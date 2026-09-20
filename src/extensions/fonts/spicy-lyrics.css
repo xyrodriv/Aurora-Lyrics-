@@ -1,0 +1,36 @@
+/*
+ * SpicyLyrics font files bundled from the official SpicyLyrics source.
+ * Upstream project: https://github.com/Spikerko/SpicyLyrics
+ * Attribution retained for the original author/project.
+ */
+@font-face {
+  font-family: "SpicyLyrics";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./LyricsRegular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "SpicyLyrics";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./LyricsMedium.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "SpicyLyrics";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./LyricsSemibold.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "SpicyLyrics";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./LyricsBold.woff2") format("woff2");
+}

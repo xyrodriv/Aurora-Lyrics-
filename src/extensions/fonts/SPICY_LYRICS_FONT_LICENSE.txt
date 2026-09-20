@@ -1,0 +1,10 @@
+SpicyLyrics font attribution
+
+These font files are bundled from the official SpicyLyrics font source:
+https://fonts.spikerko.org/spicy-lyrics/source.css
+
+Upstream project:
+https://github.com/Spikerko/SpicyLyrics
+
+Aurora Lyrics preserves attribution to the SpicyLyrics project and its author.
+Please consult the upstream project for the current source and license terms before redistributing modified builds.

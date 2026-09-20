@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Aurora Lyrics",
+  "version": "0.5.70",
+  "description": "Aurora Lyrics brings synced lyrics, artwork tools, themes, and shortcuts to YouTube Music.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://music.youtube.com/*",
+    "https://lrclib.net/*",
+    "https://unison.boidu.dev/*",
+    "https://itunes.apple.com/*",
+    "https://api.deezer.com/*",
+    "https://musicbrainz.org/*"
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Aurora Lyrics"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "src/content/content.js"
+      ],
+      "css": [
+        "src/content/styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/content/public-api.js",
+        "src/extensions/*"
+      ],
+      "matches": [
+        "https://music.youtube.com/*"
+      ]
+    }
+  ]
+}

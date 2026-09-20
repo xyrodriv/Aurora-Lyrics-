@@ -1,0 +1,8136 @@
+/*
+ * Synced Lyrics — YTMod extension.
+ *
+ * This renderer is a focused adaptation of the original Spicy Lyrics
+ * Syllable renderer by Spikerko. The original project is AGPL-3.0 licensed;
+ * preserve that license and attribution when distributing adapted builds.
+ *
+ * YTMod-specific boundaries:
+ *   - playback position and seeking come from window.YTMod.player,
+ *   - lyrics are initially loaded from TTML imports,
+ *   - the renderer lives inside YT Music's native side panel.
+ */
+(function () {
+  "use strict";
+
+  // LOAD MARKER — confirms the updated Spicy Lyrics script actually executed in
+  // the page. If this line does NOT appear in the DevTools console after a full
+  // extension + tab reload, the new code is not being loaded (stale cache /
+  // wrong reload procedure), and any lyric-rendering change will have no effect.
+  console.log("[Aurora Lyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
+
+  // Keep the original internal ID so existing installs and saved lyrics remain active.
+  const EXT_ID = "ytmod-spicy-lyrics";
+  const UNISON_API = "https://unison.boidu.dev/lyrics";
+  const LRCLIB_API = "https://lrclib.net/api/get";
+  const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
+  // The extension script is injected into the page world, where chrome.runtime
+  // is unavailable. Resolve the local font CSS from this script's own extension
+  // URL instead of resolving it against music.youtube.com.
+  const SCRIPT_URL = document.currentScript && document.currentScript.src || "";
+  const SPICY_LYRICS_FONT_CSS = SCRIPT_URL
+    ? new URL("fonts/spicy-lyrics.css", SCRIPT_URL).href
+    : "https://fonts.spikerko.org/spicy-lyrics/source.css";
+  // Bundled Kawarp WebGL module (the same one the Dynamic add-on uses). Resolved
+  // from this script's own extension URL because the page world cannot fetch
+  // chrome-extension:// resources by bare name.
+  const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
+  // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
+  // the page-wide one. animationSpeed is overridden per playback state.
+  const FS_KAWARP_OPTIONS = {
+    warpIntensity: 1,
+    blurPasses: 6,
+    animationSpeed: 0.1,
+    saturation: 1.5,
+    dithering: 0.008,
+    transitionDuration: 1000,
+    tintIntensity: 0,
+    scale: 1,
+  };
+  const GAP_DOTS_AFTER_SECONDS = 3;
+  const PRE_HIDDEN_DOT_LINE_MS = 500;
+  const LRCLIB_CACHE_LIMIT = 12;
+
+  const h = (tag, attrs, ...kids) => {
+    const e = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        const v = attrs[k];
+        if (v == null) continue;
+        if (k === "class") e.className = v;
+        else if (k === "text") e.textContent = v;
+        else if (k.startsWith("on") && typeof v === "function") {
+          e.addEventListener(k.slice(2).toLowerCase(), v);
+        } else {
+          e.setAttribute(k, v);
+        }
+      }
+    }
+    for (const kid of kids) {
+      if (kid == null) continue;
+      e.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+    }
+    return e;
+  };
+
+  function whenYTMod(cb) {
+    if (window.YTMod && window.YTMod.player) return cb();
+    setTimeout(() => whenYTMod(cb), 200);
+  }
+
+  /* ===================== TTML adapter ===================== */
+
+  function tsToSec(value) {
+    if (value == null) return 0;
+    const s = String(value).trim();
+    let m = /^([\d.]+)ms$/i.exec(s);
+    if (m) return parseFloat(m[1]) / 1000;
+    m = /^([\d.]+)s$/i.exec(s);
+    if (m) return parseFloat(m[1]);
+    m = /^([\d.]+)m$/i.exec(s);
+    if (m) return parseFloat(m[1]) * 60;
+    m = /^([\d.]+)h$/i.exec(s);
+    if (m) return parseFloat(m[1]) * 3600;
+    m = /^(\d+)f(?:@(\d+))?$/i.exec(s);
+    if (m) return parseInt(m[1], 10) / (m[2] ? parseInt(m[2], 10) : 30);
+
+    // Clock time: seconds, minutes:seconds, or hours:minutes:seconds.
+    // Splitting the fields avoids treating `01:02.345` as one hour.
+    if (!/^\d+(?::\d+){0,2}(?:\.\d+)?$/.test(s)) return 0;
+    const fields = s.split(":");
+    const seconds = parseFloat(fields.pop());
+    if (fields.length === 0) return seconds;
+    if (fields.length === 1) return parseInt(fields[0], 10) * 60 + seconds;
+    return parseInt(fields[0], 10) * 3600 +
+      parseInt(fields[1], 10) * 60 +
+      seconds;
+  }
+
+  function attrsOf(source) {
+    const out = {};
+    const re = /([\w:-]+)\s*=\s*"([^"]*)"/g;
+    let match;
+    while ((match = re.exec(source))) out[match[1].toLowerCase()] = match[2];
+    return out;
+  }
+
+  function decodeEntities(text) {
+    return String(text)
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/gi, "'");
+  }
+
+  function textOf(markup) {
+    return decodeEntities(String(markup).replace(/<[^>]+>/g, ""))
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function parseSpanTree(markup) {
+    const root = { children: [] };
+    const stack = [root];
+    const tokenRe = /<\/?span\b[^>]*>/gi;
+    let token;
+
+    while ((token = tokenRe.exec(markup))) {
+      const source = token[0];
+      if (source[1] === "/") {
+        if (stack.length === 1) continue;
+        const node = stack.pop();
+        node.closeStart = token.index;
+        node.closeEnd = tokenRe.lastIndex;
+        node.inner = markup.slice(node.openEnd, node.closeStart);
+        node.text = textOf(node.inner);
+      } else {
+        const node = {
+          attrs: attrsOf(source),
+          openStart: token.index,
+          openEnd: tokenRe.lastIndex,
+          children: [],
+        };
+        stack[stack.length - 1].children.push(node);
+        stack.push(node);
+      }
+    }
+
+    return root.children.filter((node) => node.closeEnd != null);
+  }
+
+  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd) {
+    const words = nodes
+      .map((node) => {
+        const start = tsToSec(node.attrs.begin || node.attrs["ttm:begin"]) || fallbackStart;
+        const duration = tsToSec(node.attrs.dur || node.attrs["ttm:dur"]);
+        const end =
+          tsToSec(node.attrs.end || node.attrs["ttm:end"]) ||
+          (duration ? start + duration : fallbackEnd);
+        return {
+          text: node.text || textOf(node.inner),
+          start,
+          end,
+          // True only when this span carried real timing. Drives the
+          // no-karaoke decision so partially-synced TTML lines that lack
+          // genuine timing are rendered as a static block (AJ, 2026-09-17).
+          timed: !!(
+            node.attrs.begin ||
+            node.attrs["ttm:begin"] ||
+            node.attrs.end ||
+            node.attrs["ttm:end"] ||
+            node.attrs.dur ||
+            node.attrs["ttm:dur"]
+          ),
+          node,
+          hasSpaceBefore: false,
+          explicitPartOfWord:
+            node.attrs["part-of-word"] ||
+            node.attrs["itunes:part-of-word"] ||
+            node.attrs["ttm:part-of-word"],
+        };
+      })
+      .filter((word) => word.text);
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const next = words[i + 1];
+      const previous = words[i - 1];
+      if (previous) {
+        const between = markup.slice(previous.node.closeEnd, word.node.openStart);
+        word.hasSpaceBefore = /\s/.test(between);
+      }
+      if (word.explicitPartOfWord != null) {
+        word.isPartOfWord = /^(1|true|yes)$/i.test(word.explicitPartOfWord);
+      } else if (next) {
+        const between = markup.slice(word.node.closeEnd, next.node.openStart);
+        word.isPartOfWord = !/\s/.test(between);
+      } else {
+        word.isPartOfWord = false;
+      }
+    }
+    for (const word of words) {
+      delete word.node;
+      delete word.explicitPartOfWord;
+    }
+
+    return words;
+  }
+
+  // Returns the compact TTML form used by the YTMod adapter.
+  function parseTTML(xml) {
+    const parsed = [];
+    const lineRe = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+    // Collect every timed line first so the primary (lead) artist can be chosen
+    // by how many lines they sing, not by whoever happens to open the file. A
+    // duet that begins on the second artist's line would otherwise annotate the
+    // whole file backwards — lead on the right, partner on the left.
+    const rawLines = [];
+    const agentCounts = new Map();
+    let lineMatch;
+    while ((lineMatch = lineRe.exec(xml))) {
+      const lineAttrs = attrsOf(lineMatch[1]);
+      const agent = lineAttrs["ttm:agent"] || lineAttrs.agent || "";
+      rawLines.push({ lineAttrs, body: lineMatch[2], agent });
+      if (agent) agentCounts.set(agent, (agentCounts.get(agent) || 0) + 1);
+    }
+
+    // The primary artist is the one with the most timed lines. Ties keep the
+    // first-seen agent (harmless); the case that matters is a duet opening on the
+    // partner's line, where the majority vote still lands on the real lead.
+    let primaryAgent = "";
+    let primaryCount = -1;
+    for (const [agent, count] of agentCounts) {
+      if (count > primaryCount) {
+        primaryCount = count;
+        primaryAgent = agent;
+      }
+    }
+    if (!primaryAgent) {
+      const firstAgented = rawLines.find((l) => l.agent);
+      primaryAgent = firstAgented ? firstAgented.agent : "";
+    }
+
+    for (const { lineAttrs, body, agent } of rawLines) {
+      let start = tsToSec(lineAttrs.begin || lineAttrs["ttm:begin"]);
+      const lineDuration = tsToSec(lineAttrs.dur || lineAttrs["ttm:dur"]);
+      let end = tsToSec(lineAttrs.end || lineAttrs["ttm:end"]);
+      if (!end && lineDuration) end = start + lineDuration;
+      const topLevelSpans = parseSpanTree(body);
+      const leadNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] !== "x-bg");
+      const backgroundNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] === "x-bg");
+      const words = parseTimedSpanNodes(leadNodes, body, start, end);
+      if (!start && words.length) start = words[0].start;
+      if (!end && words.length) end = words[words.length - 1].end;
+
+      const background = backgroundNodes
+        .map((node) => {
+          const bgStart =
+            tsToSec(node.attrs.begin || node.attrs["ttm:begin"]) || start;
+          const bgDuration = tsToSec(node.attrs.dur || node.attrs["ttm:dur"]);
+          const bgEnd =
+            tsToSec(node.attrs.end || node.attrs["ttm:end"]) ||
+            (bgDuration ? bgStart + bgDuration : end);
+          return {
+            start: bgStart,
+            end: bgEnd,
+            words: parseTimedSpanNodes(node.children, body, bgStart, bgEnd),
+          };
+        })
+        .filter((line) => line.words.length);
+
+      const plainText = words
+        .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
+        .join("")
+        .trim();
+      if (!plainText && !words.length && !background.length) continue;
+      const pTiming = !!(
+        lineAttrs.begin ||
+        lineAttrs["ttm:begin"] ||
+        lineAttrs.end ||
+        lineAttrs["ttm:end"] ||
+        lineAttrs.dur ||
+        lineAttrs["ttm:dur"]
+      );
+      const hasSpanTiming = words.some((w) => w.timed);
+      parsed.push({
+        start,
+        end,
+        words,
+        background,
+        text: plainText,
+        oppositeAligned: !!agent && !!primaryAgent && agent !== primaryAgent,
+        // True when the line carried at least one genuinely-timed span. Lines
+        // without it are rendered as a static block, not karaoke (AJ, 2026-09-17).
+        timed: hasSpanTiming,
+        // True when the line had any real timing (a <p> begin/end/dur or a timed
+        // span). Lines without it get a synthesized t=0 and would pile at the top
+        // of the panel, burying the synced lines — see the gap-fill pass below.
+        positioned: !!(pTiming || hasSpanTiming),
+      });
+    }
+
+    // Some exports contain no inner spans. Treat each line as one timed word
+    // so the original Syllable renderer still handles the file gracefully.
+    // NOTE: we deliberately do NOT sort here. The gap-fill pass below must see
+    // the lines in their original document order so it can slide each untimed
+    // line into the gap between the timed neighbours it actually sits between
+    // (an untimed line that follows S1 in the file must land between S1 and S2,
+    // not get swept to the top by a t=0 sort). The final time sort happens
+    // after the gap-fill (see just before the return) — AJ, 2026-09-17.
+    for (let i = 0; i < parsed.length; i++) {
+      const line = parsed[i];
+      const nextStart = parsed[i + 1] ? parsed[i + 1].start : 0;
+      if (!line.end || line.end <= line.start) {
+        const lastWordEnd = line.words.length
+          ? line.words[line.words.length - 1].end
+          : 0;
+        line.end = lastWordEnd > line.start
+          ? lastWordEnd
+          : (nextStart > line.start ? nextStart : line.start + 4);
+      }
+      if (!line.words.length && line.text) {
+        line.words.push({ text: line.text, start: line.start, end: line.end, timed: false });
+      }
+      for (const word of line.words) {
+        if (!word.end || word.end <= word.start) word.end = line.end;
+        word.start = Math.max(line.start, word.start);
+        word.end = Math.max(word.start + 0.01, Math.min(line.end, word.end));
+      }
+      for (const bg of line.background || []) {
+        if (!bg.end || bg.end <= bg.start) {
+          bg.end = bg.words.length ? bg.words[bg.words.length - 1].end : line.end;
+        }
+        for (const word of bg.words) {
+          if (!word.end || word.end <= word.start) word.end = bg.end;
+          word.start = Math.max(bg.start, word.start);
+          word.end = Math.max(word.start + 0.01, Math.min(bg.end, word.end));
+        }
+      }
+    }
+
+    // Untimed lines (no <p> begin/end and no span timing) were pinned to t=0 by
+    // the fallback above, so they all pile at the top of the panel and bury the
+    // synced lines underneath. Slide each one into the gap between the nearest
+    // timed line before and after it so it sits roughly where it belongs in the
+    // song (AJ, 2026-09-17).
+    {
+      const timedIdx = [];
+      parsed.forEach((line, idx) => {
+        if (line.positioned) timedIdx.push(idx);
+      });
+      if (timedIdx.length) {
+        for (let t = 0; t <= timedIdx.length; t++) {
+          const prevTimedIdx = t === 0 ? -1 : timedIdx[t - 1];
+          const nextTimedIdx = t === timedIdx.length ? parsed.length : timedIdx[t];
+          const prevEnd = prevTimedIdx >= 0 ? parsed[prevTimedIdx].end : 0;
+          const nextStart = nextTimedIdx < parsed.length ? parsed[nextTimedIdx].start : prevEnd + 4000;
+          const untimed = [];
+          for (let i = (prevTimedIdx >= 0 ? prevTimedIdx + 1 : 0); i < nextTimedIdx; i++) {
+            if (!parsed[i].positioned) untimed.push(i);
+          }
+          if (!untimed.length) continue;
+          const gap = Math.max(1, nextStart - prevEnd);
+          untimed.forEach((lineIdx, k) => {
+            const frac = (k + 1) / (untimed.length + 1);
+            const at = prevEnd + gap * frac;
+            const line = parsed[lineIdx];
+            line.start = at;
+            line.end = at + 1;
+            line.words.forEach((w) => { w.start = at; w.end = at + 1; });
+            if (line.background) line.background.forEach((bg) => {
+              bg.start = at;
+              bg.end = at + 1;
+              bg.words.forEach((w) => { w.start = at; w.end = at + 1; });
+            });
+          });
+        }
+      }
+    }
+
+    // Final time sort. The gap-fill above has now assigned every line its final
+    // start time (untimed lines slid into the gaps between their document-order
+    // timed neighbours), but the array is still in document order. Sort by start
+    // here so untimed lines interleave with the synced lines at their real
+    // position in the song instead of piling on top and burying the synced
+    // words (AJ, 2026-09-17).
+    parsed.sort((a, b) => a.start - b.start);
+
+    return parsed.filter((line) => line.text || line.words.length);
+  }
+
+  // Pulls songwriter credits out of a TTML string. Apple Music exports nest them
+  // in <iTunesMetadata><songwriters><songwriter>NAME</songwriter>…</songwriters></iTunesMetadata>,
+  // which lives outside the timed <p> lines and is skipped by parseTTML. Some AMLT
+  // exports instead expose them as a comma/semicolon list on amll:meta, so we catch
+  // that as a fallback. Returns a de-duplicated array of display names.
+  function extractSongwriters(xml) {
+    const names = [];
+    const pushName = (raw) => {
+      const name = decodeEntities(raw).replace(/\s+/g, " ").trim();
+      if (name && !names.includes(name)) names.push(name);
+    };
+
+    const metaBlock = /<iTunesMetadata\b[^>]*>([\s\S]*?)<\/iTunesMetadata>/i.exec(xml);
+    if (metaBlock) {
+      const swBlock = /<songwriters\b[^>]*>([\s\S]*?)<\/songwriters>/i.exec(metaBlock[1]);
+      const source = swBlock ? swBlock[1] : metaBlock[1];
+      const tagRe = /<songwriter\b[^>]*>([\s\S]*?)<\/songwriter>/gi;
+      let match;
+      while ((match = tagRe.exec(source))) pushName(match[1]);
+    }
+
+    if (!names.length) {
+      const metaRe = /<amll:meta\b[^>]*\bkey="(songwriters|lyricists?)"[^>]*\bvalue="([^"]*)"/gi;
+      let match;
+      while ((match = metaRe.exec(xml))) {
+        match[2]
+          .split(/[,;、]/)
+          .forEach((part) => pushName(part));
+      }
+    }
+    return names;
+  }
+
+  function toSyllableContent(sourceLines) {
+    return sourceLines.map((line) => ({
+      Type: "Vocal",
+      LineTimed: !!line.lineTimed,
+      Timed: !!line.timed,
+      OppositeAligned: !!line.oppositeAligned,
+      Lead: {
+        StartTime: line.start,
+        EndTime: line.end,
+        Syllables: line.words.map((word) => ({
+          Text: word.text,
+          StartTime: word.start,
+          EndTime: word.end,
+          IsPartOfWord: !!word.isPartOfWord,
+          DisableLetterAnimation: !!word.disableLetterAnimation,
+        })),
+      },
+      Background: (line.background || []).map((background) => ({
+        StartTime: background.start,
+        EndTime: background.end,
+        Syllables: background.words.map((word) => ({
+          Text: word.text,
+          StartTime: word.start,
+          EndTime: word.end,
+          IsPartOfWord: !!word.isPartOfWord,
+          DisableLetterAnimation: !!word.disableLetterAnimation,
+        })),
+      })),
+    }));
+  }
+
+  /* ===================== original renderer primitives ===================== */
+
+  // Adapted from Fraktality/spr, matching the source project's Spring.ts.
+  class Spring {
+    constructor(startPosition, frequency, dampingRatio, goal) {
+      this.d = dampingRatio;
+      this.f = frequency;
+      this.g = goal == null ? startPosition : goal;
+      this.p = startPosition;
+      this.v = 0;
+    }
+
+    Step(dt) {
+      const d = this.d;
+      const f = this.f * (2 * Math.PI);
+      const g = this.g;
+      let p = this.p;
+      let v = this.v;
+
+      if (d === 1) {
+        const q = Math.exp(-f * dt);
+        const w = dt * q;
+        const c0 = q + w * f;
+        const c2 = q - w * f;
+        const c3 = w * f * f;
+        const o = p - g;
+        p = o * c0 + v * w + g;
+        v = v * c2 - o * c3;
+      } else if (d < 1) {
+        const q = Math.exp(-d * f * dt);
+        const c = Math.sqrt(1 - d * d);
+        const i = Math.cos(dt * f * c);
+        const j = Math.sin(dt * f * c);
+        const z = c > 1e-5
+          ? j / c
+          : dt * f + (((dt * f) ** 2) * (c ** 4) / 20 - c * c) * (dt * f) ** 3 / 6;
+        const y = f * c > 1e-5
+          ? j / (f * c)
+          : dt + (((dt * f * c) ** 2) * (f * f * c * c) / 20 - f * f * c * c) * dt ** 3 / 6;
+        const o = p - g;
+        p = (o * (i + z * d) + v * y) * q + g;
+        v = (v * (i - z * d) - o * (z * f)) * q;
+      } else {
+        const c = Math.sqrt(d * d - 1);
+        const r1 = -f * (d + c);
+        const r2 = -f * (d - c);
+        const ec1 = Math.exp(r1 * dt);
+        const ec2 = Math.exp(r2 * dt);
+        const o = p - g;
+        const co2 = (v - o * r1) / (2 * f * c);
+        const co1 = ec1 * (o - co2);
+        p = co1 + co2 * ec2 + g;
+        v = co1 * r1 + co2 * ec2 * r2;
+      }
+
+      this.p = p;
+      this.v = v;
+      return p;
+    }
+
+    SetGoal(goal, replacePosition) {
+      this.g = goal;
+      if (replacePosition) {
+        this.p = goal;
+        this.v = 0;
+      }
+    }
+
+    CanSleep() {
+      const offset = this.p - this.g;
+      return this.v * this.v <= 1e-4 && offset * offset <= (1 / 3840) ** 2;
+    }
+  }
+
+  // cubic-spline's at() behavior, kept local so the YTMod extension remains a
+  // single trusted-types-safe asset with no runtime dependency loading.
+  class Spline {
+    constructor(points) {
+      this.points = points.slice().sort((a, b) => a.Time - b.Time);
+      this.slopes = this.points.map((point, index) => {
+        if (index === 0) {
+          return (this.points[1].Value - point.Value) /
+            (this.points[1].Time - point.Time);
+        }
+        if (index === this.points.length - 1) {
+          const previous = this.points[index - 1];
+          return (point.Value - previous.Value) /
+            (point.Time - previous.Time);
+        }
+        const previous = this.points[index - 1];
+        const next = this.points[index + 1];
+        return (next.Value - previous.Value) / (next.Time - previous.Time);
+      });
+    }
+
+    at(value) {
+      const points = this.points;
+      if (value <= points[0].Time) return points[0].Value;
+      if (value >= points[points.length - 1].Time) return points[points.length - 1].Value;
+
+      let index = 0;
+      while (index < points.length - 2 && value > points[index + 1].Time) index++;
+      const a = points[index];
+      const b = points[index + 1];
+      const width = b.Time - a.Time || 1;
+      const t = (value - a.Time) / width;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1;
+      const h10 = t3 - 2 * t2 + t;
+      const h01 = -2 * t3 + 3 * t2;
+      const h11 = t3 - t2;
+      return h00 * a.Value + h10 * width * this.slopes[index] +
+        h01 * b.Value + h11 * width * this.slopes[index + 1];
+    }
+  }
+
+  const easeSinOut = (value) => Math.sin(Math.max(0, Math.min(1, value)) * Math.PI / 2);
+  const getSpline = (range) => new Spline(range);
+  const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+  const ScaleSpline = getSpline([
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.085 }, { Time: 1, Value: 1 },
+  ]);
+  const LetterScaleSpline = getSpline([
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.175 }, { Time: 1, Value: 1 },
+  ]);
+  const YOffsetSpline = getSpline([
+    { Time: 0, Value: 1 / 100 }, { Time: 0.9, Value: -(1 / 36) }, { Time: 1, Value: 0 },
+  ]);
+  const LetterYOffsetSpline = getSpline([
+    { Time: 0, Value: 1 / 100 }, { Time: 0.9, Value: -(1 / 48) }, { Time: 1, Value: 0 },
+  ]);
+  const GlowSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.15, Value: 1 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 0 },
+  ]);
+  const DotScaleSpline = getSpline([
+    { Time: 0, Value: 0.75 }, { Time: 0.7, Value: 1.05 }, { Time: 1, Value: 1 },
+  ]);
+  const DotYOffsetSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -0.12 }, { Time: 1, Value: 0 },
+  ]);
+  const DotGlowSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
+  ]);
+  const DotOpacitySpline = getSpline([
+    { Time: 0, Value: 0.35 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
+  ]);
+
+  function createWordSprings() {
+    return {
+      Scale: new Spring(ScaleSpline.at(0), 0.88, 0.64),
+      YOffset: new Spring(YOffsetSpline.at(0), 1.45, 0.4),
+      Glow: new Spring(GlowSpline.at(0), 1.18, 0.56),
+    };
+  }
+
+  function createLetterSprings() {
+    return {
+      Scale: new Spring(LetterScaleSpline.at(0), 0.88, 0.64),
+      YOffset: new Spring(LetterYOffsetSpline.at(0), 1.45, 0.4),
+      Glow: new Spring(GlowSpline.at(0), 1.18, 0.56),
+    };
+  }
+
+  function createDotSprings() {
+    return {
+      Scale: new Spring(DotScaleSpline.at(0), 0.7, 0.6),
+      YOffset: new Spring(DotYOffsetSpline.at(0), 1.25, 0.4),
+      Glow: new Spring(DotGlowSpline.at(0), 1, 0.5),
+      Opacity: new Spring(DotOpacitySpline.at(0), 1, 0.5),
+    };
+  }
+
+  function isRtl(text) {
+    if (!text) return false;
+    const rtl = /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB1D-\uFB4F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+    for (const char of String(text)) {
+      if (/[\d\s,.;:?!()[\]{}"'\\/<>@#$%^&*_=+-]/.test(char)) continue;
+      return rtl.test(char);
+    }
+    return false;
+  }
+
+  function isLetterCapable(text, durationMs) {
+    return durationMs >= 1000 && !isRtl(text);
+  }
+
+  function setStyleIfChanged(element, property, value, epsilon) {
+    const previous = element.__ymSpicyStyleCache || (element.__ymSpicyStyleCache = {});
+    const old = previous[property];
+    if (old !== undefined) {
+      const oldNumber = parseFloat(old);
+      const newNumber = parseFloat(value);
+      // Only treat a value as a plain (unitless) number for epsilon comparison
+      // when it IS one. Colour strings like "rgba(255,255,255,.42)" or values
+      // containing "var(...)", units ("4px") or "%" all parseFloat() to their
+      // leading number (e.g. 255), so a .42↔.5 colour change would be wrongly
+      // seen as "no change" and skipped. For anything non-plain-numeric, fall
+      // back to an exact string comparison.
+      const isPlainNumber = (s) => /^-?\d*\.?\d+$/.test(s);
+      if (
+        !Number.isNaN(oldNumber) &&
+        !Number.isNaN(newNumber) &&
+        isPlainNumber(old) &&
+        isPlainNumber(value)
+      ) {
+        if (Math.abs(oldNumber - newNumber) <= (epsilon || 0)) return;
+      } else if (old === value) {
+        return;
+      }
+    }
+    previous[property] = value;
+    element.style.setProperty(property, value);
+  }
+
+  function getState(positionMs, startMs, endMs) {
+    if (positionMs < startMs) return "NotSung";
+    if (positionMs >= endMs) return "Sung";
+    return "Active";
+  }
+
+  function getProgress(positionMs, startMs, endMs) {
+    if (positionMs <= startMs) return 0;
+    if (positionMs >= endMs) return 1;
+    return clamp((positionMs - startMs) / (endMs - startMs), 0, 1);
+  }
+
+  function cacheLRCLyrics(key, data) {
+    if (lrclibCache.has(key)) lrclibCache.delete(key);
+    lrclibCache.set(key, data);
+    while (lrclibCache.size > LRCLIB_CACHE_LIMIT) {
+      lrclibCache.delete(lrclibCache.keys().next().value);
+    }
+  }
+
+  // ---- Persistent LRC cache -------------------------------------------------
+  // In-memory lrclibCache (above) is lost on every page reload, so the same
+  // songs get re-fetched. This layer persists the last N songs in localStorage
+  // (origin: music.youtube.com) so playback/reload reuses them. LRU eviction.
+  const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";
+  const LYRICS_CACHE_LIMIT = 15;
+
+  function loadPersistentLyricsCache() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(LYRICS_CACHE_KEY);
+      if (!raw) return new Map();
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return new Map();
+      return new Map(arr);
+    } catch (_) {
+      return new Map();
+    }
+  }
+
+  function persistLyricsCache() {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify([...persistentLyricsCache]));
+    } catch (_) {
+      /* storage unavailable or full — non-fatal */
+    }
+  }
+
+  const persistentLyricsCache = loadPersistentLyricsCache();
+
+  function cacheLyricsPersistent(key, data) {
+    if (!key || !data) return;
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, data);
+    while (persistentLyricsCache.size > LYRICS_CACHE_LIMIT) {
+      persistentLyricsCache.delete(persistentLyricsCache.keys().next().value);
+    }
+    persistLyricsCache();
+  }
+
+  function getLyricsPersistent(key) {
+    if (!key) return null;
+    if (!persistentLyricsCache.has(key)) return null;
+    const data = persistentLyricsCache.get(key);
+    // Refresh LRU position (most-recently-used) and persist the new order.
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, data);
+    persistLyricsCache();
+    return data;
+  }
+
+  /* ===================== renderer state ===================== */
+
+  let modelLines = [];
+  let lineElements = [];
+  let lastRendererContent = null;
+  const pendingAnimationLines = new Set();
+  let tabEl = null;
+  // The node the SYNCED tab was inserted into, captured at mount time. Comparing
+  // against this is an O(1) liveness check that stays correct even if YTM nests
+  // its tabs one level deeper than the element `findTabBar()` returns.
+  let tabMountParent = null;
+  let tabBar = null;
+  let panelEl = null;
+  let panelHost = null;
+  let fontLinkEl = null;
+  let panelVisible = false;
+  let nativeTabAtOpen = null;
+  /* ---- fullscreen (video left, lyrics right) ----
+     Deliberately minimal: only one flag plus the DOM restore points needed to
+     put YTM's real <video> and our live lyrics panel back where they came from. */
+  let fsActive = false;
+  let fsOverlay = null;
+  let fsMediaHost = null;
+  let fsLyricsHost = null;
+  let fsSavedVideo = null; // { node, parent, next }
+  let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
+  let fsSavedPanel = null; // { parent, next }
+  let fsLayoutMode = "side";
+  let fsControls = null;
+  let fsLayoutSelect = null;
+  let fsOffsetRange = null;
+  let fsOffsetValue = null;
+  let fsLyricsToggle = null;
+  let fsLyricsHidden = false;
+  let fsLyricsGapDimmed = false;
+  let fsLyricsIntroDimmed = false;
+  let fsLyricsFinalDimmed = false;
+  let fsPlayerControls = null;
+  let fsPlayerPlayButton = null;
+  let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
+  let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
+  let fsPlayerSeekRange = null;
+  let fsTimeCurrent = null;
+  let fsTimeTotal = null;
+  let fsVolumeIcon = null;
+  let fsMuted = false;
+  let fsLastVolume = 100;
+  let fsPlayerStateTimer = 0;
+  let fsBgImg = null; // cover-art layer used when fullscreen has no live video
+  let fsArtImg = null; // sharp cover-art card in fsMediaHost (no-video tracks)
+  let fsBgRefresh = null; // interval id for tracking track changes during fs
+  // Kawarp WebGL backdrop for song fullscreen (handed off from the Dynamic add-on).
+  let fsKawarpCanvas = null;
+  let fsKawarp = null;
+  let fsKawarpModulePromise = null;
+  let fsKawarpArtUrl = ""; // artwork currently loaded into the Kawarp instance
+  let fsKawarpSeq = 0; // guards async module/loadImage races
+  let fsKawarpActive = false;
+  let fsKawarpResizeObserver = null;
+  let fsLyricsShade = null; // adaptive readability gradient in video-background mode
+  let fsLyricsShadeTimer = 0;
+  let fsLyricsShadeLevel = 0;
+  let fsLyricsShadeTarget = 0;
+  let fsLyricsShadeLastSampleAt = 0;
+  let fsLyricsShadeCanvas = null;
+  let fsLyricsShadeCtx = null;
+  let fsLyricsShadeCanvasTainted = false;
+  let fsLyricsShadeStream = null;
+  let fsLyricsShadeTrack = null;
+  let fsLyricsShadeCapture = null;
+  let fsLyricsShadeReader = null;
+  let fsLyricsShadeSampleInFlight = false;
+  // Blurred ambient backdrop: a low-res duplicate of the live video, scaled
+  // up and CSS-blurred to fill the overlay behind the sharp video. Drawn at
+  // the video's own paint cadence so it never competes with the lyrics loop.
+  let fsBgCanvas = null;
+  let fsBgCtx = null;
+  let fsBgRaf = null;
+  let fsBgLastDrawAt = 0;
+  // The ambient layer is blurred beyond recognition, so 24fps and a very small
+  // backing store are indistinguishable from 60fps at full resolution — while
+  // costing a fraction of the draw + upload work.
+  const FS_BG_RENDER_FPS = 24;
+  const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
+  const FS_LYRICS_SHADE_SAMPLE_MS = 240;
+  // Shade sampling geometry. The sample covers the FULL lyric band: from the
+  // left edge of the shade/lyric region, bottom to top, through to the right
+  // edge. .ym-sl-fs-lyrics-shade is `left: 53%; right: 0; top: 0; bottom: 0`,
+  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 53% is
+  // the true start of the area that gets darkened.
+  const FS_SHADE_SAMPLE_W = 48;
+  const FS_SHADE_SAMPLE_H = 32;
+  const FS_SHADE_REGION_LEFT = 0.53; // matches the shade element's left: 53%
+  // Fallback band used only when the video/overlay geometry is unavailable.
+  const FS_SHADE_SAMPLE_X = Math.floor(FS_SHADE_SAMPLE_W * FS_SHADE_REGION_LEFT);
+  const FS_SHADE_SAMPLE_SW = FS_SHADE_SAMPLE_W - FS_SHADE_SAMPLE_X;
+  const FS_IDLE_HIDE_MS = 2000; // no input for this long -> hide cursor + controls
+  const FS_LYRICS_GAP_DIM_MS = 3000; // only dim genuinely long lyric gaps
+  const FS_LYRICS_RESTORE_LEAD_MS = 850; // restore shortly before the next line
+  const FS_FINAL_LYRICS_HIDE_MS = 6000; // stale final lyric -> hide after 6s
+  let fsIdleTimer = 0; // setTimeout id for the idle countdown
+  let fsIdleHidden = false; // is the overlay currently in the idle state?
+  let fsPointerDown = false; // is a button held (i.e. actively dragging)?
+  let mountTabTimer = 0;
+  let raf = 0;
+  let lineScrollRaf = 0;
+  let lastFrameTime = performance.now();
+  let lastActiveLine = -1;
+  let manualScrollActive = false;
+  // After the user scrolls/keys away to browse lyrics, automatically return to
+  // the active line if they stop interacting this long.
+  const FS_JUMP_RETURN_MS = 8000;
+  let manualScrollReturnTimer = 0;
+  let jumpButton = null;
+  let wpObserver = null;
+  let lineScrollEl = null;
+  let linesRoot = null;
+  let scrollCandidateIndices = [];
+  let currentTrackKey = "";
+  // Separate sequence for prefetch so an in-flight next-track lookup can never
+  // collide with or abort the current track's lyric request (which uses
+  // trackRequestSeq / activeTrackAbort).
+  let prefetchSeq = 0;
+  // Per-track offset slots: one for music-video playback, one for the regular
+  // (audio) song. See setVideoOffsetMs / loadVideoOffsetForTrack.
+  let offsetVideoMs = 0;
+  let offsetSongMs = 0;
+  let activeOffsetMode = "video";   // which slot is applied to playback (auto by hasMusicVideo)
+  let editingOffsetMode = "video";  // which slot the on-screen control edits / displays
+  let lastOffsetModeCheckAt = 0;
+
+  /* ---- MV pause re-sync state ------------------------------------------------
+     A music video can stop the MUSIC while the video keeps playing, so after the
+     pause every lyric line is early by the pause length. ONE sync point per track:
+     { line: <original startTime ms of the chosen line>, offset: ms }.
+     Lines from `line` onward use `offset`; lines before it keep the normal
+     per-track offset. The offset is set by hand with a slider — nothing is derived
+     from the video position. See getOffsetForPosition(). */
+  let pauseSync = null;
+  // True while the user is picking a line. Suspends auto-scroll and makes line
+  // clicks select instead of seek.
+  let pausePickMode = false;
+  // DOM refs for the options-overlay PAUSE SYNC section and the in-panel banner.
+  let pauseUi = null;
+  let pauseBanner = null;
+  let pauseBannerText = null;
+  let manualLyricsTrackKey = "";
+  let manualLyricsIsPermanent = false;
+  let currentLyricsIsTTML = false;
+  // Raw TTML is retained only for user-imported lyrics so export can preserve
+  // the original file. Auto-fetched lyrics never populate this value.
+  let importedTTMLXml = "";
+  let currentTTMLSource = "none";
+  // True when the currently displayed lyrics are plain (unsynced) text loaded
+  // from an LRCLIB result that had no synced lyrics. Static lines render fully
+  // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
+  let staticLyricsActive = false;
+  // For static (unsynced) lyrics: when the user manually scrolls, auto-scroll is
+  // paused and a "Auto scroll" popup is shown to resume it (AJ, 2026-09-18).
+  let autoScrollUserPaused = false;
+  let lastObservedTrackKey = "";
+  let lastObservedPositionMs = null;
+  let currentSongwriters = [];
+  let cachedFirstRealLyricStartMs = Infinity;
+  let cachedLastRealLyricEndMs = 0;
+  let trackRequestSeq = 0;
+  let activeTrackAbort = null;
+  const lrclibCache = new Map();
+  let adaptiveLayoutLastAt = 0;
+  // Defaults track the Synced Lyrics settings popup so a fresh install (and the
+  // host's "Reset to defaults" button) open at AJ's preferred look: bigger
+  // lyrics, pushed up, brighter background vocals, faster animation overall,
+  // gentler syllable + vertical animation, and both adaptive spacing +
+  // romanization on. The popup schema in src/content/content.js mirrors these
+  // values; if you change one, change both.
+  const DEFAULT_SETTINGS = {
+    size: 1.15,
+    offset: -80,
+    bgOpacity: 2.0,
+    animation: 1.25,
+    syllableAnimation: 0.9,
+    verticalAnimation: 1.55,
+    adaptiveSpacing: true,
+    romanizationEnabled: true,
+    legibilityBackdrop: false,
+  };
+  let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
+
+  function applySettings(next) {
+    const prevRomanization = currentSettings.romanizationEnabled;
+    currentSettings = Object.assign({}, currentSettings, next || {});
+    const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+    const booleanValue = (value, fallback) => {
+      if (value == null) return fallback;
+      if (typeof value === "string") return !/^(false|0|off|no)$/i.test(value.trim());
+      return Boolean(value);
+    };
+    currentSettings.size = clamp(finite(currentSettings.size, DEFAULT_SETTINGS.size), 0.75, 6.0);
+    currentSettings.offset = clamp(finite(currentSettings.offset, DEFAULT_SETTINGS.offset), -80, 80);
+    currentSettings.bgOpacity = clamp(finite(currentSettings.bgOpacity, DEFAULT_SETTINGS.bgOpacity), 0.15, 2.0);
+    currentSettings.animation = clamp(finite(currentSettings.animation, DEFAULT_SETTINGS.animation), 0, 1.25);
+    currentSettings.syllableAnimation = clamp(
+      finite(currentSettings.syllableAnimation, DEFAULT_SETTINGS.syllableAnimation),
+      0,
+      1.5
+    );
+    currentSettings.verticalAnimation = clamp(
+      finite(currentSettings.verticalAnimation, DEFAULT_SETTINGS.verticalAnimation),
+      0,
+      3
+    );
+    currentSettings.adaptiveSpacing = booleanValue(
+      currentSettings.adaptiveSpacing,
+      DEFAULT_SETTINGS.adaptiveSpacing
+    );
+    currentSettings.romanizationEnabled = booleanValue(
+      currentSettings.romanizationEnabled,
+      DEFAULT_SETTINGS.romanizationEnabled
+    );
+    currentSettings.legibilityBackdrop = booleanValue(
+      currentSettings.legibilityBackdrop,
+      DEFAULT_SETTINGS.legibilityBackdrop
+    );
+    document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    adaptiveLayoutLastAt = 0;
+    if (!currentSettings.adaptiveSpacing) resetAdaptiveSpacing();
+    if (lineScrollEl) {
+      lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
+      lineScrollEl.style.setProperty("--ym-sl-lyrics-offset", `${currentSettings.offset}px`);
+      lineScrollEl.style.setProperty("--ym-sl-bg-vocal-opacity", String(currentSettings.bgOpacity));
+    }
+    // Romanization is computed at build time, so toggling it means rebuilding the
+    // current lines. No lines yet (e.g. first init) -> nothing to do.
+    if (prevRomanization !== currentSettings.romanizationEnabled && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+  }
+
+  function blendAnimation(resting, target) {
+    return resting + (target - resting) * currentSettings.animation;
+  }
+
+  function blendSyllableAnimation(resting, target) {
+    const intensity = clamp(
+      currentSettings.animation * currentSettings.syllableAnimation,
+      0,
+      1.5
+    );
+    return resting + (target - resting) * intensity;
+  }
+
+  function blendVerticalAnimation(resting, target) {
+    const intensity = clamp(
+      currentSettings.animation *
+        currentSettings.syllableAnimation *
+        currentSettings.verticalAnimation,
+      0,
+      3
+    );
+    return resting + (target - resting) * intensity;
+  }
+
+  const CSS = `
+    .ym-sl-panel {
+      position: relative !important;
+      inset: auto !important;
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 0;
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      overflow: hidden;
+      background: transparent !important;
+      color: #fff;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      container-type: size;
+      isolation: isolate;
+    }
+    /* Page-wide background styling moved to the Dynamic theme. */
+    /*
+    .ym-sl-page-bg-root {
+      isolation: isolate !important;
+      background: transparent !important;
+      --ytmusic-app-background: transparent !important;
+      --ytmusic-player-page-background: transparent !important;
+      --ytmusic-player-bar-background: transparent !important;
+      --ytmusic-nav-bar-background: transparent !important;
+      --ytmusic-general-background-a: transparent !important;
+      --ytmusic-general-background-b: transparent !important;
+      --ytmusic-general-background-c: transparent !important;
+      --ytmusic-general-background-d: transparent !important;
+    }
+    html.ym-sl-page-bg-active,
+    body.ym-sl-page-bg-active {
+      background: transparent !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-page-bg-needs-position {
+      position: relative !important;
+    }
+    .ym-sl-page-bg-host {
+      position: fixed !important;
+      inset: 0 !important;
+      z-index: 0 !important;
+      display: block;
+      overflow: hidden;
+      pointer-events: none;
+      background: #0f0f0f;
+    }
+    .ym-sl-page-bg-host .ym-sl-kawarp-bg {
+      transform: none;
+      -webkit-mask-image: none;
+      mask-image: none;
+      filter: saturate(1.7) brightness(.78);
+    }
+    .ym-sl-page-bg-host .ym-sl-kawarp-bg.ready { opacity: .88; }
+    .ym-sl-page-bg-host .ym-sl-kawarp-shade {
+      background:
+        linear-gradient(
+          180deg,
+          rgba(5,5,8,.28),
+          rgba(5,5,8,.1) 28%,
+          rgba(5,5,8,.1) 72%,
+          rgba(5,5,8,.32)
+        );
+    }
+    .ym-sl-page-divider {
+      position: absolute;
+      top: 84px;
+      bottom: 72px;
+      left: 68%;
+      width: 1px;
+      z-index: 2;
+      background: linear-gradient(
+        180deg,
+        transparent,
+        rgba(255,255,255,.38) 12%,
+        rgba(255,255,255,.38) 88%,
+        transparent
+      );
+      box-shadow: 0 0 8px rgba(255,255,255,.1);
+      opacity: .56;
+    }
+    .ym-sl-page-bg-root ytmusic-app-layout,
+    .ym-sl-page-bg-root ytmusic-nav-bar,
+    .ym-sl-page-bg-root ytmusic-player-page,
+    .ym-sl-page-bg-root ytmusic-watch-page,
+    .ym-sl-page-bg-root ytmusic-player-bar,
+    .ym-sl-page-bg-root ytmusic-guide-renderer,
+    .ym-sl-page-bg-root ytmusic-left-nav-bar,
+    .ym-sl-page-bg-root #layout,
+    .ym-sl-page-bg-root #nav-bar,
+    .ym-sl-page-bg-root #nav-bar-background,
+    .ym-sl-page-bg-root #guide,
+    .ym-sl-page-bg-root #guide-spacer,
+    .ym-sl-page-bg-root #mini-guide,
+    .ym-sl-page-bg-root #mini-guide-background,
+    .ym-sl-page-bg-root #guide-wrapper,
+    .ym-sl-page-bg-root #left-content,
+    .ym-sl-page-bg-root #player-bar {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root #player-bar-background {
+      background: rgba(6,6,10,.22) !important;
+      background-color: rgba(6,6,10,.22) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      border-top: 1px solid rgba(255,255,255,.1);
+      box-shadow: 0 -10px 30px rgba(0,0,0,.12);
+    }
+    .ym-sl-page-bg-root.ym-sl-topbar-scrolled #nav-bar-background {
+      background: rgba(6,6,10,.22) !important;
+      background-color: rgba(6,6,10,.22) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      box-shadow: 0 10px 30px rgba(0,0,0,.12);
+    }
+    .ym-sl-page-bg-root ytmusic-nav-bar::before,
+    .ym-sl-page-bg-root ytmusic-nav-bar::after,
+    .ym-sl-page-bg-root ytmusic-guide-renderer::before,
+    .ym-sl-page-bg-root ytmusic-guide-renderer::after,
+    .ym-sl-page-bg-root ytmusic-player-bar::before,
+    .ym-sl-page-bg-root ytmusic-player-bar::after {
+      background: transparent !important;
+    }
+    .ym-sl-page-bg-root ytmusic-player-page .html5-video-container,
+    .ym-sl-page-bg-root ytmusic-player-page video.html5-main-video {
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 2px;
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,.28),
+        0 18px 42px rgba(0,0,0,.38);
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode {
+      --ym-sl-left-rail-width: 245px;
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode
+      :is(ytmusic-guide-renderer, ytmusic-left-nav-bar, #guide-wrapper, #guide, #left-content) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(ytmusic-guide-renderer, ytmusic-left-nav-bar, #guide-wrapper, #guide, #left-content) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-browse-page,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer,
+        ytmusic-grid-renderer,
+        #page-manager,
+        #main-panel,
+        #content,
+        #content-page,
+        #browse-page,
+        #home-page,
+        #contents
+      ) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(ytmusic-fullbleed-thumbnail-renderer, ytmusic-fullbleed-thumbnail-renderer img) {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-browse-response > *,
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-section-list-renderer > #contents,
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-section-list-renderer > #contents > * {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer
+      )::before,
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer
+      )::after {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode .ym-sl-kawarp-shade {
+      background: rgba(5,5,8,.16);
+    }
+    .ym-sl-page-bg-root:not(.ym-sl-song-mode) .ym-sl-page-divider {
+      display: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      ytmusic-search-page > ytmusic-tabbed-search-results-renderer > ytmusic-tabs {
+      background: rgba(6,6,10,.18) !important;
+      background-color: rgba(6,6,10,.18) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(24px) saturate(1.35);
+      backdrop-filter: blur(24px) saturate(1.35);
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      ytmusic-search-page > ytmusic-tabbed-search-results-renderer > ytmusic-tabs > #tabs {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode ytmusic-player-bar {
+      left: var(--ym-sl-left-rail-width) !important;
+      right: 0 !important;
+      width: auto !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-player-bar {
+      left: 0 !important;
+      right: 0 !important;
+      width: auto !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    */
+    .ym-sl-native-hidden { display: none !important; }
+    .ym-sl-panel.hidden { display: none !important; }
+    .ym-sl-panel.drag { outline: 2px dashed rgba(255,255,255,.6); outline-offset: -4px; }
+    /*
+    .ym-sl-kawarp-bg {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      pointer-events: none;
+      transform: scaleX(1.08);
+      transform-origin: center center;
+      filter: saturate(1.7) brightness(.72);
+      -webkit-mask-image: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.5) 3%,
+        #000 9%,
+        #000 91%,
+        rgba(0,0,0,.5) 97%,
+        transparent 100%
+      );
+      mask-image: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.5) 3%,
+        #000 9%,
+        #000 91%,
+        rgba(0,0,0,.5) 97%,
+        transparent 100%
+      );
+      transition: opacity .65s ease;
+    }
+    .ym-sl-kawarp-bg.ready { opacity: .98; }
+    .ym-sl-kawarp-shade {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      background:
+        linear-gradient(
+          90deg,
+          rgba(5,5,8,.26) 0%,
+          rgba(5,5,8,.07) 9%,
+          rgba(5,5,8,.07) 91%,
+          rgba(5,5,8,.26) 100%
+        ),
+        linear-gradient(
+          180deg,
+          rgba(5,5,8,.14),
+          transparent 26%,
+          transparent 72%,
+          rgba(5,5,8,.24)
+        );
+      pointer-events: none;
+    }
+    */
+    .ym-sl-tools {
+      position: absolute;
+      top: 2px;
+      right: 14px;
+      left: 14px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 8px 0;
+      pointer-events: auto;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    .ym-sl-tools:hover,
+    .ym-sl-tools:focus-within { opacity: 1; }
+    /* At short widths the action row behaves like YT Music's tab strip:
+       controls stay in one horizontal rail and the arrows move the rail
+       left/right instead of clipping Fullscreen or Offset off-screen. */
+    .ym-sl-tools-scroll {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+    }
+    .ym-sl-tools-scroll::-webkit-scrollbar { display: none; }
+    .ym-sl-tools-arrow {
+      display: none;
+      flex: 0 0 26px;
+      width: 26px;
+      min-height: 30px;
+      padding: 0;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .ym-sl-tools-arrow:hover { background: rgba(255,255,255,.16); }
+    /* Consolidated options overlay. Holds track / offset / import so the toolbar
+       is just [Options] [Fullscreen]. Lives on <body> (see buildUI). The fullscreen
+       options overlay reuses the same chrome but with a higher z-index so it
+       floats above the fullscreen overlay. */
+    .ym-sl-options-overlay,
+    .ym-sl-fs-options-overlay {
+      position: fixed;
+      top: 96px;
+      right: 28px;
+      z-index: 2147483000;
+      width: 340px;
+      max-width: calc(100vw - 32px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(18,18,20,.92);
+      -webkit-backdrop-filter: blur(20px) saturate(1.4);
+      backdrop-filter: blur(20px) saturate(1.4);
+      box-shadow: 0 18px 50px rgba(0,0,0,.55);
+      color: #fff;
+      font-family: inherit;
+    }
+    /* Fullscreen variant: sit above the fullscreen overlay (also 2147483000)
+       and anchor to the top-right where the controls normally live. */
+    .ym-sl-fs-options-overlay {
+      z-index: 2147483100;
+      top: 64px;
+      right: 24px;
+      width: 360px;
+    }
+    .ym-sl-options-overlay.hidden,
+    .ym-sl-fs-options-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(-8px) scale(.97);
+    }
+    .ym-sl-options-overlay,
+    .ym-sl-fs-options-overlay {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0) scale(1);
+      transition:
+        opacity .2s ease,
+        transform .28s cubic-bezier(.22,.61,.36,1),
+        visibility 0s linear 0s;
+    }
+    .ym-sl-options-overlay.hidden,
+    .ym-sl-fs-options-overlay.hidden {
+      transition:
+        opacity .16s ease,
+        transform .22s cubic-bezier(.4,0,1,1),
+        visibility 0s linear .22s;
+    }
+    .ym-sl-options-header,
+    .ym-sl-fs-options-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+      background: rgba(255,255,255,.06);
+      border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    .ym-sl-options-header:active,
+    .ym-sl-fs-options-header:active { cursor: grabbing; }
+    .ym-sl-options-title,
+    .ym-sl-fs-options-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.8);
+    }
+    .ym-sl-options-close,
+    .ym-sl-fs-options-close {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      padding: 0 4px;
+      font: inherit;
+      font-size: 20px;
+      line-height: 1;
+      color: rgba(255,255,255,.7);
+      cursor: pointer;
+    }
+    .ym-sl-options-close:hover,
+    .ym-sl-fs-options-close:hover { color: #fff; }
+    .ym-sl-options-body,
+    .ym-sl-fs-options-body {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 16px;
+      padding: 18px;
+    }
+    .ym-sl-options-section,
+    .ym-sl-options-body .ym-sl-options-section {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .ym-sl-options-body .ym-sl-video-offset {
+      margin-top: 2px;
+      padding-top: 4px;
+      border-top: 1px solid rgba(255,255,255,.07);
+    }
+    /* Divider + section title separate the lyrics controls (track, offset)
+       from the TTML import controls (mode, upload). */
+    .ym-sl-options-divider {
+      appearance: none;
+      height: 1px;
+      width: calc(100% + 36px);
+      margin: 2px -18px 0;
+      border: 0;
+      background: rgba(255,255,255,.1);
+    }
+    .ym-sl-options-section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.55);
+      padding: 4px 2px 0;
+    }
+    .ym-sl-options-body .ym-sl-track { width: 100%; }
+    /* The offset row is a wide horizontal rail; let it wrap and give the slider
+       its own line so nothing overflows the 340px panel. */
+    .ym-sl-options-body .ym-sl-video-offset { flex-wrap: wrap; row-gap: 8px; }
+    .ym-sl-options-body .ym-sl-video-offset input[type="range"] { width: 100%; min-width: 0; }
+    .ym-sl-options-button { white-space: nowrap; }
+    .ym-sl-export-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding-top: 2px;
+    }
+    .ym-sl-export-actions.hidden {
+      display: none;
+    }
+    .ym-sl-export-actions .ym-sl-import {
+      flex: 1 1 140px;
+      min-width: 0;
+    }
+    /* Fullscreen overlay is always block; media + lyrics are absolute so
+       layout changes (side / background / lyrics-only) animate via CSS
+       transitions instead of snapping. */
+    .ym-sl-fs-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: block;
+      padding: 0;
+      box-sizing: border-box;
+      background: #0a0a0c;
+      color: #fff;
+      overflow: hidden;
+    }
+    /* Media and lyrics are ALWAYS absolute and animate their geometry. The
+       transition list covers every property that changes between layouts.
+       Media gets a 3% padding in background mode; the video's inline 100%
+       sizing fills the padding box, producing the rounded-card look without
+       a per-layout video rule, and animating the padding smoothly resizes
+       the video inside. */
+    .ym-sl-fs-media,
+    .ym-sl-fs-lyrics {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      overflow: hidden;
+      transition:
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease,
+        padding .45s cubic-bezier(.22, .61, .36, 1);
+      will-change: left, width, transform, opacity, padding;
+    }
+    .ym-sl-fs-media { z-index: 2; }
+    .ym-sl-fs-lyrics { z-index: 3; }
+
+    /* Legibility backdrop (Synced Lyrics setting "Legibility backdrop"): a very
+       dark, slightly transparent panel with a light frost behind the lyrics so
+       they stay readable over bright artwork / video. Body-level class so it
+       survives renderer rebuilds. */
+    .ym-sl-legibility-backdrop .LyricsContainer {
+      background: rgba(0, 0, 0, 0.55);
+      -webkit-backdrop-filter: blur(8px) saturate(1.1);
+      backdrop-filter: blur(8px) saturate(1.1);
+      border-radius: 12px;
+    }
+    .ym-sl-legibility-backdrop .ym-sl-fs-lyrics {
+      background: rgba(0, 0, 0, 0.45);
+      -webkit-backdrop-filter: blur(10px) saturate(1.1);
+      backdrop-filter: blur(10px) saturate(1.1);
+    }
+
+    /* Default "side" layout: video left, lyrics right. No padding on the media
+       host — padding here would push the element's padding-box past the lyrics
+       panel's left edge and create a dark sliver that reads as "video under the
+       lyrics". Clean position + clean width keeps the video fully inside its
+       own column. */
+    .ym-sl-fs-overlay .ym-sl-fs-media {
+      left: 4%;
+      width: 50%;
+    }
+    .ym-sl-fs-overlay .ym-sl-fs-lyrics {
+      left: 57.4%;
+      width: 42.6%;
+      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px);
+      box-sizing: border-box;
+    }
+    /* "Background" layout: media fills the overlay (3% padding = card inset
+       via the video's inline padding-box sizing); lyrics float on the right
+       with a backdrop blur and a left-edge fade. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media {
+      left: 0;
+      width: 100%;
+      padding: 0;
+      box-sizing: border-box;
+      z-index: 1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media > video {
+      border-radius: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics {
+      left: 61%;
+      width: 39%;
+      min-width: 320px;
+      /* Asymmetric padding so lyric text starts past the left-edge fade. */
+      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px) clamp(28px, 6vh, 84px) clamp(80px, 6vw, 120px);
+      box-sizing: border-box;
+      /* No permanent black surface: the shade layer below activates only when
+         the sampled video behind the lyrics is genuinely near-white. */
+      background: transparent;
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
+      mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      --ym-sl-fs-lyrics-shade-opacity: 0;
+      transition:
+        opacity 1.1s ease,
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        padding .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-lyrics-shade {
+      display: none;
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 53%;
+      z-index: 2;
+      pointer-events: none;
+      opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+      background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.16) 14%,
+        rgba(0,0,0,.62) 52%,
+        rgba(0,0,0,.9) 100%
+      );
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      transition: opacity .22s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics-shade {
+      display: block;
+      opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
+      position: relative;
+      z-index: 3;
+    }
+    /* The readability shade is adaptive: it is transparent unless the video
+       under the lyric column contains enough near-white pixels. */
+    /* During a long intro or instrumental gap, dim rather than remove the
+       lyrics so the video remains the visual focus. The hidden-toggle rule
+       below still wins when the user explicitly hides lyrics. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-gap-dim .ym-sl-fs-lyrics {
+      opacity: 0;
+    }
+    /* Let the user preview the hidden lyric area without fully bringing it
+       back. Opacity 0 still participates in hit testing, so hovering the
+       lyric panel can reveal it at a quiet 60% while the gap continues. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-gap-dim .ym-sl-fs-lyrics:hover {
+      opacity: .6;
+    }
+    /* Intro lyrics stay completely hidden until the first real line begins,
+       including on hover. Later instrumental gaps retain the 60% hover preview. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .ym-sl-fs-lyrics,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .ym-sl-fs-lyrics:hover,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .ym-sl-fs-lyrics,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .ym-sl-fs-lyrics:hover {
+      opacity: 0;
+    }
+    /* Background-mode toggle state: the live lyrics stay mounted so timing
+       continues, but the whole lyric surface fades away smoothly. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-lyrics-hidden .ym-sl-fs-lyrics {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(18px);
+    }
+    /* "Lyrics only" layout: media fades out (kept in the tree so the
+       transition has a source geometry), lyrics center and widen. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-media {
+      left: 0;
+      width: 100%;
+      padding: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics {
+      left: 50%;
+      width: min(980px, calc(100% - 2 * 120px));
+      transform: translateX(-50%);
+      padding: clamp(32px, 7vh, 96px) clamp(28px, 7vw, 120px);
+      box-sizing: border-box;
+      background: transparent;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    /* Reserve a bottom-safe band for the centered playback row and the
+       fullscreen bar. On compact screens the lyric viewport becomes slightly
+       shorter instead of allowing the controls to sit over the active line. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+      padding-bottom: clamp(148px, 18vh, 220px);
+      box-sizing: border-box;
+    }
+    /* Backdrop layers (full-overlay absolutes). Visibility unchanged. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-img {
+      display: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-canvas {
+      display: block !important;
+      z-index: 0;
+      /* The sharp video is the focus; this canvas is a very low-res duplicate
+         of it, scaled up to fill the entire overlay as an ambient backdrop.
+         The blur, saturation and brightness are baked into the canvas with
+         ctx.filter in drawBgFrame() — a CSS filter here was being silently
+         dropped on <canvas>, so the layer rendered crisp. Keep this set to
+         none so the effect is not applied twice. */
+      filter: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-tint {
+      display: block !important;
+      z-index: 1;
+      background: rgba(0,0,0,.18);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .LyricsContent {
+      --ym-sl-lyrics-scale: 1.16;
+    }
+    /* Fullscreen lyrics pane is much wider than the side panel, so it gets its
+       own fixed base size. Fixed rem (not cqw) so it never shrinks on a smaller
+       monitor / lower resolution. */
+    .ym-sl-fs-overlay #ym-sl-panel.SpicyRenderer .LyricsContent {
+      --DefaultLyricsSize: calc(3.5rem * var(--ym-sl-lyrics-scale));
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .SpicyLyricsScrollContainer {
+      width: 100%;
+      max-width: 980px;
+      margin: 0 auto;
+    }
+    /* Fullscreen playback controls use the same chrome as the layout controls,
+       but their placement follows the selected layout. */
+    /* ===== fullscreen playback chrome: floating play chip + bottom scrubber =====
+       The container is a zero-height full-width anchor at the bottom; the chip
+       and scrubber are positioned absolutely inside it, so the geometry is
+       identical across side / video-background / lyrics-only layouts. */
+    .ym-sl-fs-player-controls {
+      position: absolute;
+      inset: auto 0 0 0;
+      z-index: 21;
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-player-controls {
+      opacity: 1;
+      pointer-events: none;
+    }
+    /* Floating play chip (prev / play / next + volume), centered just above the
+       scrubber. Fades out on idle like the top chrome. */
+    .ym-sl-fs-play-chip {
+      position: absolute;
+      left: 50%;
+      bottom: 46px;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.22);
+      box-shadow: 0 10px 28px rgba(0,0,0,.2);
+      backdrop-filter: blur(20px) saturate(1.5);
+      -webkit-backdrop-filter: blur(20px) saturate(1.5);
+      opacity: 0;
+      pointer-events: auto;
+      transition: opacity .22s ease, transform .35s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-play-chip,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-play-chip {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-play-chip {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-fs-options-button {
+      white-space: nowrap;
+    }
+    /* Volume: a mute toggle + a thin bar beside the chip */
+    .ym-sl-fs-volume-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 6px;
+      padding-right: 0; /* the chip's own 16px right padding absorbs the hover grow */
+      margin-left: 4px;
+      border-left: 1px solid rgba(255,255,255,.16);
+      /* No reserved width on the chip: the custom <div> slider expands via a
+         composited transform, which never reflows the chip and leaves no gap. */
+      flex: 0 0 auto;
+    }
+    .ym-sl-fs-volume-icon {
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      min-height: 30px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      transition: transform .2s ease, color .2s ease;
+    }
+    .ym-sl-fs-volume-icon:hover { color: #fff; transform: scale(1.06); }
+    /* Bottom scrubber: a full-width thin line pinned to the bottom edge. It is
+       hidden by default and only appears while the overlay is hovered/focused,
+       so the video stays clean when the pointer is away. */
+    .ym-sl-fs-scrubber {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      pointer-events: auto;
+      opacity: 0;
+      transition: opacity .25s ease;
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-scrubber,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-scrubber {
+      opacity: 1;
+    }
+    .ym-sl-fs-time {
+      flex: 0 0 auto;
+      min-width: 38px;
+      color: rgba(255,255,255,.82);
+      font: 600 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .02em;
+      user-select: none;
+      text-shadow: 0 1px 3px rgba(0,0,0,.55);
+    }
+    .ym-sl-fs-time[data-time="total"] { text-align: right; }
+    /* thin range track for the seek bar (volume is a custom <div> slider) */
+    .ym-sl-fs-scrubber input[type="range"] {
+      appearance: none;
+      -webkit-appearance: none;
+      height: 3px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      outline: none;
+      cursor: pointer;
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-scrubber .ym-sl-fs-player-seek { flex: 1 1 auto; min-width: 0; }
+    /* seek fill driven by --slider-fill (percent) and --ym-sl-fs-accent. The
+       accent defaults to soft white; an artwork-derived color can override it
+       by setting --ym-sl-fs-accent on the overlay. */
+    .ym-sl-fs-player-seek {
+      --slider-fill: 0%;
+      --seek-played: var(--ym-sl-fs-accent, rgba(255,255,255,.92));
+      --seek-unplayed: rgba(255,255,255,.18);
+    }
+    .ym-sl-fs-player-seek::-webkit-slider-runnable-track {
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(to right,
+        var(--seek-played) 0%, var(--seek-played) var(--slider-fill),
+        var(--seek-unplayed) var(--slider-fill), var(--seek-unplayed) 100%);
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-player-seek::-moz-range-track { height: 3px; border-radius: 999px; background: var(--seek-unplayed); }
+    .ym-sl-fs-player-seek::-moz-range-progress { height: 3px; border-radius: 999px; background: var(--seek-played); }
+    .ym-sl-fs-player-seek::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 12px; height: 12px; margin-top: -4.5px;
+      border: 0; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.5);
+      opacity: 0; transition: opacity .2s ease;
+    }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb,
+    .ym-sl-fs-player-seek:focus::-webkit-slider-thumb { opacity: 1; }
+    .ym-sl-fs-player-seek::-moz-range-thumb {
+      width: 12px; height: 12px; border: 0; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.5); opacity: 0;
+    }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-thumb,
+    .ym-sl-fs-player-seek:focus::-moz-range-thumb { opacity: 1; }
+    /* Progress bar grows a little thicker while hovered for easier seeking. */
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-runnable-track { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-track { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-progress { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb { margin-top: -1.5px; }
+    /* Custom <div> volume slider. The track is the hit area; the unplayed line is
+       drawn with ::before, the white fill with .ym-sl-fs-volume-fill, the knob with
+       .ym-sl-fs-volume-knob. On hover the track scales on the X axis (origin left,
+       growing into the 32px group padding) so it stays inside the pill. scaleX is
+       GPU-composited, so it animates smoothly even on software compositors. The knob
+       counter-scales by 1/ratio to stay perfectly round through the whole transition. */
+    .ym-sl-fs-player-volume {
+      --vol-fill: 100%;
+      position: relative;
+      width: 150px;            /* long at rest; hover grows to 159px (stays short of pill edge) */
+      height: 14px;            /* generous hit area */
+      border-radius: 999px;
+      cursor: pointer;
+      touch-action: none;
+      transform-origin: left center;
+      transition: transform .28s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-player-volume::before {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 50%; transform: translateY(-50%);
+      height: 3px; border-radius: 999px;
+      background: rgba(255,255,255,.18);
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+    }
+    .ym-sl-fs-volume-fill {
+      position: absolute;
+      left: 0; top: 50%; transform: translateY(-50%);
+      height: 3px; width: var(--vol-fill, 100%);
+      border-radius: 999px;
+      background: #fff;
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+      pointer-events: none;
+    }
+    .ym-sl-fs-volume-knob {
+      position: absolute;
+      top: 50%; left: var(--vol-fill, 100%);
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.5);
+      transform: translate(-50%, -50%) scaleX(1);
+      transform-origin: center;
+      opacity: 0;
+      transition: opacity .2s ease, transform .28s cubic-bezier(.22,.61,.36,1);
+      pointer-events: none;
+    }
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume { transform: scaleX(1.06); }
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-knob {
+      transform: translate(-50%, -50%) scaleX(0.943);
+    }
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-knob,
+    .ym-sl-fs-player-volume:focus-visible .ym-sl-fs-volume-knob,
+    .ym-sl-fs-player-volume:focus .ym-sl-fs-volume-knob { opacity: 1; }
+    .ym-sl-fs-player-volume:focus-visible { outline: none; }
+    .ym-sl-fs-player-volume:focus-visible::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 50%; transform: translateY(-50%);
+      height: 14px; border-radius: 999px;
+      box-shadow: 0 0 0 2px rgba(255,255,255,.55);
+    }
+    .ym-sl-fs-player-controls button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      min-width: 34px;
+      min-height: 34px;
+      padding: 0;
+      border: 1px solid rgba(255,255,255,.24);
+      border-radius: 50%;
+      background: rgba(255,255,255,.12);
+      color: rgba(255,255,255,.94);
+      font: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow:
+        0 10px 24px -8px rgba(8, 10, 18, .46),
+        inset 0 1px 0 rgba(255,255,255,.34),
+        inset 0 0 0 1px rgba(255,255,255,.08);
+      transition: transform .22s cubic-bezier(.34,1.56,.64,1),
+        background .22s ease, box-shadow .22s ease, color .22s ease;
+    }
+    .ym-sl-fs-player-controls button:hover {
+      transform: scale(1.06);
+      background: rgba(255,255,255,.2);
+      color: #fff;
+      box-shadow:
+        0 14px 30px -8px rgba(8, 10, 18, .55),
+        0 0 20px -5px rgba(255,255,255,.2),
+        inset 0 1px 0 rgba(255,255,255,.48),
+        inset 0 0 0 1px rgba(255,255,255,.14);
+    }
+    .ym-sl-fs-player-controls button:active { transform: scale(.92); }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play {
+      width: 50px;
+      height: 50px;
+      min-width: 50px;
+      min-height: 50px;
+      font-size: 20px;
+      background: rgba(255,255,255,.18);
+    }
+    /* offset rail (inside the options overlay) — keep the original look */
+    .ym-sl-fs-control-offset input[type="range"] {
+      appearance: none;
+      -webkit-appearance: none;
+      height: 6px;
+      width: 104px;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255,255,255,.96) 0 var(--slider-fill, 50%), rgba(255,255,255,.18) var(--slider-fill, 50%) 100%);
+      outline: none;
+      accent-color: #fff;
+      cursor: pointer;
+      transition: none;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-fs-control-offset input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -4px;
+      border: 2px solid rgba(255,255,255,.94);
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0,0,0,.45);
+    }
+    .ym-sl-fs-control-offset input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      transform: translateY(-1px);
+      border: 2px solid rgba(255,255,255,.94);
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0,0,0,.45);
+    }
+    .ym-sl-fs-controls {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      left: auto;
+      bottom: auto;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 10px;
+      background: rgba(255,255,255,.08);
+      box-shadow: 0 10px 28px rgba(0,0,0,.2);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px);
+      transition: opacity .18s ease, transform .35s cubic-bezier(.22,.61,.36,1),
+        left .35s cubic-bezier(.22,.61,.36,1), right .35s cubic-bezier(.22,.61,.36,1),
+        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+      /* Frosted translucent chrome, per the redesign. */
+      backdrop-filter: blur(20px) saturate(1.5);
+      -webkit-backdrop-filter: blur(20px) saturate(1.5);
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+    /* Idle state: after a couple of seconds without input, hide the pointer and
+       the hover controls so nothing sits on top of the video. Placed AFTER the
+       :hover rule above so it wins on equal specificity. Any input clears it. */
+    .ym-sl-fs-overlay.ym-sl-fs-idle,
+    .ym-sl-fs-overlay.ym-sl-fs-idle * {
+      cursor: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-controls {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px);
+    }
+    .ym-sl-fs-controls button,
+    .ym-sl-fs-controls select {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .ym-sl-fs-controls button { padding: 0 10px; }
+    .ym-sl-fs-controls select {
+      padding: 0 24px 0 8px;
+      /* Tell Chrome to paint the native dropdown popup in dark mode; without
+         this it falls back to a white panel and the option text becomes
+         white-on-white / unreadable. */
+      color-scheme: dark;
+    }
+    .ym-sl-fs-controls select option {
+      /* Explicit fallback for browsers that ignore color-scheme on <option>. */
+      background: #1a1a1a;
+      color: #fff;
+    }
+    .ym-sl-fs-controls button:hover,
+    .ym-sl-fs-controls select:hover { background: rgba(255,255,255,.15); }
+    /* The generic fullscreen button rule has higher specificity than a plain
+       class selector, so keep the hidden state equally specific. */
+    /* The Hide lyrics button is always in the flex row, but collapses to zero
+       width outside Video Background. This makes appearance/disappearance
+       interpolate instead of snapping between display:none and inline-flex. */
+    .ym-sl-fs-controls button.ym-sl-fs-lyrics-toggle {
+      display: inline-flex !important;
+      overflow: hidden;
+      max-width: 0;
+      min-width: 0;
+      width: 0;
+      padding-left: 0 !important;
+      padding-right: 0 !important;
+      border-left-width: 0;
+      border-right-width: 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: scale(.88) translateY(4px);
+      transition:
+        max-width .32s cubic-bezier(.22,.61,.36,1),
+        width .32s cubic-bezier(.22,.61,.36,1),
+        padding .32s cubic-bezier(.22,.61,.36,1),
+        border-width .32s cubic-bezier(.22,.61,.36,1),
+        opacity .22s ease, visibility 0s linear .32s,
+        transform .32s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video.ym-sl-fs-mode-background .ym-sl-fs-lyrics-toggle {
+      max-width: 120px;
+      width: auto;
+      padding-left: 10px !important;
+      padding-right: 10px !important;
+      border-left-width: 1px;
+      border-right-width: 1px;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: scale(1) translateY(0);
+      transition-delay: 0s;
+    }
+    /* Keep the reverse transition symmetric. The hidden state waits only for
+       opacity/geometry to finish before becoming non-interactive, instead of
+       instantly removing the button from layout. */
+    .ym-sl-fs-controls button.ym-sl-fs-lyrics-toggle:not(:hover) {
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-control-offset {
+      display: none;
+      align-items: center;
+      gap: 5px;
+      color: rgba(255,255,255,.72);
+      white-space: nowrap;
+    }
+    .ym-sl-fs-control-offset.visible { display: inline-flex; }
+    .ym-sl-fs-control-offset input[type="range"] {
+      width: 104px;
+      accent-color: #fff;
+      cursor: pointer;
+      transition: none;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-fs-control-offset-value { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+    .ym-sl-fs-control-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-number {
+      width: 52px; font-size: 11px; color: #fff; background: rgba(255,255,255,.12);
+      border: 0; border-radius: 6px; padding: 2px 4px;
+      -moz-appearance: textfield;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-number::-webkit-outer-spin-button,
+    .ym-sl-fs-control-offset .ym-sl-offset-number::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ym-sl-fs-control-offset .ym-sl-offset-applied {
+      font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: rgba(255,255,255,.5);
+    }
+    /* The range is useful on any track: on cover-art tracks it remains a
+       harmless manual lyric timing nudge, while music videos use the same
+       persisted per-track offset as the normal panel. */
+    .ym-sl-fs-control-offset.force-visible { display: inline-flex; }
+    .ym-sl-video-offset {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      color: rgba(255,255,255,.78);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .ym-sl-video-offset.visible { display: inline-flex; }
+    .ym-sl-video-offset input[type="range"] {
+      width: 92px;
+      accent-color: #fff;
+      cursor: pointer;
+    }
+    .ym-sl-video-offset-value {
+      min-width: 48px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: rgba(255,255,255,.66);
+    }
+    .ym-sl-video-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.1); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-video-offset .ym-sl-offset-number {
+      width: 52px; font-size: 11px; color: #fff; background: rgba(255,255,255,.1);
+      border: 0; border-radius: 6px; padding: 2px 4px;
+      -moz-appearance: textfield;
+    }
+    .ym-sl-video-offset .ym-sl-offset-number::-webkit-outer-spin-button,
+    .ym-sl-video-offset .ym-sl-offset-number::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ym-sl-video-offset .ym-sl-offset-applied {
+      font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: rgba(255,255,255,.45);
+    }
+    /* Fullscreen view: YTM's real <video> on the left, the live lyrics panel on
+       the right. Nothing is re-created — both are the existing live elements, so
+       playback, timing and scroll state all keep working. No artwork fetching,
+       no blurred backdrop, and no extension controls in this view. */
+    /* Geometry comes from the mode rules (.ym-sl-fs-mode-* / default "side")
+       higher up; only the visual treatment and overflow are pinned here. */
+    .ym-sl-fs-media {
+      position: absolute;
+      display: block;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: transparent !important;
+    }
+    .ym-sl-fs-media > video {
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      margin: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      /* Keep the complete 16:9 video visible. The old cover mode was the reason
+         the left/right edges were cropped and the player looked like a square
+         album-art card; the blurred canvas already fills the surrounding area. */
+      object-fit: contain !important;
+      border-radius: 14px;
+      background: transparent;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, .55);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > video {
+      /* Restore the pre-letterbox presentation. */
+      background: transparent;
+    }
+    /* Music videos: rounding only; column geometry comes from the layout mode. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media {
+      border-radius: 14px;
+    }
+    /* Smooth fade when the backdrop swaps between cover-art and the live video
+       mid-fullscreen. syncFsVideoMode toggles fsMediaHost opacity around the
+       swap so the transition (cover art fading out / new backdrop fading in)
+       replaces the snap AJ reported (2026-09-16). */
+    .ym-sl-fs-media {
+      transition: opacity .25s ease;
+    }
+    /* Music videos: the hero on the left is the unblurred live video (the
+       clone behind supplies the blurred light). Remove any softening filter
+       so the left video stays crisp. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > video {
+      filter: none;
+    }
+    /* Music videos: give the left column more room so the unblurred hero is
+       visually prominent instead of feeling offset inside a narrow slice.
+       (Dead code now that the overlay is display:block — left here as a
+       no-op anchor in case we ever reintroduce a grid track for side mode.)
+       Grid-template-columns rule removed. */
+    /* Cover art: a centered square card filling the column width. The blurred
+       backdrop fills the vertical space around it, so there are no black bars. */
+    .ym-sl-fs-media > img {
+      display: block;
+      width: min(100%, 70vh);
+      height: auto;
+      max-width: 100%;
+      max-height: 70vh;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border-radius: 16px;
+      background: #000;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, .55);
+    }
+    /* In side mode, center the square cover in the media column without
+       stretching it to the full column height. The old height:100% override
+       made the square's contain box span the entire screen, creating huge
+       black bars above and below the artwork. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
+      width: min(100%, 70vh);
+      max-height: 70vh;
+      flex: 0 1 auto;
+    }
+
+    /* Self-contained blurred backdrop. We render our own (rather than
+       reparenting dynamic.js's Kawarp node) because dynamic.js's rootObserver
+       actively yanks pageBgHost back to pageBgRoot, stealing it from the overlay
+       within a frame. For music videos, a muted clone of the live video plays
+       blurred in the background AND the original plays unblurred on the left,
+       so the music video actually lights up the background with live motion. */
+    .ym-sl-fs-bg-img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scale(1.06);
+      will-change: transform, filter;
+      z-index: 0;
+    }
+    /* Cover art: brighter than before so the blurred album art reads as a
+       proper background, not a near-black veil. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-bg-img {
+      filter: blur(30px) saturate(1.75) brightness(.78);
+    }
+    /* Music videos: hide the static artwork backdrop because the live video
+       itself fills the fullscreen media layer. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-bg-img {
+      display: none;
+    }
+    /* Kawarp WebGL backdrop for song fullscreen. Sits behind everything at
+       z-index 0; when it owns the backdrop the static blurred cover is hidden.
+       The .ready class fades it in once the module + image have loaded. */
+    .ym-sl-fs-kawarp {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(1.06);
+      transition: opacity .6s ease;
+    }
+    .ym-sl-fs-kawarp.ready { opacity: 1; }
+    .ym-sl-fs-overlay.ym-sl-fs-has-kawarp .ym-sl-fs-bg-img { display: none; }
+    /* Music-video backdrop: a <canvas> holding a very low-res copy of the live
+       <video>. The heavy blur is applied by CSS (see the background-mode rule)
+       to a static layer, so the browser never re-blurs the live video per
+       frame. Overscan is larger than before because a 64px blur would
+       otherwise fade out at the element edges. */
+    .ym-sl-fs-bg-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      /* Decorative ambient backdrop only. It covers the whole overlay, so it
+         must never intercept clicks meant for the lyrics (the sibling
+         .ym-sl-fs-bg-tint already sets this; the canvas was missing it). */
+      pointer-events: none;
+      /* Larger overscan than the old 1.06: ctx.filter's blur fades toward the
+         canvas edges, and this scales the faded border outside the viewport. */
+      transform: scale(1.3);
+      transform-origin: center center;
+      will-change: transform;
+      z-index: 0;
+    }
+    .ym-sl-fs-bg-tint {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, .2);
+      z-index: 1;
+      pointer-events: none;
+    }
+    /* .ym-sl-fs-media / .ym-sl-fs-lyrics base position + z-index are set by
+       the animated rules higher up. */
+    .ym-sl-fs-lyrics {
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      display: flex;
+      overflow: hidden;
+    }
+    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
+    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
+    .ym-sl-track { 
+      min-width: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(255,255,255,.66);
+      pointer-events: none;
+    }
+    .ym-sl-import {
+      flex: 0 0 auto;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.82);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+      transition: background .15s ease, transform .12s ease;
+    }
+    .ym-sl-import:hover { background: rgba(255,255,255,.14); }
+    .ym-sl-import:active { transform: scale(.97); }
+    .ym-sl-import.active {
+      background: rgba(96,165,250,.28);
+      border-color: rgba(96,165,250,.6);
+      color: #eaf2ff;
+    }
+    .ym-sl-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding: 28px 12px;
+      text-align: center;
+    }
+    .ym-sl-empty-msg { color: rgba(255,255,255,.72); }
+    .ym-sl-empty-search { min-height: 34px; padding: 0 16px; font-size: 12px; }
+    .ym-sl-search {
+      position: absolute;
+      top: 48px;
+      left: 14px;
+      right: 14px;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 12px;
+      background: rgba(16,18,24,.96);
+      box-shadow: 0 12px 30px rgba(0,0,0,.5);
+      pointer-events: auto;
+    }
+    .ym-sl-search.hidden { display: none !important; }
+    .ym-sl-search-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .ym-sl-search-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-search-close {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 6px;
+      background: rgba(255,255,255,.1);
+      color: rgba(255,255,255,.85);
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .ym-sl-search-close:hover { background: rgba(255,255,255,.18); }
+    .ym-sl-search-form { display: flex; gap: 6px; }
+    .ym-sl-search-input {
+      flex: 1 1 auto;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 7px;
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.92);
+      font: inherit;
+      font-size: 12px;
+    }
+    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.45); }
+    .ym-sl-search-remember {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: rgba(255,255,255,.7);
+      cursor: pointer;
+      user-select: none;
+    }
+    .ym-sl-search-status {
+      min-height: 14px;
+      font-size: 11px;
+      color: rgba(255,255,255,.6);
+    }
+    .ym-sl-search-results {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 240px;
+      overflow-y: auto;
+      margin: 0;
+      padding: 0;
+    }
+    .ym-sl-search-result {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 1px;
+      text-align: left;
+      padding: 7px 9px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      background: rgba(255,255,255,.05);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      cursor: pointer;
+      transition: background .12s ease;
+    }
+    .ym-sl-search-result:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-result.no-sync {
+      opacity: .42;
+      cursor: not-allowed;
+      background: rgba(255,255,255,.03);
+    }
+    .ym-sl-search-result.no-sync:hover { background: rgba(255,255,255,.03); }
+    .ym-sl-search-result.no-sync-available {
+      opacity: .62;
+      cursor: pointer;
+      background: rgba(255,255,255,.04);
+    }
+    .ym-sl-search-result.no-sync-available:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-name { font-size: 12px; font-weight: 600; }
+    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.6); }
+    .ym-sl-jump {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 25;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 8px;
+      background: rgba(0,0,0,.88);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+      opacity: 1;
+      transform: translateY(0);
+      transition:
+        opacity .18s ease,
+        background .15s ease,
+        transform .18s ease;
+    }
+    .ym-sl-jump:hover { background: rgba(0,0,0,.98); }
+    .ym-sl-jump:active { transform: scale(.97); }
+    .ym-sl-jump.hidden {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(6px);
+    }
+    /* ---- MV pause re-sync ---------------------------------------------------
+       Pick mode: hovering a primary line shows the existing .line::before box in a
+       stronger form plus a floating "Sync from here" label (.line::after is unused
+       on lines, only .word/.letterGroup use ::after for spacing). The label is
+       absolutely positioned, so it is not treated as a flex item of the .line. */
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line)::after {
+      content: "Sync from here";
+      position: absolute;
+      right: -4px;
+      top: -11px;
+      z-index: 3;
+      padding: 1px 6px;
+      border-radius: 6px;
+      background: rgba(0,0,0,.86);
+      color: rgba(255,255,255,.88);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      line-height: 1.5;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .15s ease;
+    }
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line):hover::after { opacity: 1; }
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line):hover::before {
+      opacity: 1;
+      transform: scale(1);
+      border-color: rgba(255,255,255,.55);
+      background: rgba(255,255,255,.10);
+    }
+    .ym-sl-pause-mode .line.bg-line,
+    .ym-sl-pause-mode .line.musical-line { cursor: default; }
+    /* Persistently mark the chosen sync point even outside pick mode. */
+    .line.ym-sl-pause-mark::before {
+      opacity: 1;
+      transform: scale(1);
+      border-color: rgba(255,255,255,.45);
+      background: rgba(255,255,255,.05);
+    }
+    .ym-sl-pause-banner {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 58px;
+      z-index: 26;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 8px;
+      background: rgba(0,0,0,.9);
+      color: rgba(255,255,255,.92);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .ym-sl-pause-banner.hidden { display: none; }
+    .ym-sl-pause-banner-text { flex: 1 1 auto; min-width: 0; }
+    .ym-sl-pause-cancel {
+      flex: 0 0 auto;
+      min-height: 24px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 6px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .ym-sl-pause-section { display: flex; flex-direction: column; gap: 6px; }
+    .ym-sl-pause-editor { display: flex; flex-direction: column; gap: 6px; }
+    .ym-sl-pause-editor.hidden { display: none; }
+    .ym-sl-pause-line {
+      font-size: 11px;
+      color: rgba(255,255,255,.62);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-pause-row { display: flex; align-items: center; gap: 8px; }
+    .ym-sl-pause-range { flex: 1 1 auto; min-width: 0; accent-color: #fff; }
+    .ym-sl-pause-number {
+      flex: 0 0 auto;
+      width: 58px;
+      min-height: 26px;
+      padding: 0 6px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 6px;
+      background: rgba(0,0,0,.35);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+    }
+    .ym-sl-pause-value { font-size: 11px; color: rgba(255,255,255,.72); }
+    .ym-sl-pause-clear { flex: 0 0 auto; min-height: 26px; padding: 0 10px; }
+    .ym-sl-pause-pick.hidden { display: none; }
+    .ym-sl-pause-pick:disabled { opacity: .45; cursor: not-allowed; }
+    .ym-sl-import-mode {
+      flex: 0 0 auto;
+      min-height: 30px;
+      padding: 0 24px 0 8px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.82);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .ym-sl-import-mode option {
+      background: #202020;
+      color: #000;
+    }
+    .ym-sl-options-overlay select,
+    .ym-sl-fs-options-overlay select,
+    .ym-sl-fs-controls select {
+      color-scheme: light;
+      background-color: #fff;
+      color: #000;
+      transition: background-color .2s ease, color .2s ease, border-color .2s ease;
+    }
+    .ym-sl-options-overlay select option,
+    .ym-sl-fs-options-overlay select option,
+    .ym-sl-fs-controls select option {
+      background: #fff;
+      color: #000;
+    }
+    .ym-sl-options-overlay select:hover,
+    .ym-sl-options-overlay select:focus,
+    .ym-sl-fs-options-overlay select:hover,
+    .ym-sl-fs-options-overlay select:focus,
+    .ym-sl-fs-controls select:hover,
+    .ym-sl-fs-controls select:focus {
+      background-color: #f2f2f2;
+      border-color: rgba(0,0,0,.35);
+      color: #000;
+      outline: none;
+    }
+
+/* Fullscreen controls must stay reachable on short/lower-resolution screens.
+       They remain over the overlay but have a safe-area clamp so the native
+       fullscreen browser chrome and YTM player bar cannot cover them. */
+    .ym-sl-fs-controls {
+      top: max(18px, env(safe-area-inset-top, 0px));
+      right: max(18px, env(safe-area-inset-right, 0px));
+    }
+    @media (max-height: 700px) {
+      .ym-sl-fs-controls {
+        top: max(8px, env(safe-area-inset-top, 0px));
+        right: max(8px, env(safe-area-inset-right, 0px));
+        transform: translateY(-8px) scale(.92);
+        transform-origin: top right;
+      }
+      .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+      .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+        transform: translateY(0) scale(.92);
+      }
+    }
+    @media (max-height: 560px) {
+      .ym-sl-fs-controls {
+        gap: 4px;
+        padding: 5px 6px;
+        top: max(4px, env(safe-area-inset-top, 0px));
+        right: max(4px, env(safe-area-inset-right, 0px));
+        transform: translateY(-4px) scale(.82);
+      }
+      .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+      .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+        transform: translateY(0) scale(.82);
+      }
+    }
+    /* YT Music-style arrows are only needed below 1920x1080. At or above
+       that resolution the complete options row stays clean and arrow-free. */
+    @media (max-width: 1919px), (max-height: 1079px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        display: block;
+      }
+    }
+    /* Lower-resolution YTM pages can have a short viewport where the native
+       tab row is clipped by the player/header stack. Keep the existing panel
+       mount, but reserve a compact top-safe position for the tab controls. */
+    @media (max-height: 700px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
+        top: 0;
+        right: 8px;
+        left: 8px;
+        min-height: 26px;
+        padding: 4px 0;
+        gap: 4px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 6px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        flex-basis: 24px;
+        width: 24px;
+        min-height: 26px;
+        font-size: 16px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-import,
+      #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
+      #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
+        min-height: 26px;
+        font-size: 10px;
+      }
+    }
+    @media (max-height: 560px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
+        min-height: 22px;
+        padding: 2px 0;
+        gap: 3px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 4px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        flex-basis: 21px;
+        width: 21px;
+        min-height: 22px;
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-import,
+      #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
+      #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
+        min-height: 22px;
+        font-size: 9px;
+      }
+    }
+
+    #ym-sl-panel.SpicyRenderer .LyricsContainer {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      flex-direction: column;
+      justify-content: center;
+      overflow: hidden;
+      z-index: 4;
+    }
+    #ym-sl-panel.SpicyRenderer .LyricsContent {
+      --TextGlowDef: rgba(255,255,255,.15) 0 0 6px;
+      --ActiveTextGlowDef: rgba(255,255,255,.4) 0 0 14px;
+      --StrongTextGlowDef: rgba(255,255,255,.68) 0 0 16.4px;
+      --ym-sl-lyrics-scale: 1;
+      --ym-sl-lyrics-offset: 0px;
+      --ym-sl-bg-vocal-opacity: .4;
+      /* Fixed rem base (NOT the old container-width clamp(1.7rem,7cqw,3.5rem)):
+         the 7cqw term scaled with the pane, so on a smaller monitor / lower
+         resolution the lyrics shrank. A fixed base keeps them the same size.
+         The fullscreen pane is much wider, so it overrides this with a larger
+         fixed base (see the .ym-sl-fs-overlay rule). The user's size setting
+         still multiplies via --ym-sl-lyrics-scale. */
+      --DefaultLyricsSize: calc(2rem * var(--ym-sl-lyrics-scale));
+      --amll-lyric-player-font-size: var(--DefaultLyricsSize);
+      --vertical-gap: 0px;
+      width: 100%;
+      height: 100%;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      font-size: var(--DefaultLyricsSize) !important;
+      font-weight: 700;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif !important;
+      font-kerning: normal;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+      container-type: size;
+      opacity: 1;
+      transform: translateY(var(--ym-sl-lyrics-offset));
+      transform-origin: center center;
+      -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      transition: opacity .25s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .LyricsContent.offline {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #ym-sl-panel.SpicyRenderer .SpicyLyricsScrollContainer {
+      width: 100%;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      margin-top: 25cqh;
+      margin-bottom: 45cqh;
+    }
+    #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer {
+      position: relative;
+      width: 100%;
+      box-sizing: border-box;
+      /* Clip-safe horizontal inset. .LyricsContent has overflow-x: hidden, so
+         lyric glyphs (and the hover highlight box, which bleeds .35em past the
+         line) get cut at the panel edge. Widening the inner padding keeps the
+         text layout/formatting identical and just reserves a safe band, so the
+         right edge clips inside the tab boundary instead of on the glyphs. */
+      padding: 0 28px;
+      container-type: inline-size;
+    }
+    #ym-sl-panel.SpicyRenderer .line {
+      --font-size: var(--DefaultLyricsSize);
+      --BlurAmount: 0px;
+      --DefaultLyricsScale: .95;
+      --DefaultEmphasisLyricsScale: .95;
+      --DefaultLineScale: 1;
+      --Vocal-NotSung-opacity: .51;
+      --Vocal-Active-opacity: 1;
+      --Vocal-Sung-opacity: .497;
+      --Vocal-Hover-opacity: 1;
+      --gradient-position: -20%;
+      --gradient-color: 255;
+      --gradient-alpha: .85;
+      --gradient-alpha-end: .5;
+      --gradient-degrees: 90deg;
+      --gradient-offset: 0%;
+      display: flex;
+      position: relative;
+      flex-wrap: wrap;
+      align-items: baseline;
+      margin: 1cqw 0;
+      transition: opacity .2s cubic-bezier(.61,1,.88,1);
+      font-size: var(--font-size) !important;
+      /* SF Pro's descenders need a little more line-box room than the
+         original SpicyLyrics font, especially while the glyphs are lifted. */
+      line-height: 1.4 !important;
+      letter-spacing: 0;
+      direction: ltr;
+      /* No will-change here. Declaring it permanently on every line/word/letter
+         promoted 600+ compositor layers (70 lines + 571 words on a single 3:28
+         track) that were never demoted, so GPU memory and layer bookkeeping grew
+         for the whole session -- the "panel gets laggier the longer I listen" bug.
+         It also bought nothing: will-change: transform promises only transform /
+         opacity will change, but these elements also repaint every frame via
+         text-shadow (glow) and background-image gradient stops. The hint is now
+         applied in JS only while an element is actually mid-animation; see
+         setAnimatingHint(). */
+      cursor: pointer;
+      transform-origin: left center;
+      isolation: isolate;
+      overflow: visible;
+      padding-block: .12em;
+    }
+    /* Static (unsynced) lines: paint at full alpha / opacity and use tighter
+       spacing, mirroring Spicy Lyrics' data-lyrics-type="Static" look so an
+       unkaraoked LRCLIB result reads like real lyrics rather than dim ghosts.
+       Scoped to .line.static only — synced lyrics keep their own rhythm
+       (AJ, 2026-09-18). */
+    #ym-sl-panel.SpicyRenderer .line.static {
+      opacity: 1 !important;
+      --gradient-alpha: 1 !important;
+      --gradient-alpha-end: 1 !important;
+      margin: .12cqw 0;
+      --font-size: calc(var(--DefaultLyricsSize) * .9);
+      padding-block: .04em;
+      line-height: 1.2 !important;
+      cursor: default;
+      transition: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.static .word,
+    #ym-sl-panel.SpicyRenderer .line.static .letter {
+      --gradient-alpha: 1 !important;
+      --gradient-alpha-end: 1 !important;
+      --gradient-position: 100% !important;
+      --text-shadow-blur-radius: 4px;
+      --text-shadow-opacity: 0%;
+      transform: none;
+      --ym-sl-base-scale: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line::before {
+      content: "";
+      position: absolute;
+      inset: -.08em -.35em;
+      z-index: 0;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 10px;
+      background: rgba(255,255,255,.055);
+      opacity: 0;
+      transform: scale(.985);
+      pointer-events: none;
+      transition:
+        opacity .18s ease,
+        transform .22s cubic-bezier(.22,.61,.36,1);
+    }
+    #ym-sl-panel.SpicyRenderer .line > * {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line .romaji {
+      flex-basis: 100%;
+      width: 100%;
+      order: 99;
+      font-size: .52em;
+      line-height: 1.25;
+      font-weight: 500;
+      letter-spacing: .04em;
+      text-transform: none;
+      margin-top: .28em;
+      color: rgba(255,255,255,.62);
+      text-shadow: 0 1px 3px rgba(0,0,0,.45);
+      transition: opacity .2s ease;
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .romaji { opacity: .85; }
+    #ym-sl-panel.SpicyRenderer .line:hover {
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .line:hover::before {
+      opacity: 1;
+      transform: scale(1);
+    }
+    /* Static (unsynced) lines can't be clicked to seek (no time mapping), so the
+       hover highlight box is misleading — suppress it for them (AJ, 2026-09-18). */
+    #ym-sl-panel.SpicyRenderer .line.static:hover::before {
+      opacity: 0;
+      transform: scale(.985);
+    }
+    #ym-sl-panel.SpicyRenderer .line.static:hover {
+      z-index: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .line.OppositeAligned:not(.rtl) {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl.OppositeAligned {
+      transform-origin: left center !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed {
+      transition:
+        opacity .2s cubic-bezier(.61,1,.88,1),
+        scale .28s cubic-bezier(.22,.61,.36,1);
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed.Active {
+      scale: 1.05;
+    }
+    #ym-sl-panel.SpicyRenderer
+      .SpicyLyricsScrollContainer.HasDuetLines
+      .line:not(.OppositeAligned, .rtl) {
+      width: 100%;
+      box-sizing: border-box;
+      padding-right: 14cqw;
+    }
+    #ym-sl-panel.SpicyRenderer
+      .SpicyLyricsScrollContainer.HasDuetLines
+      .line.OppositeAligned:not(.rtl) {
+      width: 100%;
+      box-sizing: border-box;
+      justify-content: flex-end;
+      padding-left: 14cqw;
+      text-align: right;
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word,
+    #ym-sl-panel.SpicyRenderer .line .letter,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup {
+      position: relative;
+      display: inline-block;
+      font-weight: 700 !important;
+      transform-origin: center center;
+      --gradient-position: -20%;
+      --gradient-color: 255;
+      --gradient-alpha: .85;
+      --gradient-alpha-end: .5;
+      --gradient-degrees: 90deg;
+      --gradient-offset: 0%;
+      --text-shadow-blur-radius: 4px;
+      --text-shadow-opacity: 0%;
+      --ym-sl-base-scale: 1;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+      overflow: visible;
+    }
+    #ym-sl-panel.SpicyRenderer .line .letterGroup {
+      display: inline-flex;
+    }
+    /* A letter that is just whitespace collapses to a 0px inline-block, which
+       glues multi-word syllables together. Keep the space rendered and give it
+       a floor. Mirrors upstream Spicy Lyrics Emphasize.ts / Mixed.css. */
+    #ym-sl-panel.SpicyRenderer .line .letter.SpaceLetter {
+      white-space: pre;
+      min-width: 0.3ch;
+    }
+    /* Only the leaf text elements (.word/.letter) carry the gradient clip.
+       Putting background-clip:text on the .letterGroup wrapper clips its child
+       letters to the (empty) wrapper box and makes them vanish once the active
+       gradient is removed — the "long words turn dark after being sung" bug. */
+    #ym-sl-panel.SpicyRenderer .line .word,
+    #ym-sl-panel.SpicyRenderer .line .letter {
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      /* Paint every state with the same gradient-clip technique (only the
+         gradient's brightness differs per state). This keeps stroke weight
+         identical while a line is Active vs Sung/NotSung; swapping to a solid
+         fill on Sung made the glyphs read fuller/bolder (the "thicker after
+         the line ends" bug). */
+      background-image: linear-gradient(
+        var(--gradient-degrees),
+        rgba(255,255,255,var(--gradient-alpha)) var(--gradient-position),
+        rgba(255,255,255,var(--gradient-alpha-end))
+          calc(var(--gradient-position) + 20% + var(--gradient-offset))
+      );
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord
+      + :is(.word.PartOfWord, .letterGroup.PartOfWord),
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord
+      + :is(.word.PartOfWord, .letterGroup.PartOfWord) {
+      transform-origin: center center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord
+      + :is(.word, .letterGroup),
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord
+      + :is(.word, .letterGroup) {
+      transform-origin: left center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word.PartOfWord,
+    #ym-sl-panel.SpicyRenderer .line.rtl .letterGroup.PartOfWord {
+      transform-origin: left center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word.PartOfWord
+      + :is(.word, .letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.rtl .letterGroup.PartOfWord
+      + :is(.word, .letterGroup) {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word:not(.PartOfWord, .dot, .LastWordInLine)::after,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup:not(.PartOfWord, .dot, .LastWordInLine)::after {
+      content: "";
+      margin-right: .32ch;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .word,
+    #ym-sl-panel.SpicyRenderer .line.Active .letter,
+    #ym-sl-panel.SpicyRenderer .line.Active .letterGroup {
+      /* Gradient is now supplied by the base .word/.letter rule; only the
+         per-word glow (during active singing) lives here. */
+      text-shadow: 0 0 var(--text-shadow-blur-radius) rgba(255,255,255,var(--text-shadow-opacity));
+    }
+    #ym-sl-panel.SpicyRenderer .line.NotSung {
+      opacity: var(--Vocal-NotSung-opacity);
+      --gradient-position: -20% !important;
+      /* Dim gradient (same clip technique as Active) instead of a solid fill,
+         so the stroke weight never changes between states. */
+      --gradient-alpha: .4;
+      --gradient-alpha-end: .4;
+      text-shadow: 0 0 var(--BlurAmount) rgba(255,255,255,var(--gradient-alpha-end));
+    }
+    #ym-sl-panel.SpicyRenderer .line.NotSung .word,
+    #ym-sl-panel.SpicyRenderer .line.NotSung .letter {
+      --gradient-position: -20% !important;
+      --text-shadow-opacity: 0% !important;
+      --text-shadow-blur-radius: 4px !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Sung {
+      opacity: var(--Vocal-Sung-opacity);
+      --gradient-position: 100% !important;
+      /* Dim gradient (same clip technique as Active) instead of a solid fill,
+         so a finished line keeps the exact stroke weight it had while playing.
+         (Earlier theory blamed the line-level text-shadow halo; that rests at 0
+         on Sung and was not the cause — the solid-fill swap was.) */
+      --gradient-alpha: .32;
+      --gradient-alpha-end: .32;
+      --BlurAmount: 0px !important;
+      text-shadow: 0 0 var(--BlurAmount) rgba(255,255,255,var(--gradient-alpha));
+    }
+    #ym-sl-panel.SpicyRenderer .line.Sung .word,
+    #ym-sl-panel.SpicyRenderer .line.Sung .letter {
+      --gradient-position: 100% !important;
+    }
+    /* WordSung keeps the gradient-clip from the base rule; no solid-fill
+       override, so weight stays consistent with the active line. */
+    /* WordNotSung keeps the gradient-clip from the base rule; no solid-fill
+       override, so weight stays consistent with the active line. */
+    /* Letter-group words are governed by EXACTLY the same rules as regular
+       words (the .line.Sung/.line.NotSung .word,.letter pairs above plus the
+       WordSung/WordNotSung pairs), so a long "wavy" word matches its
+       neighbours in every state. Do not add letter-specific fill overrides
+       here: an author !important declaration outranks a normal inline style,
+       which silently makes the animateLetters inline fills dead code.
+       Letters must also keep inheriting the line's text-shadow — the
+       .letterGroup wrapper must never set 'text-shadow: none', or the letters
+       lose the glow layer that regular words get and read dimmer. */
+    #ym-sl-panel.SpicyRenderer .line.Active {
+      opacity: 1;
+      --BlurAmount: 0px !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .word,
+    #ym-sl-panel.SpicyRenderer .line.Active .letter,
+    #ym-sl-panel.SpicyRenderer .line.Active .letterGroup { opacity: 1; }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung:not(.letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung .letter {
+      /* Always gradient-clip (thin), like the sung/active bg words, so unsung
+         bg words never read bold. The old solid fill here caused the per-word
+         "blink" (thick until sung). Keep them dim + glow-less until sung; the
+         sweep is supplied by the base gradient rule and rests at -20%. */
+      -webkit-text-fill-color: transparent;
+      background-image: linear-gradient(
+        var(--gradient-degrees),
+        rgba(255,255,255,var(--gradient-alpha)) var(--gradient-position),
+        rgba(255,255,255,var(--gradient-alpha-end))
+          calc(var(--gradient-position) + 20% + var(--gradient-offset))
+      );
+      --gradient-position: -20%;
+      --text-shadow-opacity: 0% !important;
+    }
+    /* Active background-vocal words must use the same animated gradient as
+       primary words. The resting WordNotSung override above is intentionally
+       limited to the inactive background words.
+
+       Both this rule and the WordNotSung one above MUST exclude .letterGroup via
+       :not(.letterGroup). The base gradient-clip rule deliberately omits
+       .letterGroup (see the note on .word/.letter further up), so a wrapper that
+       receives background-image WITHOUT background-clip:text paints the gradient
+       as a filled rectangle behind its letters instead of clipping it to the
+       glyphs -- the pale box that appeared around long bg-vocal words such as
+       "Keep". The .letter children still get the gradient and they do carry
+       background-clip:text. The wrapper is meant to stay inert, which is also
+       what animateWord() enforces with an inline background-image:none -- but
+       that inline style is powerless against the !important below, so the
+       exclusion has to happen here. */
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.Active:not(.letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.Active .letter,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordSung:not(.letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordSung .letter {
+      background-image: linear-gradient(
+        var(--gradient-degrees),
+        rgba(255,255,255,var(--gradient-alpha)) var(--gradient-position),
+        rgba(255,255,255,var(--gradient-alpha-end))
+          calc(var(--gradient-position) + 20% + var(--gradient-offset))
+      ) !important;
+      -webkit-text-fill-color: transparent !important;
+      color: transparent !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl {
+      direction: rtl !important;
+      transform-origin: right center !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word,
+    #ym-sl-panel.SpicyRenderer .line.rtl .letter { --gradient-degrees: -90deg; }
+    #ym-sl-panel.SpicyRenderer .line.line-timed .word,
+    #ym-sl-panel.SpicyRenderer .line.line-timed .letter,
+    #ym-sl-panel.SpicyRenderer .line.line-timed .letterGroup {
+      --gradient-degrees: 180deg;
+    }
+    #ym-sl-panel.SpicyRenderer .word-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      white-space: nowrap;
+      --ym-sl-base-scale: 1;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+      transform-origin: center center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line {
+      --font-size: calc(var(--DefaultLyricsSize) * .72);
+      --Vocal-NotSung-opacity: var(--ym-sl-bg-vocal-opacity);
+      /* Active bg vocals get a little more presence than their resting state;
+         the line remains behind the lead vocal, but the currently sung word
+         should not become dimmer while it is being performed. */
+      --Vocal-Active-opacity: calc(var(--ym-sl-bg-vocal-opacity) * 1.35);
+      --Vocal-Sung-opacity: var(--ym-sl-bg-vocal-opacity);
+      margin: -.25cqw 0 1.05cqw;
+      font-weight: 600 !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active {
+      opacity: var(--Vocal-Active-opacity);
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung {
+      opacity: var(--ym-sl-bg-vocal-opacity);
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line .word,
+    #ym-sl-panel.SpicyRenderer .line.bg-line .letter,
+    #ym-sl-panel.SpicyRenderer .line.bg-line .letterGroup {
+      /* Background vocals must never read as a white highlight. Keep the
+         gradient sweep visible but dim — the active word picks up the same
+         --gradient-alpha/--gradient-alpha-end below, so capping them here
+         applies to every state including the active background-image paint. */
+      --gradient-alpha: .62;
+      --gradient-alpha-end: .36;
+      font-weight: 600 !important;
+    }
+    /* NOTE: never override --text-shadow-opacity / --text-shadow-blur-radius
+       here with !important. animateLetters() writes those per letter inline
+       (glow * 185%) and a CSS !important outranks an inline style, which
+       freezes every letter at one constant value and makes the whole word glow
+       at once instead of lighting up letter by letter (background vocals are
+       TTML-only, so it showed up only on imported TTML). Dimming background
+       vocals is handled by the gradient alphas above plus the line's own
+       --ym-sl-bg-vocal-opacity, both of which preserve the animation. */
+    /* BG vocals resting state: dim them so they sit "behind" the lead instead
+       of showing the same brightness as the active sweep. The bg-line block
+       above now sets --gradient-alpha=.38 for ALL states, so the active wipe
+       stays dim too. These rules additionally pin the NotSung/Sung glow, which
+       is what actually paints resting glyphs. Selector specificity
+       (.line.bg-line.NotSung .word = 3 classes + 1 type) beats the base
+       .line.NotSung .word rule. */
+    #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung .word,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung .letter {
+      text-shadow: 0 0 var(--BlurAmount) rgba(255, 255, 255, .22);
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .word,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letter {
+      text-shadow: 0 0 var(--BlurAmount) rgba(255, 255, 255, .18);
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line {
+      cursor: default;
+      margin: 0;
+      padding: 0 0.9em;
+      display: grid;
+      grid-template-rows: 0fr;
+      opacity: 0;
+      transition: grid-template-rows .35s ease, opacity .35s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.playing {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line .dotGroup {
+      --dot-gap: clamp(.005rem, 1.7cqw, .18rem);
+      display: flex;
+      flex-direction: row;
+      gap: var(--dot-gap);
+      padding: 0.45em 0.2em;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.playing .dotGroup,
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+      overflow: visible;
+    }
+    @keyframes ymSlDotBounceOut {
+      0%   { transform: scale(1);    opacity: 1; }
+      30%  { transform: scale(1.22); opacity: 1; }
+      100% { transform: scale(0.12); opacity: 0; }
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+      animation: ymSlDotBounceOut 360ms cubic-bezier(.34, 1.4, .64, 1) forwards;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line .dot {
+      --font-size: calc(var(--DefaultLyricsSize) * 1.3);
+      --opacity-size: .35;
+      display: inline-block;
+      min-width: .35ch;
+      border-radius: 50%;
+      scale: .75;
+      font-size: var(--font-size) !important;
+      line-height: .65;
+      opacity: var(--opacity-size);
+      --gradient-position: 100%;
+      --ym-sl-base-scale: .75;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+    }
+    #ym-sl-panel.SpicyRenderer .line.static {
+      cursor: default;
+      --gradient-position: 100%;
+      --gradient-alpha: 1;
+      --gradient-alpha-end: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-empty {
+      width: min(90%, 300px);
+      margin: auto;
+      color: rgba(255,255,255,.55);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits {
+      margin: 48px 4px 16px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255,255,255,.12);
+      opacity: .85;
+      pointer-events: none;
+      user-select: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.5);
+      margin-bottom: 6px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits-names {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.5;
+      color: rgba(255,255,255,.8);
+    }
+    tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
+    tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
+    /* The SYNCED tab is a clone of the selected LYRICS tab, so its label
+       inherited the selected tab's styling. Force the same label colour and
+       opacity as the other (unselected) tabs. */
+    tp-yt-paper-tab.ym-sl-tab .tab-content {
+      color: rgba(255,255,255,.7) !important;
+      opacity: .8 !important;
+    }
+    tp-yt-paper-tabs #selectionBar {
+      transition: opacity .24s ease;
+    }
+    tp-yt-paper-tabs.ym-sl-custom-active #selectionBar,
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab)::after,
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab) .tab-content::after {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+    tp-yt-paper-tab.ym-sl-tab::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      background: #fff;
+      pointer-events: none;
+      opacity: 0;
+      transform: scaleX(.35);
+      transform-origin: center;
+      transition:
+        opacity .2s ease,
+        transform .28s cubic-bezier(.22,.61,.36,1);
+    }
+    tp-yt-paper-tab.ym-sl-tab.ym-sl-active::after {
+      opacity: 1;
+      transform: scaleX(1);
+    }
+
+    /* Final fullscreen geometry rules. These intentionally come after the
+       short-viewport media queries above: the mode selectors carry higher
+       specificity, so switching to Lyrics Only animates the control bars to
+       their new locations instead of the media-query transform winning and
+       making them snap. */
+    /* The redesigned fullscreen controls are layout-agnostic: the chrome lives
+       top-right (see .ym-sl-fs-controls at the top of this block) and the play
+       chip + scrubber are pinned to the bottom of the full-width
+       .ym-sl-fs-player-controls anchor (see .ym-sl-fs-player-controls above).
+       The legacy per-layout repositioning that used to live here pushed the
+       chrome to bottom-center and shrank the player-controls anchor to content
+       width, which squeezed the play chip into the bottom-left corner on the
+       side and video-background layouts. It is removed; only the lyrics scroll
+       clearance that genuinely still applies is kept. */
+    @media (max-height: 720px) {
+      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+        padding-bottom: 142px;
+      }
+    }
+    @media (max-height: 560px) {
+      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+        padding-bottom: 112px;
+      }
+    }
+  `;
+
+  function findTabBar() {
+    return (
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
+      document.querySelector("tp-yt-paper-tabs")
+    );
+  }
+
+  /* ---- tab watcher -------------------------------------------------------
+     YTM re-renders the watch page on track and route changes, which destroys the
+     injected SYNCED tab, so a MutationObserver watches for its disappearance.
+
+     Observing `ytmusic-app` with `subtree: true` means the callback fires on
+     EVERY mutation anywhere in the app, and during playback YTM mutates
+     constantly (progress bar, elapsed time, recommendations, queue). The old
+     callback ran `findTabBar()` — up to four document-wide querySelectors — on
+     every one of those, so its cost scaled with both YTM's mutation rate and its
+     growing DOM. That is a genuine contributor to "FPS falls the longer the
+     session runs", and unlike the animation-loop fix it is not bounded per song.
+
+     Narrowing the observed root is NOT safe here: the re-render that removes the
+     tab is exactly the one we must not miss. So the coverage stays identical and
+     the callback is made cheap instead:
+       1. Fast path — if our tab is still a direct child of the bar we mounted it
+          into, nothing changed. One property read instead of four querySelectors.
+          This is the overwhelmingly common case, so the steady-state cost is
+          effectively zero.
+       2. Coalesce — bursts of mutations collapse into a single check per frame. */
+  let tabWatchRaf = 0;
+  function tabWatcherNeedsMount() {
+    if (tabEl && tabMountParent &&
+      tabEl.parentElement === tabMountParent && tabMountParent.isConnected) {
+      return false;
+    }
+    const bar = findTabBar();
+    return !bar || !bar.querySelector(".ym-sl-tab");
+  }
+  function runTabWatcher() {
+    tabWatchRaf = 0;
+    if (tabWatcherNeedsMount()) scheduleMountTab();
+  }
+  function onWatchMutations() {
+    if (tabWatchRaf) return;
+    tabWatchRaf = requestAnimationFrame(runTabWatcher);
+  }
+
+  /* ---- draggable overlay panel ---- */
+  // Pointer events (not mouse events) so a drag works with touch as well, and
+  // setPointerCapture on the panel so a fast drag that outruns the cursor still
+  // tracks instead of dropping the panel mid-move. The first drag converts the
+  // CSS anchor (top/right) into explicit left/top, so the panel continues from
+  // wherever it currently sits rather than jumping to the pointer.
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    handle.addEventListener("pointerdown", (event) => {
+      // Let the close button and any real control inside the header behave
+      // normally instead of starting a drag.
+      if (event.target.closest("button, input, select, textarea, a")) return;
+      const rect = panel.getBoundingClientRect();
+      dragging = true;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      panel.style.left = startLeft + "px";
+      panel.style.top = startTop + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      try { panel.setPointerCapture(pointerId); } catch (_) {}
+      event.preventDefault();
+    });
+
+    panel.addEventListener("pointermove", (event) => {
+      if (!dragging || event.pointerId !== pointerId) return;
+      panel.style.left = (startLeft + event.clientX - startX) + "px";
+      panel.style.top = (startTop + event.clientY - startY) + "px";
+    });
+
+    const endDrag = (event) => {
+      if (!dragging || (event && event.pointerId !== pointerId)) return;
+      dragging = false;
+      if (pointerId != null) {
+        try { panel.releasePointerCapture(pointerId); } catch (_) {}
+      }
+      pointerId = null;
+    };
+    panel.addEventListener("pointerup", endDrag);
+    panel.addEventListener("pointercancel", endDrag);
+  }
+
+  function buildUI() {
+    // On extension reload Chrome re-injects the content script but does NOT remove
+    // DOM we created earlier, so a stale (possibly open) panel/style from the previous
+    // injection can linger. Clear any orphaned UI first so we always start clean and closed.
+    const stalePanel = document.getElementById("ym-sl-panel");
+    if (stalePanel) stalePanel.remove();
+    const staleStyle = document.getElementById("ym-sl-style");
+    if (staleStyle) staleStyle.remove();
+    const staleFonts = document.getElementById("ym-sl-fonts");
+    if (staleFonts) staleFonts.remove();
+    // The options overlay is a <body> child, so it survives a panel rebuild and
+    // would otherwise stack up as duplicates on every extension reload.
+    const staleOptions = document.querySelector(".ym-sl-options-overlay");
+    if (staleOptions) staleOptions.remove();
+    // A rebuild (e.g. extension reload) orphaned the old panel; drop the stale
+    // search popover reference and any in-flight request so we recreate cleanly.
+    if (searchAbortController) {
+      searchAbortController.abort();
+      searchAbortController = null;
+    }
+    searchPanelEl = null;
+
+    const style = document.createElement("style");
+    style.id = "ym-sl-style";
+    style.textContent = CSS;
+    document.head.appendChild(style);
+    fontLinkEl = document.createElement("link");
+    fontLinkEl.id = "ym-sl-fonts";
+    fontLinkEl.rel = "stylesheet";
+    fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
+    document.head.appendChild(fontLinkEl);
+    panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
+    const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
+    const importButton = h("button", {
+      class: "ym-sl-import",
+      type: "button",
+      title: "Import TTML lyrics",
+      "aria-label": "Import TTML lyrics",
+      text: "Upload",
+    });
+    const importMode = h("select", {
+      class: "ym-sl-import-mode",
+      title: "Choose how long this TTML should be used",
+      "aria-label": "TTML import duration",
+    });
+    importMode.append(
+      h("option", { value: "temporary", text: "Temporary" }),
+      h("option", { value: "permanent", text: "Permanent", selected: true })
+    );
+    jumpButton = h("button", {
+      class: "ym-sl-jump hidden",
+      type: "button",
+      title: "Jump to the currently playing lyric",
+      "aria-label": "Jump to the currently playing lyric",
+      text: "Jump to current",
+    });
+    jumpButton.addEventListener("click", onJumpButtonClick);
+    const fileInput = h("input", {
+      id: "ym-sl-file",
+      type: "file",
+      accept: ".ttml,.xml,application/ttml+xml",
+      style: "display:none",
+    });
+    importButton.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) readFile(file, importMode.value);
+      event.target.value = "";
+    });
+
+    const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
+    const videoOffsetLabel = h("span", { text: "Offset" });
+    const offsetScope = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
+    offsetScope.append(
+      h("option", { value: "video", text: "Video" }),
+      h("option", { value: "song", text: "Song" })
+    );
+    offsetScope.value = editingOffsetMode;
+    const videoOffsetRange = h("input", {
+      type: "range",
+      min: "-30000",
+      max: "30000",
+      step: "100",
+      value: "0",
+      "aria-label": "Lyric offset",
+    });
+    const videoOffsetNumber = h("input", {
+      type: "number",
+      class: "ym-sl-offset-number",
+      step: "0.1",
+      min: "-30",
+      max: "30",
+      value: "0",
+      title: "Offset in seconds (typed)",
+      "aria-label": "Lyric offset in seconds",
+    });
+    const videoOffsetValue = h("span", { class: "ym-sl-video-offset-value", text: "0.0s" });
+    const offsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
+    videoOffsetWrap.append(videoOffsetLabel, offsetScope, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
+    videoOffsetRange.addEventListener("input", () => {
+      setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
+    });
+    videoOffsetNumber.addEventListener("input", () => {
+      const seconds = parseFloat(videoOffsetNumber.value);
+      if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
+    });
+    offsetScope.addEventListener("change", () => {
+      editingOffsetMode = offsetScope.value;
+      refreshVideoOffsetControl();
+    });
+
+    const fullscreenButton = h("button", {
+      class: "ym-sl-import",
+      type: "button",
+      title: "Fullscreen — video on the left, lyrics on the right",
+      "aria-label": "Open fullscreen lyrics",
+      text: "Fullscreen",
+      onclick: enterFullscreenMode,
+    });
+    const optionsButton = h("button", {
+      class: "ym-sl-import ym-sl-options-button",
+      type: "button",
+      title: "Lyrics options — offset, import, and more",
+      "aria-label": "Open lyrics options",
+      text: "Options",
+    });
+    const toolsScroll = h("div", { class: "ym-sl-tools-scroll" }, optionsButton, fullscreenButton);
+    const tools = h("div", { class: "ym-sl-tools" }, toolsScroll);
+
+    // The remaining controls (track, offset, import mode, upload) moved out of
+    // the toolbar into a draggable overlay. The overlay is a child of <body> on
+    // purpose: .ym-sl-panel sets container-type: size, which makes the panel a
+    // containing block for fixed-position descendants and would trap + clip a
+    // nested overlay (the panel also has overflow: hidden).
+    const optionsOverlay = h("div", { class: "ym-sl-options-overlay hidden" });
+    const optionsHeader = h("div", { class: "ym-sl-options-header" });
+    const optionsTitle = h("span", { class: "ym-sl-options-title", text: "Options" });
+    const optionsClose = h("button", {
+      class: "ym-sl-options-close",
+      type: "button",
+      text: "\u00d7",
+      title: "Close options",
+      "aria-label": "Close options",
+    });
+    optionsHeader.append(optionsTitle, optionsClose);
+    const optionsTop = h("div", { class: "ym-sl-options-section" });
+    optionsTop.append(trackEl, videoOffsetWrap);
+    const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
+    const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
+    const optionsBottom = h("div", { class: "ym-sl-options-section" });
+    const exportButton = h("button", {
+      class: "ym-sl-import ym-sl-export-button",
+      type: "button",
+      title: "Download the imported TTML without applying the current offset",
+      "aria-label": "Export imported TTML",
+      text: "Export",
+    });
+    const exportSyncButton = h("button", {
+      class: "ym-sl-import ym-sl-export-sync-button",
+      type: "button",
+      title: "Download the imported TTML with the current offset applied",
+      "aria-label": "Export imported TTML with sync",
+      text: "Export + sync",
+    });
+    const exportActions = h("div", { class: "ym-sl-export-actions hidden" }, exportButton, exportSyncButton);
+    exportButton.addEventListener("click", () => exportImportedTTML(false));
+    exportSyncButton.addEventListener("click", () => exportImportedTTML(true));
+    const deletePermanentButton = h("button", {
+      class: "ym-sl-import ym-sl-delete-permanent-button hidden",
+      type: "button",
+      title: "Delete the permanently-saved TTML for this track",
+      "aria-label": "Delete permanently saved TTML",
+      text: "Delete saved",
+    });
+    deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
+    optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
+    /* ---- MV pause re-sync section -------------------------------------------
+       Sits between the Offset controls and the TTML controls: it is a timing
+       control, so it belongs next to the other one rather than under file tools. */
+    const pauseDivider = h("hr", { class: "ym-sl-options-divider" });
+    const pauseTitle = h("div", { class: "ym-sl-options-section-title", text: "Pause sync" });
+    const pauseSection = h("div", { class: "ym-sl-options-section ym-sl-pause-section" });
+    const pausePick = h("button", {
+      class: "ym-sl-import ym-sl-pause-pick",
+      type: "button",
+      "aria-label": "Set pause sync point",
+      text: "Set pause point",
+    });
+    pausePick.addEventListener("click", () => enterPausePickMode());
+    const pauseEditor = h("div", { class: "ym-sl-pause-editor hidden" });
+    const pauseLineLabel = h("div", { class: "ym-sl-pause-line" });
+    const pauseRange = h("input", {
+      type: "range",
+      class: "ym-sl-pause-range",
+      min: String(PAUSE_SYNC_MIN),
+      max: String(PAUSE_SYNC_MAX),
+      step: String(PAUSE_SYNC_STEP),
+      value: "0",
+      "aria-label": "Pause sync offset",
+    });
+    const pauseNumber = h("input", {
+      type: "number",
+      class: "ym-sl-pause-number",
+      step: "0.1",
+      value: "0",
+      "aria-label": "Pause sync offset in seconds",
+    });
+    const pauseValue = h("span", { class: "ym-sl-pause-value", text: "+0.0s" });
+    const pauseClear = h("button", {
+      class: "ym-sl-import ym-sl-pause-clear",
+      type: "button",
+      "aria-label": "Clear pause sync point",
+      text: "Clear",
+    });
+    pauseClear.addEventListener("click", () => clearPauseSync());
+    pauseRange.addEventListener("input", () => setPauseSyncOffset(pauseRange.value, false));
+    pauseRange.addEventListener("change", () => setPauseSyncOffset(pauseRange.value, true));
+    pauseNumber.addEventListener("input", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, false));
+    pauseNumber.addEventListener("change", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, true));
+    const pauseRow1 = h("div", { class: "ym-sl-pause-row" }, pauseRange);
+    const pauseRow2 = h("div", { class: "ym-sl-pause-row" }, pauseNumber, pauseValue, pauseClear);
+    pauseEditor.append(pauseLineLabel, pauseRow1, pauseRow2);
+    pauseSection.append(pausePick, pauseEditor);
+    pauseUi = {
+      root: pauseSection,
+      pick: pausePick,
+      editor: pauseEditor,
+      line: pauseLineLabel,
+      range: pauseRange,
+      number: pauseNumber,
+      value: pauseValue,
+    };
+
+    // Banner shown on the lyrics panel while a line is being picked.
+    pauseBanner = h("div", { class: "ym-sl-pause-banner hidden" });
+    pauseBannerText = h("span", { class: "ym-sl-pause-banner-text" });
+    const pauseBannerCancel = h("button", {
+      class: "ym-sl-pause-cancel",
+      type: "button",
+      text: "Cancel",
+      "aria-label": "Cancel pause sync selection",
+    });
+    pauseBannerCancel.addEventListener("click", () => exitPausePickMode());
+    pauseBanner.append(pauseBannerText, pauseBannerCancel);
+
+    const optionsBody = h("div", { class: "ym-sl-options-body" });
+    optionsBody.append(
+      optionsTop,
+      pauseDivider, pauseTitle, pauseSection,
+      optionsDivider, optionsTtmlTitle, optionsBottom
+    );
+    optionsOverlay.append(optionsHeader, optionsBody);
+    optionsButton.addEventListener("click", () => {
+      const opening = optionsOverlay.classList.contains("hidden");
+      optionsOverlay.classList.toggle("hidden");
+      if (opening) refreshPermanentDeleteState();
+    });
+    optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
+    optionsOverlay._exportActions = exportActions;
+    makeDraggable(optionsOverlay, optionsHeader);
+    document.body.appendChild(optionsOverlay);
+    const lyricsContainer = h("div", { class: "LyricsContainer" });
+    const content = h("div", { class: "LyricsContent offline" });
+    const scrollContainer = h("div", {
+      class: "SpicyLyricsScrollContainer",
+      "data-lyrics-type": "Syllable",
+    });
+    linesRoot = h("div", { class: "VirtualLyricsContainer" });
+    linesRoot.appendChild(h("div", {
+      class: "ym-sl-empty",
+      text: "Drop a .ttml file here, or use Upload to load synced lyrics.",
+    }));
+    scrollContainer.appendChild(linesRoot);
+    content.appendChild(scrollContainer);
+    lyricsContainer.appendChild(content);
+    panelEl.append(tools, fileInput, lyricsContainer, jumpButton, pauseBanner);
+    panelEl.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      panelEl.classList.add("drag");
+    });
+    panelEl.addEventListener("dragleave", () => panelEl.classList.remove("drag"));
+    panelEl.addEventListener("drop", (event) => {
+      event.preventDefault();
+      panelEl.classList.remove("drag");
+      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) readFile(file, importMode.value);
+    });
+
+    lineScrollEl = content;
+    lineScrollEl.addEventListener("wheel", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("touchstart", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("keydown", handleManualScrollKey);
+    applySettings(currentSettings);
+    document.body.appendChild(panelEl);
+    refreshTrack();
+    mountTab();
+    startTick();
+
+    const watchRoot = document.querySelector("ytmusic-app") ||
+      document.querySelector("ytmusic-player-page");
+    if (watchRoot) {
+      wpObserver = new MutationObserver(onWatchMutations);
+      wpObserver.observe(watchRoot, { childList: true, subtree: true });
+    }
+  }
+
+  function mountPanel(bar) {
+    const host = bar && bar.parentElement;
+    // Never yank the panel back into the YTM tab while fullscreen is active —
+    // it currently lives inside the fullscreen overlay.
+    if (!host || !panelEl || fsActive) return;
+    panelHost = host;
+    if (panelEl.parentElement !== host) host.appendChild(panelEl);
+  }
+
+  function findPlayerVideo() {
+    const video =
+      document.querySelector("ytmusic-player video") ||
+      document.querySelector("#movie_player video") ||
+      document.querySelector("video");
+    // A song with no music video still leaves an empty <video> in the DOM, so
+    // only treat it as real media once it actually has frame dimensions.
+    return video && video.videoWidth > 0 ? video : null;
+  }
+
+  // Bump a YouTube image CDN URL to a larger size so the cover art fills the
+  // fullscreen pane crisply instead of rendering as a tiny thumbnail. The CDN
+  // accepts a trailing =wWIDTH-hHEIGHT hint and resizes server-side.
+  function hiResArt(url) {
+    if (!url || typeof url !== "string") return url;
+    if (/=w\d+(-h\d+)?/.test(url)) return url.replace(/=w\d+(-h\d+)?/, "=w1024-h1024");
+    return url + "=w1024-h1024";
+  }
+
+  function setFullscreenLyricsShadeTarget(target) {
+    // Do not smooth this in JavaScript. The CSS opacity transition already
+    // provides a short visual fade, while assigning the sampled value directly
+    // prevents the old brightness sample from keeping a stale black gradient
+    // visible after the video has returned to a dark or colorful frame.
+    fsLyricsShadeTarget = Math.max(0, Math.min(0.9, target));
+    fsLyricsShadeLevel = fsLyricsShadeTarget;
+    if (fsOverlay) {
+      const opacity = fsLyricsShadeLevel.toFixed(3);
+      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", opacity);
+      if (fsLyricsShade) fsLyricsShade.style.opacity = opacity;
+    }
+  }
+
+  // Count "bright" pixels of ANY hue, not just near-white.
+  // Perceptual luma weights green heavily (0.7152), so a vivid red scores only
+  // ~54 and a vivid blue ~18 — both would be missed by a luma test even though
+  // they wash out lyric text just as badly as white. HSV value (the max RGB
+  // channel) treats saturated bright colours and near-white the same way, which
+  // is the behaviour that actually protects readability.
+  function getBrightResponse(pixels) {
+    const BRIGHT_CHANNEL = 190;
+    let bright = 0;
+    let count = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const red = pixels[i];
+      const green = pixels[i + 1];
+      const blue = pixels[i + 2];
+      const max = red > green ? (red > blue ? red : blue) : (green > blue ? green : blue);
+      if (max > BRIGHT_CHANNEL) bright++;
+      count++;
+    }
+    return count ? bright / count : 0;
+  }
+
+  function applyFullscreenShadePixels(pixels) {
+    const response = getBrightResponse(pixels);
+    // Bright colours are far more common than near-white, so require a slightly
+    // larger share of the panel before the gradient starts, then ramp to full.
+    const target = Math.max(0, Math.min(1, (response - 0.2) / 0.45)) * 0.9;
+    setFullscreenLyricsShadeTarget(target);
+  }
+
+  // Map the on-screen lyric band to sample-canvas coordinates.
+  // The <video> fills the overlay but paints with object-fit: contain, so the
+  // frame is letterboxed: sampling the raw frame by screen percentage alone
+  // drifts whenever the video aspect differs from the overlay's. Convert the
+  // screen band (53%..100%, full height) into frame pixels first, then scale
+  // into the canvas, which always holds the whole frame.
+  function getShadeSampleRect() {
+    const fallback = { x: FS_SHADE_SAMPLE_X, y: 0, w: FS_SHADE_SAMPLE_SW, h: FS_SHADE_SAMPLE_H };
+    const video = fsSavedVideo && fsSavedVideo.node;
+    if (!fsOverlay || !video || !video.videoWidth || !video.videoHeight) return fallback;
+    const overlayW = fsOverlay.clientWidth;
+    const overlayH = fsOverlay.clientHeight;
+    if (!overlayW || !overlayH) return fallback;
+
+    const scale = Math.min(overlayW / video.videoWidth, overlayH / video.videoHeight);
+    if (!(scale > 0)) return fallback;
+    const contentW = video.videoWidth * scale;
+    const offsetX = (overlayW - contentW) / 2;
+
+    // Frame pixels covered by the on-screen lyric band.
+    const fx0 = Math.max(0, Math.min(video.videoWidth, (overlayW * FS_SHADE_REGION_LEFT - offsetX) / scale));
+    const fx1 = Math.max(0, Math.min(video.videoWidth, (overlayW - offsetX) / scale));
+    if (fx1 <= fx0) return fallback;
+
+    // Frame pixels -> canvas pixels (canvas is the whole frame, stretched).
+    const sx = Math.floor((fx0 / video.videoWidth) * FS_SHADE_SAMPLE_W);
+    const ex = Math.ceil((fx1 / video.videoWidth) * FS_SHADE_SAMPLE_W);
+    const x = Math.max(0, Math.min(FS_SHADE_SAMPLE_W - 1, sx));
+    const w = Math.max(1, Math.min(FS_SHADE_SAMPLE_W - x, ex - x));
+    // Full height: the lyric band runs bottom to top.
+    return { x, y: 0, w, h: FS_SHADE_SAMPLE_H };
+  }
+
+  function ensureFullscreenShadeCapture() {
+    const video = fsSavedVideo && fsSavedVideo.node;
+    if (!video || fsLyricsShadeStream || typeof video.captureStream !== "function") return false;
+    try {
+      fsLyricsShadeStream = video.captureStream();
+      fsLyricsShadeTrack = fsLyricsShadeStream.getVideoTracks()[0] || null;
+      if (!fsLyricsShadeTrack) return false;
+      if (typeof MediaStreamTrackProcessor === "function") {
+        fsLyricsShadeReader = new MediaStreamTrackProcessor({ track: fsLyricsShadeTrack }).readable.getReader();
+      }
+      if (typeof ImageCapture === "function") fsLyricsShadeCapture = new ImageCapture(fsLyricsShadeTrack);
+      return !!(fsLyricsShadeReader || fsLyricsShadeCapture);
+    } catch (_) {
+      fsLyricsShadeReader = null;
+      fsLyricsShadeCapture = null;
+      fsLyricsShadeTrack = null;
+      fsLyricsShadeStream = null;
+      return false;
+    }
+  }
+
+  async function sampleFullscreenLyricsBrightness() {
+    if (fsLyricsShadeSampleInFlight) return;
+    // Skip (and clear) the shade whenever the lyrics are not actually visible.
+    // The manual hide toggle plus the intro / gap / final dim states all set the
+    // lyric column to opacity:0 and show only the "..." dots, so a shade over a
+    // bright video is pointless (nothing to read) and reads as a stray black
+    // band sitting behind the dots.
+    if (!fsActive || fsLayoutMode !== "background" || !fsSavedVideo || fsLyricsHidden ||
+        fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
+      setFullscreenLyricsShadeTarget(0);
+      return;
+    }
+    const now = performance.now();
+    if (now - fsLyricsShadeLastSampleAt < FS_LYRICS_SHADE_SAMPLE_MS) return;
+    fsLyricsShadeLastSampleAt = now;
+    const video = fsSavedVideo.node;
+    if (!video.videoWidth || !video.videoHeight) return;
+    if (!fsLyricsShadeCanvas) {
+      fsLyricsShadeCanvas = document.createElement("canvas");
+      fsLyricsShadeCanvas.width = FS_SHADE_SAMPLE_W;
+      fsLyricsShadeCanvas.height = FS_SHADE_SAMPLE_H;
+      fsLyricsShadeCtx = fsLyricsShadeCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    fsLyricsShadeSampleInFlight = true;
+    try {
+      if (!fsLyricsShadeCanvasTainted && fsLyricsShadeCtx) {
+        try {
+          fsLyricsShadeCtx.drawImage(video, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
+          const rect = getShadeSampleRect();
+          applyFullscreenShadePixels(
+            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
+          );
+          return;
+        } catch (_) {
+          fsLyricsShadeCanvasTainted = true;
+        }
+      }
+      if (!ensureFullscreenShadeCapture()) {
+        setFullscreenLyricsShadeTarget(0);
+        return;
+      }
+      let frame = null;
+      if (fsLyricsShadeReader) {
+        const result = await fsLyricsShadeReader.read();
+        frame = result && result.value;
+      } else if (fsLyricsShadeCapture) {
+        frame = await fsLyricsShadeCapture.grabFrame();
+      }
+      if (!frame) {
+        setFullscreenLyricsShadeTarget(0);
+        return;
+      }
+      fsLyricsShadeCtx.drawImage(frame, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
+      const rect = getShadeSampleRect();
+      applyFullscreenShadePixels(
+        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
+      );
+      if (typeof frame.close === "function") frame.close();
+    } catch (_) {
+      setFullscreenLyricsShadeTarget(0);
+    } finally {
+      fsLyricsShadeSampleInFlight = false;
+    }
+  }
+
+  function formatFullscreenOffset(ms) {
+    const sign = ms > 0 ? "+" : "";
+    return sign + (ms / 1000).toFixed(1) + "s";
+  }
+
+  // Paint the live <video> into the ambient backdrop canvas at ~1/6 overlay
+  // resolution. The CSS blur on the canvas then smooths + scales it to fill
+  // the entire overlay as the ambient backdrop. One drawImage per video frame
+  // is all this costs; the heavy blur is applied once to a static layer
+  // instead of re-blurring the live video every compositor frame. At a 64px
+  // blur the 1/6 backing store is invisible, so this is free quality to trade
+  // away for performance.
+  function drawBgFrame() {
+    if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    const now = performance.now();
+    if (now - fsBgLastDrawAt < FS_BG_FRAME_INTERVAL_MS) return;
+    fsBgLastDrawAt = now;
+    const v = fsSavedVideo.node;
+    if (!v.videoWidth || !v.videoHeight) return;
+    const targetW = Math.max(2, Math.round(fsBgCanvas.clientWidth / 6));
+    const targetH = Math.max(2, Math.round(fsBgCanvas.clientHeight / 6));
+    if (fsBgCanvas.width !== targetW || fsBgCanvas.height !== targetH) {
+      fsBgCanvas.width = targetW;
+      fsBgCanvas.height = targetH;
+    }
+    try {
+      // Bake the blur into the canvas instead of applying it with CSS. A
+      // stylesheet filter on a <canvas> was being silently dropped in the live
+      // build; ctx.filter is a canvas API and cannot be overridden by CSS, so
+      // the result is deterministic. Blurring a ~320x180 backing store costs
+      // almost nothing, and the upscale to fullscreen multiplies the radius:
+      // 10px here renders as roughly 70px of blur on a 1080p overlay (turned
+      // down from 18px / ~130px at AJ's request — still clearly blurred but
+      // less heavy).
+      fsBgCtx.filter = "blur(10px) saturate(1.4) brightness(.6)";
+      fsBgCtx.drawImage(v, 0, 0, targetW, targetH);
+      fsBgCtx.filter = "none";
+    } catch (_) {
+      try { fsBgCtx.filter = "none"; } catch (_e) {}
+      // Direct draw can be blocked by cross-origin taint. The canvas keeps
+      // its last frame, which is fine for an ambient backdrop.
+    }
+  }
+
+  // Drive the backdrop redraw from the video's actual paint cadence so we
+  // only do work when a new frame is available, and never compete with the
+  // 60Hz lyrics animation loop.
+  function startBgDrawLoop() {
+    if (fsBgRaf) return;
+    const v = fsSavedVideo && fsSavedVideo.node;
+    if (v && typeof v.requestVideoFrameCallback === "function") {
+      const loop = () => {
+        if (!fsActive) return;
+        drawBgFrame();
+        fsBgRaf = v.requestVideoFrameCallback(loop);
+      };
+      fsBgRaf = v.requestVideoFrameCallback(loop);
+    } else {
+      const step = () => {
+        fsBgRaf = null;
+        if (!fsActive) return;
+        drawBgFrame();
+        fsBgRaf = requestAnimationFrame(step);
+      };
+      fsBgRaf = requestAnimationFrame(step);
+    }
+  }
+
+  function stopBgDrawLoop() {
+    const v = fsSavedVideo && fsSavedVideo.node;
+    if (fsBgRaf) {
+      if (v && typeof v.cancelVideoFrameCallback === "function") {
+        try { v.cancelVideoFrameCallback(fsBgRaf); } catch (_) {}
+      } else {
+        cancelAnimationFrame(fsBgRaf);
+      }
+    }
+    fsBgRaf = null;
+  }
+
+  function updateFullscreenGapDimming(lyricPositionMs, activeIndex) {
+    if (!fsOverlay) return;
+    const canDim = fsLayoutMode === "background" && !!fsSavedVideo;
+    if (!canDim || !modelLines.length || !scrollCandidateIndices.length) {
+      if (fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
+        fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
+        fsLyricsGapDimmed = false;
+        fsLyricsIntroDimmed = false;
+        fsLyricsFinalDimmed = false;
+      }
+      return;
+    }
+
+    const activeLine = activeIndex >= 0 ? modelLines[activeIndex] : null;
+    const finalHideDelay = currentLyricsIsTTML ? 0 : FS_FINAL_LYRICS_HIDE_MS;
+    const finalExpired = cachedLastRealLyricEndMs > 0 &&
+      lyricPositionMs >= cachedLastRealLyricEndMs + finalHideDelay;
+    const beforeFirstLyric = Number.isFinite(cachedFirstRealLyricStartMs) &&
+      lyricPositionMs < cachedFirstRealLyricStartMs;
+    let shouldDim = beforeFirstLyric || finalExpired;
+
+    if (!finalExpired && !beforeFirstLyric && activeLine && activeLine.DotLine) {
+      // Later generated dot lines span instrumental gaps. Keep the lyrics
+      // hidden until shortly before the next real lyric starts.
+      shouldDim = activeLine.EndTime - lyricPositionMs > FS_LYRICS_RESTORE_LEAD_MS;
+    } else if (!finalExpired && !beforeFirstLyric && !activeLine) {
+      // A gap without generated dots: only dim when there is no active line AND a real next line.
+      const previousLine = activeIndex > 0 ? modelLines[activeIndex - 1] : null;
+      const nextLine = activeIndex >= 0 ? modelLines[activeIndex + 1] : null;
+      const previousEnd = previousLine ? previousLine.EndTime : lyricPositionMs;
+      const nextStart = nextLine ? nextLine.StartTime : Infinity;
+      const gapMs = nextStart - previousEnd;
+      shouldDim = Number.isFinite(nextStart) &&
+        gapMs >= FS_LYRICS_GAP_DIM_MS &&
+        nextStart - lyricPositionMs > FS_LYRICS_RESTORE_LEAD_MS;
+    }
+
+    if (shouldDim !== fsLyricsGapDimmed) {
+      fsLyricsGapDimmed = shouldDim;
+      fsOverlay.classList.toggle("ym-sl-fs-gap-dim", shouldDim);
+    }
+    if (beforeFirstLyric !== fsLyricsIntroDimmed) {
+      fsLyricsIntroDimmed = beforeFirstLyric;
+      fsOverlay.classList.toggle("ym-sl-fs-intro-dim", beforeFirstLyric);
+    }
+    if (finalExpired !== fsLyricsFinalDimmed) {
+      fsLyricsFinalDimmed = finalExpired;
+      fsOverlay.classList.toggle("ym-sl-fs-final-dim", finalExpired);
+    }
+    // No lyrics are on screen in any hidden / intro / gap / final state, so the
+    // readability shade has nothing to protect. Clear it immediately so a bright
+    // video doesn't leave a black band behind the "..." dots until the next
+    // 240ms brightness sample. The sampler also guards on these flags, this just
+    // removes the stale-gradient delay.
+    if (fsLyricsHidden || fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
+      setFullscreenLyricsShadeTarget(0);
+    }
+  }
+
+  function applyFullscreenLayout(mode) {
+    if (!fsOverlay) return;
+    fsLayoutMode = mode === "background" || mode === "lyrics" ? mode : "side";
+    if (fsLayoutMode !== "background") {
+      setFullscreenLyricsShadeTarget(0);
+      fsLyricsGapDimmed = false;
+      fsLyricsIntroDimmed = false;
+      fsLyricsFinalDimmed = false;
+      fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
+    }
+    // The column's left/width are CSS-transitioned (no frost re-measure needed).
+    fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
+    fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
+    if (fsLayoutSelect && fsLayoutSelect.value !== fsLayoutMode) fsLayoutSelect.value = fsLayoutMode;
+    try { localStorage.setItem("better_lyrics_fullscreen_layout_v1", fsLayoutMode); } catch (_) {}
+    recomputeActiveOffsetMode(true);
+  }
+
+  function findPlayerButton(labels) {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return null;
+    const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
+    return buttons.find((button) => {
+      const text = [button.getAttribute("aria-label"), button.getAttribute("title"), button.id, button.textContent]
+        .filter(Boolean).join(" ");
+      return labels.some((label) => new RegExp(label, "i").test(text));
+    }) || null;
+  }
+
+  function clickPlayerButton(kind) {
+    const labels = kind === "previous"
+      ? ["previous", "back", "prev"]
+      : kind === "next"
+        ? ["next", "skip"]
+        : ["play", "pause"];
+    const button = findPlayerButton(labels);
+    if (button) button.click();
+  }
+
+  function findPlayerVolumeRange() {
+    return document.querySelector("ytmusic-player-bar tp-yt-paper-slider[aria-label*='volume' i]") ||
+      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]");
+  }
+
+  function setPlayerVolume(value) {
+    const range = findPlayerVolumeRange();
+    if (range) {
+      range.value = String(clamp(value, 0, 100));
+      range.dispatchEvent(new Event("input", { bubbles: true }));
+      range.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  function updateVolumeIcon() {
+    if (!fsVolumeIcon) return;
+    const v = fsPlayerVolumeValue;
+    fsVolumeIcon.textContent = (fsMuted || v <= 0) ? "\u{1F507}" : "\u{1F50A}";
+  }
+
+  function syncFullscreenVolumeControl() {
+    if (!fsPlayerVolumeRange) return;
+    const source = findPlayerVolumeRange();
+    if (!source) return;
+    const sourceValue = Number(source.value);
+    const sourceMax = Number(source.max);
+    if (!Number.isFinite(sourceValue) || !Number.isFinite(sourceMax) || sourceMax <= 0) return;
+    const percent = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    // The track is a <div> (no .value). Skip while the user is driving it so the
+    // 500ms refresh loop doesn't fight an in-progress drag/focus.
+    if (document.activeElement !== fsPlayerVolumeRange) {
+      fsPlayerVolumeValue = percent;
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", percent + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(percent));
+      updateVolumeIcon();
+    }
+  }
+
+  function formatClock(ms) {
+    const total = Math.max(0, Math.floor(Number(ms) / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function syncFullscreenSeekControl() {
+    if (!fsPlayerSeekRange || !window.YTMod || !window.YTMod.player) return;
+    const position = Number(window.YTMod.player.getPositionMs());
+    const duration = Number(window.YTMod.player.getDurationMs());
+    if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) return;
+    const percent = clamp((position / duration) * 100, 0, 100);
+    if (document.activeElement !== fsPlayerSeekRange) fsPlayerSeekRange.value = String(position);
+    fsPlayerSeekRange.max = String(duration);
+    fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
+    if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
+    if (fsTimeTotal) fsTimeTotal.textContent = formatClock(duration);
+  }
+
+  function refreshFullscreenPlayerState() {
+    if (!fsPlayerPlayButton) return;
+    syncFullscreenSeekControl();
+    if (!fsPlayerPlayButton) return;
+    syncFullscreenVolumeControl();
+    if (!fsPlayerPlayButton) return;
+    const paused = window.YTMod && window.YTMod.player && window.YTMod.player.isPaused
+      ? window.YTMod.player.isPaused()
+      : null;
+    if (paused === true) {
+      fsPlayerPlayButton.textContent = "▶";
+      fsPlayerPlayButton.setAttribute("aria-label", "Play");
+    } else if (paused === false) {
+      fsPlayerPlayButton.textContent = "⏸";
+      fsPlayerPlayButton.setAttribute("aria-label", "Pause");
+    }
+  }
+
+  function buildFullscreenControls() {
+    if (!fsOverlay || fsControls) return;
+    const exit = h("button", { type: "button", text: "Exit fullscreen", title: "Exit fullscreen" });
+    fsLayoutSelect = h("select", { "aria-label": "Fullscreen layout", title: "Fullscreen layout" });
+    const sideOption = h("option", { value: "side", text: "Video + Lyrics" });
+    const backgroundOption = h("option", { value: "background", text: "Video Background" });
+    const lyricsOption = h("option", { value: "lyrics", text: "Lyrics Only" });
+    fsLayoutSelect.append(sideOption, backgroundOption, lyricsOption);
+    const offsetWrap = h("div", { class: "ym-sl-fs-control-offset" });
+    const offsetLabelFs = h("span", { text: "Offset" });
+    const offsetScopeFs = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
+    offsetScopeFs.append(
+      h("option", { value: "video", text: "Video" }),
+      h("option", { value: "song", text: "Song" })
+    );
+    offsetScopeFs.value = editingOffsetMode;
+    fsOffsetRange = h("input", {
+      type: "range", min: "-30000", max: "30000", step: "100",
+      value: "0", "aria-label": "Lyric offset",
+    });
+    const fsOffsetNumber = h("input", {
+      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-30", max: "30",
+      value: "0", "aria-label": "Lyric offset in seconds", title: "Offset in seconds (typed)",
+    });
+    fsOffsetValue = h("span", { class: "ym-sl-fs-control-offset-value", text: "0.0s" });
+    const fsOffsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
+    offsetWrap.append(offsetLabelFs, offsetScopeFs, fsOffsetRange, fsOffsetNumber, fsOffsetValue, fsOffsetApplied);
+    offsetScopeFs.addEventListener("change", () => {
+      editingOffsetMode = offsetScopeFs.value;
+      refreshVideoOffsetControl();
+    });
+    fsLyricsToggle = h("button", {
+      type: "button",
+      class: "ym-sl-fs-lyrics-toggle",
+      text: "Hide lyrics",
+      title: "Show or hide lyrics",
+      "aria-label": "Hide lyrics",
+    });
+    // Mirror the normal-panel toolbar: keep Exit / layout dropdown / Hide
+    // lyrics in the bar, and move the offset rail into a draggable options
+    // overlay (same chrome as the normal Options panel). The overlay lives on
+    // <body> so it floats above the fullscreen overlay.
+    const fsOptionsOverlay = h("div", { class: "ym-sl-fs-options-overlay hidden" });
+    const fsOptionsHeader = h("div", { class: "ym-sl-fs-options-header" });
+    const fsOptionsTitle = h("span", { class: "ym-sl-fs-options-title", text: "Options" });
+    const fsOptionsClose = h("button", {
+      class: "ym-sl-fs-options-close",
+      type: "button",
+      text: "\u00d7",
+      title: "Close options",
+      "aria-label": "Close options",
+    });
+    fsOptionsHeader.append(fsOptionsTitle, fsOptionsClose);
+    const fsOptionsBody = h("div", { class: "ym-sl-fs-options-body" });
+    fsOptionsBody.append(offsetWrap);
+    fsOptionsOverlay.append(fsOptionsHeader, fsOptionsBody);
+    const fsOptionsButton = h("button", {
+      class: "ym-sl-fs-options-button",
+      type: "button",
+      title: "Lyric offset",
+      "aria-label": "Open lyric options",
+      text: "Options",
+    });
+    fsOptionsButton.addEventListener("click", () => fsOptionsOverlay.classList.toggle("hidden"));
+    fsOptionsClose.addEventListener("click", () => fsOptionsOverlay.classList.add("hidden"));
+    makeDraggable(fsOptionsOverlay, fsOptionsHeader);
+    // Native browser fullscreen only renders descendants of fsOverlay. Keeping
+    // this overlay under <body> made the button appear dead in Video Background
+    // mode: the panel did open, but it was outside the fullscreen presentation
+    // surface. Append it to fsOverlay so both native and in-page fullscreen show
+    // it, while the high z-index keeps it above the control bar.
+    fsOverlay.appendChild(fsOptionsOverlay);
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLayoutSelect, fsLyricsToggle, fsOptionsButton);
+    const previousButton = h("button", { class: "ym-sl-fs-player-prev", type: "button", text: "⏮", title: "Previous song", "aria-label": "Previous song" });
+    const playButton = h("button", { class: "ym-sl-fs-player-play", type: "button", text: "⏸", title: "Play or pause", "aria-label": "Play or pause" });
+    const nextButton = h("button", { class: "ym-sl-fs-player-next", type: "button", text: "⏭", title: "Next song", "aria-label": "Next song" });
+    fsPlayerSeekRange = h("input", {
+      class: "ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "1", step: "100", value: "0",
+      title: "Song progress", "aria-label": "Song progress",
+    });
+    // Custom <div>-based volume slider. A native <input type=range> cannot animate
+    // its width smoothly (width is never GPU-composited, so it snaps on software
+    // compositors), and CSS transform:scaleX on a native range renders broken in
+    // Chrome (shadow-DOM track/thumb desync). Plain divs composite transform
+    // reliably, so the hover-expand glides on every machine and the layout never
+    // reflows.
+    fsPlayerVolumeRange = h("div", {
+      class: "ym-sl-fs-player-volume",
+      role: "slider",
+      tabindex: "0",
+      title: "Volume",
+      "aria-label": "Volume",
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(fsPlayerVolumeValue),
+    });
+    const fsVolumeFill = h("div", { class: "ym-sl-fs-volume-fill" });
+    const fsVolumeKnob = h("div", { class: "ym-sl-fs-volume-knob" });
+    fsPlayerVolumeRange.append(fsVolumeFill, fsVolumeKnob);
+    fsVolumeIcon = h("button", {
+      class: "ym-sl-fs-volume-icon",
+      type: "button",
+      text: "\u{1F50A}",
+      title: "Mute or unmute",
+      "aria-label": "Mute or unmute",
+    });
+    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, fsVolumeIcon, fsPlayerVolumeRange);
+    const playChip = h("div", { class: "ym-sl-fs-play-chip" }, previousButton, playButton, nextButton, volumeGroup);
+    fsTimeCurrent = h("span", { class: "ym-sl-fs-time", "data-time": "current", text: "0:00" });
+    fsTimeTotal = h("span", { class: "ym-sl-fs-time", "data-time": "total", text: "0:00" });
+    const scrubber = h("div", { class: "ym-sl-fs-scrubber" }, fsTimeCurrent, fsPlayerSeekRange, fsTimeTotal);
+    fsPlayerPlayButton = playButton;
+    fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
+    fsOverlay.append(fsControls, fsPlayerControls);
+    refreshFullscreenPlayerState();
+    fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
+    exit.addEventListener("click", exitFullscreenMode);
+    previousButton.addEventListener("click", () => clickPlayerButton("previous"));
+    playButton.addEventListener("click", () => clickPlayerButton("play"));
+    nextButton.addEventListener("click", () => clickPlayerButton("next"));
+    // Single source of truth for the custom slider: writes the fill (via
+    // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
+    function applyFullscreenVolume(v) {
+      v = clamp(Math.round(v), 0, 100);
+      fsPlayerVolumeValue = v;
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
+      if (v > 0) fsMuted = false;
+      updateVolumeIcon();
+      setPlayerVolume(v);
+    }
+    // Map a pointer X to 0-100 against the VISUAL (post-transform) rect so the
+    // value tracks exactly where the user grabs the scaled bar.
+    function volumeFromPointer(clientX) {
+      const rect = fsPlayerVolumeRange.getBoundingClientRect();
+      const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+      return Math.round(ratio * 100);
+    }
+    fsPlayerVolumeRange.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      fsPlayerVolumeRange.focus();
+      fsPlayerVolumeRange.setPointerCapture(e.pointerId);
+      applyFullscreenVolume(volumeFromPointer(e.clientX));
+      const onMove = (ev) => applyFullscreenVolume(volumeFromPointer(ev.clientX));
+      const onUp = (ev) => {
+        try { fsPlayerVolumeRange.releasePointerCapture(ev.pointerId); } catch (_) {}
+        fsPlayerVolumeRange.removeEventListener("pointermove", onMove);
+        fsPlayerVolumeRange.removeEventListener("pointerup", onUp);
+        fsPlayerVolumeRange.removeEventListener("pointercancel", onUp);
+      };
+      fsPlayerVolumeRange.addEventListener("pointermove", onMove);
+      fsPlayerVolumeRange.addEventListener("pointerup", onUp);
+      fsPlayerVolumeRange.addEventListener("pointercancel", onUp);
+    });
+    fsPlayerVolumeRange.addEventListener("keydown", (e) => {
+      let v = fsPlayerVolumeValue;
+      const step = e.shiftKey ? 10 : 5;
+      switch (e.key) {
+        case "ArrowRight": case "ArrowUp": v += step; break;
+        case "ArrowLeft": case "ArrowDown": v -= step; break;
+        case "Home": v = 0; break;
+        case "End": v = 100; break;
+        case "PageUp": v += 10; break;
+        case "PageDown": v -= 10; break;
+        default: return;
+      }
+      e.preventDefault();
+      applyFullscreenVolume(v);
+    });
+    // Initialise the fill from the stored value; YTM supplies the real volume on
+    // the first refresh. Keep the mute/icon in sync.
+    fsPlayerVolumeRange.style.setProperty("--vol-fill", clamp(fsPlayerVolumeValue, 0, 100) + "%");
+    updateVolumeIcon();
+    fsVolumeIcon.addEventListener("click", () => {
+      const current = fsPlayerVolumeValue;
+      if (fsMuted || current <= 0) {
+        fsMuted = false;
+        applyFullscreenVolume(fsLastVolume > 0 ? fsLastVolume : 100);
+      } else {
+        fsLastVolume = current;
+        fsMuted = true;
+        applyFullscreenVolume(0);
+      }
+    });
+    fsPlayerSeekRange.addEventListener("input", () => {
+      const duration = Number(window.YTMod && window.YTMod.player && window.YTMod.player.getDurationMs());
+      const position = Number(fsPlayerSeekRange.value);
+      if (Number.isFinite(duration) && duration > 0 && Number.isFinite(position)) {
+        fsPlayerSeekRange.style.setProperty("--slider-fill", clamp(position / duration * 100, 0, 100) + "%");
+      }
+    });
+    fsPlayerSeekRange.addEventListener("change", () => {
+      const position = Number(fsPlayerSeekRange.value);
+      if (Number.isFinite(position) && window.YTMod && window.YTMod.player) {
+        window.YTMod.player.seek(position);
+      }
+    });
+    fsLayoutSelect.addEventListener("change", () => applyFullscreenLayout(fsLayoutSelect.value));
+    fsLyricsToggle.addEventListener("click", () => {
+      fsLyricsHidden = !fsLyricsHidden;
+      if (fsOverlay) {
+        fsOverlay.classList.toggle("ym-sl-fs-lyrics-hidden", fsLyricsHidden);
+        if (fsLyricsHidden) {
+      setFullscreenLyricsShadeTarget(0);
+      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", "0");
+    }
+      }
+      fsLyricsToggle.textContent = fsLyricsHidden ? "Show lyrics" : "Hide lyrics";
+      fsLyricsToggle.setAttribute("aria-label", fsLyricsHidden ? "Show lyrics" : "Hide lyrics");
+    });
+    fsOffsetRange.addEventListener("input", () => {
+      setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
+    });
+    let savedMode = "side";
+    try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
+    const hasVideo = !!findPlayerVideo();
+    backgroundOption.hidden = !hasVideo;
+    backgroundOption.disabled = !hasVideo;
+    if (!hasVideo && savedMode === "background") savedMode = "side";
+    applyFullscreenLayout(savedMode);
+    fsLyricsHidden = false;
+    fsOverlay.classList.remove("ym-sl-fs-lyrics-hidden");
+    fsLyricsToggle.textContent = "Hide lyrics";
+    fsLyricsToggle.setAttribute("aria-label", "Hide lyrics");
+    offsetWrap.classList.toggle("visible", true);
+    offsetWrap.classList.toggle("force-visible", !hasVideo);
+    recomputeActiveOffsetMode(true);
+    refreshVideoOffsetControl();
+  }
+
+  /* ---- idle pointer / control auto-hide ----------------------------------
+     Native-player behavior: after FS_IDLE_HIDE_MS without input, drop the
+     pointer and the hover controls. Any movement, click, wheel, or key press
+     brings both straight back and restarts the countdown. */
+  function hideFsChrome() {
+    fsIdleTimer = 0;
+    if (!fsActive || !fsOverlay) return;
+    // Only block while a button is physically held (mid-drag on the offset
+    // slider). Focus must NOT block this: changing the layout leaves the
+    // <select> focused, and gating on focus meant the chrome never hid until
+    // you clicked somewhere else first. Retry on a timer instead of giving up,
+    // so a mouseup that lands outside the window can't strand it permanently.
+    if (fsPointerDown) {
+      fsIdleTimer = setTimeout(hideFsChrome, FS_IDLE_HIDE_MS);
+      return;
+    }
+    fsOverlay.classList.add("ym-sl-fs-idle");
+    fsIdleHidden = true;
+  }
+
+  function showFsChrome() {
+    if (fsIdleTimer) {
+      clearTimeout(fsIdleTimer);
+      fsIdleTimer = 0;
+    }
+    if (fsIdleHidden) {
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-idle");
+      fsIdleHidden = false;
+    }
+    fsIdleTimer = setTimeout(hideFsChrome, FS_IDLE_HIDE_MS);
+  }
+
+  function handleFsActivity() {
+    if (!fsActive) return;
+    showFsChrome();
+  }
+
+  function handleFsMouseMove(event) {
+    // Recover from a mouseup that landed outside the window: if no button is
+    // held, the pointer is definitively not dragging anything.
+    if (fsPointerDown && event && event.buttons === 0) fsPointerDown = false;
+    handleFsActivity();
+  }
+
+  function handleFsPointerDown() {
+    fsPointerDown = true;
+    handleFsActivity();
+  }
+
+  function handleFsPointerUp() {
+    fsPointerDown = false;
+    handleFsActivity();
+  }
+
+  function startFsIdleTracking() {
+    stopFsIdleTracking();
+    document.addEventListener("mousemove", handleFsMouseMove, { passive: true });
+    document.addEventListener("mousedown", handleFsPointerDown, { passive: true });
+    document.addEventListener("mouseup", handleFsPointerUp, { passive: true });
+    document.addEventListener("wheel", handleFsActivity, { passive: true });
+    document.addEventListener("keydown", handleFsActivity, true);
+    showFsChrome();
+  }
+
+  function stopFsIdleTracking() {
+    if (fsIdleTimer) {
+      clearTimeout(fsIdleTimer);
+      fsIdleTimer = 0;
+    }
+    fsPointerDown = false;
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-idle");
+    fsIdleHidden = false;
+    document.removeEventListener("mousemove", handleFsMouseMove, { passive: true });
+    document.removeEventListener("mousedown", handleFsPointerDown, { passive: true });
+    document.removeEventListener("mouseup", handleFsPointerUp, { passive: true });
+    document.removeEventListener("wheel", handleFsActivity, { passive: true });
+    document.removeEventListener("keydown", handleFsActivity, true);
+  }
+
+  // ===== Kawarp backdrop for song fullscreen =====
+  // Songs have no live video, so instead of a blurred still cover we can run the
+  // same Kawarp WebGL fluid backdrop the Dynamic add-on uses page-wide. It is
+  // gated on that add-on being active (its page-world handshake is present) and
+  // it suspends the page Kawarp while open, so only one ever animates at a time.
+  function getKawarpConstructor() {
+    if (!KAWARP_CORE_URL) return Promise.reject(new Error("Kawarp module URL unavailable."));
+    if (!fsKawarpModulePromise) {
+      fsKawarpModulePromise = import(KAWARP_CORE_URL).then((module) => {
+        const Kawarp = module.default || module.Kawarp;
+        if (typeof Kawarp !== "function") throw new Error("Kawarp module did not export a constructor.");
+        return Kawarp;
+      });
+    }
+    return fsKawarpModulePromise;
+  }
+
+  function sizeFullscreenKawarp() {
+    if (!fsKawarpCanvas || !fsOverlay) return;
+    const rect = fsOverlay.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
+    if (fsKawarpCanvas.width === width && fsKawarpCanvas.height === height) return;
+    fsKawarpCanvas.width = width;
+    fsKawarpCanvas.height = height;
+    if (fsKawarp) fsKawarp.resize();
+  }
+
+  function stopFullscreenKawarp() {
+    fsKawarpActive = false;
+    ++fsKawarpSeq;
+    if (fsKawarpResizeObserver) { try { fsKawarpResizeObserver.disconnect(); } catch (_) {} }
+    fsKawarpResizeObserver = null;
+    if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
+    fsKawarp = null;
+    if (fsKawarpCanvas && fsKawarpCanvas.parentElement) {
+      fsKawarpCanvas.parentElement.removeChild(fsKawarpCanvas);
+    }
+    fsKawarpCanvas = null;
+    fsKawarpArtUrl = "";
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
+  }
+
+  async function startFullscreenKawarp(artUrl) {
+    if (!fsOverlay) return;
+    // Gate on the Dynamic add-on: its handshake object is our signal that the
+    // page-wide Kawarp exists, and we take the backdrop over from it.
+    const dyn = window.__ymAuroraDynamic;
+    if (!dyn || typeof dyn.suspend !== "function") return;
+    fsKawarpActive = true;
+    const seq = ++fsKawarpSeq;
+    fsKawarpCanvas = h("canvas", { class: "ym-sl-fs-kawarp", "aria-hidden": "true" });
+    fsOverlay.insertBefore(fsKawarpCanvas, fsOverlay.firstChild);
+    fsOverlay.classList.add("ym-sl-fs-has-kawarp");
+    if (typeof ResizeObserver === "function") {
+      fsKawarpResizeObserver = new ResizeObserver(() => sizeFullscreenKawarp());
+      fsKawarpResizeObserver.observe(fsOverlay);
+    }
+    try {
+      const Kawarp = await getKawarpConstructor();
+      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return;
+      sizeFullscreenKawarp();
+      fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
+      if (artUrl) {
+        await fsKawarp.loadImage(artUrl);
+        fsKawarpArtUrl = artUrl;
+      }
+      if (seq !== fsKawarpSeq) return;
+      fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
+      fsKawarp.start();
+      fsKawarpCanvas.classList.add("ready");
+    } catch (error) {
+      // Any failure (module load, WebGL context, image) falls back to the
+      // static blurred cover by dropping the canvas and the hiding class.
+      console.warn("[Aurora Lyrics] Kawarp backdrop failed:", error);
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
+      if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
+      fsKawarp = null;
+      if (fsKawarpCanvas && fsKawarpCanvas.parentElement) {
+        fsKawarpCanvas.parentElement.removeChild(fsKawarpCanvas);
+      }
+      fsKawarpCanvas = null;
+      fsKawarpActive = false;
+    }
+  }
+
+  function syncFullscreenKawarpArt(artUrl) {
+    if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
+    fsKawarpArtUrl = artUrl;
+    try { fsKawarp.loadImage(artUrl); } catch (_) {}
+  }
+
+  function suspendPageKawarp() {
+    const dyn = window.__ymAuroraDynamic;
+    if (dyn && typeof dyn.suspend === "function") {
+      try { dyn.suspend(); } catch (_) {}
+    }
+  }
+
+  function resumePageKawarp() {
+    const dyn = window.__ymAuroraDynamic;
+    if (dyn && typeof dyn.resume === "function") {
+      try { dyn.resume(); } catch (_) {}
+    }
+  }
+
+  // Swap the fullscreen backdrop between music-video mode and cover-art mode
+  // when the track changes mid-fullscreen (no-MV -> MV or vice versa).
+  // enterFullscreenMode() decides once at entry; this catches the transitions.
+  // The swap is wrapped in a fade: fsMediaHost opacity goes to 0 (the .25s
+  // CSS transition on .ym-sl-fs-media handles the animation), the DOM swap
+  // runs, then opacity clears so it transitions back to 1 — replaces the
+  // snap AJ reported (2026-09-16). A guard timer prevents re-entry while a
+  // swap is already in flight.
+  function syncFsVideoMode() {
+    if (!fsActive || !fsMediaHost) return;
+    if (fsVideoModeSwapTimer) return; // a swap is already in flight
+    const liveVideo = findPlayerVideo();
+    const hasAttached = !!fsSavedVideo;
+    if (liveVideo && hasAttached) return;
+    if (!liveVideo && !hasAttached) return;
+
+    fsMediaHost.style.opacity = "0";
+    fsVideoModeSwapTimer = setTimeout(() => {
+      fsVideoModeSwapTimer = 0;
+      // Guard each separately: touching fsMediaHost.style when fsMediaHost is
+      // null would throw (fullscreen can exit mid-swap).
+      if (!fsMediaHost) return;
+      if (!fsActive) { fsMediaHost.style.opacity = ""; return; }
+      // Re-read state inside the timer (the interval could have ticked again).
+      const lv = findPlayerVideo();
+      const ha = !!fsSavedVideo;
+      if (lv && ha) { fsMediaHost.style.opacity = ""; return; }
+      if (lv && !ha) {
+        // Attach the live video (mirrors enterFullscreenMode).
+        fsSavedVideo = {
+          node: lv,
+          parent: lv.parentElement,
+          next: lv.nextSibling,
+          cssText: lv.style.cssText,
+        };
+        fsOverlay.classList.add("ym-sl-fs-has-video");
+        fsOverlay.classList.add("ym-sl-fs-video-contain");
+        // Defensive: drop any stale canvas before creating a new one so a repeated
+        // attach can never leave two ambient backdrops stacked.
+        if (fsBgCanvas && fsBgCanvas.parentElement) {
+          fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+        }
+        fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
+        fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
+        fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
+        fsBgLastDrawAt = 0;
+        requestAnimationFrame(() => {
+          drawBgFrame();
+          startBgDrawLoop();
+        });
+        fsMediaHost.appendChild(lv);
+        lv.style.setProperty("position", "absolute", "important");
+        lv.style.setProperty("top", "0", "important");
+        lv.style.setProperty("left", "0", "important");
+        lv.style.setProperty("right", "0", "important");
+        lv.style.setProperty("bottom", "0", "important");
+        lv.style.setProperty("width", "100%", "important");
+        lv.style.setProperty("height", "100%", "important");
+        lv.style.setProperty("max-width", "none", "important");
+        lv.style.setProperty("max-height", "none", "important");
+        lv.style.setProperty("object-fit", "contain", "important");
+        lv.style.setProperty("background", "transparent", "important");
+        try { lv.play().catch(() => {}); } catch (_) {}
+        if (fsArtImg && fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
+        fsArtImg = null;
+        stopFullscreenKawarp();
+      } else if (!lv && ha) {
+        // Detach the stale video and fall back to cover art.
+        const saved = fsSavedVideo;
+        // Stop the draw loop FIRST, while fsSavedVideo is still set:
+        // stopBgDrawLoop() picks its cancel method from that video
+        // (cancelVideoFrameCallback vs cancelAnimationFrame), and
+        // cancelAnimationFrame CANNOT cancel a requestVideoFrameCallback
+        // handle — clearing fsSavedVideo first left the video-frame loop
+        // running forever on a detached video (AJ's 1 fps symptom).
+        stopBgDrawLoop();
+        // Restore the video to the slot it came from so YTM keeps ownership
+        // and can reuse it for the next music video. Orphaning it here is
+        // what broke MV loading after a skip (AJ-confirmed).
+        if (saved && saved.node && saved.parent) {
+          if (saved.next && saved.next.parentNode === saved.parent) {
+            saved.parent.insertBefore(saved.node, saved.next);
+          } else {
+            saved.parent.appendChild(saved.node);
+          }
+          if (Object.prototype.hasOwnProperty.call(saved, "cssText")) {
+            saved.node.style.cssText = saved.cssText;
+          }
+        } else if (saved && saved.node && saved.node.parentElement === fsMediaHost) {
+          fsMediaHost.removeChild(saved.node);
+        }
+        fsSavedVideo = null;
+        fsOverlay.classList.remove("ym-sl-fs-has-video", "ym-sl-fs-video-contain");
+        if (fsBgCanvas && fsBgCanvas.parentElement) {
+          fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+        }
+        fsBgCanvas = null;
+        fsBgCtx = null;
+        fsBgLastDrawAt = 0;
+        const t = getCurrentTrack();
+        const artUrl = t && t.artworkUrl;
+        if (artUrl) {
+          fsArtImg = h("img", { class: "ym-sl-fs-art", src: hiResArt(artUrl), alt: "" });
+          fsMediaHost.appendChild(fsArtImg);
+        }
+        startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+      }
+      // Fade back in.
+      fsMediaHost.style.opacity = "";
+    }, 260);
+  }
+
+  function enterFullscreenMode() {
+    if (fsActive || !panelEl) return;
+    fsActive = true;
+    // Fullscreen takes over the backdrop entirely, so stop the page-wide Kawarp
+    // for every track (song or music video) — only one Kawarp ever runs.
+    suspendPageKawarp();
+    // The toolbar (and its Options button) is hidden in fullscreen, so close the
+    // overlay rather than leaving it stranded behind the fullscreen surface.
+    const openOptions = document.querySelector(".ym-sl-options-overlay");
+    if (openOptions) openOptions.classList.add("hidden");
+
+    fsSavedPanel = { parent: panelEl.parentElement, next: panelEl.nextSibling };
+
+    // Self-contained blurred-artwork backdrop. We render our own rather than
+    // reparenting dynamic.js's Kawarp host because dynamic.js's rootObserver
+    // actively yanks pageBgHost back into pageBgRoot, stealing it out of the
+    // overlay within a frame.
+    const initialTrack = getCurrentTrack();
+    const initialArt = initialTrack && initialTrack.artworkUrl;
+    fsBgImg = h("img", {
+      class: "ym-sl-fs-bg-img",
+      src: hiResArt(initialArt) || "",
+      alt: "",
+    });
+    const tint = h("div", { class: "ym-sl-fs-bg-tint" });
+
+    fsMediaHost = h("div", { class: "ym-sl-fs-media" });
+    fsLyricsHost = h("div", { class: "ym-sl-fs-lyrics" });
+    fsLyricsShade = h("div", { class: "ym-sl-fs-lyrics-shade", "aria-hidden": "true" });
+    // The has-video class is added below once we know whether YTM's <video> is
+    // real. Video-background mode uses the live video directly plus the
+    // readability gradient; there is no cloned or blurred video layer.
+    fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
+    document.body.appendChild(fsOverlay);
+    fsLyricsShadeTimer = window.setInterval(() => sampleFullscreenLyricsBrightness(), FS_LYRICS_SHADE_SAMPLE_MS);
+
+    // Left: YTM's real <video> when there is one, otherwise the cover art.
+    const video = findPlayerVideo();
+    if (video) {
+      const wasPlaying = !video.paused;
+      const resumeAt = video.currentTime;
+      fsSavedVideo = {
+        node: video,
+        parent: video.parentElement,
+        next: video.nextSibling,
+        cssText: video.style.cssText,
+      };
+      fsOverlay.classList.add("ym-sl-fs-has-video");
+      fsOverlay.classList.add("ym-sl-fs-video-contain");
+
+      // Ambient blurred backdrop: a low-res duplicate of the live video that
+      // the CSS blurs + dims to fill the entire overlay. The sharp video sits
+      // on top in fsMediaHost, so the empty letterbox space and the area
+      // behind the lyrics both get the blurred ambient fill.
+      fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
+      fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
+      fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
+      fsBgLastDrawAt = 0;
+      // Defer the first draw + loop start until the canvas is laid out so
+      // clientWidth/clientHeight are valid for sizing.
+      requestAnimationFrame(() => {
+        drawBgFrame();
+        startBgDrawLoop();
+      });
+
+      fsMediaHost.appendChild(video);
+      // YTM may keep player-bar inline styles on the node after reparenting.
+      // Override them directly so the video reliably fills the media pane
+      // regardless of what YTM left behind. (Media host positioning itself is
+      // handled by the animated CSS rules, not inline.)
+      video.style.setProperty("position", "absolute", "important");
+      video.style.setProperty("top", "0", "important");
+      video.style.setProperty("left", "0", "important");
+      video.style.setProperty("right", "0", "important");
+      video.style.setProperty("bottom", "0", "important");
+      video.style.setProperty("width", "100%", "important");
+      video.style.setProperty("height", "100%", "important");
+      video.style.setProperty("max-width", "none", "important");
+      video.style.setProperty("max-height", "none", "important");
+      // Keep the complete video frame visible instead of cropping it into the
+      // square-looking left card. The canvas behind it supplies the ambient
+      // fill for the unused space.
+      video.style.setProperty("object-fit", "contain", "important");
+      video.style.setProperty("background", "transparent", "important");
+      // Reparenting a media element can pause it in some engines; nudge it back.
+      if (wasPlaying && video.paused) {
+        try {
+          video.currentTime = resumeAt;
+          video.play().catch(() => {});
+        } catch (_) {}
+      }
+    } else {
+      const track = getCurrentTrack();
+      const artUrl = track && track.artworkUrl;
+      if (artUrl) {
+        fsArtImg = h("img", { class: "ym-sl-fs-art", src: hiResArt(artUrl), alt: "" });
+        fsMediaHost.appendChild(fsArtImg);
+      }
+      // Song fullscreen: replace the blurred cover backdrop with Kawarp when the
+      // Dynamic add-on is active (it suspends its page-wide instance for us).
+      startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+    }
+
+    // Right: the live lyrics panel. Same node, so timing/scroll are preserved.
+    fsLyricsHost.appendChild(panelEl);
+    panelEl.classList.remove("hidden");
+    buildFullscreenControls();
+
+    // Keep the cover-art layers in sync if the track changes mid-fullscreen.
+    // The sharp card art (fsArtImg) and the blurred backdrop (fsBgImg) are
+    // separate nodes; refreshing only the backdrop left the square cover card
+    // showing the previous song's artwork after a skip.
+    fsBgRefresh = setInterval(() => {
+      if (!fsActive) return;
+      // Catch a track swap between MV and no-MV mid-fullscreen so the backdrop
+      // switches from cover art to the live video (or back). Without this,
+      // fullscreen opened on a no-MV track is stuck on cover art forever.
+      syncFsVideoMode();
+      const t = getCurrentTrack();
+      const u = t && t.artworkUrl;
+      const hi = hiResArt(u);
+      if (!hi) return;
+      if (fsBgImg && fsBgImg.getAttribute("src") !== hi) fsBgImg.setAttribute("src", hi);
+      if (fsArtImg && fsArtImg.getAttribute("src") !== hi) fsArtImg.setAttribute("src", hi);
+      if (fsKawarpActive) syncFullscreenKawarpArt(hi);
+    }, 2000);
+
+    // Progressive enhancement: true browser fullscreen when allowed. If it is
+    // blocked or unsupported, the in-page overlay above is already correct.
+    try {
+      if (fsOverlay.requestFullscreen) {
+        const pending = fsOverlay.requestFullscreen();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      }
+    } catch (_) {}
+
+    document.addEventListener("keydown", handleFsKeydown, true);
+    document.addEventListener("fullscreenchange", handleFsFullscreenChange);
+    startFsIdleTracking();
+  }
+
+  function exitFullscreenMode() {
+    if (!fsActive) return;
+    if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
+    fsActive = false;
+    stopFsIdleTracking();
+    document.removeEventListener("keydown", handleFsKeydown, true);
+    document.removeEventListener("fullscreenchange", handleFsFullscreenChange);
+
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        const pending = document.exitFullscreen();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      }
+    } catch (_) {}
+
+    // Restore the video to the exact slot it came from.
+    if (fsSavedVideo && fsSavedVideo.node && fsSavedVideo.parent) {
+      const { node, parent, next } = fsSavedVideo;
+      if (next && next.parentNode === parent) parent.insertBefore(node, next);
+      else parent.appendChild(node);
+      if (Object.prototype.hasOwnProperty.call(fsSavedVideo, "cssText")) {
+        node.style.cssText = fsSavedVideo.cssText;
+      }
+    }
+    // Restore the lyrics panel to the exact slot it came from.
+    if (fsSavedPanel && fsSavedPanel.parent && panelEl) {
+      const { parent, next } = fsSavedPanel;
+      if (next && next.parentNode === parent) parent.insertBefore(panelEl, next);
+      else parent.appendChild(panelEl);
+    }
+
+    if (fsBgRefresh) { clearInterval(fsBgRefresh); fsBgRefresh = null; }
+    stopBgDrawLoop();
+    if (fsBgCanvas && fsBgCanvas.parentElement) {
+      fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+    }
+    fsBgCanvas = null;
+    fsBgCtx = null;
+    fsBgLastDrawAt = 0;
+    if (fsLyricsShadeTimer) { clearInterval(fsLyricsShadeTimer); fsLyricsShadeTimer = 0; }
+    if (fsLyricsShadeReader) { try { fsLyricsShadeReader.cancel(); } catch (_) {} }
+    if (fsLyricsShadeTrack) { try { fsLyricsShadeTrack.stop(); } catch (_) {} }
+    if (fsLyricsShadeStream) { try { fsLyricsShadeStream.getTracks().forEach((track) => track.stop()); } catch (_) {} }
+    fsLyricsShadeReader = null;
+    fsLyricsShadeCapture = null;
+    fsLyricsShadeTrack = null;
+    fsLyricsShadeStream = null;
+    fsLyricsShadeCanvas = null;
+    fsLyricsShadeCtx = null;
+    fsLyricsShadeCanvasTainted = false;
+    fsLyricsShadeSampleInFlight = false;
+    fsLyricsShade = null;
+    fsLyricsShadeLevel = 0;
+    fsLyricsShadeTarget = 0;
+    fsLyricsShadeLastSampleAt = 0;
+    // Hand the backdrop back: dispose our Kawarp, then let the Dynamic add-on
+    // resume its page-wide one so exactly one is ever running.
+    stopFullscreenKawarp();
+    resumePageKawarp();
+    fsBgImg = null;
+    fsArtImg = null;
+    const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
+    if (fsOptionsOverlay) fsOptionsOverlay.remove();
+    if (fsOverlay) fsOverlay.remove();
+    fsOverlay = null;
+    fsMediaHost = null;
+    fsLyricsHost = null;
+    fsControls = null;
+    fsLayoutSelect = null;
+    fsOffsetRange = null;
+    fsOffsetValue = null;
+    fsLyricsToggle = null;
+    fsLyricsHidden = false;
+    fsLyricsGapDimmed = false;
+    fsLyricsIntroDimmed = false;
+    fsLyricsFinalDimmed = false;
+    if (fsPlayerStateTimer) clearInterval(fsPlayerStateTimer);
+    fsPlayerStateTimer = 0;
+    fsPlayerControls = null;
+    fsPlayerPlayButton = null;
+    fsPlayerVolumeRange = null;
+    fsPlayerSeekRange = null;
+    fsTimeCurrent = null;
+    fsTimeTotal = null;
+    fsVolumeIcon = null;
+    fsMuted = false;
+    fsLastVolume = 100;
+    fsSavedVideo = null;
+    fsSavedPanel = null;
+  }
+
+  function handleFsKeydown(event) {
+    if (!fsActive || event.key !== "Escape") return;
+    event.preventDefault();
+    exitFullscreenMode();
+  }
+
+  // If the browser leaves native fullscreen by any other route (F11, browser
+  // chrome), unwind our overlay too so nothing is left stranded on screen.
+  function handleFsFullscreenChange() {
+    if (fsActive && !document.fullscreenElement) exitFullscreenMode();
+  }
+
+  function syncNativePanel(on) {
+    const host = panelHost || (tabBar && tabBar.parentElement);
+    if (!host) return;
+    for (const child of Array.from(host.children)) {
+      if (child === tabBar || child === panelEl) continue;
+      child.classList.toggle("ym-sl-native-hidden", on);
+    }
+  }
+
+  function cleanupTabBar(bar) {
+    if (!bar) return;
+    if (tabEl && tabEl.parentElement === bar) {
+      tabEl.remove();
+      tabEl = null;
+      tabMountParent = null;
+    }
+    if (bar.__ymCloseObserver) {
+      bar.__ymCloseObserver.disconnect();
+      delete bar.__ymCloseObserver;
+    }
+    if (bar.__ymNativeClickHandler) {
+      bar.removeEventListener("click", bar.__ymNativeClickHandler, true);
+      bar.removeEventListener("tap", bar.__ymNativeClickHandler, true);
+      delete bar.__ymNativeClickHandler;
+    }
+    bar.classList.remove("ym-sl-custom-active");
+  }
+
+  function scheduleMountTab() {
+    if (mountTabTimer) return;
+    mountTabTimer = window.setTimeout(() => {
+      mountTabTimer = 0;
+      mountTab();
+    }, 400);
+  }
+
+  function mountTab() {
+    const bar = findTabBar();
+    if (!bar) {
+      scheduleMountTab();
+      return;
+    }
+    if (tabBar && tabBar !== bar) cleanupTabBar(tabBar);
+    tabBar = bar;
+    tabBar.classList.toggle("ym-sl-custom-active", panelVisible);
+    mountPanel(bar);
+
+    if (!tabBar.__ymCloseObserver) {
+      tabBar.__ymCloseObserver = new MutationObserver(() => {
+        if (!panelVisible) return;
+        const selected = tabBar.querySelector(
+          "tp-yt-paper-tab.iron-selected:not(.ym-sl-tab)"
+        );
+        if (selected && selected !== nativeTabAtOpen) setPanel(false);
+      });
+      tabBar.__ymCloseObserver.observe(tabBar, {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ["class", "aria-selected"],
+      });
+    }
+    if (!tabBar.__ymNativeClickHandler) {
+      tabBar.__ymNativeClickHandler = (event) => {
+        if (!panelVisible) return;
+        const nativeTab = event.target && event.target.closest
+          ? event.target.closest("tp-yt-paper-tab")
+          : null;
+        if (!nativeTab || nativeTab.classList.contains("ym-sl-tab")) return;
+        setPanel(false);
+      };
+      tabBar.addEventListener("click", tabBar.__ymNativeClickHandler, true);
+      tabBar.addEventListener("tap", tabBar.__ymNativeClickHandler, true);
+    }
+    if (bar.querySelector(".ym-sl-tab")) return;
+
+    const tabs = Array.from(bar.querySelectorAll("tp-yt-paper-tab"));
+    if (!tabs.length) {
+      scheduleMountTab();
+      return;
+    }
+    let anchor = null;
+    for (const tab of tabs) {
+      if ((tab.textContent || "").trim().toLowerCase().includes("lyrics")) {
+        anchor = tab;
+        break;
+      }
+    }
+    const ref = anchor || tabs[tabs.length - 1];
+    const tab = ref.cloneNode(true);
+    tab.classList.add("ym-sl-tab");
+    tab.classList.remove("iron-selected", "selected", "active", "iron-disabled", "disabled");
+    tab.removeAttribute("aria-selected");
+    tab.removeAttribute("active");
+    tab.removeAttribute("name");
+    tab.removeAttribute("disabled");
+    tab.removeAttribute("aria-disabled");
+    tab.setAttribute("tabindex", "0");
+
+    const label = tab.querySelector(".tab-content") || tab;
+    label.textContent = "SYNCED";
+
+    const blockNativeTap = (event) => {
+      event.stopPropagation();
+      if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    };
+    const activate = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+      setPanel(!panelVisible);
+    };
+    tab.addEventListener("tap", blockNativeTap, true);
+    tab.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") activate(event);
+    }, true);
+    tab.addEventListener("click", activate, true);
+
+    (anchor || ref).after(tab);
+    try {
+      tab.disabled = false;
+      delete tab.disabled;
+    } catch (_) {}
+    tabEl = tab;
+    tabMountParent = tab.parentElement;
+  }
+
+  function setPanel(on) {
+    // While fullscreen is up, the lyrics panel is owned by the overlay. Ignore
+    // tab-driven visibility changes so the lyrics can't be hidden underneath us.
+    if (fsActive) return;
+    panelVisible = on;
+    nativeTabAtOpen = on && tabBar
+      ? tabBar.querySelector("tp-yt-paper-tab.iron-selected:not(.ym-sl-tab)")
+      : null;
+    syncNativePanel(on);
+    if (!panelEl) return;
+    panelEl.classList.toggle("hidden", !on);
+    if (tabBar) tabBar.classList.toggle("ym-sl-custom-active", on);
+    if (tabEl) tabEl.classList.toggle("ym-sl-active", on);
+    if (on) {
+      refreshTrack();
+      syncTrackLyrics();
+    }
+  }
+
+  function refreshTrack() {
+    const track = getCurrentTrack();
+    const label = track ? track.title + (track.artist ? " — " + track.artist : "") : "Synced Lyrics";
+    const trackEl = document.getElementById("ym-sl-track");
+    if (trackEl) trackEl.textContent = label;
+    const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
+    if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+  }
+
+  function getCurrentTrack() {
+    return window.YTMod && window.YTMod.player && window.YTMod.player.getTrack
+      ? window.YTMod.player.getTrack()
+      : null;
+  }
+
+  function getTrackKey(track) {
+    if (!track || !track.title) return "";
+    return [track.artist || "", track.title].join("::").toLowerCase();
+  }
+
+  const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
+  const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
+  const VIDEO_OFFSET_LIMIT = 100;
+
+  // An offset entry is { video: ms, song: ms, pauseSync: {line, offset}|null }.
+  // Legacy v1 stored a bare number (the music-video offset); migrate those into the
+  // video slot. Entries written before pause sync existed simply have no
+  // pauseSync key, so it defaults to null here rather than dropping the entry.
+  function normalizeOffsetEntry(value) {
+    if (value && typeof value === "object") {
+      const entry = {
+        video: Number(value.video) || 0,
+        song: Number(value.song) || 0,
+        pauseSync: null,
+      };
+      const ps = value.pauseSync;
+      if (ps && typeof ps === "object" &&
+        Number.isFinite(Number(ps.line)) && Number.isFinite(Number(ps.offset))) {
+        entry.pauseSync = { line: Number(ps.line), offset: Number(ps.offset) };
+      }
+      return entry;
+    }
+    if (typeof value === "number") return { video: value, song: 0, pauseSync: null };
+    return { video: 0, song: 0, pauseSync: null };
+  }
+
+  function loadVideoOffsets() {
+    try {
+      const raw2 = window.localStorage && window.localStorage.getItem(OFFSET_STORAGE_KEY);
+      if (raw2) {
+        const parsed = JSON.parse(raw2);
+        if (parsed && typeof parsed === "object") {
+          const out = {};
+          for (const k in parsed) out[k] = normalizeOffsetEntry(parsed[k]);
+          return out;
+        }
+      }
+      // Migrate legacy v1 flat-number map into the new two-slot shape.
+      const raw1 = window.localStorage && window.localStorage.getItem(VIDEO_OFFSET_STORAGE_KEY);
+      if (raw1) {
+        const parsed = JSON.parse(raw1);
+        if (parsed && typeof parsed === "object") {
+          const out = {};
+          for (const k in parsed) out[k] = normalizeOffsetEntry(parsed[k]);
+          return out;
+        }
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  const videoOffsets = loadVideoOffsets();
+
+  function persistVideoOffsets() {
+    try {
+      if (window.localStorage) window.localStorage.setItem(OFFSET_STORAGE_KEY, JSON.stringify(videoOffsets));
+    } catch (_) {}
+  }
+
+  function formatOffset(ms) {
+    const sign = ms > 0 ? "+" : "";
+    return sign + (ms / 1000).toFixed(1) + "s";
+  }
+
+  function hasMusicVideo() {
+    return !!findPlayerVideo();
+  }
+
+  function getActiveOffsetMs() {
+    return activeOffsetMode === "video" ? offsetVideoMs : offsetSongMs;
+  }
+
+  /* ---- MV pause re-sync lookups ---------------------------------------------
+     getOffsetForLine  — which offset a line uses (click-to-seek).
+     getOffsetForPosition — which offset applies right now (the clock, every frame).
+
+     The lookup tests LYRIC time, not video time: if applying the sync offset lands
+     us at or past the sync line, we are in the post-pause segment. That is
+     equivalent to comparing positionMs against (pauseSync.line + pauseSync.offset)
+     — the video moment the sync line actually starts — but it stays monotone even
+     when the user dials in a negative offset. */
+  function getOffsetForLine(startTimeMs) {
+    if (pauseSync && Number.isFinite(startTimeMs) && startTimeMs >= pauseSync.line) {
+      return pauseSync.offset;
+    }
+    return getActiveOffsetMs();
+  }
+
+  function getOffsetForPosition(positionMs) {
+    if (!pauseSync) return getActiveOffsetMs();
+    if (positionMs - pauseSync.offset >= pauseSync.line) return pauseSync.offset;
+    return getActiveOffsetMs();
+  }
+
+  // Auto-select which slot is applied: a music video uses the video offset, an
+  // audio-only track uses the song offset. Throttled so we don't query the DOM
+  // every animation frame; force=true re-evaluates immediately (track change).
+  function recomputeActiveOffsetMode(force) {
+    const now = performance.now();
+    if (!force && now - lastOffsetModeCheckAt < 1000) return;
+    lastOffsetModeCheckAt = now;
+    const desired = hasMusicVideo() ? "video" : "song";
+    const changed = desired !== activeOffsetMode;
+    activeOffsetMode = desired;
+    if (changed) {
+      editingOffsetMode = desired;
+      refreshVideoOffsetControl();
+      lastActiveLine = -1;
+      publishSyncState();
+    }
+  }
+
+  // Updates BOTH the panel offset control and the fullscreen offset control,
+  // since either can be on screen. Each control carries the same child classes
+  // so a single pass refreshes both. We skip rewriting a field the user is
+  // actively typing in to avoid clobbering the caret.
+  function refreshVideoOffsetControl() {
+    const ms = editingOffsetMode === "video" ? offsetVideoMs : offsetSongMs;
+    const seconds = ms / 1000;
+    document.querySelectorAll(".ym-sl-video-offset, .ym-sl-fs-control-offset").forEach((root) => {
+      const range = root.querySelector("input[type=range]");
+      const number = root.querySelector("input.ym-sl-offset-number");
+      const value = root.querySelector(".ym-sl-video-offset-value, .ym-sl-fs-control-offset-value");
+      const scope = root.querySelector(".ym-sl-offset-scope");
+      const applied = root.querySelector(".ym-sl-offset-applied");
+      if (range && document.activeElement !== range) range.value = String(ms);
+      if (number && document.activeElement !== number) number.value = seconds.toFixed(1);
+      if (value) value.textContent = formatOffset(ms);
+      if (scope) scope.value = editingOffsetMode;
+      if (applied) applied.textContent = activeOffsetMode === "video" ? "video" : "song";
+    });
+  }
+
+  function setVideoOffsetMs(value, save) {
+    const numeric = Number(value);
+    const ms = Number.isFinite(numeric)
+      ? clamp(Math.round(numeric / 100) * 100, -30000, 30000)
+      : 0;
+    if (editingOffsetMode === "video") offsetVideoMs = ms;
+    else offsetSongMs = ms;
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (save && key) {
+      // Preserve the pause sync point: this assignment replaces the whole entry.
+      videoOffsets[key] = { video: offsetVideoMs, song: offsetSongMs, pauseSync };
+      const keys = Object.keys(videoOffsets);
+      while (keys.length > VIDEO_OFFSET_LIMIT) {
+        delete videoOffsets[keys.shift()];
+      }
+      persistVideoOffsets();
+    }
+    refreshVideoOffsetControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function loadVideoOffsetForTrack(track) {
+    const key = getTrackKey(track);
+    const entry = key ? (videoOffsets[key] || {}) : {};
+    offsetVideoMs = Number(entry.video) || 0;
+    offsetSongMs = Number(entry.song) || 0;
+    pauseSync = entry.pauseSync || null;
+    recomputeActiveOffsetMode(true);
+    editingOffsetMode = activeOffsetMode;
+    refreshVideoOffsetControl();
+    refreshPauseSyncControl();
+    publishSyncState();
+  }
+
+  /* ===================== MV pause re-sync ===================== */
+
+  const PAUSE_SYNC_MIN = -5000;
+  const PAUSE_SYNC_MAX = 30000;
+  const PAUSE_SYNC_STEP = 100;
+
+  function savePauseSync() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) return;
+    const existing = videoOffsets[key] || { video: offsetVideoMs, song: offsetSongMs };
+    existing.video = offsetVideoMs;
+    existing.song = offsetSongMs;
+    existing.pauseSync = pauseSync;
+    videoOffsets[key] = existing;
+    const keys = Object.keys(videoOffsets);
+    while (keys.length > VIDEO_OFFSET_LIMIT) delete videoOffsets[keys.shift()];
+    persistVideoOffsets();
+  }
+
+  // The line whose stored startTime matches the sync point, if it is still in the
+  // current render tree.
+  function findPauseSyncLine() {
+    if (!pauseSync) return null;
+    for (let index = 0; index < modelLines.length; index++) {
+      if (modelLines[index].StartTime === pauseSync.line) return modelLines[index];
+    }
+    return null;
+  }
+
+  function describePauseSyncLine() {
+    const line = findPauseSyncLine();
+    if (!line) return "a line from a previous lyrics file";
+    const words = line.Syllables && line.Syllables.Lead;
+    if (!words || !words.length) return "the sync line";
+    let text = "";
+    for (let index = 0; index < words.length && index < 5; index++) {
+      text += words[index].Text || "";
+    }
+    return '"' + (text.trim() || "the sync line") + '"';
+  }
+
+  function markPauseSyncLine() {
+    for (let index = 0; index < modelLines.length; index++) {
+      const line = modelLines[index];
+      const on = !!pauseSync && line.StartTime === pauseSync.line;
+      line.HTMLElement.classList.toggle("ym-sl-pause-mark", on);
+    }
+  }
+
+  function setPauseSyncLine(lineModel) {
+    if (!lineModel || !lineModel.isPrimary) return;
+    // Start at the offset already in effect, so picking a line never changes
+    // playback — the slider then moves from "no visible change" upwards. (Starting
+    // at 0 would snap the post-pause lines back to zero offset, which looks like
+    // the feature broke something.) Re-picking a line keeps what was dialled in.
+    const keep = pauseSync ? pauseSync.offset : getActiveOffsetMs();
+    pauseSync = { line: lineModel.StartTime, offset: keep };
+    exitPausePickMode();
+    savePauseSync();
+    refreshPauseSyncControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function setPauseSyncOffset(ms, save) {
+    if (!pauseSync) return;
+    const numeric = Number(ms);
+    pauseSync.offset = Number.isFinite(numeric)
+      ? clamp(Math.round(numeric / PAUSE_SYNC_STEP) * PAUSE_SYNC_STEP, PAUSE_SYNC_MIN, PAUSE_SYNC_MAX)
+      : 0;
+    if (save) savePauseSync();
+    refreshPauseSyncControl();
+    // Force the active line to re-resolve against the new offset.
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function clearPauseSync() {
+    pauseSync = null;
+    exitPausePickMode();
+    savePauseSync();
+    refreshPauseSyncControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function isPlaybackPaused() {
+    return !!(window.YTMod && window.YTMod.player &&
+      typeof window.YTMod.player.isPaused === "function" && window.YTMod.player.isPaused());
+  }
+
+  function enterPausePickMode() {
+    if (!isPlaybackPaused()) return;
+    pausePickMode = true;
+    if (linesRoot && linesRoot.parentElement) {
+      linesRoot.parentElement.classList.add("ym-sl-pause-mode");
+    }
+    if (pauseBanner && pauseBannerText) {
+      const pos = window.YTMod && window.YTMod.player ? window.YTMod.player.getPositionMs() : null;
+      pauseBannerText.textContent = Number.isFinite(pos)
+        ? "Click the line that starts after the pause (paused at " + formatClock(pos) + ")"
+        : "Click the line that starts after the pause";
+      pauseBanner.classList.remove("hidden");
+    }
+  }
+
+  function exitPausePickMode() {
+    pausePickMode = false;
+    if (linesRoot && linesRoot.parentElement) {
+      linesRoot.parentElement.classList.remove("ym-sl-pause-mode");
+    }
+    if (pauseBanner) pauseBanner.classList.add("hidden");
+  }
+
+  function formatClock(ms) {
+    const total = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function refreshPauseSyncControl() {
+    const ui = pauseUi;
+    if (!ui || !ui.root) return;
+    const has = !!pauseSync;
+    if (ui.pick) {
+      ui.pick.classList.toggle("hidden", has);
+      const paused = isPlaybackPaused();
+      ui.pick.disabled = !paused;
+      ui.pick.title = paused
+        ? "Pause the video, then pick the line that plays after the pause"
+        : "Pause the video first";
+    }
+    if (ui.editor) ui.editor.classList.toggle("hidden", !has);
+    if (!has) {
+      markPauseSyncLine();
+      return;
+    }
+    const ms = pauseSync.offset;
+    if (ui.line) ui.line.textContent = "Sync from " + describePauseSyncLine();
+    if (ui.range && document.activeElement !== ui.range) ui.range.value = String(ms);
+    if (ui.number && document.activeElement !== ui.number) ui.number.value = (ms / 1000).toFixed(1);
+    if (ui.value) ui.value.textContent = formatOffset(ms);
+    markPauseSyncLine();
+  }
+
+  function getPermanentTTML(trackKey) {
+    if (!window.YTMod || typeof window.YTMod.getPermanentLyrics !== "function") {
+      return Promise.resolve(null);
+    }
+    return window.YTMod.getPermanentLyrics(trackKey);
+  }
+
+  function savePermanentTTML(trackKey, xml) {
+    if (!window.YTMod || typeof window.YTMod.setPermanentLyrics !== "function") {
+      return Promise.reject(new Error("Permanent lyrics storage is unavailable."));
+    }
+    return window.YTMod.setPermanentLyrics(trackKey, xml);
+  }
+
+  function removePermanentTTML(trackKey) {
+    if (!window.YTMod || typeof window.YTMod.removePermanentLyrics !== "function") {
+      return Promise.resolve();
+    }
+    return window.YTMod.removePermanentLyrics(trackKey);
+  }
+
+  // (G) Delete the permanently-saved TTML for the current track. Lets the user
+  // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  async function deletePermanentTTMLForCurrentTrack() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) {
+      showLyricsMessage("No track loaded, so there is nothing to delete.");
+      return;
+    }
+    try {
+      await removePermanentTTML(key);
+      manualLyricsIsPermanent = false;
+      showLyricsMessage("Permanently-saved TTML removed for this track.");
+    } catch (error) {
+      console.warn("[SpicyLyrics] Could not delete permanent TTML:", error);
+      showLyricsMessage("Could not delete the saved TTML for this track.");
+    }
+    refreshPermanentDeleteState();
+  }
+
+  // Shows the "Delete saved" button only when a permanent TTML actually exists
+  // for the current track, so it is obvious there is something to remove.
+  async function refreshPermanentDeleteState() {
+    const btn = deletePermanentButton;
+    if (!btn) return;
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) {
+      btn.classList.add("hidden");
+      return;
+    }
+    let saved = null;
+    try {
+      saved = await getPermanentTTML(key);
+    } catch (error) {
+      saved = null;
+    }
+    btn.classList.toggle("hidden", !saved);
+  }
+
+  function showLyricsMessage(message) {
+    if (!lineScrollEl || !linesRoot) return;
+    if (lineScrollRaf) {
+      cancelAnimationFrame(lineScrollRaf);
+      lineScrollRaf = 0;
+    }
+    lineScrollEl.classList.add("offline");
+    const empty = h("div", { class: "ym-sl-empty" });
+    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
+    // Surface a Search button under the empty-state message — that's the
+    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
+    const emptySearch = h("button", {
+      class: "ym-sl-import ym-sl-empty-search",
+      type: "button",
+      "aria-label": "Search lyrics",
+      text: "Search",
+    });
+    emptySearch.addEventListener("click", () => toggleSearchPanel());
+    empty.appendChild(emptySearch);
+    linesRoot.replaceChildren(empty);
+    modelLines = [];
+    lineElements = [];
+    scrollCandidateIndices = [];
+    lastActiveLine = -1;
+    manualScrollActive = false;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    setJumpButtonVisible(false);
+    // Tell the bus the lyrics are gone so the PiP (and any other subscriber of
+    // lyrics:lines) clears too. Without this the PiP retains the previous track's
+    // lyrics forever — the panel itself replaced linesRoot with the empty state,
+    // but the bus never publishes that fact, so the PiP's lines/videoId stay
+    // pinned to the last loaded track. videoId/title/artist are best-effort via
+    // getCurrentTrack() so the PiP can detect the track identity has changed.
+    if (window.YTMod && window.YTMod.bus) {
+      const t = (typeof getCurrentTrack === "function") ? getCurrentTrack() : null;
+      window.YTMod.bus.emit("lyrics:lines", {
+        trackKey: currentTrackKey || null,
+        videoId: t && t.videoId ? t.videoId : null,
+        title: t && t.title ? t.title : null,
+        artist: t && t.artist ? t.artist : null,
+        lines: [],
+      });
+      try {
+        document.documentElement.dataset.ymLyricLines = "0";
+      } catch (e) {}
+    }
+  }
+
+  function setJumpButtonVisible(visible) {
+    if (jumpButton) {
+      if (visible) {
+        // The same popup doubles as "Jump to current" (synced) and "Auto scroll"
+        // (unsynced) — label it for whichever mode is active (AJ, 2026-09-18).
+        if (staticLyricsActive) {
+          jumpButton.textContent = "Auto scroll";
+          jumpButton.title = "Resume automatic scrolling";
+          jumpButton.setAttribute(
+            "aria-label",
+            "Resume automatic scrolling"
+          );
+        } else {
+          jumpButton.textContent = "Jump to current";
+          jumpButton.title = "Jump to the currently playing lyric";
+          jumpButton.setAttribute(
+            "aria-label",
+            "Jump to the currently playing lyric"
+          );
+        }
+      }
+      jumpButton.classList.toggle("hidden", !visible);
+    }
+  }
+
+  function onJumpButtonClick() {
+    if (staticLyricsActive) {
+      // Resume the smooth auto-scroll that the manual scroll interrupted.
+      autoScrollUserPaused = false;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+    } else {
+      jumpToCurrentLyric();
+    }
+  }
+
+  function handleManualScrollIntent() {
+    if (!lineScrollEl) return;
+    if (lineScrollRaf) {
+      cancelAnimationFrame(lineScrollRaf);
+      lineScrollRaf = 0;
+    }
+    manualScrollActive = true;
+    if (staticLyricsActive) {
+      // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
+      // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
+      autoScrollUserPaused = true;
+    }
+    setJumpButtonVisible(true);
+    scheduleManualScrollReturn();
+  }
+
+  // If the user stops scrolling for FS_JUMP_RETURN_MS, snap back to the line
+  // that is currently playing. Re-armed on every scroll/key intent, so the
+  // timer measures "idle time", not "time since first scroll".
+  function scheduleManualScrollReturn() {
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    manualScrollReturnTimer = window.setTimeout(() => {
+      manualScrollReturnTimer = 0;
+      if (manualScrollActive && lineScrollEl && lastActiveLine >= 0 && lineElements[lastActiveLine]) {
+        jumpToCurrentLyric();
+      }
+    }, FS_JUMP_RETURN_MS);
+  }
+
+  // True when the currently playing line is anywhere on screen. Used to drop the
+  // "Jump to current" button the moment the user scrolls back onto the active
+  // line, instead of making them click it.
+  function isActiveLineInView() {
+    if (!lineScrollEl || lastActiveLine < 0 || !lineElements[lastActiveLine]) return false;
+    const rect = lineElements[lastActiveLine].getBoundingClientRect();
+    const view = lineScrollEl.getBoundingClientRect();
+    return rect.bottom >= view.top && rect.top <= view.bottom;
+  }
+
+  function handleManualScrollKey(event) {
+    if (event.defaultPrevented) return;
+    if ([
+      "ArrowUp",
+      "ArrowDown",
+      "PageUp",
+      "PageDown",
+      "Home",
+      "End",
+      " ",
+    ].includes(event.key)) {
+      handleManualScrollIntent();
+    }
+  }
+
+  function jumpToCurrentLyric() {
+    if (!lineScrollEl || lastActiveLine < 0 || !lineElements[lastActiveLine]) return;
+    manualScrollActive = false;
+    setJumpButtonVisible(false);
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    scrollActiveLineIntoView(lineElements[lastActiveLine], true);
+  }
+
+  function scrollActiveLineIntoView(element, force) {
+    // pausePickMode suspends auto-scroll the same way manual scrolling does, but it
+    // must NOT set manualScrollActive: that flag is auto-cleared by animate() as soon
+    // as the active line is back in view, which would drop the user out of pick mode
+    // the moment they scrolled near the playhead.
+    if (!lineScrollEl || !element || ((manualScrollActive || pausePickMode) && !force)) return;
+    if (lineScrollRaf) cancelAnimationFrame(lineScrollRaf);
+
+    const lineRect = element.getBoundingClientRect();
+    const viewportRect = lineScrollEl.getBoundingClientRect();
+    const lineCenter = lineRect.top + lineRect.height / 2;
+    const viewportCenter = viewportRect.top + viewportRect.height / 2;
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const target = clamp(
+      lineScrollEl.scrollTop + lineCenter - viewportCenter,
+      0,
+      maxScrollTop
+    );
+    const start = lineScrollEl.scrollTop;
+    const distance = target - start;
+
+    if (Math.abs(distance) < 1) {
+      lineScrollRaf = 0;
+      return;
+    }
+
+    const duration = clamp(180 + Math.abs(distance) * 0.22, 180, 420);
+    const startedAt = performance.now();
+    const step = (now) => {
+      const progress = clamp((now - startedAt) / duration, 0, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      lineScrollEl.scrollTop = start + distance * eased;
+      if (progress < 1) {
+        lineScrollRaf = requestAnimationFrame(step);
+      } else {
+        lineScrollRaf = 0;
+      }
+    };
+    lineScrollRaf = requestAnimationFrame(step);
+  }
+
+  // Smoothly follow playback with the native scroll position for static
+  // (unsynced) lyrics: scrollTop = progress * maxScroll, eased each frame. At
+  // song start progress is 0 (top), at the end it is 1 (bottom). A small lerp
+  // factor keeps it slow and fluid; if playback is paused the target is fixed so
+  // the panel simply settles and holds (AJ, 2026-09-18).
+  function driveStaticAutoScroll(positionMs) {
+    const player = window.YTMod && window.YTMod.player;
+    const durationMs = player && typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : 0;
+    if (!durationMs || durationMs <= 0) return;
+    const progress = clamp(positionMs / durationMs, 0, 1);
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const target = progress * maxScrollTop;
+    const current = lineScrollEl.scrollTop;
+    lineScrollEl.scrollTop = current + (target - current) * 0.06;
+  }
+
+  function parseLrcTimestamp(minutes, seconds) {
+    return parseInt(minutes, 10) * 60 + parseFloat(seconds);
+  }
+
+  function parseLRC(lrc, durationSeconds) {
+    const entries = [];
+    const timestampRe = /\[(\d+):(\d{1,2}(?:\.\d+)?)\]/g;
+
+    for (const rawLine of String(lrc || "").replace(/\r/g, "").split("\n")) {
+      const timestamps = [];
+      let match;
+      while ((match = timestampRe.exec(rawLine))) {
+        timestamps.push(parseLrcTimestamp(match[1], match[2]));
+      }
+      timestampRe.lastIndex = 0;
+      if (!timestamps.length) continue;
+
+      const text = rawLine.replace(timestampRe, "").trim();
+      if (!text) continue;
+      for (const start of timestamps) entries.push({ start, text });
+    }
+
+    entries.sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const entry of entries) {
+      const previous = merged[merged.length - 1];
+      if (previous && Math.abs(previous.start - entry.start) < 0.001) {
+        if (previous.text !== entry.text) previous.text += " " + entry.text;
+      } else {
+        merged.push({ start: entry.start, text: entry.text });
+      }
+    }
+
+    return merged.map((entry, index) => {
+      const nextStart = merged[index + 1] ? merged[index + 1].start : 0;
+      const end = nextStart > entry.start
+        ? nextStart
+        : (durationSeconds > entry.start ? durationSeconds : entry.start + 4);
+      return {
+        start: entry.start,
+        end: Math.max(entry.start + 0.05, end),
+        text: entry.text,
+        lineTimed: true,
+        words: [{
+          text: entry.text,
+          start: entry.start,
+          end: Math.max(entry.start + 0.05, end),
+          isPartOfWord: false,
+          disableLetterAnimation: true,
+        }],
+        background: [],
+      };
+    });
+  }
+
+  // Build a parsed-line model from plain (unsynced) LRCLIB text. Each source
+  // line becomes one word with no timing (start = end = 0). The renderer treats
+  // these as NoKaraoke static blocks and, because their time window is empty,
+  // they resolve to the "Sung" (fully-filled) state at every playback position
+  // and the active-line search never matches them, so the panel shows them all
+  // at once with no karaoke sweep and no auto-scroll (AJ, 2026-09-18).
+  function parsePlain(text) {
+    const lines = String(text || "")
+      .replace(/\r/g, "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return lines.map((text) => ({
+      start: 0,
+      end: 0,
+      text,
+      words: [{ text, start: 0, end: 0, timed: false }],
+      background: [],
+      lineTimed: false,
+      timed: false,
+      positioned: false,
+    }));
+  }
+
+  function applyParsedLyrics(parsed) {
+    if (!parsed || !parsed.length) {
+      showLyricsMessage("No lyrics found.");
+      return false;
+    }
+    buildRendererLines(toSyllableContent(parsed));
+    lastActiveLine = -1;
+    cachedFirstRealLyricStartMs = modelLines.reduce((first, line) =>
+      line && !line.DotLine ? Math.min(first, line.StartTime) : first,
+      Infinity
+    );
+    cachedLastRealLyricEndMs = modelLines.reduce((last, line) =>
+      line && !line.DotLine ? Math.max(last, line.EndTime) : last,
+      0
+    );
+    return true;
+  }
+
+  function setTTMLExportVisibility() {
+    const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
+    if (!exportActions) return;
+    exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+  }
+
+  function loadTTML(xml, source) {
+    const rawXml = String(xml || "");
+    const parsed = parseTTML(rawXml);
+    if (!parsed.length) {
+      staticLyricsActive = false;
+      currentLyricsIsTTML = false;
+      currentTTMLSource = "none";
+      importedTTMLXml = "";
+      setTTMLExportVisibility();
+      showLyricsMessage("Could not parse that TTML. Try an .ttml export with timed <p> lines.");
+      return false;
+    }
+    currentLyricsIsTTML = true;
+    staticLyricsActive = false;
+    currentSongwriters = extractSongwriters(rawXml);
+    currentTTMLSource = source === "imported" ? "imported" : "external";
+    importedTTMLXml = currentTTMLSource === "imported" ? rawXml : "";
+    const applied = applyParsedLyrics(parsed);
+    setTTMLExportVisibility();
+    return applied;
+  }
+
+  function loadLRCLyrics(data, durationMs) {
+    currentLyricsIsTTML = false;
+    currentTTMLSource = "none";
+    importedTTMLXml = "";
+    currentSongwriters = [];
+    autoScrollUserPaused = false;
+    // An LRCLIB result may carry plain lyrics without synced timestamps. Load
+    // those as a static, already-filled set instead of reporting "no lyrics".
+    // Synced lyrics always win when both are present (AJ, 2026-09-18).
+    if (data && data.syncedLyrics) {
+      staticLyricsActive = false;
+      const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
+      const applied = applyParsedLyrics(parsed);
+      setTTMLExportVisibility();
+      return applied;
+    }
+    if (data && data.plainLyrics) {
+      staticLyricsActive = true;
+      const parsed = parsePlain(data.plainLyrics);
+      const applied = applyParsedLyrics(parsed);
+      setTTMLExportVisibility();
+      return applied;
+    }
+    staticLyricsActive = false;
+    showLyricsMessage("No lyrics found.");
+    setTTMLExportVisibility();
+    return false;
+  }
+
+  function unwrapUnisonResult(data) {
+    if (!data) return null;
+    if (data.success && data.data) return data.data;
+    return data.lyrics ? data : null;
+  }
+
+  function normalizeUnisonLyrics(data) {
+    const result = unwrapUnisonResult(data);
+    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
+    const format = String(result.format || "").toLowerCase();
+    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics };
+    if (format === "ttml") return { format: "ttml", lyrics: result.lyrics };
+    // Plain lyrics are deliberately not considered a synced hit. The next
+    // provider (LRCLIB) gets the chance to return timed lyrics instead.
+    if (format === "plain") return null;
+    // Be conservative with servers omitting format: accept only timestamped LRC.
+    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
+      ? { format: "lrc", lyrics: result.lyrics }
+      : null;
+  }
+
+  async function fetchUnisonLyrics(track, key, controller) {
+    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
+    const params = new URLSearchParams();
+    if (track.videoId) params.set("v", track.videoId);
+    else {
+      params.set("song", track.title);
+      if (track.artist) params.set("artist", track.artist);
+      if (track.album) params.set("album", track.album);
+      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+        params.set("duration", String(Math.round(track.durationMs / 1000)));
+      }
+    }
+    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (!response.ok || !response.data) return null;
+    return normalizeUnisonLyrics(response.data);
+  }
+
+  function normalizeLookupText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  }
+
+  function selectLRCLIBResult(results, track) {
+    const candidates = Array.isArray(results)
+      ? results.filter((result) => result && result.syncedLyrics)
+      : [];
+    if (!candidates.length) return null;
+
+    const wantedTitle = normalizeLookupText(track.title);
+    const wantedArtist = normalizeLookupText(track.artist);
+    const wantedDuration = Number(track.durationMs) / 1000;
+
+    return candidates
+      .map((result) => {
+        const title = normalizeLookupText(result.trackName);
+        const artist = normalizeLookupText(result.artistName);
+        let score = 0;
+        if (title === wantedTitle) score += 8;
+        else if (title.includes(wantedTitle) || wantedTitle.includes(title)) score += 3;
+        if (wantedArtist && artist === wantedArtist) score += 6;
+        else if (wantedArtist && (artist.includes(wantedArtist) || wantedArtist.includes(artist))) score += 2;
+        if (Number.isFinite(wantedDuration) && Number.isFinite(Number(result.duration))) {
+          score += Math.max(0, 3 - Math.abs(Number(result.duration) - wantedDuration) / 3);
+        }
+        return { result, score };
+      })
+      .sort((a, b) => b.score - a.score)[0].result;
+  }
+
+  // Sibling of selectLRCLIBResult for plain (unsynced) entries. Only used as a
+  // last-resort auto-fetch fallback when no synced result exists, so unsynced
+  // LRCLIB lyrics render automatically instead of reporting "no lyrics"
+  // (AJ, 2026-09-18).
+  function selectLRCLIBPlainResult(results, track) {
+    const candidates = Array.isArray(results)
+      ? results.filter((result) => result && result.plainLyrics && !result.syncedLyrics)
+      : [];
+    if (!candidates.length) return null;
+
+    const wantedTitle = normalizeLookupText(track.title);
+    const wantedArtist = normalizeLookupText(track.artist);
+
+    return candidates
+      .map((result) => {
+        const title = normalizeLookupText(result.trackName);
+        const artist = normalizeLookupText(result.artistName);
+        let score = 0;
+        if (title === wantedTitle) score += 4;
+        else if (title.includes(wantedTitle) || wantedTitle.includes(title)) score += 1;
+        if (wantedArtist && artist === wantedArtist) score += 3;
+        else if (wantedArtist && (artist.includes(wantedArtist) || wantedArtist.includes(artist))) score += 1;
+        return { result, score };
+      })
+      .sort((a, b) => b.score - a.score)[0].result;
+  }
+
+  async function fetchLRCLyrics(track, key) {
+    const requestId = ++trackRequestSeq;
+    if (activeTrackAbort) activeTrackAbort.abort();
+    const controller = new AbortController();
+    activeTrackAbort = controller;
+
+    showLyricsMessage("Looking for lyrics…");
+    try {
+      const unisonData = await fetchUnisonLyrics(track, key, controller);
+      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
+      if (unisonData && unisonData.format === "ttml") {
+        if (loadTTML(unisonData.lyrics, "external")) return;
+        console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; falling back to LRCLIB.");
+      }
+      if (unisonData && unisonData.format === "lrc") {
+        if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs)) return;
+        console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; falling back to LRCLIB.");
+      }
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      console.warn("[SpicyLyrics] Unison lookup failed; falling back to LRCLIB:", error);
+    }
+
+    const cached = lrclibCache.get(key);
+    if (cached) {
+      lrclibCache.delete(key);
+      lrclibCache.set(key, cached);
+      loadLRCLyrics(cached, track.durationMs);
+      return;
+    }
+    const persisted = getLyricsPersistent(key);
+    if (persisted) {
+      lrclibCache.set(key, persisted);
+      loadLRCLyrics(persisted, track.durationMs);
+      return;
+    }
+
+    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
+      showLyricsMessage("Could not load lyrics. Reload Aurora Lyrics and try again.");
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set("track_name", track.title);
+    if (track.artist) params.set("artist_name", track.artist);
+    if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+      params.set("duration", String(Math.round(track.durationMs / 1000)));
+    }
+
+    try {
+      const response = await window.YTMod.fetchLRCLIB(
+        `${LRCLIB_API}?${params.toString()}`
+      );
+      if (!response.ok && response.status !== 404) {
+        throw new Error("LRCLIB returned HTTP " + response.status);
+      }
+      let data = response.ok ? response.data : null;
+
+      if (!data || !data.syncedLyrics) {
+        const searchParams = new URLSearchParams({
+          q: [track.title, track.artist].filter(Boolean).join(" "),
+        });
+        if (controller.signal.aborted ||
+            requestId !== trackRequestSeq ||
+            key !== currentTrackKey) return;
+        const searchResponse = await window.YTMod.fetchLRCLIB(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        );
+        if (!searchResponse.ok) {
+          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+        }
+        // Prefer a synced match; fall back to a plain (unsynced) match so the
+        // panel shows lyrics automatically instead of "No lyrics found"
+        // (AJ, 2026-09-18). Both are scored against the current track on the
+        // same search response — no second request.
+        data = selectLRCLIBResult(searchResponse.data, track)
+          || selectLRCLIBPlainResult(searchResponse.data, track);
+      }
+
+      if (controller.signal.aborted ||
+          requestId !== trackRequestSeq ||
+          key !== currentTrackKey) return;
+      // Accept either a synced or a plain match. Only give up when there is no
+      // usable lyrics object at all.
+      if (!data || (!data.syncedLyrics && !data.plainLyrics)) {
+        showLyricsMessage("No lyrics found.");
+        return;
+      }
+      cacheLRCLyrics(key, data);
+      cacheLyricsPersistent(key, data);
+      loadLRCLyrics(data, track.durationMs);
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
+      console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
+      showLyricsMessage("Could not load lyrics. Try again later or import a TTML file.");
+    }
+  }
+
+  /* ===================== next-track prefetch ===================== */
+  // Warm the lyric cache for the upcoming track so the song change has no
+  // blank flash. Best-effort only: any failure is swallowed and never touches
+  // the current track's UI. Uses its own prefetchSeq + AbortController so it
+  // cannot abort or race the active track's request.
+  async function prefetchNextTrackLyrics() {
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getNextTrack !== "function") return;
+    let next;
+    try { next = player.getNextTrack(); } catch (e) { return; }
+    if (!next || !next.title) return;
+    const key = getTrackKey(next);
+    if (!key || key === currentTrackKey) return;
+    // Already cached (memory or persistent file)? Nothing to do.
+    if (lrclibCache.has(key) || getLyricsPersistent(key)) return;
+
+    const controller = new AbortController();
+    const reqId = ++prefetchSeq;
+    try {
+      let data = null;
+      // Mirror the LRCLIB path of fetchLRCLyrics, but cache instead of rendering.
+      if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return;
+      const params = new URLSearchParams();
+      params.set("track_name", next.title);
+      if (next.artist) params.set("artist_name", next.artist);
+      if (Number.isFinite(Number(next.durationMs)) && Number(next.durationMs) > 0) {
+        params.set("duration", String(Math.round(Number(next.durationMs) / 1000)));
+      }
+      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_API}?${params.toString()}`);
+      if (reqId !== prefetchSeq) return;
+      if (response && response.ok && response.data && response.data.syncedLyrics) {
+        data = response.data;
+      } else if (!response || !response.ok || response.status === 404) {
+        const searchParams = new URLSearchParams({
+          q: [next.title, next.artist].filter(Boolean).join(" "),
+        });
+        const searchResponse = await window.YTMod.fetchLRCLIB(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        );
+        if (reqId !== prefetchSeq) return;
+        if (searchResponse && searchResponse.ok) {
+          data = selectLRCLIBResult(searchResponse.data, next);
+        }
+      }
+      if (reqId !== prefetchSeq) return;
+      if (!data || !data.syncedLyrics) return;
+      cacheLRCLyrics(key, data);
+      cacheLyricsPersistent(key, data);
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      // Non-fatal: lyrics simply load normally when the track starts.
+    }
+  }
+
+  /* ===================== manual lyric search ===================== */
+  // In-place LRCLIB search. Opens a popover, queries the search endpoint, and
+  // applies the chosen match through the same loader the auto-sync uses, so a
+  // manual pick behaves identically to an auto-synced line set. All DOM is built
+  // with h() — no innerHTML — to satisfy YouTube Music's Trusted-Types policy.
+  // A chosen match can also be persisted for the current track (cached in the
+  // same layer fetchLRCLyrics reads from), so it survives reloads.
+
+  let searchPanelEl = null;
+  let searchAbortController = null;
+  let searchRequestSeq = 0;
+
+  function ensureSearchPanel() {
+    if (searchPanelEl) return searchPanelEl;
+    const panel = h("div", {
+      class: "ym-sl-search hidden",
+      role: "dialog",
+      "aria-label": "Search lyrics",
+    });
+    const head = h("div", { class: "ym-sl-search-head" });
+    const title = h("span", { class: "ym-sl-search-title", text: "Search lyrics" });
+    const closeBtn = h("button", {
+      class: "ym-sl-search-close",
+      type: "button",
+      "aria-label": "Close search",
+      text: "✕",
+    });
+    head.append(title, closeBtn);
+
+    const form = h("form", { class: "ym-sl-search-form" });
+    const input = h("input", {
+      class: "ym-sl-search-input",
+      type: "search",
+      placeholder: "Song title — artist",
+      "aria-label": "Lyric search query",
+      autocomplete: "off",
+    });
+    const submit = h("button", { class: "ym-sl-import", type: "submit", text: "Search" });
+    form.append(input, submit);
+
+    const rememberRow = h("label", { class: "ym-sl-search-remember" });
+    const remember = h("input", { type: "checkbox", class: "ym-sl-search-remember-box" });
+    rememberRow.append(remember, h("span", { text: "Remember for this track" }));
+
+    const status = h("div", { class: "ym-sl-search-status", role: "status" });
+    const results = h("div", {
+      class: "ym-sl-search-results",
+      role: "listbox",
+      "aria-label": "Search results",
+    });
+
+    panel.append(head, form, rememberRow, status, results);
+    panel._input = input;
+    panel._remember = remember;
+    panel._status = status;
+    panel._results = results;
+
+    closeBtn.addEventListener("click", () => toggleSearchPanel(false));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runLyricSearch();
+    });
+
+    searchPanelEl = panel;
+    panelEl.appendChild(panel);
+    return panel;
+  }
+
+  function toggleSearchPanel(force) {
+    const panel = ensureSearchPanel();
+    const show = force == null ? panel.classList.contains("hidden") : !!force;
+    if (show) {
+      const track = getCurrentTrack();
+      panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
+      panel._results.replaceChildren();
+      panel._status.textContent = "";
+      panel.classList.remove("hidden");
+      panel._input.focus();
+      panel._input.select();
+    } else {
+      panel.classList.add("hidden");
+      if (searchAbortController) {
+        searchAbortController.abort();
+        searchAbortController = null;
+      }
+    }
+  }
+
+  async function runLyricSearch() {
+    const panel = ensureSearchPanel();
+    const query = (panel._input.value || "").trim();
+    if (!query) {
+      panel._status.textContent = "Type a song title or artist first.";
+      return;
+    }
+    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
+      panel._status.textContent = "Search unavailable. Reload Aurora Lyrics and try again.";
+      return;
+    }
+    const requestId = ++searchRequestSeq;
+    if (searchAbortController) searchAbortController.abort();
+    const controller = new AbortController();
+    searchAbortController = controller;
+    panel._status.textContent = "Searching…";
+    panel._results.replaceChildren();
+
+    const params = new URLSearchParams({ q: query });
+    try {
+      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_SEARCH_API}?${params.toString()}`);
+      if (controller.signal.aborted || requestId !== searchRequestSeq) return;
+      searchAbortController = null;
+      if (!response.ok) throw new Error("LRCLIB search returned HTTP " + response.status);
+      const list = Array.isArray(response.data) ? response.data : [];
+      if (!list.length) {
+        panel._status.textContent = "No results found.";
+        return;
+      }
+      panel._status.textContent = `${list.length} result${list.length === 1 ? "" : "s"} — pick one to load.`;
+      list.slice(0, 25).forEach((item) => {
+        panel._results.appendChild(makeSearchResultRow(item, panel._remember.checked, panel._status));
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      if (requestId !== searchRequestSeq) return;
+      searchAbortController = null;
+      panel._status.textContent = "Search failed. Try again.";
+      console.warn("[SpicyLyrics] manual lyric search failed:", error);
+    }
+  }
+
+  function makeSearchResultRow(item, remember, status) {
+    const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
+    const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
+    const hasSync = !!item.syncedLyrics;
+    const hasPlain = !!item.plainLyrics;
+    const metaBits = [item.artistName, item.albumName].filter(Boolean);
+    if (!hasSync && hasPlain) metaBits.push("unsynced");
+    const meta = h("span", { class: "ym-sl-search-meta", text: metaBits.join(" · ") });
+    row.append(name, meta);
+    if (hasSync || hasPlain) {
+      // Both synced and plain matches are now loadable. Plain ones render as a
+      // static, already-filled set with no karaoke sweep (AJ, 2026-09-18).
+      if (!hasSync) {
+        row.classList.add("no-sync-available");
+        row.title = "Load unsynced lyrics (no timestamps)";
+      }
+      row.addEventListener("click", () => applySearchResult(item, remember, status));
+    } else {
+      row.classList.add("no-sync");
+      row.disabled = true;
+      row.title = "No lyrics for this match";
+    }
+    return row;
+  }
+
+  function applySearchResult(item, remember, status) {
+    const track = getCurrentTrack();
+    const durationMs = track ? Number(track.durationMs) : 0;
+    const key = track ? getTrackKey(track) : "";
+    loadLRCLyrics(item, durationMs);
+    cacheLRCLyrics(key, item);
+    if (remember && key) cacheLyricsPersistent(key, item);
+    const isUnsynced = !item.syncedLyrics && item.plainLyrics;
+    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (remembered for this track)" : ""}.`;
+    toggleSearchPanel(false);
+  }
+
+  async function syncTrackLyrics() {
+    const track = getCurrentTrack();
+    const key = getTrackKey(track);
+    if (!key) return;
+
+    const positionMs = window.YTMod && window.YTMod.player
+      ? window.YTMod.player.getPositionMs()
+      : null;
+    const durationMs = Number(track.durationMs);
+    const restartedTemporaryTrack =
+      manualLyricsTrackKey === key &&
+      lastObservedTrackKey === key &&
+      Number.isFinite(positionMs) &&
+      Number.isFinite(lastObservedPositionMs) &&
+      Number.isFinite(durationMs) &&
+      durationMs > 0 &&
+      lastObservedPositionMs >= durationMs * 0.9 &&
+      positionMs < 5000;
+
+    lastObservedTrackKey = key;
+    lastObservedPositionMs = positionMs;
+
+    // A *temporary* manual upload should fall back to the API-synced lyrics when
+    // the same track is replayed. A *permanent* upload must survive the restart,
+    // so we leave currentTrackKey alone and let the existing TTML DOM persist.
+    if (restartedTemporaryTrack && !manualLyricsIsPermanent) {
+      manualLyricsTrackKey = "";
+      currentTrackKey = "";
+    }
+    if (key === currentTrackKey) return;
+
+    currentTrackKey = key;
+    prefetchNextTrackLyrics();
+    loadVideoOffsetForTrack(track);
+    refreshTrack();
+    if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {
+      manualLyricsTrackKey = "";
+    }
+    if (manualLyricsTrackKey === key) return;
+
+    if (activeTrackAbort) {
+      activeTrackAbort.abort();
+      activeTrackAbort = null;
+    }
+    const requestId = ++trackRequestSeq;
+    showLyricsMessage("Loading synced lyrics…");
+
+    let savedTTML = null;
+    try {
+      savedTTML = await getPermanentTTML(key);
+    } catch (error) {
+      console.warn("[SpicyLyrics] Could not read permanent TTML:", error);
+    }
+    if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
+
+    if (savedTTML) {
+      if (loadTTML(savedTTML, "external")) return;
+      try {
+        await removePermanentTTML(key);
+      } catch (error) {
+        console.warn("[SpicyLyrics] Could not remove invalid permanent TTML:", error);
+      }
+      if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
+    }
+
+    manualLyricsIsPermanent = false;
+    refreshPermanentDeleteState();
+    fetchLRCLyrics(track, key);
+  }
+
+  /* ===================== lyric DOM construction ===================== */
+
+  function makeLetterGroup(word) {
+    const start = word.StartTime * 1000;
+    const rawEnd = word.EndTime * 1000;
+    const letterEnd = Math.max(start + 1, rawEnd - 250);
+    const letterTotal = Math.max(1, letterEnd - start);
+    const group = h("div", { class: "letterGroup" });
+    const letters = [];
+    const chars = Array.from(word.Text);
+    const duration = letterTotal / Math.max(chars.length, 1);
+
+    chars.forEach((char, index) => {
+      const isSpace = char.trim().length === 0;
+      const letter = h("span", { class: "letter Emphasis", text: char });
+      const letterStart = start + index * duration;
+      const letterEnd = letterStart + duration;
+      letter.style.setProperty("--gradient-position", "-20%");
+      letter.style.setProperty("--text-shadow-opacity", "0%");
+      letter.style.setProperty("--text-shadow-blur-radius", "4px");
+      letter.style.setProperty("--ym-sl-base-scale", "0.95");
+      letter.style.transform = "translateY(calc(var(--DefaultLyricsSize) * 0.02))";
+      if (index === chars.length - 1) letter.classList.add("LastLetterInWord");
+      // Whitespace inside an inline-block collapses to a 0px box, which glues
+      // multi-word syllables (e.g. "Watch this") together. Tag it so the
+      // stylesheet can keep the space rendered. Mirrors upstream Emphasize.ts.
+      if (isSpace) letter.classList.add("SpaceLetter");
+      group.appendChild(letter);
+      letters.push({
+        HTMLElement: letter,
+        StartTime: letterStart,
+        EndTime: letterEnd,
+        AnimatorStore: null,
+      });
+    });
+
+    const model = {
+      HTMLElement: group,
+      Text: word.Text,
+      StartTime: start,
+      EndTime: rawEnd,
+      TotalTime: Math.max(1, rawEnd - start),
+      LetterGroup: true,
+      Letters: letters,
+      AnimatorStore: null,
+    };
+    return model;
+  }
+
+  /* ===================== Romanization (JP + KR) ===================== */
+  // Rule-based kana -> romaji and Hangul -> romaja. Display-only, computed once
+  // at lyric build time (see appendRomaji / buildRendererLines), so it adds no
+  // per-frame or per-letter cost. No dictionary, no network, no bundle bloat.
+  // Chinese pinyin is intentionally excluded (it needs a dictionary) — see notes.
+
+  const HIRA_BASE = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわゐゑをん";
+  const HIRA_ROMA = ["a","i","u","e","o","ka","ki","ku","ke","ko","sa","shi","su","se","so","ta","chi","tsu","te","to","na","ni","nu","ne","no","ha","hi","fu","he","ho","ma","mi","mu","me","mo","ya","yu","yo","ra","ri","ru","re","ro","wa","wi","we","wo","n"];
+  const KATA_BASE = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヰヱヲン";
+
+  const KANA_MAP = {};
+  function dakutenize(roma) {
+    if (roma === "shi") return "ji";
+    if (roma === "chi") return "ji";
+    if (roma === "tsu") return "zu";
+    if (roma === "fu") return "bu";
+    const dm = { k: "g", s: "z", t: "d", h: "b" };
+    const c = roma[0];
+    return dm[c] ? dm[c] + roma.slice(1) : roma;
+  }
+  function handakutenize(roma) {
+    if (roma === "fu") return "pu";
+    return roma[0] === "h" ? "p" + roma.slice(1) : roma;
+  }
+  function buildKanaMap() {
+    for (let i = 0; i < HIRA_BASE.length; i++) {
+      const k = HIRA_BASE[i];
+      const r = HIRA_ROMA[i];
+      KANA_MAP[k] = r;
+      const cp = k.codePointAt(0);
+      const c0 = r[0];
+      if (c0 === "k" || c0 === "s" || c0 === "t" || c0 === "h" || c0 === "f") {
+        KANA_MAP[String.fromCodePoint(cp + 1)] = dakutenize(r);
+        if (c0 === "h" || c0 === "f") KANA_MAP[String.fromCodePoint(cp + 2)] = handakutenize(r);
+      }
+    }
+    for (let i = 0; i < KATA_BASE.length; i++) {
+      const k = KATA_BASE[i];
+      const r = HIRA_ROMA[i];
+      KANA_MAP[k] = r;
+      const cp = k.codePointAt(0);
+      const c0 = r[0];
+      if (c0 === "k" || c0 === "s" || c0 === "t" || c0 === "h" || c0 === "f") {
+        KANA_MAP[String.fromCodePoint(cp + 1)] = dakutenize(r);
+        if (c0 === "h" || c0 === "f") KANA_MAP[String.fromCodePoint(cp + 2)] = handakutenize(r);
+      }
+    }
+    Object.assign(KANA_MAP, {
+      "ぁ": "a", "ぃ": "i", "ぅ": "u", "ぇ": "e", "ぉ": "o",
+      "ゃ": "ya", "ゅ": "yu", "ょ": "yo", "ゎ": "wa", "ゕ": "ka", "ゖ": "ka",
+      "ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
+      "ャ": "ya", "ュ": "yu", "ョ": "yo", "ヮ": "wa", "ヵ": "ka", "ヶ": "ka",
+    });
+  }
+  buildKanaMap();
+
+  const SMALL_Y = { "ゃ": "a", "ゅ": "u", "ょ": "o", "ャ": "a", "ュ": "u", "ョ": "o" };
+  function isKanaCode(cp) {
+    return (cp >= 0x3040 && cp <= 0x309f) || (cp >= 0x30a0 && cp <= 0x30ff);
+  }
+  function isSmallYKana(ch) {
+    return Object.prototype.hasOwnProperty.call(SMALL_Y, ch);
+  }
+
+  // Hangul -> Revised Romanization (initial + medial + final jamo).
+  const CHOSEONG = ["g","kk","n","d","tt","r","m","b","pp","s","ss","","j","jj","ch","k","t","p","h"];
+  const JUNGSEONG = ["a","ae","ya","yae","eo","e","yeo","ye","o","wa","wae","oe","yo","u","wo","we","wi","yu","eu","ui","i"];
+  const JONGSEONG = ["","g","k","g","n","n","n","t","l","lk","lm","l","l","l","l","lp","m","b","p","s","ss","ng","j","ch","k","t","p","h"];
+  function hangulToRomaja(cp) {
+    const SBase = 0xac00, NCount = 588, TCount = 28;
+    const idx = cp - SBase;
+    const L = Math.floor(idx / NCount);
+    const V = Math.floor((idx % NCount) / TCount);
+    const T = idx % TCount;
+    let s = CHOSEONG[L] + JUNGSEONG[V];
+    if (T > 0) s += JONGSEONG[T];
+    return s;
+  }
+
+  function romanize(text) {
+    if (!text) return "";
+    const out = [];
+    const chars = Array.from(text);
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      const cp = ch.codePointAt(0);
+      if (cp >= 0xac00 && cp <= 0xd7a3) {
+        out.push(hangulToRomaja(cp));
+        continue;
+      }
+      if (!isKanaCode(cp)) {
+        out.push(ch);
+        continue;
+      }
+      // Grammatical particles は/へ/を read as wa/e/o when they close a kana run
+      // (followed by a non-kana or end of string). Still rule-based, no dictionary.
+      if (ch === "は" || ch === "へ" || ch === "を") {
+        const nextCh = chars[i + 1];
+        const nextKana = nextCh && isKanaCode(nextCh.codePointAt(0));
+        if (!nextKana) {
+          out.push(ch === "は" ? "wa" : ch === "へ" ? "e" : "o");
+          continue;
+        }
+      }
+      // sokuon (small tsu) -> double the next syllable's first consonant
+      if (ch === "っ" || ch === "ッ") {
+        const nr = chars[i + 1] ? KANA_MAP[chars[i + 1]] : null;
+        out.push(nr ? nr[0] : "tsu");
+        continue;
+      }
+      // chōonpu (long vowel mark) -> repeat the previous vowel
+      if (ch === "ー" || ch === "〜" || ch === "ｰ") {
+        const prev = out[out.length - 1];
+        if (prev && /[aiueo]$/.test(prev)) out[out.length - 1] = prev + prev[prev.length - 1];
+        continue;
+      }
+      const rom = KANA_MAP[ch];
+      if (!rom) { out.push(ch); continue; }
+      // small y-kana merges with the previous syllable ending in 'i'
+      if (isSmallYKana(ch) && out.length) {
+        const prev = out[out.length - 1];
+        if (prev.endsWith("i") && !prev.endsWith("ei")) {
+          const consonant = prev.slice(0, -1);
+          const yv = SMALL_Y[ch];
+          out[out.length - 1] = /^(sh|ch|j)$/.test(consonant) ? consonant + yv : consonant + "y" + yv;
+          continue;
+        }
+      }
+      out.push(rom);
+    }
+    return out.join("");
+  }
+
+  function appendRomaji(lineElement, syllables) {
+    if (!currentSettings.romanizationEnabled) return;
+    if (!syllables || !syllables.length) return;
+    const plain = syllables.map((w) => w.Text).join("");
+    if (!plain.trim()) return;
+    // Reading kanji needs a dictionary (out of scope), so strip Han characters
+    // first and show only the pronunciation of the readable kana underneath the
+    // original line. Pure-kana and Hangul lines still get full romanization.
+    const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
+    if (!kanaOnly.trim()) return;
+    const rom = romanize(kanaOnly);
+    if (!rom || rom === kanaOnly) return;
+    if (!/[A-Za-z]/.test(rom)) return;
+    lineElement.appendChild(h("div", { class: "romaji", text: rom }));
+  }
+
+  function makeWord(word, isLast, lineTimed, noKaraoke) {
+    // An unsynced line (no real per-word timing) must not spawn syllable/letter
+    // karaoke springs — that is what tanks FPS on partially-synced TTML imports
+    // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
+    // static block. A LineTimed (LRCLIB) line is left untouched: its letter
+    // reveal is the intended, cheap behaviour.
+    const suppressKaraoke = !!(noKaraoke && !lineTimed);
+    const start = word.StartTime * 1000;
+    const end = Math.max(start + 1, word.EndTime * 1000);
+    const duration = end - start;
+    const letterCapable =
+      !suppressKaraoke &&
+      !word.DisableLetterAnimation &&
+      !word.disableLetterAnimation &&
+      isLetterCapable(word.Text, duration);
+    const element = letterCapable
+      ? makeLetterGroup(word)
+      : h("span", { class: "word", text: word.Text });
+
+    if (!letterCapable) {
+      if (staticLyricsActive) {
+        // Static (unsynced) lyrics: paint fully filled immediately so there is
+        // no one-frame dim flash before animateWord confirms the Sung state.
+        element.style.setProperty("--gradient-position", "100%");
+        element.style.setProperty("--text-shadow-opacity", "0%");
+        element.style.setProperty("--text-shadow-blur-radius", "4px");
+        element.style.setProperty("--ym-sl-base-scale", "1");
+        element.style.transform = "translateY(0)";
+      } else {
+        element.style.setProperty("--gradient-position", "-20%");
+        element.style.setProperty("--text-shadow-opacity", "0%");
+        element.style.setProperty("--text-shadow-blur-radius", "4px");
+        element.style.setProperty("--ym-sl-base-scale", lineTimed ? "1" : "0.95");
+        element.style.transform = lineTimed
+          ? "translateY(0)"
+          : "translateY(calc(var(--DefaultLyricsSize) * 0.01))";
+      }
+    }
+    const elementNode = letterCapable ? element.HTMLElement : element;
+    if (word.IsPartOfWord) elementNode.classList.add("PartOfWord");
+    if (isLast) {
+      elementNode.classList.add("LastWordInLine");
+    }
+
+    return letterCapable
+      ? element
+      : {
+          HTMLElement: element,
+          Text: word.Text,
+          StartTime: start,
+          EndTime: end,
+          TotalTime: duration,
+          IsPartOfWord: !!word.IsPartOfWord,
+          LineTimed: !!lineTimed,
+          NoKaraoke: suppressKaraoke,
+          LetterGroup: false,
+          AnimatorStore: null,
+        };
+  }
+
+  function appendWords(lineElement, lineModel, words, background, noKaraoke) {
+    let currentWordGroup = null;
+    words.forEach((word, wordIndex) => {
+      const wordModel = makeWord(word, wordIndex === words.length - 1, lineModel.LineTimed, noKaraoke);
+      if (background) wordModel.BGWord = true;
+      if (background) {
+        wordModel.BGWord = true;
+        wordModel.HTMLElement.classList.add("bg-word");
+      }
+      const previous = words[wordIndex - 1];
+      const belongsToGroupedWord =
+        word.IsPartOfWord || (previous && previous.IsPartOfWord && currentWordGroup);
+
+      if (belongsToGroupedWord) {
+        if (!currentWordGroup) {
+          currentWordGroup = h("span", { class: "word-group" });
+          lineElement.appendChild(currentWordGroup);
+        }
+        currentWordGroup.appendChild(wordModel.HTMLElement);
+        if (!word.IsPartOfWord && previous && previous.IsPartOfWord) {
+          currentWordGroup = null;
+        }
+      } else {
+        currentWordGroup = null;
+        lineElement.appendChild(wordModel.HTMLElement);
+      }
+      lineModel.Syllables.Lead.push(wordModel);
+    });
+  }
+
+  function makeDotLine(startMs, endMs, oppositeAligned) {
+    const lineElement = h("div", { class: "line musical-line" });
+    if (oppositeAligned) lineElement.classList.add("OppositeAligned");
+    const dotGroup = h("div", { class: "dotGroup" });
+    const total = Math.max(1, endMs - startMs);
+    const base = total / 3;
+    const padding = -((PRE_HIDDEN_DOT_LINE_MS + 50) / 3);
+    const dotEnds = [
+      Math.max(startMs, startMs + base + padding),
+      Math.max(startMs, startMs + base * 2 + padding * 2),
+      Math.max(startMs, startMs + total - (PRE_HIDDEN_DOT_LINE_MS + 50)),
+    ];
+    const words = [];
+    let dotStart = startMs;
+
+    for (let i = 0; i < 3; i++) {
+      const dot = h("span", { class: "word dot", text: "•" });
+      dotGroup.appendChild(dot);
+      words.push({
+        HTMLElement: dot,
+        Text: "•",
+        StartTime: dotStart,
+        EndTime: Math.max(dotStart + 1, dotEnds[i]),
+        TotalTime: Math.max(1, dotEnds[i] - dotStart),
+        Dot: true,
+        AnimatorStore: null,
+      });
+      dotStart = dotEnds[i];
+    }
+    lineElement.appendChild(dotGroup);
+    return {
+      HTMLElement: lineElement,
+      StartTime: startMs,
+      EndTime: endMs,
+      TotalTime: total,
+      DotLine: true,
+      Syllables: { Lead: words },
+      AnimatorStore: null,
+    };
+  }
+
+  function buildCreditsFooter(names) {
+    const footer = h("div", { class: "ym-sl-credits" });
+    footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
+    const namesEl = h("div", { class: "ym-sl-credits-names" });
+    names.forEach((name, index) => {
+      if (index) namesEl.appendChild(document.createTextNode(", "));
+      namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
+    });
+    footer.appendChild(namesEl);
+    return footer;
+  }
+
+  /* ---- bus publishing -------------------------------------------------------
+     Other add-ons (PiP lyrics, and anything later) must not scrape this panel's
+     DOM — that is what makes cross-add-on work fragile. So publish the parsed
+     data and the active index on YTMod.bus instead. Guarded, so this is a no-op
+     when the host does not expose a bus. Payloads are plain data, times in ms.
+  */
+  /* Publish the animation machinery itself, not just the data. A consumer that
+     re-implements these would drift from the panel the moment a spring or spline
+     is tuned here; handing over the actual objects means the PiP window runs
+     literally the same spring integrator and the same curves. The blend helpers
+     read currentSettings, so the user's animation-intensity settings come along
+     for free. */
+  let rendererKitPublished = false;
+  function publishRendererKit() {
+    if (rendererKitPublished) return;
+    if (!window.YTMod || !window.YTMod.bus) return;
+    rendererKitPublished = true;
+    window.YTMod.bus.emit("lyrics:renderer", {
+      Spring: Spring,
+      easeSinOut: easeSinOut,
+      clamp: clamp,
+      splines: {
+        ScaleSpline: ScaleSpline,
+        LetterScaleSpline: LetterScaleSpline,
+        YOffsetSpline: YOffsetSpline,
+        LetterYOffsetSpline: LetterYOffsetSpline,
+        GlowSpline: GlowSpline,
+      },
+      createLetterSprings: createLetterSprings,
+      createWordSprings: createWordSprings,
+      blendSyllableAnimation: blendSyllableAnimation,
+      blendVerticalAnimation: blendVerticalAnimation,
+      storeNeedsAnimation: storeNeedsAnimation,
+      setStyleIfChanged: setStyleIfChanged,
+      // The compositor hint matters as much as the springs: without it the
+      // consumer animates unpromoted and reads as low frame rate even when it is
+      // stepping at full rate.
+      setAnimatingHint: setAnimatingHint,
+      HINT_ON: HINT_ON,
+    });
+    // Observable diagnostic: a consumer that cannot see this is running without
+    // the springs. Check <html data-ym-lyric-renderer="kit">.
+    try {
+      document.documentElement.dataset.ymLyricRenderer = "kit";
+    } catch (e) {}
+  }
+
+  function publishLyricLines(content) {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    publishRendererKit(); // before the lines, so a consumer has the springs ready
+    let track = null;
+    try { track = typeof getCurrentTrack === "function" ? getCurrentTrack() : null; } catch (e) {}
+
+    // One syllable -> the same shape makeWord()/makeLetterGroup() consume, so a
+    // consumer can reproduce the exact markup: .word vs .letterGroup > .letter,
+    // .PartOfWord, .LastWordInLine, .SpaceLetter.
+    const mapWords = (syllables) => {
+      const list = syllables || [];
+      return list.map((w, index) => {
+        const startMs = w.StartTime * 1000;
+        const endMs = Math.max(startMs + 1, w.EndTime * 1000);
+        let letterCapable = false;
+        try {
+          letterCapable =
+            !w.DisableLetterAnimation &&
+            !w.disableLetterAnimation &&
+            typeof isLetterCapable === "function" &&
+            isLetterCapable(w.Text, endMs - startMs);
+        } catch (e) {}
+        return {
+          text: w.Text || "",
+          startMs,
+          endMs,
+          letterCapable: !!letterCapable,
+          isPartOfWord: !!w.IsPartOfWord,
+          isLast: index === list.length - 1,
+        };
+      });
+    };
+
+    const lines = [];
+    (content || []).forEach((line) => {
+      const lead = line && line.Lead;
+      if (!lead || !lead.Syllables || !lead.Syllables.length) return;
+      lines.push({
+        text: lead.Syllables.map((w) => w.Text || "").join(""),
+        startMs: lead.StartTime * 1000,
+        endMs: lead.EndTime * 1000,
+        lineTimed: !!line.LineTimed,
+        opposite: !!line.OppositeAligned,
+        words: mapWords(lead.Syllables),
+        // Background vocals render as their own .line.bg-line elements right
+        // after the main line, with .bg-word children.
+        background: (line.Background || []).map((bg) => ({
+          startMs: bg.StartTime * 1000,
+          endMs: bg.EndTime * 1000,
+          words: mapWords(bg.Syllables),
+        })),
+      });
+    });
+    window.YTMod.bus.emit("lyrics:lines", {
+      trackKey: currentTrackKey || null,
+      videoId: track ? track.videoId : null,
+      title: track ? track.title : null,
+      artist: track ? track.artist : null,
+      lines,
+    });
+    // Cheap observable diagnostic: if the bus ever stops publishing, this stays
+    // stale. Inspect <html data-ym-lyric-lines="..."> to check.
+    try {
+      document.documentElement.dataset.ymLyricLines = String(lines.length);
+      let bgRuns = 0;
+      lines.forEach((l) => { bgRuns += (l.background || []).length; });
+      document.documentElement.dataset.ymLyricBg = String(bgRuns);
+    } catch (e) {}
+  }
+
+  function publishActiveLine(index) {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    window.YTMod.bus.emit("lyrics:active", { trackKey: currentTrackKey || null, index });
+  }
+
+  /* The resolved sync state a consumer needs to re-derive the lyric clock itself.
+     The panel shifts the lyric position by getOffsetForPosition(positionMs) every
+     frame (see animate()); a consumer that reads the raw player clock — the PiP
+     window, which cannot see the panel's internal offset vars — must apply the
+     SAME shift or every line and word lands that offset early/late. Published on
+     every change and retained by the bus, so a PiP opened mid-track replays it. */
+  function publishSyncState() {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    window.YTMod.bus.emit("lyrics:sync", {
+      offsetMs: getActiveOffsetMs(),
+      pauseSync: pauseSync ? { line: pauseSync.line, offset: pauseSync.offset } : null,
+    });
+    // Observability: confirm the sync topic is firing and what it carries, without
+    // dumping the console. Inspect <html data-ym-lyric-sync="...">.
+    try {
+      document.documentElement.dataset.ymLyricSync =
+        (pauseSync ? "pause+" : "") + formatOffset(getActiveOffsetMs());
+    } catch (e) {}
+  }
+
+  function buildRendererLines(content) {
+    lastRendererContent = content;
+    publishLyricLines(content);
+    if (lineScrollRaf) {
+      cancelAnimationFrame(lineScrollRaf);
+      lineScrollRaf = 0;
+    }
+    modelLines = [];
+    lineElements = [];
+    cachedFirstRealLyricStartMs = Infinity;
+    cachedLastRealLyricEndMs = 0;
+    pendingAnimationLines.clear();
+    scrollCandidateIndices = [];
+    manualScrollActive = false;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    setJumpButtonVisible(false);
+    linesRoot.replaceChildren();
+    const scrollContainer = linesRoot.parentElement;
+    const hasDuetLines = content.some((line) => line.OppositeAligned);
+    if (scrollContainer) {
+      scrollContainer.classList.toggle("HasDuetLines", hasDuetLines);
+    }
+
+    const addLine = (lineModel) => {
+      lineModel.RenderState = null;
+      modelLines.push(lineModel);
+      lineElements.push(lineModel.HTMLElement);
+      if (lineModel.isPrimary || lineModel.DotLine) scrollCandidateIndices.push(modelLines.length - 1);
+      linesRoot.appendChild(lineModel.HTMLElement);
+    };
+
+    const firstStart = content[0] && content[0].Lead ? content[0].Lead.StartTime * 1000 : 0;
+    if (firstStart >= GAP_DOTS_AFTER_SECONDS * 1000) {
+      addLine(makeDotLine(0, firstStart, !!content[0].OppositeAligned));
+    }
+
+    content.forEach((contentLine, index) => {
+      const lead = contentLine.Lead;
+      if (!lead || !lead.Syllables || !lead.Syllables.length) return;
+      cachedFirstRealLyricStartMs = Math.min(cachedFirstRealLyricStartMs, lead.StartTime * 1000);
+      cachedLastRealLyricEndMs = Math.max(cachedLastRealLyricEndMs, lead.EndTime * 1000);
+      // Static (unsynced) lines get the .static class so CSS can paint them at
+      // full opacity / alpha-1 regardless of the per-state Sung/NotSung dim
+      // (AJ, 2026-09-18).
+      const lineElement = h("div", {
+        class: staticLyricsActive ? "line static" : "line",
+      });
+      const lineModel = {
+        HTMLElement: lineElement,
+        StartTime: lead.StartTime * 1000,
+        EndTime: lead.EndTime * 1000,
+        TotalTime: (lead.EndTime - lead.StartTime) * 1000,
+        Syllables: { Lead: [] },
+        isPrimary: true,
+        LineTimed: !!contentLine.LineTimed,
+        AnimatorStore: null,
+      };
+      if (lineModel.LineTimed) {
+        lineElement.classList.add("line-timed");
+      }
+      if (contentLine.OppositeAligned) {
+        lineElement.classList.add("OppositeAligned");
+      }
+      if (isRtl(lead.Syllables.map((word) => word.Text).join(" "))) {
+        lineElement.classList.add("rtl");
+      }
+
+      // A line with neither line-level sync nor real span timing is unsynced:
+      // render it as a static block (no syllable/letter karaoke).
+      const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
+      appendWords(lineElement, lineModel, lead.Syllables, false, noKaraoke);
+      appendRomaji(lineElement, lead.Syllables);
+      lineElement.addEventListener("click", () => {
+        // While picking a pause sync point a click selects, it does not seek.
+        if (pausePickMode) {
+          setPauseSyncLine(lineModel);
+          return;
+        }
+        if (window.YTMod && window.YTMod.player) {
+          window.YTMod.player.seek(Math.max(0, lineModel.StartTime + getOffsetForLine(lineModel.StartTime)));
+        }
+      });
+      addLine(lineModel);
+
+      for (const background of contentLine.Background || []) {
+        if (!background.Syllables || !background.Syllables.length) continue;
+        const backgroundElement = h("div", { class: "line bg-line" });
+        const backgroundModel = {
+          HTMLElement: backgroundElement,
+          StartTime: background.StartTime * 1000,
+          EndTime: background.EndTime * 1000,
+          TotalTime: (background.EndTime - background.StartTime) * 1000,
+          Syllables: { Lead: [] },
+          isPrimary: false,
+          BGLine: true,
+          AnimatorStore: null,
+        };
+        if (isRtl(background.Syllables.map((word) => word.Text).join(" "))) {
+          backgroundElement.classList.add("rtl");
+        }
+        if (contentLine.OppositeAligned) {
+          backgroundElement.classList.add("OppositeAligned");
+        }
+        appendWords(backgroundElement, backgroundModel, background.Syllables, true, noKaraoke);
+        appendRomaji(backgroundElement, background.Syllables);
+        backgroundElement.addEventListener("click", () => {
+          // Background vocals are never valid sync points, so ignore clicks in
+          // pick mode rather than silently picking the wrong line.
+          if (pausePickMode) return;
+          if (window.YTMod && window.YTMod.player) {
+            window.YTMod.player.seek(backgroundModel.StartTime);
+          }
+        });
+        addLine(backgroundModel);
+      }
+
+      const next = content[index + 1] && content[index + 1].Lead;
+      if (next) {
+        const gapStart = lead.EndTime * 1000;
+        const gapEnd = next.StartTime * 1000;
+        if (gapEnd - gapStart >= GAP_DOTS_AFTER_SECONDS * 1000) {
+          addLine(makeDotLine(
+            gapStart,
+            gapEnd,
+            !!content[index + 1].OppositeAligned
+          ));
+        }
+      }
+    });
+
+    if (currentSongwriters.length) {
+      linesRoot.appendChild(buildCreditsFooter(currentSongwriters));
+    }
+
+    // Re-apply the pause sync marker: the line elements were just rebuilt, so any
+    // class on the old nodes is gone.
+    markPauseSyncLine();
+    lineScrollEl.classList.remove("offline");
+    // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
+    // from here through the song (AJ, 2026-09-18).
+    if (staticLyricsActive && lineScrollEl) {
+      lineScrollEl.scrollTop = 0;
+    }
+  }
+
+  function loadLyrics(xml) {
+    // A freshly imported file invalidates any pause sync point: it was measured
+    // against the previous TTML's line times, so keeping it would silently
+    // mis-sync. Drop it (AJ's call, 2026-09-15).
+    pauseSync = null;
+    pausePickMode = false;
+    return loadTTML(xml, "imported");
+  }
+
+  // Only touches the paused/disabled state of the pick button. Kept separate from
+  // refreshPauseSyncControl() because this runs on the 500ms housekeeping tick and
+  // must not re-walk every line.
+  function refreshPausePickButtonState() {
+    const ui = pauseUi;
+    if (!ui || !ui.pick) return;
+    const paused = isPlaybackPaused();
+    if (ui.pick.disabled === !paused) return;
+    ui.pick.disabled = !paused;
+    ui.pick.title = paused
+      ? "Pick the line that plays after the pause"
+      : "Pause the video first";
+  }
+
+  function escapeDownloadName(value) {
+    return String(value || "lyrics")
+      .replace(/[<>:"/\\|?*\x00-\x1F]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 100) || "lyrics";
+  }
+
+  function parseExportTime(value) {
+    const seconds = Number(value) / 1000;
+    if (!Number.isFinite(seconds)) return "0:00.000";
+    const safe = Math.max(0, seconds);
+    const minutes = Math.floor(safe / 60);
+    const remainder = (safe - minutes * 60).toFixed(3).padStart(6, "0");
+    return `${minutes}:${remainder}`;
+  }
+
+  function shiftTTMLSync(xml, offsetMs) {
+    if (!offsetMs) return xml;
+    return String(xml).replace(/(\b(?:begin|end|itunes:begin|itunes:end)\s*=\s*["'])([^"']+)(["'])/gi,
+      (match, prefix, time, suffix) => {
+        const parts = String(time || "").split(":");
+        if (parts.length < 2) return match;
+        const seconds = Number(parts.pop());
+        const minutes = Number(parts.pop());
+        const hours = parts.length ? Number(parts.pop()) : 0;
+        if (![seconds, minutes, hours].every(Number.isFinite)) return match;
+        const shifted = Math.max(0, (hours * 3600 + minutes * 60 + seconds) * 1000 + offsetMs);
+        return `${prefix}${parseExportTime(shifted)}${suffix}`;
+      });
+  }
+
+  function exportImportedTTML(withSync) {
+    if (currentTTMLSource !== "imported" || !importedTTMLXml) {
+      showLyricsMessage("Export is available only for imported TTML files.");
+      return;
+    }
+    const offset = withSync ? getActiveOffsetMs() : 0;
+    const output = withSync ? shiftTTMLSync(importedTTMLXml, offset) : importedTTMLXml;
+    const track = getCurrentTrack();
+    const title = escapeDownloadName(track && track.title ? track.title : "lyrics");
+    const suffix = withSync && offset ? "-synced" : "";
+    const blob = new Blob([output], { type: "application/ttml+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${title}${suffix}.ttml`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function readFile(file, importMode) {
+    const reader = new FileReader();
+    const mode = importMode === "permanent" ? "permanent" : "temporary";
+    const trackKey = currentTrackKey || getTrackKey(getCurrentTrack());
+    reader.onload = async () => {
+      const xml = String(reader.result || "");
+      if (!loadLyrics(xml)) return;
+      importedTTMLXml = xml;
+      currentTTMLSource = "imported";
+      setTTMLExportVisibility();
+
+      if (activeTrackAbort) {
+        activeTrackAbort.abort();
+        activeTrackAbort = null;
+      }
+      ++trackRequestSeq;
+
+      if (mode === "permanent") {
+        manualLyricsIsPermanent = true;
+        manualLyricsTrackKey = "";
+        try {
+          await savePermanentTTML(trackKey, xml);
+        } catch (error) {
+          manualLyricsIsPermanent = false;
+          manualLyricsTrackKey = trackKey;
+          console.warn("[SpicyLyrics] Could not save permanent TTML:", error);
+        }
+      } else {
+        manualLyricsIsPermanent = false;
+        manualLyricsTrackKey = trackKey;
+      }
+      refreshPermanentDeleteState();
+    };
+    reader.readAsText(file);
+  }
+
+  /* ===================== animation ===================== */
+
+  // Returns true when at least one letter actually moved this frame.
+  //
+  // TTML is where the frame budget goes. A long word becomes one span per
+  // character, each with its own three springs and five animated custom
+  // properties. A ten-word line with four letter-capable words is ~40 letter
+  // spans, and the original loop stepped every one of them and rebuilt its
+  // style strings on every frame even when the word was long since sung and
+  // every letter was sound asleep. That is roughly 200 style writes and 200
+  // throwaway strings per frame — over 12,000 a second — which is exactly why
+  // imported TTML runs at 30-40 FPS while line-synced LRCLIB lyrics hold ~110:
+  // LRCLIB lines produce a single LineTimed word with no letter spans at all.
+  //
+  // A letter only needs work when its own state changed or its springs are
+  // still settling. Everything else is skipped outright — no stepping, no
+  // template strings, no style writes. This is visually identical, because a
+  // resting letter was already producing byte-identical values every frame.
+  function animateLetters(word, wordState, lineState, positionMs, deltaTime) {
+    if (!word.Letters) return false;
+    let activeIndex = -1;
+    let activeProgress = 0;
+    if (wordState === "Active") {
+      for (let i = 0; i < word.Letters.length; i++) {
+        const letter = word.Letters[i];
+        if (getState(positionMs, letter.StartTime, letter.EndTime) === "Active") {
+          activeIndex = i;
+          activeProgress = getProgress(positionMs, letter.StartTime, letter.EndTime);
+          break;
+        }
+      }
+    }
+
+    let anyAwake = false;
+    const letters = word.Letters;
+    for (let index = 0; index < letters.length; index++) {
+      const letter = letters[index];
+      if (!letter.AnimatorStore) {
+        letter.AnimatorStore = createLetterSprings();
+        letter.AnimatorStore.Scale.SetGoal(LetterScaleSpline.at(0), true);
+        letter.AnimatorStore.YOffset.SetGoal(LetterYOffsetSpline.at(0), true);
+        letter.AnimatorStore.Glow.SetGoal(GlowSpline.at(0), true);
+      }
+
+      const letterState = getState(positionMs, letter.StartTime, letter.EndTime);
+      const restingScale = LetterScaleSpline.at(0);
+      const restingYOffset = LetterYOffsetSpline.at(0);
+      const restingGlow = GlowSpline.at(0);
+      let targetScale = restingScale;
+      let targetYOffset = restingYOffset;
+      let targetGlow = restingGlow;
+      let targetGradient = letterState === "Sung" ? 100 : -20;
+
+      if (activeIndex >= 0) {
+        // Keep neighboring letters on the active letter's phase. This is the
+        // original renderer's proximity motion and avoids upcoming letters
+        // drifting ahead on the word's broader progress.
+        const baseScale = LetterScaleSpline.at(activeProgress);
+        const baseYOffset = LetterYOffsetSpline.at(activeProgress);
+        const baseGlow = GlowSpline.at(activeProgress);
+        const distance = Math.abs(index - activeIndex);
+        const scaleFalloff = 1 / (1 + Math.pow(distance, 2.8));
+        const glowFalloff = 1 / (1 + distance * 0.9);
+        targetScale = restingScale + (baseScale - restingScale) * scaleFalloff;
+        targetYOffset = restingYOffset + (baseYOffset - restingYOffset) * scaleFalloff;
+        targetGlow = restingGlow + (baseGlow - restingGlow) * glowFalloff;
+        if (letterState === "Active" && index === activeIndex) {
+          targetGradient = -20 + 120 * easeSinOut(activeProgress);
+        }
+      } else if (letterState === "Sung") {
+        targetScale = LetterScaleSpline.at(1);
+        targetYOffset = LetterYOffsetSpline.at(1);
+        // Glow must rest at the same endpoint as a regular sung word
+        // (GlowSpline.at(1) ≈ 0). The previous GlowSpline.at(0.2) was the
+        // *active peak* of the spring (~1.34); with the per-letter
+        // multipliers (12 for blur, 185 for opacity) it produced a 20px
+        // white halo at ~full opacity. On a dark panel that halo fuses
+        // with the .85 gradient glyph and eats its edge contrast, so the
+        // long "bones" word read as fuzzy / dim against the crisp .85
+        // regular words next to it. Settling to the resting endpoint
+        // matches the regular-word glow and restores crisp brightness.
+        targetGlow = GlowSpline.at(1);
+      }
+
+      letter.AnimatorStore.Scale.SetGoal(blendSyllableAnimation(restingScale, targetScale));
+      letter.AnimatorStore.YOffset.SetGoal(blendVerticalAnimation(restingYOffset, targetYOffset));
+      letter.AnimatorStore.Glow.SetGoal(blendSyllableAnimation(restingGlow, targetGlow));
+
+      // Goals are current. If this letter's state did not change and its springs
+      // are already asleep, stepping it would reproduce exactly the values that
+      // are already on the element — so skip the stepping and all five writes.
+      const letterStateChanged = letter.LastState !== letterState;
+      letter.LastState = letterState;
+      if (!letterStateChanged && !storeNeedsAnimation(letter.AnimatorStore)) continue;
+      anyAwake = true;
+
+      const scale = letter.AnimatorStore.Scale.Step(deltaTime);
+      const yOffset = letter.AnimatorStore.YOffset.Step(deltaTime);
+      const glow = letter.AnimatorStore.Glow.Step(deltaTime);
+
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "transform",
+        `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset * 2}), 0)`,
+        0.001
+      );
+      setStyleIfChanged(letter.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+      setStyleIfChanged(letter.HTMLElement, "--gradient-position", `${targetGradient}%`, 0.1);
+      // Fill, colour and background-image are intentionally NOT written here.
+      // Letters follow the same stylesheet rules as regular words, so a
+      // letter-group word always matches its neighbours. Upstream Spicy Lyrics
+      // only animates --gradient-position, scale/transform and the glow
+      // variables on a letter; everything else is CSS.
+      setStyleIfChanged(letter.HTMLElement, "--text-shadow-blur-radius", `${4 + 12 * glow}px`, 0.5);
+      setStyleIfChanged(letter.HTMLElement, "--text-shadow-opacity", `${glow * 185}%`, 1);
+    }
+    return anyAwake;
+  }
+
+  /* ---- compositor hint management ------------------------------------------
+     `will-change` is a promise about what is ABOUT to change, not a decoration.
+     Declared permanently in CSS it forced a promoted compositor layer per element
+     -- 70 lines + 571 words + every letter on one 3:28 track -- and nothing ever
+     demoted them, so layer count and GPU raster memory only grew as a session ran.
+     Because these elements also repaint every frame anyway (text-shadow glow,
+     background-image gradient stops), the promotion bought no repaint saving
+     either: worst of both worlds.
+
+     So the hint is applied here, per element, only while its springs are awake,
+     and dropped the moment it settles. In steady state a handful of elements on
+     the active line carry it instead of the entire song. */
+  const HINT_ON = "transform, opacity";
+
+  function setAnimatingHint(element, animating) {
+    if (!element) return;
+    const want = animating ? HINT_ON : "";
+    // Cheap guard: this runs on the hot path for every animating word every
+    // frame, and re-writing an identical value still dirties style.
+    if (element.__ymWillChange === want) return;
+    element.__ymWillChange = want;
+    element.style.willChange = want;
+  }
+
+  // Called when a line leaves pendingAnimationLines, i.e. every spring on it has
+  // slept. Without this the hint set during animation would never be released and
+  // we would be back to a permanent promotion, just reached the slow way.
+  function releaseLineAnimationHints(line) {
+    const words = line && line.Syllables && line.Syllables.Lead;
+    if (!words) return;
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index];
+      setAnimatingHint(word.HTMLElement, false);
+      const letters = word.Letters;
+      if (!letters) continue;
+      for (let letterIndex = 0; letterIndex < letters.length; letterIndex++) {
+        setAnimatingHint(letters[letterIndex].HTMLElement, false);
+      }
+    }
+  }
+
+  function animateWord(word, lineState, positionMs, deltaTime) {
+    const state = getState(positionMs, word.StartTime, word.EndTime);
+    const progress = getProgress(positionMs, word.StartTime, word.EndTime);
+    const stateChanged = word.LastState !== state;
+    word.LastState = state;
+    if (stateChanged) {
+      word.HTMLElement.classList.toggle("WordNotSung", state === "NotSung");
+      word.HTMLElement.classList.toggle("WordSung", state === "Sung");
+    }
+
+    // No real per-word sync: show the line as a static block that lights up when
+    // active/sung instead of running syllable/letter karaoke springs — the
+    // dominant per-frame cost on partially-synced TTML imports (AJ, 2026-09-17).
+    if (word.NoKaraoke) {
+      const lit = state !== "NotSung";
+      setStyleIfChanged(word.HTMLElement, "--gradient-position", lit ? "100%" : "-20%", 0.1);
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", "1", 0.001);
+      setStyleIfChanged(word.HTMLElement, "transform", "translateY(0)", 0.001);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", "4px", 0.5);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", "0%", 1);
+      setAnimatingHint(word.HTMLElement, false);
+      return;
+    }
+
+    if (word.Dot) {
+      if (!word.AnimatorStore) {
+        word.AnimatorStore = createDotSprings();
+        word.AnimatorStore.Scale.SetGoal(DotScaleSpline.at(0), true);
+        word.AnimatorStore.YOffset.SetGoal(DotYOffsetSpline.at(0), true);
+        word.AnimatorStore.Glow.SetGoal(DotGlowSpline.at(0), true);
+        word.AnimatorStore.Opacity.SetGoal(DotOpacitySpline.at(0), true);
+      }
+      const targetScale = blendAnimation(
+        DotScaleSpline.at(0),
+        DotScaleSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetYOffset = blendAnimation(
+        DotYOffsetSpline.at(0),
+        DotYOffsetSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetGlow = blendAnimation(
+        DotGlowSpline.at(0),
+        DotGlowSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetOpacity = DotOpacitySpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0);
+      word.AnimatorStore.Scale.SetGoal(targetScale);
+      word.AnimatorStore.YOffset.SetGoal(targetYOffset);
+      word.AnimatorStore.Glow.SetGoal(targetGlow);
+      word.AnimatorStore.Opacity.SetGoal(targetOpacity);
+      if (!stateChanged && !storeNeedsAnimation(word.AnimatorStore)) {
+        setAnimatingHint(word.HTMLElement, false);
+        return;
+      }
+      setAnimatingHint(word.HTMLElement, true);
+      const scale = word.AnimatorStore.Scale.Step(deltaTime);
+      const yOffset = word.AnimatorStore.YOffset.Step(deltaTime);
+      const glow = word.AnimatorStore.Glow.Step(deltaTime);
+      const opacity = word.AnimatorStore.Opacity.Step(deltaTime);
+      setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001);
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+      setStyleIfChanged(word.HTMLElement, "opacity", String(opacity), 0.001);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", `${4 + 6 * glow}px`, 0.5);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${glow * 90}%`, 1);
+      return;
+    }
+
+    if (!word.AnimatorStore) {
+      word.AnimatorStore = createWordSprings();
+      word.AnimatorStore.Scale.SetGoal(word.LineTimed ? 1 : ScaleSpline.at(0), true);
+      word.AnimatorStore.YOffset.SetGoal(word.LineTimed ? 0 : YOffsetSpline.at(0), true);
+      word.AnimatorStore.Glow.SetGoal(GlowSpline.at(0), true);
+    }
+    const target = state === "Active" ? progress : state === "Sung" ? 1 : 0;
+    const targetScale = word.LineTimed
+      ? 1
+      : blendSyllableAnimation(ScaleSpline.at(0), ScaleSpline.at(target));
+    const targetYOffset = word.LineTimed
+      ? 0
+      : blendVerticalAnimation(YOffsetSpline.at(0), YOffsetSpline.at(target));
+    word.AnimatorStore.Scale.SetGoal(targetScale);
+    word.AnimatorStore.YOffset.SetGoal(targetYOffset);
+    word.AnimatorStore.Glow.SetGoal(blendSyllableAnimation(GlowSpline.at(0), GlowSpline.at(target)));
+
+    // A letter can only be moving while its word is active (or has just changed
+    // state), so a word that is already at rest can skip the letter pass
+    // entirely instead of walking dozens of spans.
+    const selfAwake = stateChanged || storeNeedsAnimation(word.AnimatorStore);
+    let lettersAwake = false;
+    if (word.LetterGroup && (state === "Active" || selfAwake)) {
+      lettersAwake = animateLetters(word, state, lineState, positionMs, deltaTime);
+    }
+    // Nothing on this word or any of its letters changed: skip the spring steps
+    // and every style write. Rebuilding those strings for dozens of resting
+    // letter spans every frame was the single largest TTML cost.
+    if (!selfAwake && !lettersAwake) {
+      setAnimatingHint(word.HTMLElement, false);
+      return;
+    }
+    setAnimatingHint(word.HTMLElement, true);
+
+    const scale = word.AnimatorStore.Scale.Step(deltaTime);
+    const yOffset = word.AnimatorStore.YOffset.Step(deltaTime);
+    const glow = word.AnimatorStore.Glow.Step(deltaTime);
+    const gradient = state === "Sung" ? 100 : state === "Active" ? -20 + 120 * progress : -20;
+
+    setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001);
+    setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+    if (word.LetterGroup) {
+      // The wrapper must stay inert: no gradient of its own (a wrapper gradient
+      // double/ghosts the active letters). Two constraints that caused the
+      // "long words are dim" bug:
+      //  1. Never set the wrapper's -webkit-text-fill-color to "transparent" —
+      //     with background-clip:text on the wrapper it clips the child letters
+      //     to the empty wrapper box and long words vanish. "inherit" is safe.
+      //  2. Never set `text-shadow: none` on the wrapper. text-shadow is
+      //     INHERITED, and the line's NotSung/Sung glow is what actually paints
+      //     the glyphs (the fill is transparent). Clearing it on the wrapper
+      //     stops that glow reaching the letters, so letter-group words lose a
+      //     whole paint layer that regular words keep and render dimmer.
+      setStyleIfChanged(word.HTMLElement, "background-image", "none");
+      setStyleIfChanged(word.HTMLElement, "-webkit-text-fill-color", "inherit");
+      setStyleIfChanged(word.HTMLElement, "color", "inherit");
+    } else {
+      setStyleIfChanged(word.HTMLElement, "--gradient-position", `${gradient}%`, 0.1);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", `${4 + 2 * glow}px`, 0.5);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${Math.min(glow * 35, 100)}%`, 1);
+    }
+  }
+
+  // Hot path: called for every candidate line on every animation frame, so it
+  // must not allocate. The previous Object.values(store).some(...) built a fresh
+  // array plus a closure per word (and per letter) per frame — thousands of
+  // short-lived allocations every second. That is steady garbage, and it is the
+  // mechanism behind "the longer the session runs, the lower the FPS": minor GCs
+  // get more frequent as the heap fills, so frame pacing degrades over time even
+  // though the per-song workload is identical. Direct property reads allocate
+  // nothing. Spring stores have a fixed known shape (see create*Springs).
+  function storeNeedsAnimation(store) {
+    if (!store) return false;
+    if (store.Scale && !store.Scale.CanSleep()) return true;
+    if (store.YOffset && !store.YOffset.CanSleep()) return true;
+    if (store.Glow && !store.Glow.CanSleep()) return true;
+    if (store.Opacity && !store.Opacity.CanSleep()) return true;
+    return false;
+  }
+
+  function wordNeedsAnimation(word) {
+    if (storeNeedsAnimation(word.AnimatorStore)) return true;
+    const letters = word.Letters;
+    if (!letters) return false;
+    for (let index = 0; index < letters.length; index++) {
+      if (storeNeedsAnimation(letters[index].AnimatorStore)) return true;
+    }
+    return false;
+  }
+
+  const ADAPTIVE_MIN_GAP_PX = 1.5;
+
+  function resetLineAdaptiveSpacing(line) {
+    if (!line.Syllables || !line.Syllables.Lead) return;
+    line.Syllables.Lead.forEach((word) => {
+      if (!word.HTMLElement) return;
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-adaptive-scale", "1", 0.001);
+      if (word.HTMLElement.parentElement &&
+        word.HTMLElement.parentElement.classList.contains("word-group")) {
+        setStyleIfChanged(
+          word.HTMLElement.parentElement,
+          "--ym-sl-adaptive-scale",
+          "1",
+          0.001
+        );
+      }
+    });
+    line.AdaptiveSpacingApplied = false;
+  }
+
+  function resetAdaptiveSpacing() {
+    modelLines.forEach(resetLineAdaptiveSpacing);
+  }
+
+  function applyAdaptiveSpacing(activeIndex, force) {
+    if (!currentSettings.adaptiveSpacing) return;
+    // Only recompute on a meaningful layout change (active-line change). The
+    // geometry reads below force a synchronous layout flush (getComputedStyle +
+    // offset*). Running that on a timer every frame was a constant reflow and a
+    // major source of per-frame jank — the measured word geometry only changes
+    // when the active line moves, so gating on `force` removes the reflow
+    // without changing the spacing result.
+    if (!force) return;
+
+    const measuredLines = [];
+    modelLines.forEach((line, index) => {
+      const relevant =
+        !line.DotLine &&
+        line.HTMLElement.isConnected &&
+        (line.RenderState === "Active" ||
+          (activeIndex >= 0 && Math.abs(index - activeIndex) <= 3) ||
+          (activeIndex < 0 && line.AdaptiveSpacingApplied));
+      if (!relevant) {
+        if (line.AdaptiveSpacingApplied) resetLineAdaptiveSpacing(line);
+        return;
+      }
+
+      const units = [];
+      const seenGroups = new Set();
+      for (const word of line.Syllables && line.Syllables.Lead || []) {
+        const element = word.HTMLElement;
+        if (!element || !element.isConnected) continue;
+        const group = element.parentElement &&
+          element.parentElement.classList.contains("word-group")
+          ? element.parentElement
+          : null;
+        if (group) {
+          if (seenGroups.has(group)) continue;
+          seenGroups.add(group);
+          units.push({ element: group });
+        } else if (!word.IsPartOfWord && !word.Dot) {
+          units.push({ element });
+        }
+      }
+      units.forEach((unit) => {
+        const element = unit.element;
+        unit.rect = {
+          left: element.offsetLeft,
+          right: element.offsetLeft + element.offsetWidth,
+          top: element.offsetTop,
+          height: element.offsetHeight,
+          width: element.offsetWidth,
+        };
+      });
+      const measuredUnits = units
+        .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+        .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+
+      const scaleTargets = new Map(measuredUnits.map(({ element }) => [element, 1]));
+      const fontSize = parseFloat(getComputedStyle(line.HTMLElement).fontSize) || 20;
+      const minimumGap = Math.max(ADAPTIVE_MIN_GAP_PX, Math.min(4, fontSize * 0.08));
+
+      for (let i = 1; i < measuredUnits.length; i++) {
+        const previous = measuredUnits[i - 1];
+        const current = measuredUnits[i];
+        const rowTolerance = Math.max(
+          4,
+          Math.min(previous.rect.height, current.rect.height) * 0.55
+        );
+        const sameRow =
+          Math.abs(
+            previous.rect.top + previous.rect.height / 2 -
+            (current.rect.top + current.rect.height / 2)
+          ) <= rowTolerance;
+        if (!sameRow) continue;
+
+        const gap = current.rect.left - previous.rect.right;
+        const pressure = minimumGap - gap;
+        if (pressure <= 0) continue;
+
+        const width = Math.max(1, previous.rect.width + current.rect.width);
+        const shrink = clamp(1 - (pressure / width) * 0.7, 0.95, 1);
+        scaleTargets.set(
+          previous.element,
+          Math.min(scaleTargets.get(previous.element), shrink)
+        );
+        scaleTargets.set(
+          current.element,
+          Math.min(scaleTargets.get(current.element), shrink)
+        );
+      }
+
+      measuredLines.push({ line, scaleTargets });
+      line.AdaptiveSpacingApplied = true;
+    });
+
+    // Read all geometry before writing styles so the pass does not alternate
+    // layout reads and writes for each neighboring lyric unit.
+    measuredLines.forEach(({ scaleTargets }) => {
+      scaleTargets.forEach((scale, element) => {
+        setStyleIfChanged(element, "--ym-sl-adaptive-scale", String(scale), 0.001);
+      });
+    });
+  }
+
+  function lineNeedsAnimation(line) {
+    if (!line.Syllables || !line.Syllables.Lead) return false;
+    const words = line.Syllables.Lead;
+    for (let index = 0; index < words.length; index++) {
+      if (wordNeedsAnimation(words[index])) return true;
+    }
+    return false;
+  }
+
+  function animate(positionMs) {
+    if (!panelVisible || !modelLines.length) return;
+    const now = performance.now();
+    const deltaTime = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
+    lastFrameTime = now;
+
+    // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
+    // tracks playback — top at song start, bottom at song end. Paused while the
+    // user scrolls manually (AJ, 2026-09-18).
+    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl) {
+      driveStaticAutoScroll(positionMs);
+      setJumpButtonVisible(false);
+    }
+
+    let activeIndex = -1;
+    // Pick the active per-track offset slot (video vs. song) based on what is
+    // actually playing, then shift the lyric clock without moving the player.
+    recomputeActiveOffsetMode(false);
+    const lyricPositionMs = Math.max(0, positionMs - getOffsetForPosition(positionMs));
+    let low = 0;
+    let high = scrollCandidateIndices.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const candidateIndex = scrollCandidateIndices[middle];
+      const candidate = modelLines[candidateIndex];
+      if (lyricPositionMs < candidate.StartTime) {
+        high = middle - 1;
+      } else if (lyricPositionMs >= candidate.EndTime) {
+        low = middle + 1;
+      } else {
+        activeIndex = candidateIndex;
+        break;
+      }
+    }
+
+    updateFullscreenGapDimming(lyricPositionMs, activeIndex);
+
+      const activeLineChanged = activeIndex !== lastActiveLine;
+    if (activeLineChanged) {
+      lastActiveLine = activeIndex;
+      publishActiveLine(activeIndex);
+      if (activeIndex >= 0 && lineElements[activeIndex]) {
+        scrollActiveLineIntoView(lineElements[activeIndex]);
+      }
+    }
+
+    // If the user has scrolled away but the line that is now playing is already
+    // on screen, treat that as "caught up" and drop the jump button without
+    // requiring a click. The 8s idle return (manualScrollReturnTimer) covers the
+    // case where they scrolled to a different line and stopped.
+    if (manualScrollActive && isActiveLineInView()) {
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+    }
+
+    for (let index = 0; index < modelLines.length; index++) {
+      const line = modelLines[index];
+      const lineState = getState(lyricPositionMs, line.StartTime, line.EndTime);
+      const stateChanged = line.RenderState !== lineState;
+      if (stateChanged) {
+        line.RenderState = lineState;
+        // Static (unsynced) lines keep the .static CSS state so they stay bright
+        // and never get the per-state opacity/alpha overrides (AJ, 2026-09-18).
+        if (!staticLyricsActive) {
+          line.HTMLElement.classList.toggle("Active", lineState === "Active");
+          line.HTMLElement.classList.toggle("NotSung", lineState === "NotSung");
+          line.HTMLElement.classList.toggle("Sung", lineState === "Sung");
+        }
+      }
+      if (line.DotLine) {
+        const nearEnd = positionMs > line.EndTime - PRE_HIDDEN_DOT_LINE_MS;
+        const playing = lineState === "Active" && !nearEnd;
+        line.HTMLElement.classList.toggle("playing", playing);
+        if (playing) {
+          line.HTMLElement.classList.remove("bounce-out");
+        } else if (nearEnd && lineState === "Active") {
+          line.HTMLElement.classList.add("bounce-out");
+        }
+      }
+
+      // Recompute the glow (--BlurAmount) only when the active line changes.
+      // NOTE: during the silent gap between two lines activeIndex is -1, so this
+      // block is intentionally skipped in that window — we must NOT zero the
+      // glow there, or every line loses its blur for the whole gap and it
+      // snaps back when the next line starts (the "blur flicker" bug). The glow
+      // simply stays frozen at its last value through the gap, which is smooth.
+      if (activeLineChanged && activeIndex >= 0) {
+        const distance = Math.abs(index - activeIndex);
+        const blur = lineState === "Active" || distance === 0
+          ? 0
+          : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
+        setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+      }
+
+      // Scan only lines that can actually be moving: the active line, a line
+      // whose state just changed, or a line already known to still be settling.
+      // A resting neighbour is never woken by proximity — a line only starts
+      // moving when its OWN state flips, at which point `stateChanged` is true
+      // and it enters `pendingAnimationLines` until its springs sleep. The old
+      // +/-6 window forced a full word/letter spring scan across 13 lines on
+      // every frame for no benefit, and that scan (not the animation) was the
+      // dominant per-frame cost.
+      const shouldInspectAnimation =
+        stateChanged ||
+        lineState === "Active" ||
+        pendingAnimationLines.has(line);
+      const pendingAnimation = shouldInspectAnimation && lineNeedsAnimation(line);
+      // Only run the per-word/letter animation for the actively-playing line,
+      // lines whose state just changed, or lines whose springs are still
+      // settling. Previously this also ran for every line within ±4 of the
+      // active one on EVERY frame, which is the bulk of the per-frame cost and
+      // the source of the "laggier the longer the song plays" jank. Resting
+      // neighbours need no per-frame work — their classes were set when their
+      // state changed and their springs have already slept.
+      //
+      // `pendingAnimation` must apply to EVERY line, including background-vocal
+      // lines and the imported-TTML fullscreen path. Two earlier guards dropped
+      // it: (1) the fsImportedPerformance branch animated only on
+      // `stateChanged || Active`, and (2) background lines were capped at
+      // `stateChanged || Active`. Both meant that the instant a line flipped
+      // Active -> Sung its springs were never stepped again, so words froze
+      // mid-motion with scale/glow stuck at their active values. This is cheap:
+      // a resting line's springs are asleep, so `pendingAnimation` is false and
+      // it costs nothing per frame — settling is a short, bounded window.
+      const shouldAnimateLine =
+        lineState === "Active" || stateChanged || pendingAnimation;
+      if (line.Syllables && line.Syllables.Lead && shouldAnimateLine) {
+        // Imported TTML can contain hundreds of timed words and letter spans.
+        // In fullscreen, keep the active primary line and state transitions,
+        // but do not repeatedly walk every background-vocal syllable/spring.
+        const leadWords = line.Syllables.Lead;
+        for (let wordIndex = 0; wordIndex < leadWords.length; wordIndex++) {
+          animateWord(leadWords[wordIndex], lineState, lyricPositionMs, deltaTime);
+        }
+      }
+      // Membership in `pendingAnimationLines` means "this line may be holding
+      // compositor hints". It is keyed on `shouldAnimateLine`, NOT on
+      // `pendingAnimation`, and it deliberately sits OUTSIDE the branch above:
+      // a LineTimed line sets every spring goal instantly, so lineNeedsAnimation
+      // is never true for it and `pendingAnimation` would never add it — which
+      // left hints set by animateWord with no path to release them.
+      if (shouldAnimateLine) {
+        pendingAnimationLines.add(line);
+      } else if (pendingAnimationLines.delete(line)) {
+        // The line has settled: release the compositor hints set while it was
+        // animating, so its words are not left permanently promoted.
+        releaseLineAnimationHints(line);
+      }
+    }
+
+    applyAdaptiveSpacing(activeIndex, activeLineChanged);
+  }
+
+  function tick() {
+    raf = requestAnimationFrame(tick);
+    if (!window.YTMod || !window.YTMod.player) return;
+    const position = window.YTMod.player.getPositionMs();
+    if (position != null) animate(position);
+  }
+
+  // Track + offset housekeeping used to run inside tick(), so two document-wide
+  // querySelectorAll passes per second executed in the same rAF callback as the
+  // animation and competed with it for the frame budget -- any slowdown surfaced
+  // as panel stutter while the rest of the page stayed smooth. None of it needs
+  // frame accuracy, so it runs on its own timer and leaves the frame loop alone.
+  const HOUSEKEEPING_MS = 500;
+  let housekeepingTimer = 0;
+  function housekeeping() {
+    if (!window.YTMod || !window.YTMod.player) return;
+    // The media element is cached for the 60fps position read; re-resolve it here
+    // so a track change can never leave a stale element in the cache for longer
+    // than one housekeeping pass.
+    if (typeof window.YTMod.player.refreshMedia === "function") {
+      window.YTMod.player.refreshMedia();
+    }
+    refreshVideoOffsetControl();
+    refreshPausePickButtonState();
+    syncTrackLyrics();
+  }
+  function startHousekeeping() {
+    if (!housekeepingTimer) {
+      housekeepingTimer = window.setInterval(housekeeping, HOUSEKEEPING_MS);
+    }
+  }
+  function stopHousekeeping() {
+    if (housekeepingTimer) {
+      clearInterval(housekeepingTimer);
+      housekeepingTimer = 0;
+    }
+  }
+
+  function startTick() {
+    if (!raf) {
+      lastFrameTime = performance.now();
+      tick();
+    }
+    startHousekeeping();
+  }
+
+  /* ===================== lifecycle ===================== */
+
+  // Named so it can be detached. Every enable injects a NEW <script>, which runs
+  // this whole IIFE again; without detaching, each disabled instance keeps a live
+  // window listener forever, so repeated toggles stack up closures that all react
+  // to every ytmod-ext message.
+  let messageListenerAttached = false;
+  function handleHostMessage(event) {
+    const data = event.data;
+    if (!data || data.id !== EXT_ID) return;
+    if (data.type === "ytmod-settings") {
+      applySettings(data.settings);
+      return;
+    }
+    if (data.type !== "ytmod-ext") return;
+    if (data.action === "disable") teardown();
+  }
+
+  function attachMessageListener() {
+    if (messageListenerAttached) return;
+    window.addEventListener("message", handleHostMessage);
+    messageListenerAttached = true;
+  }
+  function detachMessageListener() {
+    if (!messageListenerAttached) return;
+    window.removeEventListener("message", handleHostMessage);
+    messageListenerAttached = false;
+  }
+  attachMessageListener();
+
+  function teardown() {
+    exitFullscreenMode();
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    stopHousekeeping();
+    if (lineScrollRaf) cancelAnimationFrame(lineScrollRaf);
+    lineScrollRaf = 0;
+    if (mountTabTimer) clearTimeout(mountTabTimer);
+    mountTabTimer = 0;
+    if (wpObserver) wpObserver.disconnect();
+    wpObserver = null;
+    if (tabWatchRaf) cancelAnimationFrame(tabWatchRaf);
+    tabWatchRaf = 0;
+    if (activeTrackAbort) activeTrackAbort.abort();
+    activeTrackAbort = null;
+    cachedFirstRealLyricStartMs = Infinity;
+    cachedLastRealLyricEndMs = 0;
+    pendingAnimationLines.clear();
+    teardownOnboarding();
+    syncNativePanel(false);
+    cleanupTabBar(tabBar);
+    if (panelEl) panelEl.remove();
+    const optsOverlay = document.querySelector(".ym-sl-options-overlay");
+    if (optsOverlay) optsOverlay.remove();
+    const style = document.getElementById("ym-sl-style");
+    if (style) style.remove();
+    if (fontLinkEl) fontLinkEl.remove();
+    fontLinkEl = null;
+    modelLines = [];
+    lineElements = [];
+    scrollCandidateIndices = [];
+    lrclibCache.clear();
+    // Track-identity state must be cleared as well. Re-enabling injects a fresh
+    // <script>, so normally this starts clean anyway — but if any of it survived
+    // into the next run, syncTrackLyrics would bail at the `key === currentTrackKey`
+    // check and the panel would sit empty until the user changed songs. Clearing
+    // here guarantees disable -> re-enable reloads lyrics for the current track.
+    currentTrackKey = "";
+    manualLyricsTrackKey = "";
+    manualLyricsIsPermanent = false;
+    currentLyricsIsTTML = false;
+    lastObservedTrackKey = "";
+    lastObservedPositionMs = null;
+    lastActiveLine = -1;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    currentSongwriters = [];
+    panelVisible = false;
+    panelHost = null;
+    tabBar = null;
+    pauseSync = null;
+    pausePickMode = false;
+    pauseUi = null;
+    pauseBanner = null;
+    pauseBannerText = null;
+    panelEl = null;
+    tabEl = null;
+    tabMountParent = null;
+    jumpButton = null;
+    detachMessageListener();
+  }
+
+  /* ===================== first-run onboarding ===================== */
+  // Persist completion on the YouTube Music origin so the welcome card appears only once,
+  // rather than returning after every extension or tab reload.
+  const ONBOARDING_KEY = "better_lyrics_onboarding_done_v1";
+  let onbHasRun = false;
+
+  function hasCompletedOnboarding() {
+    try { return localStorage.getItem(ONBOARDING_KEY) === "1"; } catch (_) { return false; }
+  }
+
+  function markOnboardingComplete() {
+    try { localStorage.setItem(ONBOARDING_KEY, "1"); } catch (_) {}
+  }
+
+  function closePanelsNow() {
+    // Force-close any open lyrics panel without depending on internal state:
+    // hide our panel directly (incl. orphans from a previous injection) and
+    // collapse the native YTM lyrics panel.
+    try {
+      const p = document.getElementById("ym-sl-panel");
+      if (p) p.classList.add("hidden");
+    } catch (_) {}
+    try { setPanel(false); } catch (_) {}
+    try { syncNativePanel(false); } catch (_) {}
+  }
+
+  function waitForSelector(selector, timeout) {
+    return new Promise(function (resolve) {
+      const start = Date.now();
+      (function check() {
+        const el = document.querySelector(selector);
+        if (el) return resolve(el);
+        if (Date.now() - start > timeout) return resolve(null);
+        setTimeout(check, 150);
+      })();
+    });
+  }
+
+  function showOnbError(err) {
+    try { console.error("[Aurora Lyrics onboarding]", err); } catch (_) {}
+    finishOnboarding();
+  }
+
+  let onbStyleEl = null;
+  let onbRoot = null;
+  let onbHighlighted = null;
+
+  function ensureOnbStyle() {
+    if (onbStyleEl && onbStyleEl.isConnected) return;
+    const css = `
+.ym-onb-root { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; }
+.ym-onb-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.74); pointer-events: auto; }
+.ym-onb-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 440px; width: calc(100% - 48px); padding: 26px 28px 22px; border-radius: 16px; background: #181818; color: #fff; box-shadow: 0 20px 60px rgba(0,0,0,0.55); font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; pointer-events: auto; text-align: center; }
+.ym-onb-card h2 { font-size: 19px; font-weight: 700; margin: 0 0 8px; }
+.ym-onb-card p { margin: 0 0 18px; color: rgba(255,255,255,0.78); font-size: 14px; }
+.ym-onb-btn { appearance: none; cursor: pointer; font: inherit; font-weight: 600; font-size: 14px; padding: 10px 28px; border-radius: 999px; border: 2px solid #1ed760; color: #1ed760; background: rgba(30,215,96,0.12); transition: background .15s ease, color .15s ease, transform .1s ease; }
+.ym-onb-btn:hover { background: #1ed760; color: #0a0a0a; }
+.ym-onb-btn:active { transform: scale(0.97); }
+.ym-onb-highlight { position: relative !important; z-index: 2147483647 !important; outline: 3px solid #1ed760 !important; outline-offset: 5px !important; border-radius: 8px !important; animation: ymOnbPulse 1.5s ease-in-out infinite; background: rgba(30,215,96,.14) !important; }
+@keyframes ymOnbPulse { 0%,100% { outline-color: #1ed760; } 50% { outline-color: rgba(30,215,96,0.45); } }`;
+    onbStyleEl = document.createElement("style");
+    onbStyleEl.id = "ym-onb-style";
+    onbStyleEl.textContent = css;
+    document.head.appendChild(onbStyleEl);
+  }
+
+  function removeOnbOverlay() {
+    if (onbRoot && onbRoot.parentElement) onbRoot.parentElement.removeChild(onbRoot);
+    onbRoot = null;
+    if (onbHighlighted) {
+      try { onbHighlighted.classList.remove("ym-onb-highlight"); } catch (_) {}
+      onbHighlighted = null;
+    }
+  }
+
+  function teardownOnboarding() {
+    removeOnbOverlay();
+    if (onbStyleEl && onbStyleEl.parentElement) onbStyleEl.parentElement.removeChild(onbStyleEl);
+    onbStyleEl = null;
+  }
+
+  function buildOnbCard(title, body, btnLabel, onClick) {
+    const card = document.createElement("div");
+    card.className = "ym-onb-card";
+    const h = document.createElement("h2"); h.textContent = title;
+    const p = document.createElement("p"); p.textContent = body;
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "ym-onb-btn"; btn.textContent = btnLabel;
+    btn.addEventListener("click", onClick);
+    card.appendChild(h); card.appendChild(p); card.appendChild(btn);
+    return card;
+  }
+
+  function showOnbOverlay(card, withBackdrop) {
+    removeOnbOverlay();
+    ensureOnbStyle();
+    onbRoot = document.createElement("div");
+    onbRoot.className = "ym-onb-root";
+    if (withBackdrop) {
+      const bd = document.createElement("div");
+      bd.className = "ym-onb-backdrop";
+      onbRoot.appendChild(bd);
+    }
+    onbRoot.appendChild(card);
+    document.body.appendChild(onbRoot);
+  }
+
+  function finishOnboarding() {
+    markOnboardingComplete();
+    teardownOnboarding();
+  }
+
+  function startMarketplaceStep() {
+    waitForSelector("#ym-nav-btn", 10000).then(function (btn) {
+      if (!btn) {
+        finishOnboarding();
+        return;
+      }
+      onbHighlighted = btn;
+      btn.classList.add("ym-onb-highlight");
+      const card = buildOnbCard(
+        "More than lyrics",
+        "Aurora Lyrics also includes themes, artwork tools, and shortcuts. Open the waffle icon in the top-right anytime to explore the rest.",
+        "Got it",
+        finishOnboarding
+      );
+      showOnbOverlay(card, false);
+    }).catch(function (e) { showOnbError(e); });
+  }
+
+  function maybeStartOnboarding() {
+    if (onbHasRun || hasCompletedOnboarding()) return;
+    onbHasRun = true;
+    // Make sure no lyrics panel is left open behind the onboarding overlay.
+    closePanelsNow();
+    try {
+      // The first-run lesson starts with the waffle icon so people know Aurora Lyrics
+      // is a small YT Music toolkit, not only a lyrics panel. The lyrics walkthrough
+      // remains available from the marketplace and the SYNCED tab itself.
+      startMarketplaceStep();
+    } catch (e) {
+      showOnbError(e);
+    }
+  }
+
+  whenYTMod(() => {
+    buildUI();
+    window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
+    maybeStartOnboarding();
+  });
+
+  // Independent kickoff so onboarding + panel-close also run even if the YTMod bridge
+  // is slow or unavailable. Guarded by onbHasRun, so it never double-runs.
+  (function kickoffOnboarding() {
+    const run = function () {
+      try { maybeStartOnboarding(); } catch (e) { showOnbError(e); }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run, { once: true });
+    } else {
+      run();
+    }
+  })();
+})();
