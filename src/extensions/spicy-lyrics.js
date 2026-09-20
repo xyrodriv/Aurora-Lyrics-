@@ -24,6 +24,11 @@
   const UNISON_API = "https://unison.boidu.dev/lyrics";
   const LRCLIB_API = "https://lrclib.net/api/get";
   const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
+  const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
+  // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
+  // server-side only and would be exposed in this client-side extension.
+  const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  const SONGLINK_API = "https://api.song.link/v1-alpha/links";
   // The extension script is injected into the page world, where chrome.runtime
   // is unavailable. Resolve the local font CSS from this script's own extension
   // URL instead of resolving it against music.youtube.com.
@@ -6093,6 +6098,125 @@
       .sort((a, b) => b.score - a.score)[0].result;
   }
 
+  // ---- Spicy Lyrics API integration (publishable key, client-side) ----
+  // Resolves a YouTube video id to a Spotify track id via Song.link / Odesli,
+  // which the Spicy Lyrics API requires (trackId = 22-char Spotify id).
+  async function resolveSpotifyId(videoId) {
+    try {
+      const url = `${SONGLINK_API}?url=${encodeURIComponent("https://music.youtube.com/watch?v=" + videoId)}`;
+      const res = await fetch(url, { credentials: "omit" });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const id = data && data.linksByPlatform && data.linksByPlatform.spotify
+        && data.linksByPlatform.spotify.trackId;
+      return id && /^[A-Za-z0-9]{22}$/.test(id) ? id : null;
+    } catch (e) {
+      console.warn("[SpicyLyrics] Song.link resolve failed:", e);
+      return null;
+    }
+  }
+
+  function escapeSpicyText(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  // Converts the Spicy Lyrics API `Body` (times in seconds) into the compact
+  // TTML form parseTTML already understands: <p> lines, lead <span begin end>
+  // syllables, background <span ttm:role="x-bg">. isPartOfWord is encoded as the
+  // absence of whitespace between adjacent spans — parseTTML infers it that way.
+  function parseSpicyLyrics(body) {
+    if (!body || !Array.isArray(body.Content) || !body.Content.length) return null;
+    const fst = (v) => (typeof v === "number" && isFinite(v)) ? v : null;
+    const lines = [];
+    for (const content of body.Content) {
+      if (!content) continue;
+      const lead = content.Lead;
+      const leadSyls = (lead && Array.isArray(lead.Syllables)) ? lead.Syllables : [];
+      const bg = Array.isArray(content.Background) ? content.Background : [];
+      if (!leadSyls.length && !bg.length) continue;
+
+      let lineStart = fst(lead && lead.StartTime);
+      if (lineStart == null && leadSyls.length) lineStart = fst(leadSyls[0].StartTime);
+      let lineEnd = fst(lead && lead.EndTime);
+      if (lineEnd == null && leadSyls.length) lineEnd = fst(leadSyls[leadSyls.length - 1].EndTime);
+      const lineTimed = lineStart != null && lineEnd != null && lineEnd > lineStart + 0.001;
+
+      const parts = [];
+      let prevWord = false;
+      for (let i = 0; i < leadSyls.length; i++) {
+        const syl = leadSyls[i];
+        const text = syl.Text;
+        if (text == null || !String(text).length) continue;
+        const s = fst(syl.StartTime);
+        const e = fst(syl.EndTime);
+        const timed = s != null && e != null && e > s + 0.001;
+        if (i > 0 && !prevWord) parts.push(" ");
+        const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
+        parts.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
+        prevWord = !!syl.IsPartOfWord;
+      }
+      let prevBgWord = false;
+      const bgInner = [];
+      for (const bgItem of bg) {
+        if (!bgItem || !Array.isArray(bgItem.Syllables)) continue;
+        const bgSyls = bgItem.Syllables;
+        for (let i = 0; i < bgSyls.length; i++) {
+          const syl = bgSyls[i];
+          const text = syl.Text;
+          if (text == null || !String(text).length) continue;
+          const s = fst(syl.StartTime);
+          const e = fst(syl.EndTime);
+          const timed = s != null && e != null && e > s + 0.001;
+          if (i > 0 && !prevBgWord) bgInner.push(" ");
+          const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
+          bgInner.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
+          prevBgWord = !!syl.IsPartOfWord;
+        }
+      }
+      if (bgInner.length) parts.push(`<span ttm:role="x-bg">${bgInner.join("")}</span>`);
+      if (!parts.length) continue;
+      const agent = content.OppositeAligned ? ` ttm:agent="v2"` : ` ttm:agent="v1"`;
+      const lineTiming = lineTimed ? ` begin="${lineStart}s" end="${lineEnd}s"` : "";
+      lines.push(`<p${agent}${lineTiming}>${parts.join("")}</p>`);
+    }
+    if (!lines.length) return null;
+    return `<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>${lines.join("")}</div></body></tt>`;
+  }
+
+  async function fetchSpicyLyrics(track, key, controller) {
+    if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
+    const videoId = track && track.videoId;
+    if (!videoId) return null;
+    const spotifyId = await resolveSpotifyId(videoId);
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (!spotifyId) {
+      console.warn("[SpicyLyrics] no Spotify track id resolved; skipping.");
+      return null;
+    }
+    let response;
+    try {
+      response = await fetch(`${SPICY_LYRICS_API}/${spotifyId}`, {
+        headers: { Authorization: "Bearer " + SPICY_LYRICS_PUBLISHABLE_KEY },
+        credentials: "omit",
+      });
+    } catch (e) {
+      console.warn("[SpicyLyrics] request failed:", e);
+      return null;
+    }
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (response.status === 404) return null; // no sync available
+    if (!response.ok) {
+      console.warn("[SpicyLyrics] API returned HTTP " + response.status);
+      return null;
+    }
+    const json = await response.json().catch(() => null);
+    if (!json || !json.Body) return null;
+    return parseSpicyLyrics(json.Body);
+  }
+
   async function fetchLRCLyrics(track, key) {
     const requestId = ++trackRequestSeq;
     if (activeTrackAbort) activeTrackAbort.abort();
@@ -6100,6 +6224,17 @@
     activeTrackAbort = controller;
 
     showLyricsMessage("Looking for lyrics…");
+    try {
+      const spicyTTML = await fetchSpicyLyrics(track, key, controller);
+      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
+      if (spicyTTML) {
+        if (loadTTML(spicyTTML, "external")) return;
+        console.warn("[SpicyLyrics] API returned TTML we could not parse; falling back to Unison/LRCLIB.");
+      }
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      console.warn("[SpicyLyrics] lookup failed; falling back to Unison/LRCLIB:", error);
+    }
     try {
       const unisonData = await fetchUnisonLyrics(track, key, controller);
       if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
