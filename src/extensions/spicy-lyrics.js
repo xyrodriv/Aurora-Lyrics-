@@ -28,7 +28,10 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
-  const SONGLINK_API = "https://api.song.link/v1-alpha/links";
+  // YTM → Spotify id resolver uses MusicBrainz (free, no key, CORS *). The old
+  // Song.link / Odesli public API was shut down (PUBLIC_API_ACCESS_DEPRECATED,
+  // HTTP 401), so it can no longer resolve a video id to a Spotify track id.
+  const MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording";
   // The extension script is injected into the page world, where chrome.runtime
   // is unavailable. Resolve the local font CSS from this script's own extension
   // URL instead of resolving it against music.youtube.com.
@@ -6099,21 +6102,58 @@
   }
 
   // ---- Spicy Lyrics API integration (publishable key, client-side) ----
-  // Resolves a YouTube video id to a Spotify track id via Song.link / Odesli,
-  // which the Spicy Lyrics API requires (trackId = 22-char Spotify id).
-  async function resolveSpotifyId(videoId) {
+  // Resolves a Spotify track id from the track's title + artist via MusicBrainz
+  // (free, no API key, CORS-enabled). The Spicy Lyrics API requires a Spotify
+  // track id, and Song.link/Odesli's public API is dead, so this is the
+  // browser-side resolver. MusicBrainz recordings don't expose Spotify links in
+  // search results, so we score candidates (best match first, like LRCLIB) and
+  // fetch each with inc=url-rels until we find an open.spotify.com/track/<id>.
+  async function resolveSpotifyId(track, controller, key) {
+    const title = track && track.title;
+    const artist = track && track.artist;
+    if (!title) return null;
+    const esc = (v) => String(v).replace(/"/g, "'");
+    const query = `recording:"${esc(title)}"` + (artist ? ` AND artist:"${esc(artist)}"` : "");
+    let search;
     try {
-      const url = `${SONGLINK_API}?url=${encodeURIComponent("https://music.youtube.com/watch?v=" + videoId)}`;
-      const res = await fetch(url, { credentials: "omit" });
+      const res = await fetch(`${MUSICBRAINZ_API}/?query=${encodeURIComponent(query)}&fmt=json&limit=10`, { credentials: "omit" });
       if (!res.ok) return null;
-      const data = await res.json();
-      const id = data && data.linksByPlatform && data.linksByPlatform.spotify
-        && data.linksByPlatform.spotify.trackId;
-      return id && /^[A-Za-z0-9]{22}$/.test(id) ? id : null;
+      search = await res.json();
     } catch (e) {
-      console.warn("[SpicyLyrics] Song.link resolve failed:", e);
+      console.warn("[SpicyLyrics] MusicBrainz search failed:", e);
       return null;
     }
+    const recs = (search && search.recordings) || [];
+    if (!recs.length) return null;
+    const norm = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    const wantedTitle = norm(title), wantedArtist = norm(artist);
+    const scored = recs.map((r) => {
+      const t = norm(r.title);
+      const a = norm((r["artist-credit"] && r["artist-credit"][0] && r["artist-credit"][0].name) || "");
+      let s = 0;
+      if (t === wantedTitle) s += 8;
+      else if (t.includes(wantedTitle) || wantedTitle.includes(t)) s += 3;
+      if (wantedArtist && a === wantedArtist) s += 6;
+      else if (wantedArtist && (a.includes(wantedArtist) || wantedArtist.includes(a))) s += 2;
+      return { r, s };
+    }).sort((x, y) => y.s - x.s);
+    for (const { r } of scored.slice(0, 5)) {
+      if (controller.signal.aborted || key !== currentTrackKey) return null;
+      let full;
+      try {
+        const fres = await fetch(`${MUSICBRAINZ_API}/${r.id}?fmt=json&inc=url-rels`, { credentials: "omit" });
+        if (!fres.ok) continue;
+        full = await fres.json();
+      } catch (e) { continue; }
+      const rels = (full && full.relations) || [];
+      for (const rel of rels) {
+        if (rel.url && /open\.spotify\.com\/track\/([A-Za-z0-9]{22})/.test(rel.url.resource)) {
+          const m = /open\.spotify\.com\/track\/([A-Za-z0-9]{22})/.exec(rel.url.resource);
+          if (m) return m[1];
+        }
+      }
+    }
+    return null;
   }
 
   function escapeSpicyText(value) {
@@ -6190,7 +6230,7 @@
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
     const videoId = track && track.videoId;
     if (!videoId) return null;
-    const spotifyId = await resolveSpotifyId(videoId);
+    const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
       console.warn("[SpicyLyrics] no Spotify track id resolved; skipping.");
