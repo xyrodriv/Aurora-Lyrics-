@@ -818,3 +818,170 @@
   .ym-support-backdrop, .ym-support-card { animation: none; }
 }
 
+/* ---- update notice (what's new / update available) ----
+   YouTube Music stays visible behind a dimmed, blurred scrim. The logo is not
+   on the scrim — it fills the card, blurred, behind the card's own text. */
+.ym-upd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: rgba(6,10,12,.5);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  animation: ym-upd-fade-in .22s ease;
+}
+.ym-upd-card {
+  position: relative;
+  z-index: 1;
+  width: 460px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 22px;
+  border: 1px solid rgba(255,255,255,.55);
+  background: rgba(255,255,255,.45);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  box-shadow:
+    0 30px 80px rgba(10,40,30,.28),
+    inset 0 1px 0 rgba(255,255,255,.5);
+  color: #16161a;
+  animation: ym-upd-pop-in .26s cubic-bezier(.22,.61,.36,1);
+}
+/* The logo fills the panel, blurred, behind the text. z-index:-1 paints it
+   above the card's own background but below the static head/body/foot
+   content, so no extra positioning is needed on those. */
+.ym-upd-cardface {
+  position: absolute;
+  inset: -40px;            /* bleed past the edges so the blur halo is clipped */
+  background-size: cover;
+  background-position: center;
+  filter: blur(26px) saturate(125%);
+  opacity: .72;
+  z-index: -1;
+  pointer-events: none;
+}
+.ym-upd-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 22px;
+  border-bottom: 1px solid rgba(0,0,0,.08);
+}
+.ym-upd-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ym-upd-title { margin: 0; font-size: 16px; font-weight: 700; color: #111114; }
+.ym-upd-ver {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.08);
+  color: #2a2a32;
+  white-space: nowrap;
+}
+.ym-upd-close {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(20,20,30,.55);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.ym-upd-close:hover { color: #111; background: rgba(0,0,0,.06); }
+.ym-upd-close:focus-visible { outline: 2px solid rgba(20,80,60,.55); outline-offset: 2px; }
+.ym-upd-close svg { fill: currentColor; }
+.ym-upd-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  overflow-y: auto;
+}
+.ym-upd-sub { margin: 0; font-size: 14px; font-weight: 600; color: #1a1a1f; }
+.ym-upd-date { margin: 0; font-size: 12px; color: rgba(0,0,0,.5); }
+.ym-upd-sect { margin: 4px 0 0; font-size: 12px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: rgba(0,0,0,.48); }
+.ym-upd-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
+.ym-upd-list li { font-size: 13.5px; line-height: 1.5; color: #2a2a32; }
+.ym-upd-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #3a2e00;
+  background: rgba(255,208,0,.18);
+  border: 1px solid rgba(0,0,0,.06);
+  border-left: 3px solid #d4a800;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.ym-upd-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 22px 20px;
+  border-top: 1px solid rgba(0,0,0,.08);
+}
+.ym-upd-btn {
+  padding: 11px 18px;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #16161a;
+  background: rgba(255,255,255,.72);
+  border: 1px solid rgba(0,0,0,.1);
+  transition: background .15s ease, transform .12s ease, filter .15s ease;
+}
+.ym-upd-btn:hover { background: rgba(255,255,255,.9); }
+.ym-upd-btn:active { transform: translateY(1px); }
+.ym-upd-btn:focus-visible { outline: 2px solid rgba(20,80,60,.55); outline-offset: 2px; }
+.ym-upd-btn.primary {
+  background: linear-gradient(180deg, #ffd000, #f0b400);
+  border-color: transparent;
+  color: #241d00;
+}
+.ym-upd-btn.primary:hover { filter: brightness(1.05); }
+@keyframes ym-upd-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ym-upd-pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+@keyframes ym-upd-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes ym-upd-card-out {
+  from { opacity: 1; transform: translateY(0)   scale(1); }
+  to   { opacity: 0; transform: translateY(8px) scale(.98); }
+}
+.ym-upd-overlay.ym-upd-leaving {
+  animation: ym-upd-fade-out .2s ease forwards;
+  pointer-events: none;
+}
+.ym-upd-card.ym-upd-leaving {
+  animation: ym-upd-card-out .2s cubic-bezier(.4,0,1,1) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ym-upd-overlay, .ym-upd-card,
+  .ym-upd-overlay.ym-upd-leaving, .ym-upd-card.ym-upd-leaving { animation: none; }
+}
+

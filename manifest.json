@@ -49,7 +49,9 @@
     {
       "resources": [
         "src/content/public-api.js",
-        "src/extensions/*"
+        "src/extensions/*",
+        "changelog.json",
+        "assets/manifest-logo.webp"
       ],
       "matches": [
         "https://music.youtube.com/*"

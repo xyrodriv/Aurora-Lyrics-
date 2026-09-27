@@ -1,0 +1,27 @@
+{
+  "releases": [
+    {
+      "version": "0.5.71",
+      "date": "2026-09-27",
+      "title": "Update notices",
+      "features": [
+        "Aurora Lyrics now tells you what changed right after it updates",
+        "You will also be told when a newer version is available, with a link to the release"
+      ]
+    },
+    {
+      "version": "0.5.70",
+      "date": "2026-09-27",
+      "title": "Popup lyrics match the main panel",
+      "features": [
+        "The popup now uses the same lyric size, settings, romanization and attribution as the main panel",
+        "Added a \"Jump to current lyric\" button that appears while you are scrolled away",
+        "Clicking a line in the popup seeks to that point in the track"
+      ],
+      "fixes": [
+        "The popup no longer snaps back to the active line while you are scrolling",
+        "Credits stay in the normal scroll flow instead of overlapping the last line"
+      ]
+    }
+  ]
+}

@@ -877,7 +877,7 @@
      injected by boot(). The content script runs in an isolated world, so its own
      window.YTMod is invisible to the console. Player readers + open/install controls
      are bridged to this isolated world via window.postMessage. */
-  const VERSION = "0.5.11";
+  const VERSION = "0.5.71";
   const ui = {
     category: "Extensions",
     view: "grid",
@@ -1611,6 +1611,248 @@
     else if (msg.type === "ytmod-setEnabled") setEnabled(msg.id, msg.on).then(renderSection);
   });
 
+  /* ---- update notice ------------------------------------------------------
+     Chrome owns the install step: an extension cannot install its own update,
+     so this only ever INFORMS the user.
+
+     Two modes:
+       "updated"   - the running version changed since we last looked. Notes come
+                     from the BUNDLED changelog.json, so this works offline and
+                     can never be wrong about its own version.
+       "available" - a newer version exists upstream. A bundled file only knows
+                     about itself, so this needs the network: it reads the SAME
+                     changelog.json from its raw GitHub URL.
+
+     Every failure is silent on purpose. Offline, rate limited, or a private repo
+     all mean "show nothing" — never a broken or empty card. */
+  const UPDATE_STORAGE_KEY = "ytmod_update_state";
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const UPDATE_REMOTE_URL = "https://raw.githubusercontent.com/xyrodriv/Aurora-Lyrics-/main/changelog.json";
+  const UPDATE_RELEASES_URL = "https://github.com/xyrodriv/Aurora-Lyrics-/releases";
+  const UPDATE_FETCH_TIMEOUT_MS = 6000;
+
+  // safeStorageSet takes the payload object itself, so the state has to be
+  // nested under its key here. Writing it flat silently stored top-level
+  // `lastSeenVersion`, which the getter below never read back — every load
+  // looked like a first run and the notice never fired.
+  const saveUpdateState = (state) => safeStorageSet({ [UPDATE_STORAGE_KEY]: state });
+
+  function runningVersion() {
+    try {
+      const v = chrome.runtime.getManifest().version;
+      return typeof v === "string" && v ? v : null;
+    } catch (err) {
+      return null; // orphaned content script: the extension was reloaded
+    }
+  }
+
+  // Numeric compare, never string compare: "0.5.10" must sort above "0.5.9".
+  function compareVersions(a, b) {
+    const pa = String(a || "").split(".");
+    const pb = String(b || "").split(".");
+    for (let i = 0; i < 3; i++) {
+      const na = parseInt(pa[i], 10) || 0;
+      const nb = parseInt(pb[i], 10) || 0;
+      if (na !== nb) return na > nb ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function releaseList(changelog) {
+    return changelog && Array.isArray(changelog.releases) ? changelog.releases : [];
+  }
+
+  function findRelease(changelog, version) {
+    return releaseList(changelog).find((r) => r && r.version === version) || null;
+  }
+
+  function newestRelease(changelog) {
+    let best = null;
+    for (const r of releaseList(changelog)) {
+      if (!r || typeof r.version !== "string") continue;
+      if (!best || compareVersions(r.version, best.version) > 0) best = r;
+    }
+    return best;
+  }
+
+  async function readBundledChangelog() {
+    try {
+      const url = chrome.runtime.getURL("changelog.json");
+      const res = await fetch(url, { cache: "no-store" });
+      console.debug("[Aurora Lyrics] update check: changelog fetch " + url + " -> " + res.status);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (err) {
+      console.debug("[Aurora Lyrics] update check: changelog fetch threw " + ((err && err.message) || err));
+      return null;
+    }
+  }
+
+  async function readRemoteChangelog() {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), UPDATE_FETCH_TIMEOUT_MS);
+      const res = await fetch(UPDATE_REMOTE_URL, { cache: "no-store", signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (err) {
+      return null;
+    }
+  }
+
+  let updateModalOpen = false;
+  function showUpdateModal(opts) {
+    if (updateModalOpen) return;
+    const release = opts.release || {};
+    const version = opts.version || release.version || "";
+    const isUpdated = opts.mode === "updated";
+    const dismiss = typeof opts.onDismiss === "function" ? opts.onDismiss : null;
+
+    let overlay = null;
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const close = () => {
+      document.removeEventListener("keydown", onKey);
+      if (overlay && overlay.isConnected) {
+        const cardEl = overlay.querySelector(".ym-upd-card");
+        if (cardEl) cardEl.classList.add("ym-upd-leaving");
+        overlay.classList.add("ym-upd-leaving");
+        const remove = () => { if (overlay && overlay.isConnected) overlay.remove(); };
+        overlay.addEventListener("animationend", remove, { once: true });
+        setTimeout(remove, 400); // fallback in case animationend never fires
+      }
+      updateModalOpen = false;
+    };
+    const dismissAndClose = () => {
+      close();
+      if (dismiss) Promise.resolve(dismiss()).catch(() => {});
+    };
+
+    // Blurred logo layer that fills the panel. Same MV3 workaround: the image
+    // source is set from JS via chrome.runtime.getURL, preloaded with an
+    // Image() so a failure logs instead of leaving an empty panel.
+    const cardface = h("div", { class: "ym-upd-cardface" });
+    try {
+      const logoSrc = chrome.runtime.getURL("assets/manifest-logo.webp");
+      const preload = new Image();
+      preload.onload = () => { cardface.style.backgroundImage = 'url("' + logoSrc + '")'; };
+      preload.onerror = () => {
+        console.debug("[Aurora Lyrics] update check: manifest logo failed to load from " + logoSrc);
+      };
+      preload.src = logoSrc;
+    } catch (err) {
+      console.debug("[Aurora Lyrics] update check: logo preload threw " + ((err && err.message) || err));
+    }
+
+    const body = h("div", { class: "ym-upd-body" });
+    if (release.title) body.appendChild(h("p", { class: "ym-upd-sub", text: release.title }));
+    if (release.date) body.appendChild(h("p", { class: "ym-upd-date", text: release.date }));
+    const sections = [["New", release.features], ["Fixed", release.fixes]];
+    for (const entry of sections) {
+      const items = entry[1];
+      if (!Array.isArray(items) || !items.length) continue;
+      body.appendChild(h("p", { class: "ym-upd-sect", text: entry[0] }));
+      const ul = h("ul", { class: "ym-upd-list" });
+      for (const item of items) {
+        if (typeof item !== "string" || !item) continue;
+        ul.appendChild(h("li", { text: item }));
+      }
+      body.appendChild(ul);
+    }
+    if (!isUpdated) {
+      body.appendChild(h("p", { class: "ym-upd-hint", text:
+        "Chrome installs the update on its own, usually within a few hours. Restarting Chrome, " +
+        "or pressing Update on the chrome://extensions page, fetches it right away." }));
+    }
+
+    const foot = h("div", { class: "ym-upd-foot" });
+    if (!isUpdated) {
+      foot.appendChild(h("a", { class: "ym-upd-btn", href: UPDATE_RELEASES_URL,
+        target: "_blank", rel: "noopener noreferrer", text: "View release" }));
+    }
+    const ok = h("button", { class: "ym-upd-btn primary", type: "button",
+      text: isUpdated ? "Got it" : "Remind me later" });
+    ok.addEventListener("click", dismissAndClose);
+    foot.appendChild(ok);
+
+    const x = h("button", { class: "ym-upd-close", type: "button", title: "Close", "aria-label": "Close" });
+    x.appendChild(svgIcon(ICON_CLOSE));
+    x.addEventListener("click", dismissAndClose);
+
+    const heading = h("div", { class: "ym-upd-heading" },
+      h("h2", { class: "ym-upd-title", text: isUpdated ? "Aurora Lyrics updated" : "Update available" }),
+      version ? h("span", { class: "ym-upd-ver", text: "v" + version }) : null
+    );
+    const card = h("div", { class: "ym-upd-card", role: "dialog", "aria-modal": "true",
+      "aria-label": isUpdated ? "Aurora Lyrics updated" : "Aurora Lyrics update available" },
+      cardface,
+      h("div", { class: "ym-upd-head" }, heading, x),
+      body,
+      foot
+    );
+
+    overlay = h("div", { class: "ym-upd-overlay" }, card);
+    // Clicks on the overlay (but not bubbled from the card) dismiss — replaces
+    // the old backdrop element the dark overlay used to provide.
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) dismissAndClose(); });
+    document.body.appendChild(overlay);
+    updateModalOpen = true;
+    document.addEventListener("keydown", onKey);
+    ok.focus();
+  }
+
+  async function runUpdateCheck() {
+    const version = runningVersion();
+    if (!version) return;
+    const state = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {};
+    const dismissed = Array.isArray(state.dismissed) ? state.dismissed : [];
+    // console.debug is hidden unless the console filter is set to Verbose, so
+    // this stays out of the way for real users but is there when diagnosing.
+    console.debug("[Aurora Lyrics] update check: running v" + version +
+      ", previously seen " + (state.lastSeenVersion || "nothing"));
+
+    // First run on this profile: record the version and stay quiet. Otherwise
+    // every existing user would get an "updated" card the day this ships.
+    if (!state.lastSeenVersion) {
+      console.debug("[Aurora Lyrics] update check: first run, recording v" + version + " and staying quiet");
+      await saveUpdateState(Object.assign({}, state, { lastSeenVersion: version }));
+      return;
+    }
+
+    if (state.lastSeenVersion !== version) {
+      const release = findRelease(await readBundledChangelog(), version);
+      await saveUpdateState(Object.assign({}, state, { lastSeenVersion: version }));
+      console.debug("[Aurora Lyrics] update check: changelog entry for v" + version + " -> " + (release ? "found" : "MISSING"));
+      if (release) {
+        showUpdateModal({ mode: "updated", version: version, release: release });
+      } else {
+        console.debug("[Aurora Lyrics] changelog.json has no entry for v" + version);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (Number.isFinite(state.lastCheckAt) && now - state.lastCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
+    await saveUpdateState(Object.assign({}, state, { lastCheckAt: now }));
+
+    const latest = newestRelease(await readRemoteChangelog());
+    if (!latest) return;
+    if (compareVersions(latest.version, version) <= 0) return;
+    if (dismissed.indexOf(latest.version) !== -1) return;
+    showUpdateModal({
+      mode: "available",
+      version: latest.version,
+      release: latest,
+      onDismiss: async () => {
+        const s = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {};
+        const d = Array.isArray(s.dismissed) ? s.dismissed : [];
+        if (d.indexOf(latest.version) === -1) d.push(latest.version);
+        if (d.length > 12) d.splice(0, d.length - 12);
+        await saveUpdateState(Object.assign({}, s, { dismissed: d }));
+      }
+    });
+  }
+
   /* ---- boot ---- */
   async function boot() {
     injectPublicAPI(); // expose window.YTMod (page world) before any JS extension loads
@@ -1660,7 +1902,10 @@
       if (mountNavButton() || tries > 60) clearInterval(iv);
     }, 300);
 
-    console.debug("[Aurora Lyrics] booted v" + VERSION);
+    // Fire-and-forget: never block the marketplace on a network round trip.
+    runUpdateCheck();
+
+    console.log("[Aurora Lyrics] booted v" + VERSION);
   }
 
   if (document.readyState === "complete" || document.readyState === "interactive") setTimeout(boot, 600);
