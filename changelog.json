@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.72",
+      "date": "2026-09-27",
+      "title": "Test release (remove after available-notice testing)",
+      "features": [
+        "This is a temporary test entry to verify the update-available notice",
+        "Delete this entry once testing is done"
+      ]
+    },
+    {
       "version": "0.5.71",
       "date": "2026-09-27",
       "title": "Update notices",
