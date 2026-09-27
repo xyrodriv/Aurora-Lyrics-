@@ -129,7 +129,7 @@
   // settings still carry over without a bus topic per value.
   const COPIED_VARS = [
     "--ym-sl-lyrics-offset",
-    "--ym-sl-bg-vocal-opacity",
+    "--ym-sl-bg-vocal-scale",
     "--gradient-alpha",
     "--gradient-alpha-end",
     "--gradient-degrees",

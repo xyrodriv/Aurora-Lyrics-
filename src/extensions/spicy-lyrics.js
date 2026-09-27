@@ -28,10 +28,26 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
-  // YTM → Spotify id resolver uses MusicBrainz (free, no key, CORS *). The old
-  // Song.link / Odesli public API was shut down (PUBLIC_API_ACCESS_DEPRECATED,
-  // HTTP 401), so it can no longer resolve a video id to a Spotify track id.
-  const MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording";
+  // YTM → Spotify id resolver. Song.link/Odesli was shut down
+  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401), and MusicBrainz was dropped for
+  // being slow and rate-limited (400 requests/window, up to ~16 per song).
+  //
+  // ListenBrainz runs `labs.api.listenbrainz.org`, MetaBrainz's free dataset
+  // hoster. It publishes the recording→Spotify mapping directly — no key, no
+  // account, no backend, and CORS `*` so we can call it from here. This is the
+  // resolver; MusicBrainz is gone.
+  const LISTENBRAINZ_LABS_API = "https://labs.api.listenbrainz.org";
+  // Per-request cap. This sits on the critical path of a track change, so it
+  // must never be the reason a song hangs.
+  const LB_TIMEOUT_MS = 5000;
+  // Bounds the total work across the whole variant ladder. Without this, a
+  // pathological title (lots of parens variants) could issue dozens of calls
+  // and stall the panel while the user is already on the next song.
+  const LB_MAX_ATTEMPTS = 12;
+  // Set when ListenBrainz returns 429/5xx. While it is in the future we stop
+  // trying and report the failure as transient, instead of burning the rest of
+  // the song's budget on calls that cannot succeed.
+  let lbThrottledUntil = 0;
   // The extension script is injected into the page world, where chrome.runtime
   // is unavailable. Resolve the local font CSS from this script's own extension
   // URL instead of resolving it against music.youtube.com.
@@ -273,21 +289,72 @@
       if (!start && words.length) start = words[0].start;
       if (!end && words.length) end = words[words.length - 1].end;
 
+      // An x-bg wrapper usually carries NO timing of its own — the times live on
+      // its child spans. Resolving the window wrapper-first and falling back to
+      // the PARENT LINE put the background's window entirely BEFORE it played.
+      // Measured on a real file (glaive "60.000 ISK", L15): the line ran 46.448
+      // to 49.066 while its bg ran 49.176 to 51.876. So the bg line was Active
+      // while every one of its words was still NotSung, and Sung by the time they
+      // were due — the fill never ran and the vocal rendered dead (no fill at
+      // all). Upstream's order is children -> wrapper -> line; ours never
+      // consulted the children.
+      //
+      // NOTE: untimed wrappers are not an exotic input — parseSpicyLyrics BELOW
+      // emits exactly this shape (`<span ttm:role="x-bg">` with the timing only on
+      // the child spans), so our own API round-trip manufactures it. The parser
+      // must therefore never rely on the wrapper's timing.
       const background = backgroundNodes
         .map((node) => {
-          const bgStart =
-            tsToSec(node.attrs.begin || node.attrs["ttm:begin"]) || start;
-          const bgDuration = tsToSec(node.attrs.dur || node.attrs["ttm:dur"]);
-          const bgEnd =
-            tsToSec(node.attrs.end || node.attrs["ttm:end"]) ||
-            (bgDuration ? bgStart + bgDuration : end);
-          return {
-            start: bgStart,
-            end: bgEnd,
-            words: parseTimedSpanNodes(node.children, body, bgStart, bgEnd),
-          };
+          const rawBegin = node.attrs.begin || node.attrs["ttm:begin"];
+          const rawEnd = node.attrs.end || node.attrs["ttm:end"];
+          const rawDur = node.attrs.dur || node.attrs["ttm:dur"];
+          // null, NOT 0: tsToSec reports a missing value as 0, and 0 is a legal
+          // timestamp, so a falsy sentinel would be indistinguishable from a real
+          // one — and the Math.min below would then drag the window to t=0.
+          const wrapStart = rawBegin ? tsToSec(rawBegin) : null;
+          const wrapEnd = rawEnd ? tsToSec(rawEnd) : null;
+          const wrapDur = rawDur ? tsToSec(rawDur) : 0;
+
+          const bgWords = parseTimedSpanNodes(
+            node.children,
+            body,
+            wrapStart == null ? start : wrapStart,
+            wrapEnd == null ? end : wrapEnd
+          );
+          if (!bgWords.length) return null;
+
+          const wordStart = bgWords.reduce((a, w) => Math.min(a, w.start), Infinity);
+          const wordEnd = bgWords.reduce((a, w) => Math.max(a, w.end), -Infinity);
+          // children first, then the wrapper — and never narrower than the
+          // children either way. Trusting the wrapper verbatim would clip what it
+          // wraps, which is the whole failure this block exists to avoid.
+          const bgStart = wrapStart == null ? wordStart : Math.min(wrapStart, wordStart);
+          let bgEnd = wrapEnd == null ? wordEnd : Math.max(wrapEnd, wordEnd);
+          if (wrapDur) {
+            bgEnd = Math.max(bgEnd, (wrapStart == null ? wordStart : wrapStart) + wrapDur);
+          }
+          return { start: bgStart, end: bgEnd, words: bgWords };
         })
-        .filter((line) => line.words.length);
+        .filter(Boolean);
+
+      // ⭐ Background vocals can start before, or run past, the lead line, and the
+      // lead's window has to COVER them or they get clipped. Every bg fill rule is
+      // gated on `.line.bg-line.Active`, so a bg that outlives its line would sit
+      // at WordNotSung for the whole of the line's window and Sung afterwards —
+      // never filled. Upstream widens the lead here for exactly this reason.
+      //
+      // ⚠️ This makes the line's window OVERLAP its neighbour's — measured 494 ms
+      // on a real file. The renderer is fine with that (it states each line from
+      // its own times, so a widened line cannot suppress its neighbour), but the
+      // active-line lookup was NOT: it used to be a binary search, which is only
+      // valid on disjoint windows and would return the previous line, or -1
+      // ("no line playing", which dims the whole panel). findLineIndexAt is now a
+      // linear scan for exactly this reason — do NOT reintroduce a binary search
+      // over these windows.
+      for (const bg of background) {
+        if (bg.start < start) start = bg.start;
+        if (bg.end > end) end = bg.end;
+      }
 
       const plainText = words
         .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
@@ -442,34 +509,85 @@
     return names;
   }
 
+  // Adapts parseTTML's line model into the renderer's content shape.
+  //
+  // `LineTimed` IS NOT "THIS LINE IS SYNCED" — that mistake collapses the whole
+  // animation. It means "this line has NO word-level timing", and it feeds
+  // straight into karaoke suppression:
+  //
+  //   makeWord(word, isLast, lineTimed, noKaraoke)
+  //     suppressKaraoke = !!(noKaraoke && !lineTimed)      // lineTimed true => keep? No:
+  //   noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed)
+  //
+  // A true `LineTimed` marks the line `line-timed`, which forces the whole line
+  // to fill as ONE unit instead of sweeping word by word, AND short-circuits the
+  // background-vocal pass. Setting it for a word-by-word body (Spicy
+  // `Body.Type:"Syllable"`, i.e. anything with per-syllable times) turns CRANK's
+  // syllable karaoke into a line fill and makes its `<span ttm:role="x-bg">`
+  // background vocals disappear entirely.
+  //
+  // So derive it from the WORDS, exactly like the LRC producer does (one word,
+  // letter animation disabled). The two producers that must stay `true` are
+  // `parseLRC` (line-synced LRC) and nothing else; a Syllable body has real
+  // per-word timing and must stay `false` to keep its karaoke.
+  //
+  // `positioned` (timing exists somewhere) is NOT a substitute for any of this —
+  // it is true for word-timed lines too. It only distinguishes "has a time
+  // window" from "fully unsynced", which is what `Timed` already covers for the
+  // noKaraoke calculation.
   function toSyllableContent(sourceLines) {
-    return sourceLines.map((line) => ({
-      Type: "Vocal",
-      LineTimed: !!line.lineTimed,
-      Timed: !!line.timed,
-      OppositeAligned: !!line.oppositeAligned,
-      Lead: {
-        StartTime: line.start,
-        EndTime: line.end,
-        Syllables: line.words.map((word) => ({
-          Text: word.text,
-          StartTime: word.start,
-          EndTime: word.end,
-          IsPartOfWord: !!word.isPartOfWord,
-          DisableLetterAnimation: !!word.disableLetterAnimation,
-        })),
-      },
-      Background: (line.background || []).map((background) => ({
-        StartTime: background.start,
-        EndTime: background.end,
-        Syllables: background.words.map((word) => ({
-          Text: word.text,
-          StartTime: word.start,
-          EndTime: word.end,
-          IsPartOfWord: !!word.isPartOfWord,
-          DisableLetterAnimation: !!word.disableLetterAnimation,
-        })),
-      })),
+    return sourceLines.map((line) => {
+      const syllables = line.words || [];
+      // Word-level timing present? Then this is a karaoke line, not a line-filled
+      // one. Mirrors parseLRC's contract: lineTimed === no word timing.
+      const hasWordTiming = syllables.some((word) => word.timed === true);
+      const explicitLineTimed = line.lineTimed === true;
+      if (explicitLineTimed) {
+        // parseLRC / parsePlain speak this dialect directly — trust it verbatim
+        // so the LRCLIB path keeps behaving exactly as it did.
+        return {
+          Type: "Vocal",
+          LineTimed: true,
+          Timed: true,
+          OppositeAligned: !!line.oppositeAligned,
+          Lead: {
+            StartTime: line.start,
+            EndTime: line.end,
+            Syllables: buildRendererSyllables(syllables),
+          },
+          Background: buildRendererBackground(line.background),
+        };
+      }
+      return {
+        Type: "Vocal",
+        LineTimed: !hasWordTiming,
+        Timed: !!(line.timed || line.positioned),
+        OppositeAligned: !!line.oppositeAligned,
+        Lead: {
+          StartTime: line.start,
+          EndTime: line.end,
+          Syllables: buildRendererSyllables(syllables),
+        },
+        Background: buildRendererBackground(line.background),
+      };
+    });
+  }
+
+  function buildRendererSyllables(words) {
+    return (words || []).map((word) => ({
+      Text: word.text,
+      StartTime: word.start,
+      EndTime: word.end,
+      IsPartOfWord: !!word.isPartOfWord,
+      DisableLetterAnimation: !!word.disableLetterAnimation,
+    }));
+  }
+
+  function buildRendererBackground(background) {
+    return (background || []).map((bg) => ({
+      StartTime: bg.start,
+      EndTime: bg.end,
+      Syllables: buildRendererSyllables(bg.words),
     }));
   }
 
@@ -547,46 +665,115 @@
     }
   }
 
-  // cubic-spline's at() behavior, kept local so the YTMod extension remains a
-  // single trusted-types-safe asset with no runtime dependency loading.
+  // Natural cubic spline — byte-for-byte the interpolation the `cubic-spline`
+  // npm package (v3.0.3, MIT, (c) 2014 Morgan Herlocker) performs, which is what
+  // upstream Spicy Lyrics imports at LyricsAnimator.ts:2. Vendored rather than
+  // bundled so the extension stays a single trusted-types-safe asset with no
+  // runtime dependency loading. Verified against the real package to 0.00e+0
+  // over every upstream range (see .scratch/verify-natural.mjs).
+  //
+  // This REPLACED a Catmull-Rom / finite-difference Hermite implementation that
+  // looked equivalent — same control points, same shape — but is a genuinely
+  // different curve. A natural cubic spline OVERSHOOTS its own control points on
+  // a sharp kink; Catmull-Rom does not. Measured 2026-09-20:
+  //
+  //   range              old Catmull-Rom      new natural         what it changed
+  //   Scale              1.0509 @ t=0.718     1.0536 @ t=0.615    shrink starts 10% sooner
+  //   LetterScale        1.1752 @ t=0.706     1.1940 @ t=0.573    shrink starts 13% sooner
+  //   YOffset           -0.01667 @ t=0.901   -0.03722 @ t=0.600    2.23x deeper rise
+  //   LetterYOffset     -0.01786 @ t=0.901   -0.04000 @ t=0.599    2.24x deeper rise
+  //   Glow               1.1611 @ t=0.356     1.4330 @ t=0.340    1.23x brighter
+  //
+  // The YOffset row is AJ's "it does go up a little but barely": -1/60 is only a
+  // CONTROL POINT, the real curve reaches -0.0372. Equally important, the peak
+  // TIME moves 0.901 -> 0.600, so the old curve held the word flat for 90% of its
+  // life and then twitched at the very end — which is why it read as "just zooms
+  // in". And the Scale row's earlier peak is literally "make it go smaller when
+  // it's close to ending".
+  //
+  // Solve the tangents ONCE in the constructor: at() is called per word per frame.
   class Spline {
     constructor(points) {
-      this.points = points.slice().sort((a, b) => a.Time - b.Time);
-      this.slopes = this.points.map((point, index) => {
-        if (index === 0) {
-          return (this.points[1].Value - point.Value) /
-            (this.points[1].Time - point.Time);
-        }
-        if (index === this.points.length - 1) {
-          const previous = this.points[index - 1];
-          return (point.Value - previous.Value) /
-            (point.Time - previous.Time);
-        }
-        const previous = this.points[index - 1];
-        const next = this.points[index + 1];
-        return (next.Value - previous.Value) / (next.Time - previous.Time);
-      });
+      const sorted = points.slice().sort((a, b) => a.Time - b.Time);
+      this.xs = sorted.map((point) => point.Time);
+      this.ys = sorted.map((point) => point.Value);
+      this.ks = this.solveTangents();
     }
 
+    // Tridiagonal solve for the first derivative (tangent) at every knot, with
+    // natural boundary conditions — second derivative zero at both ends, which in
+    // the tangent formulation is 2*m0 + m1 = 3*slope0 (mirrored at the far end).
+    // NOTE the two end rows are NOT 1/0/0 rows; seeding them as such makes b[0]
+    // zero and the whole solve returns NaN.
+    solveTangents() {
+      const xs = this.xs;
+      const ys = this.ys;
+      const n = xs.length - 1;
+      const a = new Array(n + 1).fill(0);
+      const b = new Array(n + 1).fill(0);
+      const c = new Array(n + 1).fill(0);
+      const r = new Array(n + 1).fill(0);
+
+      for (let i = 1; i < n; i++) {
+        const hPrev = xs[i] - xs[i - 1];
+        const hNext = xs[i + 1] - xs[i];
+        a[i] = 1 / hPrev;
+        b[i] = 2 * (1 / hPrev + 1 / hNext);
+        c[i] = 1 / hNext;
+        r[i] = 3 * ((ys[i] - ys[i - 1]) / (hPrev * hPrev) +
+          (ys[i + 1] - ys[i]) / (hNext * hNext));
+      }
+
+      const firstH = xs[1] - xs[0];
+      a[0] = 1 / firstH;
+      b[0] = 2 / firstH;
+      c[0] = 1 / firstH;
+      r[0] = (3 * (ys[1] - ys[0])) / (firstH * firstH);
+
+      const lastH = xs[n] - xs[n - 1];
+      a[n] = 1 / lastH;
+      b[n] = 2 / lastH;
+      c[n] = 0;
+      r[n] = (3 * (ys[n] - ys[n - 1])) / (lastH * lastH);
+
+      // Thomas algorithm — forward eliminate, then back substitute.
+      for (let i = 1; i <= n; i++) {
+        const m = a[i] / b[i - 1];
+        b[i] -= m * c[i - 1];
+        r[i] -= m * r[i - 1];
+      }
+      const ks = new Array(n + 1).fill(0);
+      ks[n] = r[n] / b[n];
+      for (let i = n - 1; i >= 0; i--) ks[i] = (r[i] - c[i] * ks[i + 1]) / b[i];
+      return ks;
+    }
+
+    // Cubic Hermite, written the way the package writes it: the tangents ARE the
+    // Hermite slopes, so this is the same curve the second-derivative formulation
+    // produces.
+    //
+    // Clamped at both ends. The real package returns NaN past the last knot and
+    // extrapolates below the first, but every upstream call site feeds a value
+    // already clamped to [0,1] by getProgressPercentage(), so clamping is
+    // behaviourally identical in-range and strictly safer outside it.
     at(value) {
-      const points = this.points;
-      if (value <= points[0].Time) return points[0].Value;
-      if (value >= points[points.length - 1].Time) return points[points.length - 1].Value;
+      const xs = this.xs;
+      const ys = this.ys;
+      const ks = this.ks;
+      if (value <= xs[0]) return ys[0];
+      if (value >= xs[xs.length - 1]) return ys[ys.length - 1];
 
       let index = 0;
-      while (index < points.length - 2 && value > points[index + 1].Time) index++;
-      const a = points[index];
-      const b = points[index + 1];
-      const width = b.Time - a.Time || 1;
-      const t = (value - a.Time) / width;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      const h00 = 2 * t3 - 3 * t2 + 1;
-      const h10 = t3 - 2 * t2 + t;
-      const h01 = -2 * t3 + 3 * t2;
-      const h11 = t3 - t2;
-      return h00 * a.Value + h10 * width * this.slopes[index] +
-        h01 * b.Value + h11 * width * this.slopes[index + 1];
+      while (index < xs.length - 2 && value > xs[index + 1]) index++;
+      const x0 = xs[index];
+      const x1 = xs[index + 1];
+      const width = x1 - x0 || 1;
+      const t = (value - x0) / width;
+      const rise = ys[index + 1] - ys[index];
+      const from = ks[index] * width - rise;
+      const to = -ks[index + 1] * width + rise;
+      return (1 - t) * ys[index] + t * ys[index + 1] +
+        t * (1 - t) * (from * (1 - t) + to * t);
     }
   }
 
@@ -594,17 +781,47 @@
   const getSpline = (range) => new Spline(range);
   const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
 
+  // Spline values are copied verbatim from upstream Spicy Lyrics
+  // (LyricsAnimator.ts, v6.3.20). They are the entire "feel" of the karaoke
+  // motion — the spring tuning only governs how fast a value chases its target,
+  // while these curves define what the target IS. Keep them in lockstep with
+  // upstream or the animation visibly diverges (AJ, 2026-09-20).
+  // Resting scale is IdleLyricsScale = 0.95 upstream.
   const ScaleSpline = getSpline([
-    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.085 }, { Time: 1, Value: 1 },
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.0505 }, { Time: 1, Value: 1 },
   ]);
   const LetterScaleSpline = getSpline([
     { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.175 }, { Time: 1, Value: 1 },
   ]);
+  // Resting Y offset is 0, NOT upstream's +1/100. This is a deliberate, twice-
+  // confirmed divergence — do not "restore parity" here a third time.
+  //
+  // WHY the non-zero resting value is a visible BUG and not just a sub-pixel
+  // offset: a word's springs are created LAZILY, the first time it is animated,
+  // with `SetGoal(..., true)` — and `replacePosition: true` SNAPS the spring to
+  // the new value. There is no spring resting at +1/100 beforehand, so the word
+  // is sitting at its natural position (translateY 0) and then JUMPS DOWN by 1%
+  // of the font size (0.48px at 48px) the instant it first animates. That is a
+  // step discontinuity, and it is what AJ reports as "as soon as a word starts,
+  // it kinda glitches and goes very slightly down."
+  //
+  // With Time:0 = 0 the snap is a no-op, so the word simply begins at rest and
+  // rises. That also makes the end pose consistent: both endpoints are 0, so a
+  // fully sung word settles exactly where an unsung one sits.
+  //
+  // COST: none that matters. The dip is actually DEEPER without the offset
+  // (-0.03901 vs upstream's -0.03722) because the natural spline has to travel
+  // from 0 instead of from +0.01. Only the travel measured from the resting pose
+  // is smaller (1.87px vs 2.27px at 48px), and 1.87px is still 2.34x the 0.80px
+  // this whole exercise started from.
+  //
+  // The 0.9 overshoot and the 1.0 settle are byte-identical to upstream; only the
+  // Time:0 control point differs.
   const YOffsetSpline = getSpline([
-    { Time: 0, Value: 1 / 100 }, { Time: 0.9, Value: -(1 / 36) }, { Time: 1, Value: 0 },
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 60) }, { Time: 1, Value: 0 },
   ]);
   const LetterYOffsetSpline = getSpline([
-    { Time: 0, Value: 1 / 100 }, { Time: 0.9, Value: -(1 / 48) }, { Time: 1, Value: 0 },
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 56) }, { Time: 1, Value: 0 },
   ]);
   const GlowSpline = getSpline([
     { Time: 0, Value: 0 }, { Time: 0.15, Value: 1 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 0 },
@@ -621,6 +838,15 @@
   const DotOpacitySpline = getSpline([
     { Time: 0, Value: 0.35 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
   ]);
+
+  // Upstream's residual-glow point for a sung letter in a word with no active
+  // letter. NOTE it evaluates to ~1.21 (the natural spline overshoots its own
+  // 0 -> 1 rise), NOT a small dim value — see the letter branch in
+  // animateLetters() for why we deliberately do NOT apply it. Kept here as the
+  // documented upstream value so an A/B can flip the behaviour in one line.
+  // (Was documented as ~1.07 before the 2026-09-20 spline fix; the corrected
+  // curve moves it to 1.21, which is 18.5px blur / 224% opacity, not less.)
+  const SungLetterGlow = 0.2;
 
   function createWordSprings() {
     return {
@@ -661,31 +887,44 @@
     return durationMs >= 1000 && !isRtl(text);
   }
 
-  function setStyleIfChanged(element, property, value, epsilon) {
+  // "4.5px" -> { value: 4.5, unit: "px" }. Returns null for anything that is not a
+  // number with an optional trailing unit: colours, var(), calc(), translate3d().
+  //
+  // The unit must match on BOTH sides before a numeric comparison is allowed.
+  // parseFloat alone is not enough: "rgba(255,255,255,.42)" and "rgba(255,255,255,.5)"
+  // both read as 255, so a real colour change would be skipped as "no change".
+  function splitNumericValue(text) {
+    const match = /^(-?\d*\.?\d+)([a-z%]*)$/i.exec(text);
+    return match ? { value: parseFloat(match[1]), unit: match[2].toLowerCase() } : null;
+  }
+
+  // `compareValue` is the number behind a value whose string cannot be parsed —
+  // specifically `translate3d(0, calc(var(--DefaultLyricsSize) * 0.037), 0)`, which
+  // starts with "translate3d(" so parseFloat returns NaN and the write degrades to an
+  // exact string comparison. That string embeds a FULL-PRECISION spring value which
+  // changes every frame, so the transform was rewritten (and a fresh string allocated)
+  // every frame for every awake word and letter, and `epsilon` did nothing at all.
+  // Callers that build such a string pass the underlying number here.
+  // (Upstream Spicy Lyrics fixed the same thing in 6.3.98 the same way.)
+  function setStyleIfChanged(element, property, value, epsilon, compareValue) {
     const previous = element.__ymSpicyStyleCache || (element.__ymSpicyStyleCache = {});
     const old = previous[property];
+    const next =
+      compareValue !== undefined && Number.isFinite(compareValue)
+        ? { value: compareValue, unit: "" }
+        : splitNumericValue(value);
+
     if (old !== undefined) {
-      const oldNumber = parseFloat(old);
-      const newNumber = parseFloat(value);
-      // Only treat a value as a plain (unitless) number for epsilon comparison
-      // when it IS one. Colour strings like "rgba(255,255,255,.42)" or values
-      // containing "var(...)", units ("4px") or "%" all parseFloat() to their
-      // leading number (e.g. 255), so a .42↔.5 colour change would be wrongly
-      // seen as "no change" and skipped. For anything non-plain-numeric, fall
-      // back to an exact string comparison.
-      const isPlainNumber = (s) => /^-?\d*\.?\d+$/.test(s);
-      if (
-        !Number.isNaN(oldNumber) &&
-        !Number.isNaN(newNumber) &&
-        isPlainNumber(old) &&
-        isPlainNumber(value)
-      ) {
-        if (Math.abs(oldNumber - newNumber) <= (epsilon || 0)) return;
+      // Both frames comparable, same unit -> the epsilon applies.
+      if (old !== null && typeof old === "object" && next !== null) {
+        if (old.unit === next.unit && Math.abs(old.value - next.value) <= (epsilon || 0)) {
+          return;
+        }
       } else if (old === value) {
         return;
       }
     }
-    previous[property] = value;
+    previous[property] = next === null ? value : next;
     element.style.setProperty(property, value);
   }
 
@@ -865,7 +1104,24 @@
   let fsPointerDown = false; // is a button held (i.e. actively dragging)?
   let mountTabTimer = 0;
   let raf = 0;
-  let lineScrollRaf = 0;
+  // Auto-scroll state. `scrollSpringTarget === null` means the scroll is at rest.
+  // `lastScrollTargetLine` is the line we are currently gliding toward, which is
+  // NOT always `lastActiveLine` — see the early-scroll block in animate().
+  let scrollSpringTarget = null;
+  let scrollSpringVelocity = 0;
+  let lastScrollTargetLine = -1;
+  // Set by any structural change that invalidates the scroll position: a new
+  // track, entering or leaving fullscreen, or switching the fullscreen layout.
+  // While set, the next placement snaps instead of gliding. See
+  // recentreActiveLine().
+  let pendingInstantScroll = false;
+  // While `performance.now() < recentreUntilMs`, animate() pins the camera to the
+  // active line EVERY frame, instantly. A one-shot placement is not enough for
+  // the fullscreen layout switch: that resizes the lyrics column with a CSS
+  // transition, so the geometry keeps moving for a few hundred ms and a single
+  // placement would be correct only for the first frame of it.
+  let recentreUntilMs = 0;
+  const RECENTRE_WINDOW_MS = 600;
   let lastFrameTime = performance.now();
   let lastActiveLine = -1;
   let manualScrollActive = false;
@@ -874,10 +1130,23 @@
   const FS_JUMP_RETURN_MS = 8000;
   let manualScrollReturnTimer = 0;
   let jumpButton = null;
+  // MUST be module scope, not a `const` inside buildUI(). refreshPermanentDeleteState()
+  // and deletePermanentTTMLForCurrentTrack() both live out here and read it, so
+  // declaring it inside buildUI made every call throw ReferenceError — which,
+  // because both callers are `async`, surfaced only as an unhandled rejection in
+  // the console while silently breaking the whole "Delete saved" button.
+  let deletePermanentButton = null;
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
   let scrollCandidateIndices = [];
+  // Loading-skeleton plumbing. `lyricsSkeletonToken` is bumped by every panel
+  // reset, which invalidates a skeleton paint still queued on rAF/`setTimeout`.
+  // Without it the placeholder can land AFTER the lyrics it stood in for: the
+  // paint is deferred on purpose (see showLyricsSkeleton), so a fast fetch wins
+  // the race and then gets clobbered a frame later.
+  let lyricsSkeletonToken = 0;
+  let lyricsSkeletonShown = false;
   let currentTrackKey = "";
   // Separate sequence for prefetch so an in-flight next-track lookup can never
   // collide with or abort the current track's lyric request (which uses
@@ -923,6 +1192,15 @@
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
   let currentSongwriters = [];
+  // Spicy Lyrics upload attribution for the currently loaded lyrics, when they
+  // came from the Spicy Lyrics API. Null for every other source. Shape mirrors
+  // the API's Body.UploadAttribution.Uploader:
+  //   { id, username, avatar, hasProfileBanner, url }
+  let currentUploader = null;
+  // Credits carried by the *next* loadTTML call. Set immediately before an
+  // external load so loadTTML (which is also used for imports and cached TTML)
+  // can attach them without changing its signature for every caller.
+  let pendingSpicyCredits = null;
   let cachedFirstRealLyricStartMs = Infinity;
   let cachedLastRealLyricEndMs = 0;
   let trackRequestSeq = 0;
@@ -930,27 +1208,60 @@
   const lrclibCache = new Map();
   let adaptiveLayoutLastAt = 0;
   // Defaults track the Synced Lyrics settings popup so a fresh install (and the
-  // host's "Reset to defaults" button) open at AJ's preferred look: bigger
-  // lyrics, pushed up, brighter background vocals, faster animation overall,
-  // gentler syllable + vertical animation, and both adaptive spacing +
-  // romanization on. The popup schema in src/content/content.js mirrors these
-  // values; if you change one, change both.
+  // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
+  // pushed up, full-strength background vocals, adaptive spacing + romanization
+  // on. The popup schema in src/content/content.js mirrors these values; if you
+  // change one, change both.
+  //
+  // These three intensity sliders multiply together and then scale a curve that
+  // is already upstream-shaped, so they are a pure amplitude boost. See
+  // blendSyllableAnimation. Current defaults (AJ, 2026-09-26) are 1.0 / 1.0 /
+  // 1.25, i.e. scale+glow are at EXACT upstream parity (1.0 x 1.0) while the
+  // vertical rise is x1.25 — deliberately, that is the one place he wants more
+  // travel than Spicy Lyrics. All three at 1.0 is full parity.
   const DEFAULT_SETTINGS = {
-    size: 1.15,
+    // 1.30 (AJ, 2026-09-26). Was briefly 1.15 when the container-relative clamp
+    // came back, but that clamp sits AT its 3.5rem ceiling on a normal-size pane,
+    // so this multiplies a flat 35px: 1.30 -> 45.5px, which is the size he landed
+    // on by dragging the slider. (1.95 belonged to the fixed-2rem base and is
+    // gone; keeping it here would have doubled the type.)
+    size: 1.30,
     offset: -80,
-    bgOpacity: 2.0,
-    animation: 1.25,
-    syllableAnimation: 0.9,
-    verticalAnimation: 1.55,
+    // Background-vocal opacity RELATIVE to a normal line: 1.0 = exactly the same
+    // resting opacity as lead lines (upstream parity), lower = dimmer. It must
+    // never exceed 1.0 — the value is written straight into an `opacity`, and
+    // CSS clamps opacity at 1, so a >100% setting silently pinned EVERY
+    // background vocal (Sung, NotSung and Active alike) to full brightness and
+    // made it ignore its state entirely. That was the bug AJ reported: bright at
+    // rest, and it never dimmed. See the .line.bg-line block for the model.
+    bgOpacity: 1.0,
+    animation: 1.0,
+    syllableAnimation: 1.0,
+    verticalAnimation: 1.25,
     adaptiveSpacing: true,
     romanizationEnabled: true,
     legibilityBackdrop: false,
+    // Scroll behaviour. Upstream Spicy Lyrics ships BOTH of these off. We default
+    // `smoothScrolling` ON instead, because our panel has always animated its
+    // scroll (a fixed-duration tween) and silently downgrading that to an instant
+    // jump would read as a regression — see scrollActiveLineIntoView.
+    smoothScrolling: true,
+    scrollLeadEnabled: false,
+    scrollLeadMs: 250,
   };
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
   function applySettings(next) {
     const prevRomanization = currentSettings.romanizationEnabled;
-    currentSettings = Object.assign({}, currentSettings, next || {});
+    const prevSize = currentSettings.size;
+    // Only merge a plain object. `Object.assign` will happily spread a string or
+    // an array by index, so a corrupted stored value would inject junk keys
+    // ("0", "1", ...) into the settings object and leave it permanently out of
+    // shape. Spicy Lyrics shipped a release where a bad settings entry made the
+    // extension unusable until storage was cleared by hand; the clamps below
+    // cover bad VALUES, this covers a bad SHAPE.
+    const incoming = next && typeof next === "object" && !Array.isArray(next) ? next : {};
+    currentSettings = Object.assign({}, currentSettings, incoming);
     const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
     const booleanValue = (value, fallback) => {
       if (value == null) return fallback;
@@ -958,8 +1269,16 @@
       return Boolean(value);
     };
     currentSettings.size = clamp(finite(currentSettings.size, DEFAULT_SETTINGS.size), 0.75, 6.0);
-    currentSettings.offset = clamp(finite(currentSettings.offset, DEFAULT_SETTINGS.offset), -80, 80);
-    currentSettings.bgOpacity = clamp(finite(currentSettings.bgOpacity, DEFAULT_SETTINGS.bgOpacity), 0.15, 2.0);
+    // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
+    // is gone and the panel simply sits at the default -80px. PINNED rather than
+    // merely defaulted, because a value stored back when the slider existed would
+    // otherwise keep shifting the lyrics with no UI left to move it back.
+    currentSettings.offset = DEFAULT_SETTINGS.offset;
+    // Ceiling is 1.0 on purpose: this value becomes an `opacity` and CSS clamps
+    // opacity at 1, so permitting >1 would silently re-create the "background
+    // vocals never dim" bug. A stored 2.0 from an older build lands on 1.0 here,
+    // which is the correct parity value.
+    currentSettings.bgOpacity = clamp(finite(currentSettings.bgOpacity, DEFAULT_SETTINGS.bgOpacity), 0.15, 1.0);
     currentSettings.animation = clamp(finite(currentSettings.animation, DEFAULT_SETTINGS.animation), 0, 1.25);
     currentSettings.syllableAnimation = clamp(
       finite(currentSettings.syllableAnimation, DEFAULT_SETTINGS.syllableAnimation),
@@ -983,14 +1302,40 @@
       currentSettings.legibilityBackdrop,
       DEFAULT_SETTINGS.legibilityBackdrop
     );
+    currentSettings.smoothScrolling = booleanValue(
+      currentSettings.smoothScrolling,
+      DEFAULT_SETTINGS.smoothScrolling
+    );
+    currentSettings.scrollLeadEnabled = booleanValue(
+      currentSettings.scrollLeadEnabled,
+      DEFAULT_SETTINGS.scrollLeadEnabled
+    );
+    currentSettings.scrollLeadMs = clamp(
+      finite(currentSettings.scrollLeadMs, DEFAULT_SETTINGS.scrollLeadMs),
+      0,
+      800
+    );
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // Turning smooth scrolling off mid-glide must not strand the spring with a
+    // target it will never reach (nothing steps it in the instant path).
+    if (!currentSettings.smoothScrolling) {
+      scrollSpringTarget = null;
+      scrollSpringVelocity = 0;
+    }
     adaptiveLayoutLastAt = 0;
     if (!currentSettings.adaptiveSpacing) resetAdaptiveSpacing();
     if (lineScrollEl) {
       lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
       lineScrollEl.style.setProperty("--ym-sl-lyrics-offset", `${currentSettings.offset}px`);
-      lineScrollEl.style.setProperty("--ym-sl-bg-vocal-opacity", String(currentSettings.bgOpacity));
+      lineScrollEl.style.setProperty("--ym-sl-bg-vocal-scale", String(currentSettings.bgOpacity));
     }
+    // A size change reflows EVERY line, so the scroll offset that was correct for
+    // the old line heights no longer points at the active line — the same "camera
+    // drifted off the line" complaint as a track change or a fullscreen toggle,
+    // with a fifth trigger. Re-centre after the write. recentreActiveLine() holds
+    // a window open and re-pins each frame, which is what covers the reflow
+    // actually landing a frame after the custom property is set.
+    if (prevSize !== currentSettings.size) recentreActiveLine();
     // Romanization is computed at build time, so toggling it means rebuilding the
     // current lines. No lines yet (e.g. first init) -> nothing to do.
     if (prevRomanization !== currentSettings.romanizationEnabled && lastRendererContent) {
@@ -998,6 +1343,18 @@
     }
   }
 
+  // NOTE: these three settings MULTIPLY, and they are applied on top of a curve
+  // that is already the same shape as upstream's. So the net amplitude is
+  //   scale & glow  : animation * syllableAnimation                      (max 1.5)
+  //   y-offset      : animation * syllableAnimation * verticalAnimation  (max 3.0)
+  // At the current defaults (1.25 / 0.9 / 1.55) that is x1.125 for scale+glow and
+  // x1.744 for the vertical rise — i.e. noticeably MORE motion than upstream, not
+  // less. All three at 1.0 is exact upstream parity.
+  // This matters because the defaults were originally tuned AGAINST the old
+  // Catmull-Rom curve, whose vertical dip was 2.23x too shallow; the spline fix
+  // (2026-09-20) corrected the curve, so the slider boost now stacks on a
+  // correct curve instead of compensating for a broken one.
+  // resolver-worker/test-animation-parity.mjs guard D prints the live numbers.
   function blendAnimation(resting, target) {
     return resting + (target - resting) * currentSettings.animation;
   }
@@ -1514,6 +1871,17 @@
     .ym-sl-options-body .ym-sl-video-offset { flex-wrap: wrap; row-gap: 8px; }
     .ym-sl-options-body .ym-sl-video-offset input[type="range"] { width: 100%; min-width: 0; }
     .ym-sl-options-button { white-space: nowrap; }
+    /* Cache section: a short status line above the purge button. */
+    .ym-sl-cache-section { gap: 10px; }
+    .ym-sl-cache-status {
+      font-size: 12px;
+      line-height: 1.4;
+      color: rgba(255,255,255,.6);
+      padding: 0 2px;
+    }
+    .ym-sl-options-body .ym-sl-cache-clear {
+      align-self: flex-start;
+    }
     .ym-sl-export-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1737,12 +2105,11 @@
     .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .LyricsContent {
       --ym-sl-lyrics-scale: 1.16;
     }
-    /* Fullscreen lyrics pane is much wider than the side panel, so it gets its
-       own fixed base size. Fixed rem (not cqw) so it never shrinks on a smaller
-       monitor / lower resolution. */
-    .ym-sl-fs-overlay #ym-sl-panel.SpicyRenderer .LyricsContent {
-      --DefaultLyricsSize: calc(3.5rem * var(--ym-sl-lyrics-scale));
-    }
+    /* The fullscreen pane deliberately has NO --DefaultLyricsSize override any
+       more. It used to carry a fixed 3.5rem base, which is the same value the
+       shared .LyricsContent clamp already lands on at that width -- so it was
+       redundant on a big monitor and actively wrong on a small one, where a
+       fixed base refused to shrink. One rule, one source of truth. */
     .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .SpicyLyricsScrollContainer {
       width: 100%;
       max-width: 980px;
@@ -2474,6 +2841,43 @@
     }
     .ym-sl-empty-msg { color: rgba(255,255,255,.72); }
     .ym-sl-empty-search { min-height: 34px; padding: 0 16px; font-size: 12px; }
+    /* Loading skeleton. Sized off --DefaultLyricsSize so it tracks the size
+       slider: a real .line rule is font-size: var(--DefaultLyricsSize) at
+       line-height 1.4 plus .12em block padding, i.e. ~1.64x, so a 0.6x bar with
+       a 0.95x gap puts the placeholder rows on roughly the same pitch as real
+       lyrics and the panel does not jump when they arrive.
+       Only transform/opacity animate. A background-position shimmer would
+       repaint the whole block every frame — the exact cost the skeleton exists
+       to hide. */
+    .ym-sl-skeleton {
+      display: flex;
+      flex-direction: column;
+      gap: calc(var(--DefaultLyricsSize) * .95);
+      padding: calc(var(--DefaultLyricsSize) * .5) 2px;
+    }
+    .ym-sl-skeleton-row {
+      position: relative;
+      flex: 0 0 auto;
+      height: calc(var(--DefaultLyricsSize) * .6);
+      border-radius: 6px;
+      background: rgba(255,255,255,.075);
+      overflow: hidden;
+    }
+    .ym-sl-skeleton-row::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
+      animation: ym-sl-skeleton-sweep 1.15s ease-in-out infinite;
+    }
+    @keyframes ym-sl-skeleton-sweep {
+      from { transform: translateX(-100%); }
+      to   { transform: translateX(100%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-skeleton-row::after { display: none; }
+    }
     .ym-sl-search {
       position: absolute;
       top: 48px;
@@ -2855,20 +3259,49 @@
       --StrongTextGlowDef: rgba(255,255,255,.68) 0 0 16.4px;
       --ym-sl-lyrics-scale: 1;
       --ym-sl-lyrics-offset: 0px;
-      --ym-sl-bg-vocal-opacity: .4;
-      /* Fixed rem base (NOT the old container-width clamp(1.7rem,7cqw,3.5rem)):
-         the 7cqw term scaled with the pane, so on a smaller monitor / lower
-         resolution the lyrics shrank. A fixed base keeps them the same size.
-         The fullscreen pane is much wider, so it overrides this with a larger
-         fixed base (see the .ym-sl-fs-overlay rule). The user's size setting
-         still multiplies via --ym-sl-lyrics-scale. */
-      --DefaultLyricsSize: calc(2rem * var(--ym-sl-lyrics-scale));
+      /* Background-vocal opacity as a MULTIPLE of a lead line's, so 1 = the
+         same dimming a normal line gets (see the .line.bg-line block). Named
+         "-scale" and not "-opacity" because it is not used as an opacity value
+         directly: calling it --ym-sl-bg-vocal-opacity and then feeding it
+         straight to the opacity property is what broke background vocals in
+         the first place. applySettings() overwrites this with the user's
+         setting.
+         NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK — this CSS lives inside a
+         JS template literal, so a stray backtick terminates it early. */
+      --ym-sl-bg-vocal-scale: 1;
+      /* Container-relative base, RESTORED 2026-09-26. A fixed rem base was tried
+         for a week to hold the size constant across monitors, but AJ called it
+         out: the pane gets narrower and the type does not, so the lyrics crowd
+         the panel. The 7cqw term tracks the pane instead.
+
+         Which pane: the query container is .ym-sl-panel (container-type: size,
+         above), NOT this element -- a container cannot query itself, so cqw in a
+         declaration here resolves against the nearest ANCESTOR container.
+         Measured live: panel content box 522px => 7cqw = 36.5px, already past
+         the 3.5rem ceiling. So on a normal-size pane this sits AT the ceiling
+         (35px) and only starts shrinking once the pane drops below ~500px. That
+         is exactly the wanted behaviour.
+
+         The fullscreen pane needs no override of its own: it is much wider, so
+         its 7cqw is even further past the same ceiling and the two agree.
+
+         The user's size setting still multiplies via --ym-sl-lyrics-scale.
+         NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK -- this CSS lives inside a
+         JS template literal, so a stray backtick terminates it early. */
+      --DefaultLyricsSize: calc(clamp(1.7rem, calc(1cqw * 7), 3.5rem) * var(--ym-sl-lyrics-scale));
       --amll-lyric-player-font-size: var(--DefaultLyricsSize);
       --vertical-gap: 0px;
       width: 100%;
       height: 100%;
       overflow-x: hidden !important;
       overflow-y: auto !important;
+      /* Eases the NON-spring scroll path. "Smooth scrolling off" means the user
+         did not ask for our spring; it does not mean the panel should teleport,
+         which is what it used to do while "smooth scrolling off" was folded into
+         "immediate". Every per-frame writer passes an explicit behavior of
+         "instant" so this never fights the spring — see writeScrollTop().
+         NO BACKTICKS IN THIS COMMENT BLOCK — it lives inside a template literal. */
+      scroll-behavior: smooth;
       font-size: var(--DefaultLyricsSize) !important;
       font-weight: 700;
       font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
@@ -2884,6 +3317,12 @@
       -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       transition: opacity .25s ease;
+    }
+    /* Honour a reduced-motion request: the native ease above is a scroll
+       animation like any other. The spring path is already off for these users
+       (see applySettings), so this only has to cover the fallback. */
+    @media (prefers-reduced-motion: reduce) {
+      #ym-sl-panel.SpicyRenderer .LyricsContent { scroll-behavior: auto; }
     }
     #ym-sl-panel.SpicyRenderer .LyricsContent.offline {
       display: flex;
@@ -3266,21 +3705,33 @@
     }
     #ym-sl-panel.SpicyRenderer .line.bg-line {
       --font-size: calc(var(--DefaultLyricsSize) * .72);
-      --Vocal-NotSung-opacity: var(--ym-sl-bg-vocal-opacity);
-      /* Active bg vocals get a little more presence than their resting state;
-         the line remains behind the lead vocal, but the currently sung word
-         should not become dimmer while it is being performed. */
-      --Vocal-Active-opacity: calc(var(--ym-sl-bg-vocal-opacity) * 1.35);
-      --Vocal-Sung-opacity: var(--ym-sl-bg-vocal-opacity);
+      /* Background vocals are NOT a special case in upstream's model: Mixed.css
+         declares one fixed per-state opacity for every line (NotSung .51 /
+         Sung .497 / Active 1) and has no background-vocal override at all. We
+         only scale that model by the "Background vocals" slider, where 1.0 =
+         identical to a normal line and lower = dimmer.
+         The scale must be applied to the STATE CONSTANTS, never to the opacity
+         property itself. CSS clamps opacity to 1, so the old code — which fed
+         the slider (then defaulting to 2.0) straight into it — pinned every
+         background vocal to full brightness and erased the Sung/NotSung
+         distinction: bright at rest, never dimming. The min(1, ...) wrapper
+         keeps the result a legal opacity without depending on that silent
+         clamp.
+         NO BACKTICKS IN THIS COMMENT BLOCK (it is inside a JS template). */
+      --Vocal-NotSung-opacity: min(1, calc(.51 * var(--ym-sl-bg-vocal-scale)));
+      --Vocal-Sung-opacity: min(1, calc(.497 * var(--ym-sl-bg-vocal-scale)));
+      --Vocal-Active-opacity: min(1, var(--ym-sl-bg-vocal-scale));
       margin: -.25cqw 0 1.05cqw;
       font-weight: 600 !important;
     }
     #ym-sl-panel.SpicyRenderer .line.bg-line.Active {
       opacity: var(--Vocal-Active-opacity);
     }
-    #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung {
+      opacity: var(--Vocal-NotSung-opacity);
+    }
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung {
-      opacity: var(--ym-sl-bg-vocal-opacity);
+      opacity: var(--Vocal-Sung-opacity);
     }
     #ym-sl-panel.SpicyRenderer .line.bg-line .word,
     #ym-sl-panel.SpicyRenderer .line.bg-line .letter,
@@ -3300,14 +3751,19 @@
        at once instead of lighting up letter by letter (background vocals are
        TTML-only, so it showed up only on imported TTML). Dimming background
        vocals is handled by the gradient alphas above plus the line's own
-       --ym-sl-bg-vocal-opacity, both of which preserve the animation. */
+       --ym-sl-bg-vocal-scale, both of which preserve the animation. */
     /* BG vocals resting state: dim them so they sit "behind" the lead instead
        of showing the same brightness as the active sweep. The bg-line block
-       above now sets --gradient-alpha=.38 for ALL states, so the active wipe
-       stays dim too. These rules additionally pin the NotSung/Sung glow, which
-       is what actually paints resting glyphs. Selector specificity
-       (.line.bg-line.NotSung .word = 3 classes + 1 type) beats the base
-       .line.NotSung .word rule. */
+       above sets --gradient-alpha .62 / --gradient-alpha-end .36 for ALL
+       states, so the active wipe stays dim too. These rules additionally pin
+       the NotSung/Sung glow, which is what actually paints resting glyphs.
+       Selector specificity (.line.bg-line.NotSung .word = 3 classes + 1 type)
+       beats the base .line.NotSung .word rule. */
+    /* NOTE: this glow pinning is a SECOND, independent dimming layer on top of
+       the line opacity above — the two multiply. Both are deliberate, but if
+       background vocals ever read as too dim, this block (not the opacity
+       model) is the one to relax: the opacity slider is already at its 1.0
+       parity ceiling and has no headroom left. */
     #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung .word,
     #ym-sl-panel.SpicyRenderer .line.bg-line.NotSung .letter {
       text-shadow: 0 0 var(--BlurAmount) rgba(255, 255, 255, .22);
@@ -3400,6 +3856,54 @@
       font-weight: 600;
       line-height: 1.5;
       color: rgba(255,255,255,.8);
+    }
+    /* "Uploaded by <avatar> <username>" — only present on Spicy Lyrics API
+       results. The parent .ym-sl-credits is pointer-events:none, so the link
+       opts itself back in; without that the click never reaches it. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
+      color: rgba(255,255,255,.5);
+      font-weight: 600;
+      letter-spacing: .02em;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
+      pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 3px 9px 3px 4px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.9);
+      text-decoration: none;
+      transition: background-color .18s ease, color .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link:hover {
+      background: rgba(255,255,255,.14);
+      color: #fff;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link.no-link {
+      pointer-events: none;
+      background: rgba(255,255,255,.05);
+      cursor: default;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-avatar {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: none;
+      background: rgba(255,255,255,.12);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
+      font-weight: 600;
+      line-height: 1;
     }
     tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
     tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
@@ -3733,7 +4237,7 @@
     const exportActions = h("div", { class: "ym-sl-export-actions hidden" }, exportButton, exportSyncButton);
     exportButton.addEventListener("click", () => exportImportedTTML(false));
     exportSyncButton.addEventListener("click", () => exportImportedTTML(true));
-    const deletePermanentButton = h("button", {
+    deletePermanentButton = h("button", {
       class: "ym-sl-import ym-sl-delete-permanent-button hidden",
       type: "button",
       title: "Delete the permanently-saved TTML for this track",
@@ -3811,11 +4315,43 @@
     pauseBannerCancel.addEventListener("click", () => exitPausePickMode());
     pauseBanner.append(pauseBannerText, pauseBannerCancel);
 
+    // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
+    // exposes an explicit purge so a stale or wrong match can be cleared without
+    // nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored Lyrics
+    // Cache" row.
+    const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
+    const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
+    const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 3 days." });
+    const cacheClear = h("button", {
+      class: "ym-sl-import ym-sl-cache-clear",
+      type: "button",
+      "aria-label": "Clear Spicy Lyrics cache",
+      text: "Clear cache",
+    });
+    cacheClear.addEventListener("click", async () => {
+      if (cacheClear.disabled) return;
+      cacheClear.disabled = true;
+      try {
+        const count = await spicyCacheEntryCount();
+        await clearSpicyLyricsCache();
+        cacheStatus.textContent = count
+          ? `Cleared ${count} cached ${count === 1 ? "song" : "songs"}.`
+          : "Nothing to clear — the cache was already empty.";
+      } catch (error) {
+        cacheStatus.textContent = "Could not clear the cache.";
+        console.warn("[SpicyLyrics] clear cache failed:", error);
+      }
+      cacheClear.disabled = false;
+    });
+    cacheSection.append(cacheStatus, cacheClear);
+
     const optionsBody = h("div", { class: "ym-sl-options-body" });
     optionsBody.append(
       optionsTop,
       pauseDivider, pauseTitle, pauseSection,
-      optionsDivider, optionsTtmlTitle, optionsBottom
+      optionsDivider, optionsTtmlTitle, optionsBottom,
+      cacheDivider, cacheTitle, cacheSection
     );
     optionsOverlay.append(optionsHeader, optionsBody);
     optionsButton.addEventListener("click", () => {
@@ -4218,6 +4754,12 @@
     if (fsLayoutSelect && fsLayoutSelect.value !== fsLayoutMode) fsLayoutSelect.value = fsLayoutMode;
     try { localStorage.setItem("better_lyrics_fullscreen_layout_v1", fsLayoutMode); } catch (_) {}
     recomputeActiveOffsetMode(true);
+    // Switching layout resizes and moves the lyrics column with a CSS transition,
+    // so the old scrollTop no longer centres the active line — and nothing
+    // corrected it until the next line change happened to retarget the spring.
+    // Hence "the camera doesn't stay on the active line". The window keeps
+    // re-placing it for the length of the transition.
+    recentreActiveLine();
   }
 
   function findPlayerButton(labels) {
@@ -4954,6 +5496,11 @@
     fsLyricsHost.appendChild(panelEl);
     panelEl.classList.remove("hidden");
     buildFullscreenControls();
+    // Detaching a scrollable element resets its scrollTop to 0, so without this
+    // fullscreen always opened on the TOP of the song no matter where the
+    // playhead was. The recentre window also rides out the overlay's entrance
+    // layout, which is still moving for a few frames after this point.
+    recentreActiveLine();
 
     // Keep the cover-art layers in sync if the track changes mid-fullscreen.
     // The sharp card art (fsArtImg) and the blurred backdrop (fsBgImg) are
@@ -5018,6 +5565,9 @@
       if (next && next.parentNode === parent) parent.insertBefore(panelEl, next);
       else parent.appendChild(panelEl);
     }
+    // Same reparenting reset as on the way in: leaving fullscreen would otherwise
+    // drop the panel back to the top of the song.
+    recentreActiveLine();
 
     if (fsBgRefresh) { clearInterval(fsBgRefresh); fsBgRefresh = null; }
     stopBgDrawLoop();
@@ -5629,26 +6179,17 @@
     btn.classList.toggle("hidden", !saved);
   }
 
-  function showLyricsMessage(message) {
-    if (!lineScrollEl || !linesRoot) return;
-    if (lineScrollRaf) {
-      cancelAnimationFrame(lineScrollRaf);
-      lineScrollRaf = 0;
-    }
-    lineScrollEl.classList.add("offline");
-    const empty = h("div", { class: "ym-sl-empty" });
-    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
-    // Surface a Search button under the empty-state message — that's the
-    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
-    const emptySearch = h("button", {
-      class: "ym-sl-import ym-sl-empty-search",
-      type: "button",
-      "aria-label": "Search lyrics",
-      text: "Search",
-    });
-    emptySearch.addEventListener("click", () => toggleSearchPanel());
-    empty.appendChild(emptySearch);
-    linesRoot.replaceChildren(empty);
+  // Shared teardown for "the panel is no longer showing a lyric line". Called by
+  // both the empty state and the loading skeleton, and it is the single place
+  // that invalidates a skeleton paint still queued on rAF/`setTimeout`.
+  function resetLyricsPanelState() {
+    lyricsSkeletonToken++;
+    lyricsSkeletonShown = false;
+    stopScrollSpring();
+    lastScrollTargetLine = -1;
+    // NOTE: the `offline` class is NOT touched here. It is a layout switch
+    // (centred empty-state box vs. the normal top-aligned scroller), so the
+    // empty state and the skeleton need opposite values and each sets its own.
     modelLines = [];
     lineElements = [];
     scrollCandidateIndices = [];
@@ -5677,6 +6218,107 @@
       try {
         document.documentElement.dataset.ymLyricLines = "0";
       } catch (e) {}
+    }
+  }
+
+  function showLyricsMessage(message) {
+    if (!lineScrollEl || !linesRoot) return;
+    resetLyricsPanelState();
+    // Centred box, the way an empty state should read.
+    if (lineScrollEl) lineScrollEl.classList.add("offline");
+    const empty = h("div", { class: "ym-sl-empty" });
+    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
+    // Surface a Search button under the empty-state message — that's the
+    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
+    const emptySearch = h("button", {
+      class: "ym-sl-import ym-sl-empty-search",
+      type: "button",
+      "aria-label": "Search lyrics",
+      text: "Search",
+    });
+    emptySearch.addEventListener("click", () => toggleSearchPanel());
+    empty.appendChild(emptySearch);
+    linesRoot.replaceChildren(empty);
+  }
+
+  /* ---- loading skeleton -----------------------------------------------------
+     A placeholder that looks like lyrics while we wait, instead of the words
+     "Looking for lyrics…". Two reasons it is worth more than it looks:
+
+     1. It holds the panel's layout. The empty state is a short centred block, so
+        when the real lyrics arrive the panel snaps from "two lines in the middle"
+        to "a full screen of lines"; with the skeleton the geometry barely moves.
+     2. It covers the blocking DOM build, not just the network. `loadTTML` ->
+        `buildRendererLines` creates every line, word and letter span in one
+        synchronous task, so the last frame the browser can paint is the one
+        BEFORE that task starts. Hence the deferred paint below.
+
+     The widths are a fixed ragged list rather than random per load: with random
+     widths the placeholder visibly reshuffles every time, which reads as a
+     glitch. Sixteen rows is about one screenful at the default size. */
+  const SKELETON_ROW_WIDTHS = [86, 62, 94, 71, 88, 55, 92, 66, 80, 97, 60, 84, 73, 90, 58, 76];
+
+  function showLyricsSkeleton() {
+    if (!linesRoot) return;
+    resetLyricsPanelState();
+    // Must be ONLINE: `offline` turns .LyricsContent into a centred flex box,
+    // which shrink-wraps its child — and the placeholder rows are empty divs with
+    // percentage widths, so they would collapse to zero. Online also means the
+    // skeleton picks up the same vertical offset and edge mask as real lyrics.
+    if (lineScrollEl) lineScrollEl.classList.remove("offline");
+    // Capture AFTER the reset, which is what bumps the token.
+    const token = lyricsSkeletonToken;
+    const wrap = h("div", {
+      class: "ym-sl-skeleton",
+      role: "status",
+      "aria-live": "polite",
+      "aria-label": "Loading lyrics",
+    });
+    for (let index = 0; index < SKELETON_ROW_WIDTHS.length; index++) {
+      const row = h("div", { class: "ym-sl-skeleton-row" });
+      row.style.width = `${SKELETON_ROW_WIDTHS[index]}%`;
+      wrap.appendChild(row);
+    }
+    const paint = () => {
+      // Superseded by a newer request, or the lyrics already landed.
+      if (token !== lyricsSkeletonToken) return;
+      if (!linesRoot) return;
+      linesRoot.replaceChildren(wrap);
+      lyricsSkeletonShown = true;
+    };
+    if (document.hidden) {
+      // requestAnimationFrame never fires in a hidden tab, so deferring here
+      // would leave the panel on the previous track's lyrics indefinitely.
+      paint();
+      return;
+    }
+    // Double rAF: the first callback runs before the next paint, the second runs
+    // after it. One frame is enough to get the element into the DOM, but we need
+    // the placeholder actually PAINTED before we hand control back to a caller
+    // that is about to block on the DOM build — and that is what the second
+    // frame guarantees.
+    requestAnimationFrame(() => requestAnimationFrame(paint));
+    // Backstop for rAF being throttled (background tab, occluded window,
+    // battery saver) rather than never firing. Cheap, and idempotent.
+    setTimeout(paint, 100);
+  }
+
+  // Backstop only. Every path that replaces the panel's contents — the renderer
+  // build, the empty state — already clears the skeleton, because they replace
+  // `linesRoot`'s children outright. This exists so a caller that forgets cannot
+  // leave a permanent placeholder on screen; it is the token bump that actually
+  // cancels a queued paint.
+  function hideLyricsSkeleton() {
+    if (!lyricsSkeletonShown) {
+      lyricsSkeletonToken++;
+      return;
+    }
+    lyricsSkeletonShown = false;
+    lyricsSkeletonToken++;
+    if (linesRoot && linesRoot.firstElementChild &&
+        linesRoot.firstElementChild.classList &&
+        linesRoot.firstElementChild.classList.contains("ym-sl-skeleton")) {
+      linesRoot.replaceChildren();
     }
   }
 
@@ -5722,10 +6364,10 @@
 
   function handleManualScrollIntent() {
     if (!lineScrollEl) return;
-    if (lineScrollRaf) {
-      cancelAnimationFrame(lineScrollRaf);
-      lineScrollRaf = 0;
-    }
+    // The user has taken the scroll. Kill the spring outright rather than
+    // retargeting: a spring still holding a target would keep pulling against
+    // their wheel/touch input, which reads as the panel fighting them.
+    stopScrollSpring();
     manualScrollActive = true;
     if (staticLyricsActive) {
       // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
@@ -5778,14 +6420,139 @@
   }
 
   function jumpToCurrentLyric() {
-    if (!lineScrollEl || lastActiveLine < 0 || !lineElements[lastActiveLine]) return;
+    // Reinforce the line the panel is already gliding toward, not necessarily the
+    // one being sung: with early scroll on those differ, and targeting the active
+    // line here would fight the next frame's retarget back to the lead line.
+    const index = lastScrollTargetLine >= 0 ? lastScrollTargetLine : lastActiveLine;
+    if (!lineScrollEl || index < 0 || !lineElements[index]) return;
     manualScrollActive = false;
     setJumpButtonVisible(false);
     if (manualScrollReturnTimer) {
       clearTimeout(manualScrollReturnTimer);
       manualScrollReturnTimer = 0;
     }
-    scrollActiveLineIntoView(lineElements[lastActiveLine], true);
+    scrollActiveLineIntoView(lineElements[index], true);
+  }
+
+  /* ---- auto-scroll ---------------------------------------------------------
+     One scroll position, THREE ways to reach it — and conflating the last two is
+     what made "smooth scrolling off" hard-cut between lines.
+
+       * spring      (smoothScrolling ON) — retargetable, keeps its velocity.
+       * native ease (smoothScrolling OFF, ordinary line change) — handed to the
+         element's own `scroll-behavior: smooth`. "Off" means the user did not ask
+         for OUR spring, not that the panel should teleport. Upstream models it the
+         same way: their $smoothScrolling also defaults to false, and their scroll
+         element carries `scroll-behavior: smooth !important` with an explicit
+         `behavior: "instant"` reserved for the writes that must not animate.
+       * hard jump   (`immediate`) — a structural change moved the lyrics out from
+         under the camera, so animating to catch up would be a lie about what just
+         happened.
+
+     `smoothScrolling` ON runs a spring that is RETARGETABLE and keeps its
+     velocity. That is the entire point of using a spring here rather than a
+     fixed-duration tween (which is what this used to be): a tween restarts from
+     zero velocity every time the target moves, so on a fast song — a new line
+     every ~400ms, and our old duration was 180-420ms — it never actually
+     arrives, and the panel reads as stop-start. A spring handed a new target
+     mid-flight just bends the curve and carries on.
+
+     A spring also takes a constant ~0.4s regardless of distance, which is why
+     the velocity clamp below matters: without it a 3000px "Jump to current"
+     would reach ~11,000px/s and the lyrics would smear. The clamp turns a long
+     jump into a constant-speed glide with a soft landing.
+
+     Damping is just over critical (zeta ~1.0), so there is no overshoot and no
+     bounce — a lyric panel that wobbles past its line looks broken, not bouncy. */
+  const SCROLL_SPRING_STIFFNESS = 110;
+  const SCROLL_SPRING_DAMPING = 21;
+  const SCROLL_MAX_VELOCITY = 4000; // px/s
+
+  /* The single scrollTop writer. `hard` picks the behaviour, and the difference
+     is load-bearing rather than cosmetic:
+
+       hard === true  -> behavior: "instant". This is the ONLY way to override the
+         element's own `scroll-behavior: smooth`; passing "auto" does not cancel
+         it, it DEFERS to it. Every per-frame writer (the spring, the static-lyrics
+         lerp) must use it, or each frame would kick off its own eased animation
+         and the two would fight — the spring would crawl and never satisfy its
+         settle test.
+
+       hard === false -> behavior: "auto" -> the CSS ease. One-shot only: issued
+         when the target CHANGES (once per line), never per frame. */
+  function writeScrollTop(top, hard) {
+    if (!lineScrollEl) return;
+    if (typeof lineScrollEl.scrollTo === "function") {
+      lineScrollEl.scrollTo({ top: top, behavior: hard ? "instant" : "auto" });
+      return;
+    }
+    lineScrollEl.scrollTop = top;
+  }
+
+  function setScrollTarget(target, immediate) {
+    if (!lineScrollEl) return;
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const clamped = clamp(target, 0, maxScrollTop);
+    if (immediate) {
+      scrollSpringTarget = null;
+      scrollSpringVelocity = 0;
+      writeScrollTop(clamped, true);
+      return;
+    }
+    if (!currentSettings.smoothScrolling) {
+      // NOT the same thing as `immediate` — see the auto-scroll header. Drop the
+      // spring, then let the element ease there under its own scroll-behavior.
+      scrollSpringTarget = null;
+      scrollSpringVelocity = 0;
+      writeScrollTop(clamped, false);
+      return;
+    }
+    // Compare against where we are HEADED, not where we are: while gliding, a
+    // "new" target equal to the current one is not a change and re-arming it
+    // every frame would keep the spring awake forever.
+    const reference = scrollSpringTarget === null ? lineScrollEl.scrollTop : scrollSpringTarget;
+    if (Math.abs(clamped - reference) < 1) return;
+    scrollSpringTarget = clamped;
+  }
+
+  // Stepped once per frame from animate(). Kept out of its own rAF loop so the
+  // scroll stops when the panel does, and so it shares animate()'s deltaTime
+  // rather than sampling the clock a second time per frame.
+  function stepScrollSpring(deltaTime) {
+    if (scrollSpringTarget === null || !lineScrollEl) return;
+    // Re-clamp every step. The target was clamped when it was SET, but scrollHeight
+    // can shrink afterwards — adaptive spacing rewrites line geometry on every line
+    // change — which leaves the spring chasing a position the container can no
+    // longer reach. It would never satisfy the settle test, so it would wind the
+    // velocity up against the stop and then release all of it as a jump the moment
+    // the target moved back inward.
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    if (scrollSpringTarget > maxScrollTop) {
+      scrollSpringTarget = maxScrollTop;
+      // Pinned at the bottom stop: carrying velocity into it only winds the spring up.
+      if (scrollSpringVelocity > 0) scrollSpringVelocity = 0;
+    }
+    const current = lineScrollEl.scrollTop;
+    const displacement = scrollSpringTarget - current;
+    // Settled: sub-pixel AND slow. The velocity half of the test matters because
+    // scrollTop reads back quantised in some browsers, so `displacement` alone
+    // can sit at ~0 while the spring is still travelling.
+    if (Math.abs(displacement) < 1 && Math.abs(scrollSpringVelocity) < 8) {
+      writeScrollTop(scrollSpringTarget, true);
+      scrollSpringTarget = null;
+      scrollSpringVelocity = 0;
+      return;
+    }
+    scrollSpringVelocity +=
+      (displacement * SCROLL_SPRING_STIFFNESS - scrollSpringVelocity * SCROLL_SPRING_DAMPING) * deltaTime;
+    if (scrollSpringVelocity > SCROLL_MAX_VELOCITY) scrollSpringVelocity = SCROLL_MAX_VELOCITY;
+    else if (scrollSpringVelocity < -SCROLL_MAX_VELOCITY) scrollSpringVelocity = -SCROLL_MAX_VELOCITY;
+    writeScrollTop(current + scrollSpringVelocity * deltaTime, true);
+  }
+
+  function stopScrollSpring() {
+    scrollSpringTarget = null;
+    scrollSpringVelocity = 0;
   }
 
   function scrollActiveLineIntoView(element, force) {
@@ -5794,39 +6561,70 @@
     // as the active line is back in view, which would drop the user out of pick mode
     // the moment they scrolled near the playhead.
     if (!lineScrollEl || !element || ((manualScrollActive || pausePickMode) && !force)) return;
-    if (lineScrollRaf) cancelAnimationFrame(lineScrollRaf);
-
+    // The old implementation cancelled its rAF here. The spring has no timer to
+    // cancel: retargeting IS the cancellation, and it keeps the velocity.
     const lineRect = element.getBoundingClientRect();
     const viewportRect = lineScrollEl.getBoundingClientRect();
     const lineCenter = lineRect.top + lineRect.height / 2;
     const viewportCenter = viewportRect.top + viewportRect.height / 2;
-    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
-    const target = clamp(
-      lineScrollEl.scrollTop + lineCenter - viewportCenter,
-      0,
-      maxScrollTop
-    );
-    const start = lineScrollEl.scrollTop;
-    const distance = target - start;
+    // Centre the line. (Upstream's live path nudges the target by -30px for
+    // centred lyrics and +85px when scrolling to the top; we always centre.)
+    const target = lineScrollEl.scrollTop + lineCenter - viewportCenter;
+    // `force` only means "ignore manualScrollActive" — it is NOT a request to skip
+    // the animation, so it does not make this immediate.
+    //
+    // `pendingInstantScroll` is the only thing that does, and it is not about
+    // preference: a structural change moved the lyrics out from under the camera
+    // (rebuilt lines, reparented panel, resized column). The user did not move the
+    // playhead, so animating to catch up is a lie about what just happened — and
+    // on a new track it means gliding all the way up from the previous song's
+    // final line.
+    //
+    // Note what is deliberately NOT here any more: `!currentSettings.smoothScrolling`.
+    // Treating "smooth scrolling off" as "immediate" is exactly what made every
+    // line change hard-cut; setScrollTarget now routes that case to the element's
+    // own CSS ease instead.
+    const immediate = pendingInstantScroll;
+    pendingInstantScroll = false;
+    setScrollTarget(target, immediate);
+  }
 
-    if (Math.abs(distance) < 1) {
-      lineScrollRaf = 0;
-      return;
-    }
+  /* ---- re-centring after a structural change --------------------------------
+     Four different events leave the panel showing the WRONG PART OF THE SONG, and
+     they all failed the same way: the position was invalidated, and nothing
+     re-placed it until the next line change happened to retarget the spring.
 
-    const duration = clamp(180 + Math.abs(distance) * 0.22, 180, 420);
-    const startedAt = performance.now();
-    const step = (now) => {
-      const progress = clamp((now - startedAt) / duration, 0, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      lineScrollEl.scrollTop = start + distance * eased;
-      if (progress < 1) {
-        lineScrollRaf = requestAnimationFrame(step);
-      } else {
-        lineScrollRaf = 0;
-      }
-    };
-    lineScrollRaf = requestAnimationFrame(step);
+       1. New track. The `scrollTop = 0` reset in buildRendererLines is
+          static-lyrics-only, so synced lyrics keep the PREVIOUS song's bottom
+          position and the spring then glides the entire height of the song.
+       2. Entering fullscreen. panelEl is reparented into fsLyricsHost, and
+          detaching a scrollable element resets scrollTop to 0 — so the song
+          starts at the top no matter where the playhead is.
+       3. Switching the fullscreen layout. The lyrics column is CSS-transitioned,
+          so the geometry moves around a stale scrollTop.
+       4. Leaving fullscreen, for the same reason as (2).
+
+     All four are the same complaint — "the camera doesn't stay on the active
+     line" — so they share one mechanism. Instant, because in none of these cases
+     did the user move the playhead: the layout moved around it. */
+  function recentreActiveLineNow() {
+    // Never fight a user who is browsing lyrics by hand. pausePickMode is exempt
+    // for the same reason scrollActiveLineIntoView exempts it from force.
+    if (manualScrollActive || pausePickMode) return;
+    if (!lineScrollEl || staticLyricsActive) return;
+    const index = lastActiveLine >= 0 ? lastActiveLine : lastScrollTargetLine;
+    if (index < 0 || !lineElements[index]) return;
+    pendingInstantScroll = true;
+    scrollActiveLineIntoView(lineElements[index], true);
+  }
+
+  function recentreActiveLine() {
+    recentreUntilMs = performance.now() + RECENTRE_WINDOW_MS;
+    // Invalidate the gate so the next frame re-places even if the line index has
+    // not changed, then place immediately for the frames where the panel is not
+    // animating (hidden tab, no lines yet).
+    lastScrollTargetLine = -1;
+    recentreActiveLineNow();
   }
 
   // Smoothly follow playback with the native scroll position for static
@@ -5844,7 +6642,9 @@
     const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
     const target = progress * maxScrollTop;
     const current = lineScrollEl.scrollTop;
-    lineScrollEl.scrollTop = current + (target - current) * 0.06;
+    // Per-frame, so it must not animate: an eased write here would restart on
+    // every frame and the lerp would never make progress.
+    writeScrollTop(current + (target - current) * 0.06, true);
   }
 
   function parseLrcTimestamp(minutes, seconds) {
@@ -5965,6 +6765,24 @@
     currentLyricsIsTTML = true;
     staticLyricsActive = false;
     currentSongwriters = extractSongwriters(rawXml);
+    // Consume any credits the caller staged for this load (Spicy Lyrics API
+    // results only). Clearing here means imports, cached TTML and Unison never
+    // inherit a stale uploader from a previous track.
+    if (pendingSpicyCredits) {
+      currentUploader = pendingSpicyCredits.uploader || null;
+      if (!currentSongwriters.length && pendingSpicyCredits.songwriters.length) {
+        currentSongwriters = pendingSpicyCredits.songwriters;
+      }
+      pendingSpicyCredits = null;
+    } else if (source === "imported") {
+      // A TTML loaded from a local file (not via the Spicy Lyrics API) has no
+      // upload attribution. Surface it as a Local Database credit instead of
+      // showing nothing — AJ, 2026-09-26. No url, so buildUploaderRow renders
+      // it as plain text (no dead link).
+      currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
+    } else {
+      currentUploader = null;
+    }
     currentTTMLSource = source === "imported" ? "imported" : "external";
     importedTTMLXml = currentTTMLSource === "imported" ? rawXml : "";
     const applied = applyParsedLyrics(parsed);
@@ -5977,6 +6795,7 @@
     currentTTMLSource = "none";
     importedTTMLXml = "";
     currentSongwriters = [];
+    currentUploader = null;
     autoScrollUserPaused = false;
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
@@ -6102,58 +6921,476 @@
   }
 
   // ---- Spicy Lyrics API integration (publishable key, client-side) ----
-  // Resolves a Spotify track id from the track's title + artist via MusicBrainz
-  // (free, no API key, CORS-enabled). The Spicy Lyrics API requires a Spotify
-  // track id, and Song.link/Odesli's public API is dead, so this is the
-  // browser-side resolver. MusicBrainz recordings don't expose Spotify links in
-  // search results, so we score candidates (best match first, like LRCLIB) and
-  // fetch each with inc=url-rels until we find an open.spotify.com/track/<id>.
-  async function resolveSpotifyId(track, controller, key) {
+  // ---- Spicy Lyrics API cache -----------------------------------------------
+  // The /v1/lyrics endpoint is rate-limited, and every play of a song we've
+  // already resolved would otherwise re-run the MusicBrainz search (up to ~16
+  // sequential HTTP requests) plus the API round-trip. Upstream Spicy Lyrics
+  // ships a 3-day TTL for exactly this data, so we use the same window — it
+  // sits comfortably inside any retention limit the API imposes, and a shorter
+  // window is always the safe direction to be wrong in.
+  //
+  // Storage is chrome.storage.local (bridged through window.YTMod) rather than
+  // localStorage: the localStorage lyrics cache is capped at 15 entries and is
+  // shared with LRCLIB results, which would evict these far too eagerly.
+  const SPICY_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days — see above.
+  // Bump whenever the stored ENTRY SHAPE or the parsing that fills it changes.
+  // `sweepSpicyCache` drops anything whose `v` differs, so a bump clears the
+  // whole cache on the next page load. v2 added the Line-body parser and the
+  // rule that only a 404 may write a negative entry.
+  //
+  // v3 — the cached value is the TTML STRING that `parseSpicyLyrics` SERIALIZES
+  // from the API's JSON, so it is only ever as current as the serializer that
+  // wrote it. `parseSpicyLyrics` is new (it does not exist in any backup older
+  // than 2026-09-26), so every entry predating it was produced by a different
+  // code path and carries a SHAPE WE NO LONGER EMIT — most visibly, one span
+  // per LINE instead of one per syllable, which the renderer then fills as a
+  // single unit. Symptom: "the lyrics are line by line, not word by word"
+  // on a track whose API body is `Type: "Syllable"` with real per-word times.
+  // Re-serializing on read would avoid this class entirely; until then, bump.
+  const SPICY_CACHE_VERSION = 3;
+  const SPICY_CACHE_LIMIT = 80;
+  // Negative results expire far sooner than positive ones: "this song has no
+  // synced lyrics" is far more likely to change (someone uploads it) than an
+  // already-uploaded TTML is. Keeps us from re-hitting the resolver for every
+  // unsynced track forever, without pinning a miss for three days.
+  const SPICY_CACHE_NEGATIVE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+  // ---- Spicy Lyrics API cache (in-memory mirror) ----------------------------
+  // The persisted object is read once per page load and then served from this
+  // map, so a cache hit costs no storage round-trip. Writes go through to
+  // storage in the background so the next page load sees them.
+  let spicyCache = null;
+  let spicyCacheLoad = null;
+  let spicyCacheDirty = false;
+  let spicyCacheFlushTimer = 0;
+
+  async function loadSpicyCache() {
+    if (spicyCache) {
+      console.log(`[SpicyLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
+      return Promise.resolve(spicyCache);
+    }
+    if (spicyCacheLoad) return spicyCacheLoad;
+    if (!window.YTMod || typeof window.YTMod.getSpicyCache !== "function") {
+      // Without the bridge every lookup is a guaranteed miss and every result
+      // is thrown away — a failure mode that looks exactly like a working
+      // resolver feeding a broken API call.
+      console.warn("[SpicyLyrics] cache bridge unavailable; nothing will be cached this session.");
+      spicyCache = {};
+      return Promise.resolve(spicyCache);
+    }
+    spicyCacheLoad = window.YTMod.getSpicyCache().then((stored) => {
+      spicyCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
+      console.log(`[SpicyLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
+      invalidateStaleSpicyEntries();
+      return spicyCache;
+    }).catch((error) => {
+      console.warn("[SpicyLyrics] cache read failed; starting empty:", error && error.message);
+      spicyCache = {};
+      return spicyCache;
+    });
+    return spicyCacheLoad;
+  }
+
+  // Writes are coalesced: a burst of cache operations (e.g. the sweep below
+  // pruning several entries) collapses into one storage write.
+  function flushSpicyCache() {
+    if (!spicyCache || !spicyCacheDirty) return;
+    spicyCacheDirty = false;
+    if (!window.YTMod || typeof window.YTMod.setSpicyCache !== "function") return;
+    const snapshot = spicyCache;
+    Promise.resolve(window.YTMod.setSpicyCache(snapshot)).catch((error) => {
+      console.warn("[SpicyLyrics] could not persist lyrics cache:", error);
+    });
+  }
+
+  function markSpicyCacheDirty() {
+    spicyCacheDirty = true;
+    if (spicyCacheFlushTimer) return;
+    spicyCacheFlushTimer = setTimeout(() => {
+      spicyCacheFlushTimer = 0;
+      flushSpicyCache();
+    }, 1500);
+  }
+
+  // Drops every entry whose `exp` has passed. Called on each read so expired
+  // data can never be served, which is what makes the retention window a real
+  // guarantee rather than a best-effort one.
+  function sweepSpicyCache(now) {
+    if (!spicyCache) return false;
+    let removed = false;
+    for (const [k, entry] of Object.entries(spicyCache)) {
+      if (!entry || typeof entry !== "object" || entry.v !== SPICY_CACHE_VERSION || !Number.isFinite(entry.exp) || entry.exp <= now) {
+        delete spicyCache[k];
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
+  // LRU-ish cap: entries carry `at` (write time) so the oldest go first.
+  function trimSpicyCache() {
+    if (!spicyCache) return false;
+    const keys = Object.keys(spicyCache);
+    if (keys.length <= SPICY_CACHE_LIMIT) return false;
+    keys
+      .sort((a, b) => (spicyCache[a].at || 0) - (spicyCache[b].at || 0))
+      .slice(0, keys.length - SPICY_CACHE_LIMIT)
+      .forEach((k) => { delete spicyCache[k]; });
+    return true;
+  }
+
+  // Drops every `sp:` entry that does NOT carry a TTML payload.
+  //
+  // Bumping SPICY_CACHE_VERSION is supposed to invalidate the whole cache when
+  // this file's parsing changes — but the cache lives in chrome.storage.local
+  // and SURVIVES a code edit, so the two got out of step: a version bump ships
+  // the new parser, yet `sp:` entries the old parser wrote keep short-circuiting
+  // the API call forever. That is what made a fixed Line-body parser still show
+  // "no synced lyrics" for a track it could now render.
+  //
+  // Negative entries are pure disposable optimisation, so re-deriving them costs
+  // one API call at worst. Resolver entries (`r:*`) are NOT touched — they
+  // record a stable fact that spending a ListenBrainz round-trip would only
+  // re-learn. Runs once per page load, and only when the stored version differs.
+  function invalidateStaleSpicyEntries() {
+    if (!spicyCache) return 0;
+    const keys = Object.keys(spicyCache);
+    if (!keys.length) return 0;
+    const drops = keys.filter((k) => k.startsWith("sp:") && !(spicyCache[k] && spicyCache[k].ttml));
+    if (!drops.length) return 0;
+    drops.forEach((k) => { delete spicyCache[k]; });
+    markSpicyCacheDirty();
+    console.log(`[SpicyLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
+    return drops.length;
+  }
+
+  // Cache key. A resolved Spotify id is the song's real identity, so prefer it
+  // whenever we have one — it survives the title/artist drift that YTM's
+  // metadata is prone to. Falls back to the track key for negative entries
+  // (where no id was ever resolved).
+  function spicyCacheKeyFor(track, spotifyId) {
+    if (spotifyId) return `sp:${spotifyId}`;
     const title = track && track.title;
     const artist = track && track.artist;
     if (!title) return null;
-    const esc = (v) => String(v).replace(/"/g, "'");
-    const query = `recording:"${esc(title)}"` + (artist ? ` AND artist:"${esc(artist)}"` : "");
-    let search;
-    try {
-      const res = await fetch(`${MUSICBRAINZ_API}/?query=${encodeURIComponent(query)}&fmt=json&limit=10`, { credentials: "omit" });
-      if (!res.ok) return null;
-      search = await res.json();
-    } catch (e) {
-      console.warn("[SpicyLyrics] MusicBrainz search failed:", e);
-      return null;
+    return `t:${String(title).toLowerCase()}|${String(artist || "").toLowerCase()}`;
+  }
+
+  async function getSpicyCacheEntry(key) {
+    if (!key) return null;
+    const cache = await loadSpicyCache();
+    const now = Date.now();
+    const swept = sweepSpicyCache(now);
+    const entry = cache[key];
+    if (entry) {
+      // Refresh recency for the LRU trim.
+      entry.at = now;
+      markSpicyCacheDirty();
     }
-    const recs = (search && search.recordings) || [];
-    if (!recs.length) return null;
-    const norm = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-    const wantedTitle = norm(title), wantedArtist = norm(artist);
-    const scored = recs.map((r) => {
-      const t = norm(r.title);
-      const a = norm((r["artist-credit"] && r["artist-credit"][0] && r["artist-credit"][0].name) || "");
-      let s = 0;
-      if (t === wantedTitle) s += 8;
-      else if (t.includes(wantedTitle) || wantedTitle.includes(t)) s += 3;
-      if (wantedArtist && a === wantedArtist) s += 6;
-      else if (wantedArtist && (a.includes(wantedArtist) || wantedArtist.includes(a))) s += 2;
-      return { r, s };
-    }).sort((x, y) => y.s - x.s);
-    for (const { r } of scored.slice(0, 5)) {
-      if (controller.signal.aborted || key !== currentTrackKey) return null;
-      let full;
-      try {
-        const fres = await fetch(`${MUSICBRAINZ_API}/${r.id}?fmt=json&inc=url-rels`, { credentials: "omit" });
-        if (!fres.ok) continue;
-        full = await fres.json();
-      } catch (e) { continue; }
-      const rels = (full && full.relations) || [];
-      for (const rel of rels) {
-        if (rel.url && /open\.spotify\.com\/track\/([A-Za-z0-9]{22})/.test(rel.url.resource)) {
-          const m = /open\.spotify\.com\/track\/([A-Za-z0-9]{22})/.exec(rel.url.resource);
-          if (m) return m[1];
+    if (swept) markSpicyCacheDirty();
+    return entry || null;
+  }
+
+  function setSpicyCacheEntry(key, value) {
+    if (!key || !spicyCache) return;
+    const now = Date.now();
+    // A "positive" entry carries a usable payload: either TTML to render or a
+    // resolved Spotify id to reuse. Anything else is a negative result.
+    const negative = !value || (!value.ttml && !value.spotifyId);
+    spicyCache[key] = Object.assign({}, value, {
+      v: SPICY_CACHE_VERSION,
+      at: now,
+      exp: now + (negative ? SPICY_CACHE_NEGATIVE_TTL_MS : SPICY_CACHE_TTL_MS),
+    });
+    trimSpicyCache();
+    markSpicyCacheDirty();
+  }
+
+  // Number of live (non-expired) entries — used only to report a useful result
+  // back to the settings UI when the cache is cleared.
+  async function spicyCacheEntryCount() {
+    const cache = await loadSpicyCache();
+    if (sweepSpicyCache(Date.now())) markSpicyCacheDirty();
+    return Object.keys(cache).length;
+  }
+
+  // Clears the whole Spicy Lyrics cache (settings "Clear cache" and the
+  // storage-permission/consent path both route through here).
+  async function clearSpicyLyricsCache() {
+    spicyCache = {};
+    spicyCacheDirty = false;
+    if (spicyCacheFlushTimer) {
+      clearTimeout(spicyCacheFlushTimer);
+      spicyCacheFlushTimer = 0;
+    }
+    if (!window.YTMod || typeof window.YTMod.clearSpicyCache !== "function") return;
+    try {
+      await window.YTMod.clearSpicyCache();
+    } catch (error) {
+      console.warn("[SpicyLyrics] could not clear lyrics cache:", error);
+    }
+  }
+
+  // Resolves a Spotify track id from the track's title + artist via
+  // ListenBrainz (free, no API key, CORS-enabled, no backend required).
+  //
+  // WHY LISTENBRAINZ INSTEAD OF MUSICBRAINZ
+  // ---------------------------------------
+  // MusicBrainz could answer the same question, but only by search-then-walk:
+  // search recordings, then fetch each candidate's URL relations until one
+  // carries a Spotify link. That was up to ~16 sequential requests per song
+  // against a 400-request window, and most of them were spent discovering that
+  // a particular pressing has no link. ListenBrainz — the same organisation,
+  // MetaBrainz — publishes the recording→Spotify mapping directly, so the whole
+  // walk collapses into a single request.
+  //
+  // Endpoint: /spotify-id-from-metadata
+  //   artist_name + track_name + release_name → spotify_track_ids[]
+  //
+  // GOTCHAS that shaped this implementation (each cost a debugging cycle):
+  //   * `release_name` is REQUIRED by the validator, but sending it EMPTY is
+  //     treated loosely and returns every mapping it has for that title+artist.
+  //     Empty beats guessing, because YTM's album string never matches
+  //     MusicBrainz's character-for-character. (A wrong name also degrades to
+  //     the loose behaviour rather than failing.)
+  //   * ARTIST CREDIT DRIFT is the trap that makes this look broken. MusicBrainz
+  //     and Spotify store featured artists in the ARTIST field, while YouTube
+  //     Music keeps them in the title's parentheses. So "underscores" returns
+  //     NOTHING for a song that "underscores feat. 8485" resolves instantly —
+  //     the very song that motivated building this. Hence the variant ladder.
+  //
+  // We deliberately do NOT try /spotify-id-from-mbid: it needs a MusicBrainz
+  // recording id, and obtaining one means going back through MusicBrainz search,
+  // which is exactly the round trip we are removing.
+
+  /** Loose normalisation — Unicode-aware, used only for de-duplicating variants. */
+  const normLoose = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+  /** Strip "(Official Video)", "(feat. X)", trailing "- Remastered 2011", etc. */
+  const stripParensLoose = (v) => String(v || "")
+    .replace(/\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*/g, " ")
+    .replace(/\s+-\s+[A-Za-z][^-]*$/, "")
+    .trim();
+
+  /** Drop a featured credit from an artist string. */
+  const dropFeatCredit = (v) => String(v || "")
+    .replace(/\s*(?:feat|ft|featuring|with)\b\.?\s*.*$/i, "")
+    .replace(/\s*[&,]\s*.*$/, "")
+    .trim();
+
+  /** Ordered, de-duplicated variant builder. */
+  function variantList(...values) {
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {
+      const s = String(value || "").trim();
+      if (!s) continue;
+      const k = normLoose(s);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(s);
+    }
+    return out;
+  }
+
+  /**
+   * Artist strings worth trying, most-likely first.
+   *
+   * The interesting case is a featured credit sitting in the TITLE: YTM gives us
+   * "Song (feat. X)" / "Artist", while the mapping is keyed on "Artist feat. X".
+   * So we lift the credit out of the parens and graft it onto the artist, in the
+   * spellings MusicBrainz editors actually use.
+   */
+  function listenbrainzArtistVariants(artist, title) {
+    const base = dropFeatCredit(artist);
+    const feat = /[\(\[\{]\s*(?:feat|ft|featuring|with)\b\.?\s*([^\)\]\}]+)[\)\]\}]/i.exec(String(title || ""));
+    const credit = feat && feat[1] ? feat[1].trim() : "";
+    return variantList(
+      artist,
+      base,
+      credit && base ? `${base} feat. ${credit}` : "",
+      credit && base ? `${base} ft. ${credit}` : "",
+      credit && base ? `${base} featuring ${credit}` : "",
+      stripParensLoose(artist)
+    );
+  }
+
+  /** Title strings worth trying: stripped first, then as YTM reported it. */
+  function listenbrainzTitleVariants(title) {
+    return variantList(stripParensLoose(title), title);
+  }
+
+  /**
+   * One request against /spotify-id-from-metadata.
+   * Returns { ids, transient } — `transient` means the answer is unknowable
+   * right now (timeout, 429, 5xx), as opposed to a definitive "no mapping".
+   */
+  async function listenbrainzLookupMetadata(artist, title, release, controller) {
+    const params = new URLSearchParams();
+    params.set("artist_name", artist || "");
+    params.set("track_name", title || "");
+    // Sent even when empty — the endpoint requires the parameter, and an empty
+    // value is what triggers its loose matching.
+    params.set("release_name", release || "");
+
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), LB_TIMEOUT_MS);
+    const onAbort = () => timeout.abort();
+    if (controller && controller.signal) {
+      if (controller.signal.aborted) { clearTimeout(timer); return { ids: [], transient: false }; }
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let response;
+    try {
+      response = await fetch(`${LISTENBRAINZ_LABS_API}/spotify-id-from-metadata/json?${params.toString()}`, {
+        credentials: "omit",
+        signal: timeout.signal,
+      });
+    } catch (error) {
+      const userAborted = !!(controller && controller.signal && controller.signal.aborted);
+      if (!userAborted) console.warn("[SpicyLyrics] ListenBrainz lookup failed:", error && error.message);
+      return { ids: [], transient: !userAborted };
+    } finally {
+      clearTimeout(timer);
+      if (controller && controller.signal) controller.signal.removeEventListener("abort", onAbort);
+    }
+
+    // 400 = our parameters were rejected. That is our bug, not a flake, so it is
+    // a definitive no rather than something worth retrying.
+    if (response.status === 400) {
+      console.warn("[SpicyLyrics] ListenBrainz rejected the query (HTTP 400).");
+      return { ids: [], transient: false };
+    }
+    if (response.status === 429) {
+      lbThrottledUntil = Date.now() + 30_000;
+      console.warn("[SpicyLyrics] ListenBrainz rate-limited us; backing off for 30s.");
+      return { ids: [], transient: true };
+    }
+    if (response.status >= 500) return { ids: [], transient: true };
+    if (!response.ok) return { ids: [], transient: false };
+
+    const json = await response.json().catch(() => null);
+    const first = Array.isArray(json) ? json[0] : (json && json[0]) || null;
+    const ids = (first && Array.isArray(first.spotify_track_ids)) ? first.spotify_track_ids : [];
+    return { ids: ids.filter((id) => /^[A-Za-z0-9]{22}$/.test(String(id))), transient: false };
+  }
+
+  /**
+   * Walk the variant ladder until a mapping turns up.
+   *
+   * Ordered most-likely-and-cheapest first: the stripped title with the raw
+   * artist answers for the overwhelming majority of songs in one request, so the
+   * feat-credit permutations only run when that fails.
+   */
+  async function resolveSpotifyIdUncached(track, controller, key) {
+    const title = track && track.title;
+    if (!title) {
+      console.warn("[SpicyLyrics] no track title; cannot resolve Spotify id.");
+      return { id: null, transient: false };
+    }
+
+    const artist = (track && track.artist) || "";
+    const album = (track && track.album) || "";
+    const titles = listenbrainzTitleVariants(title);
+    const artists = listenbrainzArtistVariants(artist, title);
+    // Try the album YTM gave us first, then the loose empty form. YTM's album
+    // string is often close enough to tighten the match, and when it isn't the
+    // endpoint degrades to the loose lookup rather than returning nothing.
+    const releases = album ? [album, ""] : [""];
+
+    let attempts = 0;
+    let transientFailure = false;
+    let sawAnyAnswer = false;
+
+    for (const t of titles) {
+      for (const a of artists) {
+        for (const r of releases) {
+          if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+          // A 429 elsewhere means the rest of this window is gone. Bail with
+          // `transient` rather than spending the remaining budget on calls that
+          // cannot succeed.
+          if (lbThrottledUntil > Date.now()) return { id: null, transient: true };
+          if (attempts >= LB_MAX_ATTEMPTS) {
+            // Budget exhausted without a definitive answer, so the caller must
+            // not record this as a permanent miss.
+            console.warn(`[SpicyLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted for "${title}".`);
+            return { id: null, transient: true };
+          }
+          attempts++;
+
+          const out = await listenbrainzLookupMetadata(a, t, r, controller);
+          if (out.transient) transientFailure = true;
+          else sawAnyAnswer = true;
+
+          if (out.ids.length) {
+            const id = out.ids[0];
+            console.log(`[SpicyLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
+            return { id, transient: false };
+          }
         }
       }
     }
-    return null;
+
+    // Every attempt failed at the transport level, so we have no information
+    // about whether the song is resolvable. Report that honestly.
+    if (!sawAnyAnswer && transientFailure) {
+      console.warn(`[SpicyLyrics] ListenBrainz was unreachable for "${title}"; not caching a miss.`);
+      return { id: null, transient: true };
+    }
+    console.warn(`[SpicyLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}).`);
+    return { id: null, transient: false };
+  }
+
+  /**
+   * Cached wrapper around the raw lookup. The resolution result is a stable
+   * property of the song, so a hit here skips the network entirely.
+   */
+  async function resolveSpotifyId(track, controller, key) {
+    const cacheKey = spicyCacheKeyFor(track, "");
+    let cachedMiss = false;
+    if (cacheKey) {
+      const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
+      if (cached) {
+        if (cached.spotifyId) {
+          console.log(`[SpicyLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
+          return cached.spotifyId;
+        }
+        // A recorded miss — don't re-run the whole search on every play of a
+        // song we already know is unresolvable.
+        cachedMiss = true;
+      }
+    }
+    if (cachedMiss) {
+      console.log("[SpicyLyrics] resolver miss from cache; skipping ListenBrainz lookup.");
+      return null;
+    }
+    const outcome = await resolveSpotifyIdUncached(track, controller, key);
+    const resolved = outcome && outcome.id ? outcome.id : null;
+    // The lookup can outlive its reason for existing: a manual upload bumps
+    // trackRequestSeq, switching tracks rewrites currentTrackKey, clearing the
+    // cache swaps spicyCache out, and track changes / unload abort the
+    // controller. Any of those means this answer describes a world we've left,
+    // so return it to the caller but never persist it.
+    const stale =
+      controller.signal.aborted ||
+      key !== currentTrackKey ||
+      !spicyCache;
+    if (cacheKey && !stale) {
+      if (resolved) {
+        // A resolved id is durable — give it the full TTL and mark the entry
+        // positive (`hit`) so it isn't treated as a negative result.
+        setSpicyCacheEntry(`r:${cacheKey}`, { spotifyId: resolved, hit: true });
+      } else if (outcome && outcome.transient) {
+        // ListenBrainz was unreachable / rate-limited. That is NOT evidence the
+        // song is unresolvable, so don't poison the cache with a miss — the
+        // next play gets a clean attempt.
+        console.warn("[SpicyLyrics] resolver failed transiently; not caching this as a miss.");
+      } else {
+        setSpicyCacheEntry(`r:${cacheKey}`, { hit: false });
+      }
+    }
+    return resolved;
   }
 
   function escapeSpicyText(value) {
@@ -6163,10 +7400,51 @@
       .replace(/>/g, "&gt;");
   }
 
+  // Normalises the API's UploadAttribution into the small shape the panel
+  // footer renders. The API returns a Discord identity; we only care about the
+  // display name, the avatar, and the public profile URL to link to.
+  function parseUploadAttribution(body) {
+    const attr = body && body.UploadAttribution;
+    const uploader = attr && attr.Uploader;
+    if (!uploader || typeof uploader !== "object") return null;
+    const username = typeof uploader.username === "string" ? uploader.username.trim() : "";
+    const id = uploader.id != null ? String(uploader.id) : "";
+    if (!username && !id) return null;
+    const url = typeof uploader.url === "string" && /^https?:\/\//i.test(uploader.url)
+      ? uploader.url
+      : (id ? `https://spicylyrics.org/uid/${id}` : "");
+    const avatar = typeof uploader.avatar === "string" ? uploader.avatar : "";
+    return {
+      id,
+      username: username || "Unknown",
+      avatar,
+      url,
+      songwriters: Array.isArray(body && body.SongWriters)
+        ? body.SongWriters.filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim())
+        : [],
+    };
+  }
+
   // Converts the Spicy Lyrics API `Body` (times in seconds) into the compact
   // TTML form parseTTML already understands: <p> lines, lead <span begin end>
   // syllables, background <span ttm:role="x-bg">. isPartOfWord is encoded as the
   // absence of whitespace between adjacent spans — parseTTML infers it that way.
+  // Returns { ttml, attribution } so the caller can surface the uploader credit.
+  //
+  // TWO BODY SHAPES, AND BOTH ARE COMMON (verified live 2026-09-20)
+  // ---------------------------------------------------------------
+  // `Body.Type === "Syllable"` — each Content entry carries
+  //   Lead: { StartTime, EndTime, Syllables: [{ Text, StartTime, EndTime,
+  //   IsPartOfWord }] } and optional Background: [{ Syllables: [...] }].
+  //   This is the word-by-word karaoke case we were built for.
+  //
+  // `Body.Type === "Line"` — each Content entry carries a PLAIN `Text` string
+  //   and a line-level StartTime/EndTime, with **no Syllables array at all**.
+  //   underscores' "Music" is served this way: 59 lines, zero syllables.
+  //
+  // Reading only the syllable shape silently discarded every Line-type body,
+  // and because the caller then cached that emptiness as a 12h negative, those
+  // songs looked permanently lyric-less. Both shapes are read here now.
   function parseSpicyLyrics(body) {
     if (!body || !Array.isArray(body.Content) || !body.Content.length) return null;
     const fst = (v) => (typeof v === "number" && isFinite(v)) ? v : null;
@@ -6176,7 +7454,29 @@
       const lead = content.Lead;
       const leadSyls = (lead && Array.isArray(lead.Syllables)) ? lead.Syllables : [];
       const bg = Array.isArray(content.Background) ? content.Background : [];
-      if (!leadSyls.length && !bg.length) continue;
+      const plainText = (typeof content.Text === "string" && content.Text.trim())
+        ? content.Text.trim()
+        : "";
+
+      // A Line-type entry: no syllable data anywhere, but a real text line with
+      // a line-level window. Emit ONE untimed span for the whole line.
+      //
+      // Do NOT split this into per-word spans. A Line body carries no per-word
+      // ground truth, so split words would be *invented* timing dressed up as
+      // word sync — and worse, it fights the renderer: a line-synced lyric is
+      // supposed to light up as a line. One span keeps the line on the
+      // LineTimed path (whole-line fill, letter reveal), while a Syllable body
+      // keeps its hand-timed word-by-word karaoke. Two bodies, two behaviours.
+      if (!leadSyls.length && !bg.length) {
+        if (!plainText) continue;
+        const ls = fst(content.StartTime);
+        const le = fst(content.EndTime);
+        const lineTimed = ls != null && le != null && le > ls + 0.001;
+        const agent = content.OppositeAligned ? ` ttm:agent="v2"` : ` ttm:agent="v1"`;
+        const lineTiming = lineTimed ? ` begin="${ls}s" end="${le}s"` : "";
+        lines.push(`<p${agent}${lineTiming}><span>${escapeSpicyText(plainText)}</span></p>`);
+        continue;
+      }
 
       let lineStart = fst(lead && lead.StartTime);
       if (lineStart == null && leadSyls.length) lineStart = fst(leadSyls[0].StartTime);
@@ -6223,19 +7523,53 @@
       lines.push(`<p${agent}${lineTiming}>${parts.join("")}</p>`);
     }
     if (!lines.length) return null;
-    return `<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>${lines.join("")}</div></body></tt>`;
+    const ttml = `<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>${lines.join("")}</div></body></tt>`;
+    return { ttml, attribution: parseUploadAttribution(body) };
   }
 
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
-    const videoId = track && track.videoId;
-    if (!videoId) return null;
+    if (!track || !track.title) { console.warn("[SpicyLyrics] no track title; skipping."); return null; }
+    console.log(`[SpicyLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
     const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
-      console.warn("[SpicyLyrics] no Spotify track id resolved; skipping.");
+      console.warn("[SpicyLyrics] no Spotify track id resolved; falling back.");
       return null;
     }
+
+    // Cache lookup happens AFTER resolution because the Spotify id is the
+    // canonical key — it survives the title/artist drift that would otherwise
+    // strand a cached TTML under a key we no longer compute.
+    const cacheKey = spicyCacheKeyFor(track, spotifyId);
+    const cached = await getSpicyCacheEntry(cacheKey);
+    if (cached) {
+      if (cached.ttml) {
+        console.log(`[SpicyLyrics] served TTML from cache (${spotifyId}).`);
+        return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
+      }
+      if (cached.hit === false) {
+        console.log(`[SpicyLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
+        return null;
+      }
+      // An entry that is neither TTML nor a recorded miss is a half-written
+      // record — exactly what a cache written while the page was being torn
+      // down looks like. Log it, because otherwise this path is a silent
+      // fall-through to the API and reads as "the cache did nothing".
+      console.warn(`[SpicyLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
+    }
+    console.log(`[SpicyLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
+
+    // Every exit from here on logs. This function used to have several silent
+    // `return null` paths, and because those are indistinguishable in the console
+    // from "the request never happened", a resolved id followed by nothing at all
+    // sent us chasing the resolver twice. A drop-in replacement for the guard
+    // below, used everywhere so no branch can go quiet again.
+    const bail = (why) => {
+      console.warn(`[SpicyLyrics] giving up on ${spotifyId} — ${why}`);
+      return null;
+    };
+
     let response;
     try {
       response = await fetch(`${SPICY_LYRICS_API}/${spotifyId}`, {
@@ -6246,15 +7580,70 @@
       console.warn("[SpicyLyrics] request failed:", e);
       return null;
     }
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
-    if (response.status === 404) return null; // no sync available
-    if (!response.ok) {
-      console.warn("[SpicyLyrics] API returned HTTP " + response.status);
-      return null;
+    // Report WHICH condition dropped the answer — aborted vs a changed track are
+    // very different bugs and used to be one silent `return null`.
+    if (controller.signal.aborted) {
+      return bail("request was aborted (a newer track/request superseded it)");
     }
+    if (key !== currentTrackKey) {
+      return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
+    }
+    console.log(`[SpicyLyrics] answered HTTP ${response.status} for ${spotifyId}`);
+    if (response.status === 404) {
+      // The API itself says it has no TTML for this id. That is a real answer
+      // and safe to remember.
+      setSpicyCacheEntry(cacheKey, { hit: false });
+      return bail("API returned 404 (no TTML for this id) — cached as a 12h miss");
+    }
+    if (!response.ok) {
+      return bail(`API returned HTTP ${response.status}`);
+    }
+
+    /* ---------------------------------------------------------------------
+       Read the body BEFORE touching the cache.
+
+       This ordering is load-bearing. These failure branches used to call
+       setSpicyCacheEntry(cacheKey, { hit: false }) on the way out, which meant
+       a TENTATIVE failure — an unreadable body, or a TTML string our own parser
+       could not render — was banked as a durable 12h negative keyed by
+       `sp:<spotifyId>`. The next play then short-circuited on
+       `cached.hit === false` and the API was never asked again, so a hiccup or
+       a parser gap became a permanent "this song has no synced lyrics" even
+       though the API was serving real TTML the whole time.
+
+       A negative entry may now only be written when the API tells us there is
+       nothing to fetch (404). Everything else is a miss for THIS attempt and
+       gets retried on the next play.
+    --------------------------------------------------------------------- */
     const json = await response.json().catch(() => null);
-    if (!json || !json.Body) return null;
-    return parseSpicyLyrics(json.Body);
+    if (!json) {
+      return bail("response body was not valid JSON");
+    }
+    if (!json.Body) {
+      return bail(`answer had no Body (top-level keys: ${Object.keys(json).join(", ") || "none"})`);
+    }
+    const parsed = parseSpicyLyrics(json.Body);
+    if (!parsed) {
+      return bail(`Body parse produced nothing (Body.Type=${json.Body.Type}, Content=${Array.isArray(json.Body.Content) ? json.Body.Content.length : "n/a"} ` +
+        `with ${Array.isArray(json.Body.Content) ? json.Body.Content.filter((c) => (c && ((c.Lead && Array.isArray(c.Lead.Syllables) && c.Lead.Syllables.length) || (Array.isArray(c.Background) && c.Background.length) || (typeof c.Text === "string" && c.Text.trim())))).length : 0} usable entr(ies))`);
+    }
+    if (!parsed.ttml) {
+      return bail("parser produced no TTML string");
+    }
+    if (parsed.attribution && parsed.attribution.songwriters.length) {
+      parsed.songwriters = parsed.attribution.songwriters;
+    }
+    // Only now — a Body that parsed into a non-empty TTML — is the result
+    // trustworthy enough to persist.
+    setSpicyCacheEntry(cacheKey, {
+      hit: true,
+      ttml: parsed.ttml,
+      attribution: parsed.attribution || null,
+      songwriters: parsed.songwriters || [],
+      spotifyId,
+    });
+    console.log(`[SpicyLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    return parsed;
   }
 
   async function fetchLRCLyrics(track, key) {
@@ -6263,13 +7652,33 @@
     const controller = new AbortController();
     activeTrackAbort = controller;
 
-    showLyricsMessage("Looking for lyrics…");
+    // Skeleton rather than a text message: this covers the network wait AND the
+    // synchronous DOM build that follows it (see showLyricsSkeleton).
+    showLyricsSkeleton();
     try {
-      const spicyTTML = await fetchSpicyLyrics(track, key, controller);
-      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
-      if (spicyTTML) {
-        if (loadTTML(spicyTTML, "external")) return;
+      const spicyResult = await fetchSpicyLyrics(track, key, controller);
+      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) {
+        // Silence here was a real dead end: the TTML was fetched and parsed, then
+        // dropped on the floor with no output, which reads as "the fetch failed".
+        console.warn(`[SpicyLyrics] discarding the Spicy result — ${
+          controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
+        return;
+      }
+      if (spicyResult && spicyResult.ttml) {
+        // Attribution + songwriters ride along with the API result; stash them
+        // before loadTTML so the credits footer can render them.
+        pendingSpicyCredits = {
+          uploader: spicyResult.attribution || null,
+          songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
+        };
+        if (loadTTML(spicyResult.ttml, "external")) {
+          console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
+          return;
+        }
+        pendingSpicyCredits = null;
         console.warn("[SpicyLyrics] API returned TTML we could not parse; falling back to Unison/LRCLIB.");
+      } else {
+        console.warn("[SpicyLyrics] no Spicy TTML for this track; falling back to Unison/LRCLIB.");
       }
     } catch (error) {
       if (error && error.name === "AbortError") return;
@@ -6632,7 +8041,7 @@
       activeTrackAbort = null;
     }
     const requestId = ++trackRequestSeq;
-    showLyricsMessage("Loading synced lyrics…");
+    showLyricsSkeleton();
 
     let savedTTML = null;
     try {
@@ -6859,13 +8268,24 @@
     // An unsynced line (no real per-word timing) must not spawn syllable/letter
     // karaoke springs — that is what tanks FPS on partially-synced TTML imports
     // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
-    // static block. A LineTimed (LRCLIB) line is left untouched: its letter
-    // reveal is the intended, cheap behaviour.
+    // static block.
     const suppressKaraoke = !!(noKaraoke && !lineTimed);
     const start = word.StartTime * 1000;
     const end = Math.max(start + 1, word.EndTime * 1000);
     const duration = end - start;
+    // A LINE-TIMED word is a whole line wearing one word's clothes. It must never
+    // become a letterGroup: makeLetterGroup() would spawn one karaoke spring per
+    // CHARACTER, so a 40-character line turns into 40 animated spans each with a
+    // ~90ms window, while the line-level fill runs over the full multi-second
+    // window. The result is the "wavy and glowy" drift AJ sees — it reads as an
+    // animation bug, not as line-synced lyrics.
+    //
+    // Keeping it a plain `.word` hands the whole thing to the line-level fill:
+    // the gradient sweeps across the line as one unit, which is what line-synced
+    // lyrics are supposed to look like. Word-by-word karaoke is the Syllable
+    // body's job, and those words are short enough to stay plain words too.
     const letterCapable =
+      !lineTimed &&
       !suppressKaraoke &&
       !word.DisableLetterAnimation &&
       !word.disableLetterAnimation &&
@@ -6988,14 +8408,58 @@
 
   function buildCreditsFooter(names) {
     const footer = h("div", { class: "ym-sl-credits" });
-    footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
-    const namesEl = h("div", { class: "ym-sl-credits-names" });
-    names.forEach((name, index) => {
-      if (index) namesEl.appendChild(document.createTextNode(", "));
-      namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
-    });
-    footer.appendChild(namesEl);
+    if (names && names.length) {
+      footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
+      const namesEl = h("div", { class: "ym-sl-credits-names" });
+      names.forEach((name, index) => {
+        if (index) namesEl.appendChild(document.createTextNode(", "));
+        namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
+      });
+      footer.appendChild(namesEl);
+    }
+    if (currentUploader) footer.appendChild(buildUploaderRow(currentUploader));
     return footer;
+  }
+
+  // "Uploaded by <avatar> <username>" — links to the uploader's Spicy Lyrics
+  // profile. Only rendered for lyrics that came from the Spicy Lyrics API,
+  // which is the only source that carries upload attribution.
+  function buildUploaderRow(uploader) {
+    const row = h("div", { class: "ym-sl-uploader" });
+    row.appendChild(h("span", { class: "ym-sl-uploader-label", text: "Uploaded by" }));
+
+    const link = h("a", {
+      class: "ym-sl-uploader-link",
+      // Open the uploader's profile in a NEW TAB so YT Music stays put. Without
+      // target="_blank" the browser navigates THIS tab away from music.youtube.com,
+      // which unloads the SPA and trips the host's "Leave site?" prompt — exactly
+      // the reported bug. rel guards the referrer/opener; the URL is already
+      // validated as http(s) at parse time (parseSpicyLyrics attribution).
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: uploader.url || "",
+    });
+    if (uploader.url) link.href = uploader.url;
+
+    if (uploader.avatar) {
+      const img = h("img", { class: "ym-sl-uploader-avatar", alt: "" });
+      img.src = uploader.avatar;
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      // A dead/blocked avatar must not leave a broken-image glyph in the panel.
+      img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+      link.appendChild(img);
+    }
+    link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
+
+    // If there is nowhere to go, render as plain (non-interactive) content so
+    // it does not look like a dead link.
+    if (!uploader.url) {
+      link.removeAttribute("href");
+      link.classList.add("no-link");
+    }
+    row.appendChild(link);
+    return row;
   }
 
   /* ---- bus publishing -------------------------------------------------------
@@ -7143,10 +8607,8 @@
   function buildRendererLines(content) {
     lastRendererContent = content;
     publishLyricLines(content);
-    if (lineScrollRaf) {
-      cancelAnimationFrame(lineScrollRaf);
-      lineScrollRaf = 0;
-    }
+    stopScrollSpring();
+    lastScrollTargetLine = -1;
     modelLines = [];
     lineElements = [];
     cachedFirstRealLyricStartMs = Infinity;
@@ -7159,6 +8621,11 @@
       manualScrollReturnTimer = 0;
     }
     setJumpButtonVisible(false);
+    // The skeleton goes away with everything else on the next line; the token
+    // bump inside hideLyricsSkeleton is the part that matters, because a paint
+    // queued on rAF would otherwise land on top of the lyrics we are about to
+    // build — the skeleton showing up AFTER the thing it was standing in for.
+    hideLyricsSkeleton();
     linesRoot.replaceChildren();
     const scrollContainer = linesRoot.parentElement;
     const hasDuetLines = content.some((line) => line.OppositeAligned);
@@ -7273,7 +8740,7 @@
       }
     });
 
-    if (currentSongwriters.length) {
+    if (currentSongwriters.length || currentUploader) {
       linesRoot.appendChild(buildCreditsFooter(currentSongwriters));
     }
 
@@ -7284,8 +8751,15 @@
     // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
     // from here through the song (AJ, 2026-09-18).
     if (staticLyricsActive && lineScrollEl) {
-      lineScrollEl.scrollTop = 0;
+      // Instant: a reset, not a scroll the user asked to watch.
+      writeScrollTop(0, true);
     }
+    // The scroll position is now meaningless: the PREVIOUS song's scrollTop is
+    // still in effect (the reset above is static-only) against completely
+    // different line geometry. Place the camera instantly. Letting the spring
+    // handle it is what made a new song glide all the way up from the last
+    // song's final line.
+    recentreActiveLine();
   }
 
   function loadLyrics(xml) {
@@ -7451,10 +8925,11 @@
       let targetGlow = restingGlow;
       let targetGradient = letterState === "Sung" ? 100 : -20;
 
+      // PROXIMITY PASS. Upstream runs this over EVERY letter of an active word
+      // first (LyricsAnimator.ts:1043-1090), then overrides two cases below.
+      // Neighbours ride the ACTIVE LETTER's phase rather than the word's broader
+      // progress, so they stay locked to the glyph being sung.
       if (activeIndex >= 0) {
-        // Keep neighboring letters on the active letter's phase. This is the
-        // original renderer's proximity motion and avoids upcoming letters
-        // drifting ahead on the word's broader progress.
         const baseScale = LetterScaleSpline.at(activeProgress);
         const baseYOffset = LetterYOffsetSpline.at(activeProgress);
         const baseGlow = GlowSpline.at(activeProgress);
@@ -7467,18 +8942,58 @@
         if (letterState === "Active" && index === activeIndex) {
           targetGradient = -20 + 120 * easeSinOut(activeProgress);
         }
-      } else if (letterState === "Sung") {
+      }
+
+      // OVERRIDE PASS — upstream LyricsAnimator.ts:1092-1102, applied AFTER the
+      // proximity pass and in this exact order:
+      //
+      //   if (letterState === "NotSung" && !simpleLyricsMode) { all three -> at(0) }
+      //   else if (letterState === "Sung" && activeLetterIndex === -1) { glow -> at(0.2) }
+      //
+      // The NotSung clause is the one that matters, and omitting it was a real
+      // bug here: the proximity pass has no direction, so it lit up the letters
+      // the playhead had NOT REACHED YET exactly as hard as the ones it had just
+      // left. At distance 1 the glow falloff is 1/(1+0.9) = 0.526 and the natural
+      // spline peaks at 1.433, so an unsung neighbour sat at 0.754 -> (x1.125)
+      // 0.848 -> a FULL-opacity 14.2px halo, and distance 2 still reached 10.9px
+      // at full opacity (the 185% multiplier saturates opacity above glow 0.54).
+      // Upstream pins those letters to 4px / 0% instead, so its glow TRAILS the
+      // karaoke point while ours bled ~2 letters ahead of it and the word read
+      // as a broad smear rather than a travelling pulse. Same for scale: ours
+      // pre-bulged unsung letters to 1.072 vs upstream's flat 0.95.
+      //
+      // `$simpleLyricsMode` is false by default upstream (stores.ts:57), so this
+      // clause is live in the default configuration — it is not an edge case.
+      if (letterState === "NotSung") {
+        targetScale = restingScale;
+        targetYOffset = restingYOffset;
+        targetGlow = restingGlow;
+      } else if (letterState === "Sung" && activeIndex === -1) {
         targetScale = LetterScaleSpline.at(1);
         targetYOffset = LetterYOffsetSpline.at(1);
-        // Glow must rest at the same endpoint as a regular sung word
-        // (GlowSpline.at(1) ≈ 0). The previous GlowSpline.at(0.2) was the
-        // *active peak* of the spring (~1.34); with the per-letter
-        // multipliers (12 for blur, 185 for opacity) it produced a 20px
-        // white halo at ~full opacity. On a dark panel that halo fuses
-        // with the .85 gradient glyph and eats its edge contrast, so the
-        // long "bones" word read as fuzzy / dim against the crisp .85
-        // regular words next to it. Settling to the resting endpoint
-        // matches the regular-word glow and restores crisp brightness.
+        // DELIBERATE DIVERGENCE FROM UPSTREAM (AJ, 2026-09-20).
+        //
+        // Upstream uses targetGlow = GlowSpline.at(SungLetterGlow /* 0.2 */) for
+        // a sung letter in an active word where no letter is currently active
+        // (i.e. the playhead sits in a gap between letters). That LOOKS like a
+        // small dim value, but the natural spline OVERSHOOTS on its 0 -> 1 rise,
+        // so at(0.2) actually evaluates to 1.20988 — i.e. an 18.5px blur at 224%
+        // opacity via the letter multipliers (12 / 185). That is essentially the
+        // same 20px white halo previously fixed here, which fused with the .85
+        // gradient glyph and made whole words read fuzzy and dim next to crisp
+        // neighbours. Before the spline fix this read 1.07165 / 16.86px, so the
+        // corrected curve makes the upstream behaviour MORE extreme, not less.
+        //
+        // We keep the fix (settle to GlowSpline.at(1) = 0) rather than copying
+        // upstream, because matching a known-bad artifact is not parity worth
+        // having. Swapping this line to `GlowSpline.at(SungLetterGlow)` restores
+        // exact upstream behaviour if it is ever wanted for A/B comparison.
+        //
+        // NOTE this branch is normally UNREACHABLE, because a TTML word's letter
+        // spans abut: exactly one letter is Active for the whole word, so
+        // activeIndex is only -1 before the first letter starts (where every
+        // letter is NotSung and the clause above wins) or after the last one ends
+        // (where word.EndTime == last.EndTime, so the word is no longer Active).
         targetGlow = GlowSpline.at(1);
       }
 
@@ -7502,7 +9017,8 @@
         letter.HTMLElement,
         "transform",
         `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset * 2}), 0)`,
-        0.001
+        0.001,
+        yOffset * 2
       );
       setStyleIfChanged(letter.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
       setStyleIfChanged(letter.HTMLElement, "--gradient-position", `${targetGradient}%`, 0.1);
@@ -7616,7 +9132,7 @@
       const yOffset = word.AnimatorStore.YOffset.Step(deltaTime);
       const glow = word.AnimatorStore.Glow.Step(deltaTime);
       const opacity = word.AnimatorStore.Opacity.Step(deltaTime);
-      setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001);
+      setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001, yOffset);
       setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
       setStyleIfChanged(word.HTMLElement, "opacity", String(opacity), 0.001);
       setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", `${4 + 6 * glow}px`, 0.5);
@@ -7663,7 +9179,7 @@
     const glow = word.AnimatorStore.Glow.Step(deltaTime);
     const gradient = state === "Sung" ? 100 : state === "Active" ? -20 + 120 * progress : -20;
 
-    setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001);
+    setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001, yOffset);
     setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
     if (word.LetterGroup) {
       // The wrapper must stay inert: no gradient of its own (a wrapper gradient
@@ -7839,6 +9355,50 @@
     });
   }
 
+  // Which line is playing at `positionMs`, over the scroll-candidate lines.
+  // -1 during a gap between lines (an instrumental break), which callers must
+  // treat as "no line", not as "line 0".
+  //
+  // ⭐⭐ THIS IS A LINEAR SCAN ON PURPOSE. It used to be a binary search, which
+  // is only valid when the windows are SORTED **AND DISJOINT** — and they are
+  // not disjoint. A lead line is widened to cover its background vocals (see the
+  // x-bg block in parseTTML), and a background vocal routinely runs PAST the end
+  // of its lead, so the widened lead reaches into the NEXT line's window
+  // (measured: 494 ms of overlap on a real file). Under overlap the comparison
+  // stops being monotonic across the array, so the search walks straight past a
+  // line that genuinely covers `positionMs` and returns -1 — "no line is
+  // playing", which drops every line to its NotSung/Sung opacity and dims the
+  // whole panel. That is the reported "line blinks / flashes dark". It can also
+  // return the PREVIOUS line, so the highlight lags by the overlap and then
+  // jumps.
+  //
+  // The candidates were also only sorted by StartTime BY ACCIDENT: the renderer
+  // pushes them in document order and never sorts. So the old search depended on
+  // two properties it was never given — a latent bug that the lead widening
+  // simply made reachable on ordinary files.
+  //
+  // Cost: one integer comparison per candidate, at most twice per frame,
+  // allocating nothing. A few hundred comparisons a frame is not measurable
+  // beside the per-word style writes this feeds.
+  //
+  // Last match wins, so when two windows overlap the line that started most
+  // recently is the active one.
+  //
+  // Guard: .workbuddy-ai/scratch/test-line-lookup-overlap.mjs drives THIS
+  // function, sliced out of this file, over the windows the shipped parser
+  // produces — plus a synthetic overlap and a clamped-disjoint control.
+  function findLineIndexAt(positionMs) {
+    let found = -1;
+    for (let index = 0; index < scrollCandidateIndices.length; index++) {
+      const candidateIndex = scrollCandidateIndices[index];
+      const candidate = modelLines[candidateIndex];
+      if (positionMs >= candidate.StartTime && positionMs < candidate.EndTime) {
+        found = candidateIndex;
+      }
+    }
+    return found;
+  }
+
   function lineNeedsAnimation(line) {
     if (!line.Syllables || !line.Syllables.Lead) return false;
     const words = line.Syllables.Lead;
@@ -7860,37 +9420,58 @@
     if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl) {
       driveStaticAutoScroll(positionMs);
       setJumpButtonVisible(false);
+    } else {
+      // Static lyrics have their own continuous follow (driveStaticAutoScroll),
+      // which is not target-based, so the spring must not also be pulling.
+      stepScrollSpring(deltaTime);
     }
 
-    let activeIndex = -1;
     // Pick the active per-track offset slot (video vs. song) based on what is
     // actually playing, then shift the lyric clock without moving the player.
     recomputeActiveOffsetMode(false);
     const lyricPositionMs = Math.max(0, positionMs - getOffsetForPosition(positionMs));
-    let low = 0;
-    let high = scrollCandidateIndices.length - 1;
-    while (low <= high) {
-      const middle = (low + high) >> 1;
-      const candidateIndex = scrollCandidateIndices[middle];
-      const candidate = modelLines[candidateIndex];
-      if (lyricPositionMs < candidate.StartTime) {
-        high = middle - 1;
-      } else if (lyricPositionMs >= candidate.EndTime) {
-        low = middle + 1;
-      } else {
-        activeIndex = candidateIndex;
-        break;
-      }
-    }
+    const activeIndex = findLineIndexAt(lyricPositionMs);
 
     updateFullscreenGapDimming(lyricPositionMs, activeIndex);
 
-      const activeLineChanged = activeIndex !== lastActiveLine;
+    const activeLineChanged = activeIndex !== lastActiveLine;
     if (activeLineChanged) {
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
-      if (activeIndex >= 0 && lineElements[activeIndex]) {
-        scrollActiveLineIntoView(lineElements[activeIndex]);
+    }
+
+    // Scroll target, which is NOT the same question as "which line is active".
+    //
+    // Early scroll evaluates the line index at a position `scrollLeadMs` in the
+    // FUTURE, so the panel is already gliding before the line starts and arrives
+    // as it begins, instead of starting to move once it is already being sung.
+    // This shifts ONLY the scroll target: `activeIndex` above — and therefore
+    // every highlight, gradient fill and karaoke animation — still follows the
+    // real playback position, so the words never light up early.
+    // (Upstream Spicy Lyrics does the same with ProcessedPosition =
+    // Position + PositionOffset, and is explicit that Status follows the real
+    // position.)
+    const scrollLeadMs = currentSettings.scrollLeadEnabled ? currentSettings.scrollLeadMs : 0;
+    const scrollIndex = scrollLeadMs > 0
+      ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
+      : activeIndex;
+    // Gated on the target changing rather than on the active line changing: with
+    // a lead these differ, and this keeps scrollActiveLineIntoView — which reads
+    // layout via getBoundingClientRect — off the per-frame path.
+    //
+    // The recentre window is the deliberate exception. It runs for a few hundred
+    // ms after a structural change, because the layout is still moving under us
+    // (the fullscreen lyrics column is CSS-transitioned) and a single placement
+    // would be correct for one frame only. It also outranks the lead-line target:
+    // while the panel is being re-placed we want the line the user is HEARING,
+    // not the one early scroll is aiming at.
+    if (recentreUntilMs > now) {
+      recentreActiveLineNow();
+      lastScrollTargetLine = lastActiveLine;
+    } else if (scrollIndex !== lastScrollTargetLine) {
+      lastScrollTargetLine = scrollIndex;
+      if (scrollIndex >= 0 && lineElements[scrollIndex]) {
+        scrollActiveLineIntoView(lineElements[scrollIndex]);
       }
     }
 
@@ -8086,8 +9667,7 @@
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     stopHousekeeping();
-    if (lineScrollRaf) cancelAnimationFrame(lineScrollRaf);
-    lineScrollRaf = 0;
+    stopScrollSpring();
     if (mountTabTimer) clearTimeout(mountTabTimer);
     mountTabTimer = 0;
     if (wpObserver) wpObserver.disconnect();
@@ -8113,6 +9693,17 @@
     lineElements = [];
     scrollCandidateIndices = [];
     lrclibCache.clear();
+    // The Spicy Lyrics cache lives in chrome.storage, so it outlives teardown.
+    // Only the in-memory mirror and its pending writes are page-lifetime state:
+    // flush anything queued, then drop the mirror so the next enable re-reads.
+    flushSpicyCache();
+    if (spicyCacheFlushTimer) {
+      clearTimeout(spicyCacheFlushTimer);
+      spicyCacheFlushTimer = 0;
+    }
+    spicyCache = null;
+    spicyCacheLoad = null;
+    spicyCacheDirty = false;
     // Track-identity state must be cleared as well. Re-enabling injects a fresh
     // <script>, so normally this starts clean anyway — but if any of it survived
     // into the next run, syncTrackLyrics would bail at the `key === currentTrackKey`
@@ -8291,6 +9882,10 @@
   }
 
   whenYTMod(() => {
+    // Kick off the persisted Spicy Lyrics cache read immediately so it is warm
+    // by the time the first track resolves — otherwise the very first lookup
+    // pays a storage round-trip on the critical path.
+    loadSpicyCache().then(() => sweepSpicyCache(Date.now())).catch(() => {});
     buildUI();
     window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
     maybeStartOnboarding();

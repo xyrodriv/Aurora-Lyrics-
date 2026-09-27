@@ -114,6 +114,10 @@
   transition: background .24s ease, border-color .24s ease;
 }
 #ym-market .ym-head h1 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+/* The title doubles as the secret 6-tap target for developer mode (content.js
+   onTitleTap). Suppress text selection so a burst of taps does not leave the
+   heading highlighted — and add NO other affordance, it is meant to look inert. */
+#ym-market .ym-head h1 { -webkit-user-select: none; user-select: none; }
 #ym-market .ym-head .ym-sub { color: #aaaaaa; font-size: 14px; }
 #ym-market #ym-close { margin-left: auto; }
 

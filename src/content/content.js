@@ -69,29 +69,107 @@
     return b;
   }
 
-  /* ---- storage (chrome.storage.local; async) ---- */
-  const getReg = () => new Promise((res) => chrome.storage.local.get("ytmod_registry", (r) => res(r["ytmod_registry"] || {})));
-  const setReg = (reg) => new Promise((res) => chrome.storage.local.set({ ytmod_registry: reg }, res));
+  /* ---- storage (chrome.storage.local; async) ----
+     Every read goes through safeStorageGet, because the plain
+     `chrome.storage.local.get(key, cb)` form has a failure mode that leaves the
+     callback NEVER called.
+
+     Once the extension is reloaded or updated, the content script already running
+     in an open tab is orphaned. From that moment every chrome.* call either throws
+     "Extension context invalidated" or silently drops its callback. The dropped
+     callback is the dangerous half: `renderSection()` awaits getReg() and has
+     already cleared #ym-section by then, so the marketplace is left as an empty
+     panel — no cards, no empty-state message. That is indistinguishable from
+     "no extensions installed", so it reads as the extension being broken rather
+     than stale, and reloading the extension with a tab open reproduces it every
+     single time.
+
+     So: never trust the callback to arrive. Check lastError, catch the synchronous
+     throw, and time the read out. A wrong-but-rendered panel always beats a blank
+     one, and `storageReadFailed` lets the caller say WHY it is empty. */
+  const STORAGE_TIMEOUT_MS = 1500;
+  let storageReadFailed = false;
+  function safeStorageGet(key, fallback) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = 0;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+      const fail = (why) => {
+        storageReadFailed = true;
+        console.warn(`[YTMod] chrome.storage read of "${key}" failed (${why}). The extension was probably reloaded — refresh this tab.`);
+        done(fallback);
+      };
+      timer = setTimeout(() => fail("timed out, callback never fired"), STORAGE_TIMEOUT_MS);
+      try {
+        chrome.storage.local.get(key, (r) => {
+          if (chrome.runtime.lastError) {
+            fail(chrome.runtime.lastError.message);
+            return;
+          }
+          const value = r ? r[key] : undefined;
+          done(value == null ? fallback : value);
+        });
+      } catch (err) {
+        // "Extension context invalidated" throws synchronously, right here.
+        fail((err && err.message) || "context invalidated");
+      }
+    });
+  }
+  function safeStorageSet(payload) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = 0;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(() => {
+        console.warn("[YTMod] chrome.storage write timed out; the extension was probably reloaded.");
+        done();
+      }, STORAGE_TIMEOUT_MS);
+      try {
+        chrome.storage.local.set(payload, () => {
+          if (chrome.runtime.lastError) {
+            console.warn("[YTMod] chrome.storage write failed:", chrome.runtime.lastError.message);
+          }
+          done();
+        });
+      } catch (err) {
+        console.warn("[YTMod] chrome.storage write threw:", (err && err.message) || err);
+        done();
+      }
+    });
+  }
+  const getReg = () => safeStorageGet("ytmod_registry", {});
+  const setReg = (reg) => safeStorageSet({ ytmod_registry: reg });
   // Persisted marketplace preferences (view, density, floating mode, and position).
-  const getUI = () => new Promise((res) => chrome.storage.local.get("ytmod_ui", (r) => res(r["ytmod_ui"] || {})));
-  const setUI = (patch) => new Promise((res) => chrome.storage.local.set({
+  const getUI = () => safeStorageGet("ytmod_ui", {});
+  const setUI = (patch) => safeStorageSet({
     ytmod_ui: Object.assign({
       view: ui.view,
       density: ui.density,
       floating: ui.floating,
       floatX: ui.floatX,
       floatY: ui.floatY,
+      dev: ui.dev,
     }, patch),
-  }, res));
+  });
   const EXT_SETTINGS_KEY = "ytmod_settings";
   let extensionSettingsStore = null;
   let extensionSettingsWrite = Promise.resolve();
   const getExtensionSettingsStore = () => {
     if (extensionSettingsStore) return Promise.resolve(extensionSettingsStore);
-    return new Promise((res) => chrome.storage.local.get(EXT_SETTINGS_KEY, (r) => {
-      extensionSettingsStore = r[EXT_SETTINGS_KEY] || {};
-      res(extensionSettingsStore);
-    }));
+    return safeStorageGet(EXT_SETTINGS_KEY, {}).then((value) => {
+      extensionSettingsStore = value || {};
+      return extensionSettingsStore;
+    });
   };
   const settingNumber = (setting, value) => {
     const numeric = Number(value);
@@ -171,6 +249,54 @@
       const saved = Object.assign({}, r[PERMANENT_LYRICS_KEY] || {});
       delete saved[trackKey];
       chrome.storage.local.set({ [PERMANENT_LYRICS_KEY]: saved }, res);
+    });
+  });
+  // ---- Spicy Lyrics API cache -----------------------------------------------
+  // The /v1/lyrics endpoint is rate-limited and the upstream extension caches
+  // its results for 3 days (SpicyLyrics_LyricsStore_g1 -> Unit "Days",
+  // Duration 3 in fetchLyrics.ts). We honour the same window, expiring every
+  // entry well inside the API's acceptable retention. Stored as one object so
+  // a single read/write covers the whole cache; entries carry their own
+  // `exp` stamp and are dropped lazily on read.
+  const SPICY_CACHE_KEY = "ytmod_spicy_lyrics_cache";
+  // The cache is read at most once per page load, so a byte count here is cheap
+  // — and it was the only way to tell a genuinely empty cache apart from one
+  // that failed to load, which is what a "resolver ran but the API never fired"
+  // report looks like from the page world.
+  const getSpicyCache = () => new Promise((res) => {
+    chrome.storage.local.get(SPICY_CACHE_KEY, (r) => {
+      const saved = r[SPICY_CACHE_KEY];
+      if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+        console.debug(`[YTMod] Spicy cache loaded: ${Object.keys(saved).length} entries.`);
+        res(saved);
+      } else {
+        console.debug("[YTMod] Spicy cache empty or unreadable; starting fresh.");
+        res({});
+      }
+    });
+  });
+  const setSpicyCache = (cache) => new Promise((res) => {
+    const count = cache && typeof cache === "object" ? Object.keys(cache).length : 0;
+    chrome.storage.local.set({ [SPICY_CACHE_KEY]: cache }, () => {
+      // A dropped entry here means the page world handed us an object it could
+      // not serialise (a cycle, or a structured-clone-hostile value), which
+      // silently costs a re-fetch on the next play.
+      if (chrome.runtime.lastError) {
+        console.warn(`[YTMod] Spicy cache write FAILED (${count} entries):`, chrome.runtime.lastError.message);
+      } else {
+        console.debug(`[YTMod] Spicy cache stored: ${count} entries.`);
+      }
+      res();
+    });
+  });
+  const clearSpicyCache = () => new Promise((res) => {
+    chrome.storage.local.remove(SPICY_CACHE_KEY, () => {
+      if (chrome.runtime.lastError) {
+        console.warn("[YTMod] Spicy cache clear failed:", chrome.runtime.lastError.message);
+      } else {
+        console.debug("[YTMod] Spicy cache cleared.");
+      }
+      res();
     });
   });
   const LRCLIB_ORIGIN = "https://lrclib.net";
@@ -454,16 +580,27 @@
       github: "https://github.com/Spikerko/spicy-lyrics",
       jsUrl: chrome.runtime.getURL("src/extensions/spicy-lyrics.js"),
       settings: [
-        { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.15, display: "percent" },
-        { key: "offset", label: "Vertical position", min: -80, max: 80, step: 1, default: -80, display: "pixels" },
-        { type: "header", label: "TTML settings" },
-        { key: "bgOpacity", label: "Background vocals", min: 0.15, max: 2.0, step: 0.05, default: 2.0, display: "percent" },
-        { key: "animation", label: "Animation intensity", min: 0, max: 1.25, step: 0.05, default: 1.25, display: "percent" },
-        { key: "syllableAnimation", label: "Syllable animation intensity", min: 0, max: 1.5, step: 0.05, default: 0.9, display: "percent" },
-        { key: "verticalAnimation", label: "Vertical animation intensity", min: 0, max: 3, step: 0.05, default: 1.55, display: "percent" },
-        { key: "adaptiveSpacing", label: "Adaptive word spacing", type: "toggle", default: true },
+        // Order is the reading order of the page. Everything WITHOUT `dev: true`
+        // shows to everyone; everything with it is hidden until the 6-tap gesture
+        // has been used — see visibleSettings(). Keep the non-dev entries first.
+        { key: "size", label: "Lyric size", min: 0.75, max: 3.0, step: 0.05, default: 1.30, display: "percent" },
         { key: "romanizationEnabled", label: "Romanization (JP / KR)", type: "toggle", default: true },
         { key: "legibilityBackdrop", label: "Legibility backdrop", type: "toggle", default: false },
+        { type: "header", label: "Scrolling" },
+        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true },
+        { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
+        { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
+        // ---- developer mode only ------------------------------------------
+        { type: "header", label: "TTML settings" },
+        { key: "bgOpacity", label: "Background vocals", min: 0.15, max: 1.0, step: 0.05, default: 1.0, display: "percent", dev: true },
+        { key: "animation", label: "Animation intensity", min: 0, max: 1.25, step: 0.05, default: 1.0, display: "percent", dev: true },
+        { key: "syllableAnimation", label: "Syllable animation intensity", min: 0, max: 1.5, step: 0.05, default: 1.0, display: "percent", dev: true },
+        { key: "verticalAnimation", label: "Vertical animation intensity", min: 0, max: 3, step: 0.05, default: 1.25, display: "percent", dev: true },
+        { key: "adaptiveSpacing", label: "Adaptive word spacing", type: "toggle", default: true, dev: true },
+        // NOTE: "Vertical position" used to live here. It was removed as a setting
+        // on AJ's call (2026-09-26) — the slider is gone and spicy-lyrics.js pins
+        // the offset at its -80px default, so a value stored while the slider
+        // existed cannot keep shifting the lyrics with no UI left to undo it.
       ],
     },
     {
@@ -591,11 +728,39 @@
     if (setting.display === "pixels") return (Number(value) > 0 ? "+" : "") + String(value) + "px";
     if (setting.display === "minutes") return String(Math.round(Number(value))) + " min";
     if (setting.display === "seconds") return String(Math.round(Number(value))) + "s";
+    if (setting.display === "milliseconds") return String(Math.round(Number(value))) + "ms";
     return Number(value).toFixed(2);
   }
 
+  /* Which settings this user is allowed to see. A setting carrying `dev: true` is
+     hidden until the 6-tap gesture turns developer mode on (see onTitleTap).
+
+     Headers are structural, so they are filtered against what SURVIVES rather than
+     carrying a flag of their own: a heading whose whole block is hidden would
+     otherwise be left stranded above nothing. That is exactly the case for
+     "TTML settings" with developer mode off. */
+  function visibleSettings(ext) {
+    const all = (ext && ext.settings) || [];
+    if (ui.dev) return all;
+    const out = [];
+    for (let i = 0; i < all.length; i++) {
+      const setting = all[i];
+      if (setting.type === "header") {
+        let hasVisibleChild = false;
+        for (let j = i + 1; j < all.length && all[j].type !== "header"; j++) {
+          if (!all[j].dev) { hasVisibleChild = true; break; }
+        }
+        if (hasVisibleChild) out.push(setting);
+        continue;
+      }
+      if (!setting.dev) out.push(setting);
+    }
+    return out;
+  }
+
   async function buildSettingsSection(ext) {
-    if (!ext.settings || !ext.settings.length) return null;
+    const list = visibleSettings(ext);
+    if (!list.length) return null;
     let values = await getExtensionSettings(ext);
     const section = h("section", { class: "ym-detail-settings" });
     section.appendChild(h("div", { class: "ym-detail-settings-head" },
@@ -603,7 +768,7 @@
       h("div", { class: "ym-detail-settings-subtitle", text: "Changes apply immediately and are saved automatically." })
     ));
     const controls = new Map();
-    for (const setting of ext.settings) {
+    for (const setting of list) {
       if (setting.type === "header") {
         // Visual-only section heading. No key, no input, no entry in `controls`
         // (so the Reset button ignores it) and no entry in `values` (so
@@ -676,7 +841,53 @@
     floating: false,
     floatX: null,
     floatY: null,
+    dev: false,
   };
+
+  /* ---- secret developer mode -----------------------------------------------
+     Tap the "Aurora Lyrics" title in the marketplace header 6 times in a row to
+     reveal the per-add-on settings; 6 more to hide them again.
+
+     Hidden by DEFAULT rather than moved to a separate page: those sliders are a
+     tuning surface, and a normal user has no reason to meet 14 of them on the
+     Synced Lyrics detail page. Nothing on screen hints that the title is
+     interactive — that is the whole point, so do NOT add an affordance, a title
+     attribute, or an aria hint.
+
+     Persisted in the same `ytmod_ui` store as the view preferences, so it
+     survives a reload without needing its own key. */
+  const DEV_TAP_COUNT = 6;
+  // "6 times in a row" needs a run-breaker, or any 6 taps across a whole session
+  // would eventually trip it. Generous for a slow tapper, short enough that two
+  // stray clicks a minute apart do not accumulate.
+  const DEV_TAP_WINDOW_MS = 900;
+  let devTaps = 0;
+  let devTapTimer = 0;
+  let detailExt = null; // the ext currently rendered by renderDetail, for re-render
+
+  function setDevMode(on) {
+    ui.dev = !!on;
+    setUI({ dev: ui.dev });
+    toast(ui.dev ? "Developer mode on" : "Developer mode off");
+    // Settings only exist inside a detail view, so re-render whatever is on
+    // screen to apply the change now instead of on the next navigation.
+    if (detailExt && $("#ym-detail")) renderDetail(detailExt);
+  }
+
+  function onTitleTap() {
+    if (devTapTimer) clearTimeout(devTapTimer);
+    devTaps += 1;
+    if (devTaps >= DEV_TAP_COUNT) {
+      devTaps = 0;
+      devTapTimer = 0;
+      setDevMode(!ui.dev);
+      return;
+    }
+    devTapTimer = window.setTimeout(() => {
+      devTaps = 0;
+      devTapTimer = 0;
+    }, DEV_TAP_WINDOW_MS);
+  }
 
   let overlay;
   let floatBtn = null;
@@ -922,6 +1133,9 @@
           case "getPermanentLyrics": r = await getPermanentLyrics(args[0]); break;
           case "setPermanentLyrics": await setPermanentLyrics(args[0], args[1]); r = true; break;
           case "removePermanentLyrics": await removePermanentLyrics(args[0]); r = true; break;
+          case "getSpicyCache": r = await getSpicyCache(); break;
+          case "setSpicyCache": await setSpicyCache(args[0]); r = true; break;
+          case "clearSpicyCache": await clearSpicyCache(); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
           case "fetchUnison": r = await fetchUnison(args[0]); break;
           case "fetchCoverArt": r = await fetchCoverArt(args[0], args[1]); break;
@@ -1017,8 +1231,15 @@
     }, "Close");
     close.id = "ym-close";
 
+    const title = h("h1", { text: "Aurora Lyrics" });
+    // Secret entry point for developer mode — see onTitleTap(). Bound to
+    // pointerdown rather than click on purpose: in floating mode
+    // enableMarketplaceDrag() calls preventDefault() on the header's pointerdown,
+    // which suppresses the derived mouse events, so a click listener would
+    // silently stop counting there.
+    title.addEventListener("pointerdown", onTitleTap);
     const header = h("div", { class: "ym-head" },
-      h("h1", { text: "Aurora Lyrics" }),
+      title,
       h("span", { class: "ym-sub", text: "Add-ons" }),
       supportBtn,
       close
@@ -1092,9 +1313,28 @@
   async function renderSection() {
     const section = $("#ym-section");
     if (!section) return;
+    // Read BEFORE clearing. This function is async, so clearing first means a
+    // failed or hung storage read leaves the marketplace permanently blank —
+    // no cards and no empty-state message (see safeStorageGet).
+    storageReadFailed = false;
+    const reg = await getReg();
     section.replaceChildren();
     kbIndex = -1;
-    const reg = await getReg();
+
+    // The registry could not be read at all. Say so, rather than implying the
+    // user has nothing installed: every chrome.* call fails this way once the
+    // extension has been reloaded with this tab open, and only a tab refresh
+    // brings the content script back.
+    if (storageReadFailed) {
+      section.className = "ym-section";
+      section.appendChild(
+        h("div", {
+          class: "ym-empty",
+          text: "Couldn't read your add-ons — the extension was reloaded while this tab was open. Refresh the tab (F5) to reconnect.",
+        })
+      );
+      return;
+    }
 
     let list;
     if (ui.category === "Installed") {
@@ -1227,6 +1467,7 @@
       section.appendChild(h("div", { class: "ym-empty", text: "Extension not found." }));
       return;
     }
+    detailExt = ext; // remembered so setDevMode() can re-render this view in place
     section.replaceChildren();
     const reg = await getReg();
     const installed = !!reg[ext.id];
@@ -1286,6 +1527,10 @@
     const wrap = h("div", { class: "ym-detail", id: "ym-detail" }, head, desc);
     if (ghWrap) wrap.appendChild(ghWrap);
     wrap.appendChild(action);
+    // buildSettingsSection decides for itself what is visible (see
+    // visibleSettings) and returns null when nothing is, so this only has to ask
+    // whether the extension HAS settings at all. Nothing replaces them for a
+    // normal user: no placeholder, no "settings are hidden" note.
     if (installed && ext.settings && ext.settings.length) {
       const settings = await buildSettingsSection(ext);
       if (settings) wrap.appendChild(settings);
@@ -1357,6 +1602,9 @@
     if (typeof savedUI.floating === "boolean") ui.floating = savedUI.floating;
     if (Number.isFinite(savedUI.floatX)) ui.floatX = savedUI.floatX;
     if (Number.isFinite(savedUI.floatY)) ui.floatY = savedUI.floatY;
+    // Deliberately an explicit `=== true`: an absent or junk key means off, and
+    // nothing but the 6-tap gesture is allowed to turn this on.
+    if (savedUI.dev === true) ui.dev = true;
     buildMarketplace();
 
     let tries = 0;

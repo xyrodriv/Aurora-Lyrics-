@@ -11,9 +11,14 @@ PiP, sleep timer, and smooth motion).
 
 - **Synced lyrics** — word-level (syllable), line-level, and plain/static
   rendering driven by live playback position.
-- **Multiple lyric sources** — auto-fetches from LRCLIB and Unison; supports
-  importing and exporting TTML with permanent, per-track saves. Additional
-  sources (e.g. the Spicy Lyrics API) are planned.
+- **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API**,
+  **LRCLIB**, and **Unison**, and supports importing/exporting TTML with
+  permanent, per-track saves.
+- **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
+  the Spicy Lyrics API is keyed by one. Aurora resolves it through
+  **ListenBrainz** (free, keyless, no backend) using a variant ladder over
+  title/artist/album, so the Spicy source works for ordinary YT Music tracks
+  rather than only hand-matched ones.
 - **Timing calibration** — a global and a per-video offset, plus a pause-sync
   point, so the lyrics line up with any source.
 - **Fullscreen karaoke mode** — video on one side, lyrics on the other, with an
@@ -69,6 +74,8 @@ spicy-ytm/
 │   │   ├── smooth-motion.js
 │   │   └── kawarp-core.js      # Bundled Kawarp WebGL module
 │   └── popup/                 # Toolbar popup (popup.html / popup.js / popup.css)
+├── docs/                      # Design, animation, and resolver notes
+├── resolver-worker/           # Optional Spotify-Worker path + regression suites
 └── backups/                   # Local working backups (git-ignored)
 ```
 

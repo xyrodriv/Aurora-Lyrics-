@@ -30,17 +30,52 @@
       .trim();
   }
 
+  // YTM titles are frequently polluted with the artist name and/or a
+  // type suffix: "underscores — Music", "Starboy (Official Video)",
+  // "Song - Remastered 2011". Strip the noise so the lyric services get a
+  // title they can actually match. `artist` is passed in when known so an
+  // "<artist> <dash> <title>" prefix can be removed — note the dash may be a
+  // hyphen, an en dash or an em dash, which YTM uses interchangeably.
   function cleanTrackTitle(s, artist) {
     let title = String(s || "").trim();
+    const dash = "[\\-–—|]";
     if (artist) {
-      const artistPrefix = new RegExp("^" + String(artist).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+-\\s+", "i");
+      const esc = String(artist).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // "underscores — Music" / "underscores - Music" / "underscores | Music"
+      const artistPrefix = new RegExp("^\\s*" + esc + "\\s*" + dash + "\\s*", "i");
       title = title.replace(artistPrefix, "");
     }
-    return title
+    title = title
       .replace(/\s*[\[(](?:official\s+)?(?:audio|video|lyrics?|visualizer|music\s+video)[\])]\s*$/i, "")
-      .replace(/\s*[-|]\s*(?:official\s+)?(?:audio|video|lyrics?|visualizer|music\s+video)\s*$/i, "")
+      .replace(new RegExp("\\s*[-–—|]\\s*(?:official\\s+)?(?:audio|video|lyrics?|visualizer|music\\s+video)\\s*$", "i"), "")
       .replace(/\s+(?:official\s+)?(?:audio|video|lyrics?|visualizer|music\s+video)\s*$/i, "")
       .trim();
+    // A trailing/leading dash left over from stripping ("— Music" -> "Music"
+    // is fine, but "- " alone is not) — drop a bare dash remnant.
+    title = title.replace(new RegExp("^\\s*" + dash + "\\s*"), "").replace(new RegExp("\\s*" + dash + "\\s*$"), "").trim();
+    // If what is left is *only* the artist name, the "title" carried no song
+    // information — reject it so callers fall through instead of searching for
+    // the artist twice. NOTE: do NOT blacklist generic words like "Music": real
+    // songs are genuinely named that (e.g. underscores' track "Music"), and
+    // rejecting them would break a valid lookup.
+    if (artist && title.toLowerCase() === String(artist).trim().toLowerCase()) return "";
+    return title;
+  }
+
+  // Opportunistically pull an ISRC out of a YTM player-response object, if one
+  // exists. YTM does not reliably expose ISRC (observed: the videoDetails read
+  // is often empty at track-change time), so this is a best-effort bonus used
+  // as an exact-join key by the Spicy Lyrics resolver; when it returns "" the
+  // resolver falls back to title+artist search.
+  function extractIsrc(v) {
+    if (!v || typeof v !== "object") return "";
+    const re = /^[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}$/i;
+    const cand = [v.isrc, v.externalVideoId, v.musicExternalVideoId];
+    for (const c of cand) {
+      if (typeof c !== "string") continue;
+      if (c.replace(/-/g, "").length === 12 && re.test(c)) return c.toUpperCase();
+    }
+    return "";
   }
 
   function pickArtworkUrl(thumbnails) {
@@ -138,7 +173,7 @@
 
     getTrack() {
       const bar = $("ytmusic-player-bar");
-      let title = null, artist = "", album = "", artworkUrl = "", videoId = "";
+      let title = null, artist = "", album = "", artworkUrl = "", videoId = "", isrc = "";
       const p = $("ytmusic-player");
 
       // The player response is the authoritative video title. YTM's player
@@ -147,6 +182,7 @@
       try {
         const resp = p && p.getPlayerResponse && p.getPlayerResponse();
         const v = resp && (resp.videoDetails || (resp.microformat && resp.microformat.microformatDataRenderer));
+        if (v) isrc = extractIsrc(v);
         if (v && v.title) {
           videoId = String(v.videoId || "");
           artist = cleanArtist(v.author || v.ownerChannelName || "");
@@ -185,7 +221,7 @@
           }
         } catch (e) {}
       }
-      return title ? { title, artist, album, videoId, durationMs: this.getDurationMs(), artworkUrl } : null;
+      return title ? { title, artist, album, videoId, isrc, durationMs: this.getDurationMs(), artworkUrl } : null;
     },
     getPositionMs() {
       const media = findPlaybackMedia();
@@ -610,6 +646,9 @@
     getPermanentLyrics: (trackKey) => cmd("getPermanentLyrics", [trackKey]),
     setPermanentLyrics: (trackKey, xml) => cmd("setPermanentLyrics", [trackKey, xml]),
     removePermanentLyrics: (trackKey) => cmd("removePermanentLyrics", [trackKey]),
+    getSpicyCache: () => cmd("getSpicyCache"),
+    setSpicyCache: (cache) => cmd("setSpicyCache", [cache]),
+    clearSpicyCache: () => cmd("clearSpicyCache"),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
