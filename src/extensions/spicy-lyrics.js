@@ -8726,7 +8726,7 @@
     // One syllable -> the same shape makeWord()/makeLetterGroup() consume, so a
     // consumer can reproduce the exact markup: .word vs .letterGroup > .letter,
     // .PartOfWord, .LastWordInLine, .SpaceLetter.
-    const mapWords = (syllables) => {
+    const mapWords = (syllables, lineTimed = false) => {
       const list = syllables || [];
       return list.map((w, index) => {
         const startMs = w.StartTime * 1000;
@@ -8734,6 +8734,7 @@
         let letterCapable = false;
         try {
           letterCapable =
+            !lineTimed &&
             !w.DisableLetterAnimation &&
             !w.disableLetterAnimation &&
             typeof isLetterCapable === "function" &&
@@ -8751,6 +8752,14 @@
     };
 
     const lines = [];
+    const mapRomaji = (syllables) => {
+      if (!currentSettings.romanizationEnabled || !syllables || !syllables.length) return "";
+      const plain = syllables.map((word) => word.Text || "").join("");
+      const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
+      if (!kanaOnly.trim()) return "";
+      const rom = romanize(kanaOnly);
+      return rom && rom !== kanaOnly && /[A-Za-z]/.test(rom) ? rom : "";
+    };
     (content || []).forEach((line) => {
       const lead = line && line.Lead;
       if (!lead || !lead.Syllables || !lead.Syllables.length) return;
@@ -8760,13 +8769,16 @@
         endMs: lead.EndTime * 1000,
         lineTimed: !!line.LineTimed,
         opposite: !!line.OppositeAligned,
-        words: mapWords(lead.Syllables),
+        romaji: mapRomaji(lead.Syllables),
+        words: mapWords(lead.Syllables, !!line.LineTimed),
         // Background vocals render as their own .line.bg-line elements right
         // after the main line, with .bg-word children.
         background: (line.Background || []).map((bg) => ({
           startMs: bg.StartTime * 1000,
           endMs: bg.EndTime * 1000,
-          words: mapWords(bg.Syllables),
+          lineTimed: !!bg.LineTimed,
+          romaji: mapRomaji(bg.Syllables),
+          words: mapWords(bg.Syllables, !!bg.LineTimed),
         })),
       });
     });
@@ -8776,6 +8788,27 @@
       title: track ? track.title : null,
       artist: track ? track.artist : null,
       lines,
+      staticLyrics: !!staticLyricsActive,
+      romanizationEnabled: currentSettings.romanizationEnabled === true,
+      songwriters: currentSongwriters.slice(),
+      smoothScrolling: currentSettings.smoothScrolling !== false,
+      scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
+      scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
+      attribution: {
+        provider: currentProvider || "",
+        uploader: currentUploader ? {
+          id: currentUploader.id || "",
+          username: currentUploader.username || "",
+          avatar: currentUploader.avatar || "",
+          url: currentUploader.url || "",
+        } : null,
+        maker: currentMaker ? {
+          id: currentMaker.id || "",
+          username: currentMaker.username || "",
+          avatar: currentMaker.avatar || "",
+          url: currentMaker.url || "",
+        } : null,
+      },
     });
     // Cheap observable diagnostic: if the bus ever stops publishing, this stays
     // stale. Inspect <html data-ym-lyric-lines="..."> to check.

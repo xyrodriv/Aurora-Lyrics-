@@ -85,9 +85,11 @@
      (Active/Sung/NotSung on .line, WordSung/WordNotSung on words) and the
      gradient formula (-20 + 120 * easeSinOut(progress) per letter).
 
-     What is NOT reused: the panel's spring system for per-letter scale / Y-offset
-     / glow. That is approximated here with the same targets and a simple easing,
-     so the micro-motion is close but not bit-identical.
+     What is intentionally different: only the outer PiP shell (Kawarp, header,
+     transport controls, and the separate-document camera). The lyric DOM,
+     state intervals, background-vocal windows, provider footer, per-word/per-
+     letter springs, splines, sync offset, and scroll spring are kept on the
+     panel's published contract so the lyric surface follows the same behavior.
   */
   function panelStylesheetText() {
     const el = document.getElementById("ym-sl-style");
@@ -122,12 +124,28 @@
     return Math.max(0, positionMs - offsetForPosition(positionMs));
   }
 
+  // Same click-to-seek rule as the main panel: line timestamps are lyric-clock
+  // times, so put the active offset back when converting them to player time.
+  function offsetForLine(startMs) {
+    if (syncState && syncState.pauseSync && Number.isFinite(startMs) &&
+        startMs >= syncState.pauseSync.line) {
+      return Number(syncState.pauseSync.offset) || 0;
+    }
+    return syncState ? Number(syncState.offsetMs) || 0 : 0;
+  }
+
+  function seekToLyricTime(startMs) {
+    const p = player();
+    if (!p || typeof p.seek !== "function" || !Number.isFinite(startMs)) return;
+    p.seek(Math.max(0, startMs + offsetForLine(startMs)));
+  }
+
   // Copy the panel's live custom properties onto the PiP wrapper, so the user's
-  // The panel's lyric SIZE is intentionally NOT copied — the PiP has its own
-  // "zoom" setting (--ym-pip-zoom) so the floating window can be sized
-  // independently of the synced tab. Offset / background-vocal / gradient / blur
-  // settings still carry over without a bus topic per value.
+  // lyric size, offset, background-vocal, gradient, blur, and opacity settings
+  // are literally the same on both surfaces. The old PiP-only zoom deliberately
+  // diverged here; it is removed from the settings UI below.
   const COPIED_VARS = [
+    "--ym-sl-lyrics-scale",
     "--ym-sl-lyrics-offset",
     "--ym-sl-bg-vocal-scale",
     "--gradient-alpha",
@@ -143,7 +161,11 @@
     if (!target) return;
     const panel = document.getElementById("ym-sl-panel");
     if (!panel) return;
-    const cs = getComputedStyle(panel);
+    // Size/opacity live on the panel's LyricsContent, while some inherited
+    // properties resolve on the outer panel. Prefer the content node so the
+    // copied --ym-sl-lyrics-scale is the actual live slider value.
+    const source = panel.querySelector(".LyricsContent") || panel;
+    const cs = getComputedStyle(source);
     COPIED_VARS.forEach((name) => {
       const v = cs.getPropertyValue(name);
       if (v && v.trim()) target.style.setProperty(name, v.trim());
@@ -217,19 +239,40 @@
       position: relative;
       flex: 1 1 auto;
       min-height: 0;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scroll-behavior: auto !important;
+      scroll-snap-type: none;
+      overflow-anchor: none;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,.3) transparent;
     }
-    /* The track is absolutely positioned so each line's offsetTop is measured
-       against it, which makes centring a line a simple translate. */
-    .ym-pip-track {
+    .ym-pip-jump {
       position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      /* Block flow, not flex: the panel's .line rules assume normal inline flow
-         for their .word / .letterGroup children, and flex would re-parent them. */
+      z-index: 5;
+      left: 50%;
+      bottom: 12px;
+      transform: translateX(-50%);
+      display: none;
+      padding: 7px 12px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 999px;
+      background: rgba(20,20,24,.82);
+      color: rgba(255,255,255,.92);
+      font: 600 12px/1.2 "SpicyLyrics", Roboto, Arial, sans-serif;
+      cursor: pointer;
+      white-space: nowrap;
+      backdrop-filter: blur(8px);
+    }
+    .ym-pip-jump.visible { display: block; }
+    .ym-pip-jump:hover { background: rgba(255,255,255,.16); }
+    /* Normal flow is important: the outer .ym-pip-lines element is the actual
+       scroll container, and the credits footer must come AFTER the lyric track,
+       not underneath an absolutely-positioned track at the top. */
+    .ym-pip-track {
+      position: relative;
       display: block;
-      transition: transform .45s cubic-bezier(.22,.61,.36,1);
     }
     /* The panel's stylesheet owns the lyric look — typography, letter splitting,
        gradient fill and the Active/Sung/NotSung states all come from it. These
@@ -238,8 +281,11 @@
        far-away lines recede. Scoped with an extra class so they out-specify the
        panel's own rules rather than fighting them with !important everywhere. */
     #ym-sl-panel.ym-pip-panel {
-      position: absolute !important;
-      inset: 0 !important;
+      position: relative !important;
+      inset: auto !important;
+      width: 100% !important;
+      min-height: 100% !important;
+      height: auto !important;
       padding: 0 !important;
       margin: 0 !important;
       border: 0 !important;
@@ -251,7 +297,8 @@
     }
     #ym-sl-panel.ym-pip-panel .LyricsContent {
       position: relative !important;
-      height: 100% !important;
+      height: auto !important;
+      min-height: 100% !important;
       padding: 0 !important;
       margin: 0 !important;
       overflow: visible !important;
@@ -264,6 +311,7 @@
       margin: 0 !important;
       padding: 2px 0 !important;
       text-align: left;
+      cursor: pointer;
     }
     #ym-sl-panel.SpicyRenderer .line.OppositeAligned { text-align: right; }
     /* Own class: the panel relies on its scroll container plus adaptive spacing
@@ -308,7 +356,15 @@
   let rafId = 0;
   let lines = [];
   let linesVideoId = null;
+  let staticLyrics = false;
+  let romanizationEnabled = true;
+  let songwriters = [];
+  let attribution = null;
+  let smoothScrolling = true;
+  let scrollLeadEnabled = false;
+  let scrollLeadMs = 0;
   let lastRenderedActive = -2;
+  let lastRenderedTarget = -2;
   let lineEls = [];
   let lineSets = [];   // animation records, parallel to lineEls
   let kit = null;      // the panel's published animation kit (lyrics:renderer)
@@ -399,26 +455,33 @@
 
     const linesBox = makeEl(doc, "div", "ym-pip-lines");
     linesBox.id = "ym-pip-lines";
+    const jump = makeEl(doc, "button", "ym-pip-jump", "Jump to current lyric");
+    jump.id = "ym-pip-jump";
+    jump.type = "button";
+    jump.setAttribute("aria-label", "Jump to current lyric");
+    jump.addEventListener("click", () => jumpToCurrentLyric());
+    linesBox.appendChild(jump);
+    // The PiP uses the same scroll semantics as the main panel. A manual wheel
+    // gesture stops the camera spring so it cannot fight the user's scroll.
+    linesBox.addEventListener("wheel", () => {
+      pipManualScrollPaused = true;
+      centerTargetY = null;
+      centerVelocity = 0;
+    }, { passive: true });
+    linesBox.addEventListener("touchstart", () => {
+      pipManualScrollPaused = true;
+      centerTargetY = null;
+      centerVelocity = 0;
+    }, { passive: true });
     // The panel's stylesheet is scoped to #ym-sl-panel.SpicyRenderer, so the PiP
     // has to present that same wrapper for the lyric rules to apply at all.
     const panelWrap = makeEl(doc, "div", "SpicyRenderer ym-pip-panel");
     panelWrap.id = "ym-sl-panel";
     const lyricsContent = makeEl(doc, "div", "LyricsContent");
     lyricsContent.id = "ym-pip-content";
-    // The panel sizes lyrics from --DefaultLyricsSize. Mirror that formula, but
-    // drive it from the PiP's own "zoom" setting (--ym-pip-zoom) so the floating
-    // window sizes independently of the synced tab. The 46px cap the panel uses is
-    // lifted to 90px so the slider can reach 300% (3.0 -> 60px) without clipping.
-    lyricsContent.style.setProperty(
-      "--DefaultLyricsSize",
-      "clamp(14px, calc(1.25rem * var(--ym-pip-zoom, 1.7)), 90px)"
-    );
-    // Seed the PiP's own zoom var from the "zoom" setting so the floating window
-    // sizes independently of the synced tab. 1.7 == 170% default; 3.0 == 300%.
-    lyricsContent.style.setProperty(
-      "--ym-pip-zoom",
-      String(settings.zoom != null ? settings.zoom : 1.7)
-    );
+    // Do NOT set a PiP-specific --DefaultLyricsSize. The shared stylesheet's
+    // container-relative formula must win, and copyPanelVars() below copies the
+    // panel's live --ym-sl-lyrics-scale into this same LyricsContent tree.
     panelWrap.appendChild(lyricsContent);
     linesBox.appendChild(panelWrap);
     root.appendChild(linesBox);
@@ -571,12 +634,20 @@
     div.dataset.index = String(index);
     if (line.opposite) div.classList.add("OppositeAligned");
     if (line.lineTimed) div.classList.add("line-timed");
+    if (staticLyrics) div.classList.add("static");
     const words = (line.words && line.words.length)
       ? line.words
       : [{ text: line.text, startMs: line.startMs, endMs: line.endMs, isLast: true }];
     const records = [];
     const elements = [div];
+    const bgIntervals = [];
     buildWordsInto(div, words, records, false, !!line.lineTimed);
+    if (romanizationEnabled && line.romaji) {
+      div.appendChild(makeEl(pipDoc, "div", "romaji", line.romaji));
+    }
+    // Match the main panel's click-to-seek behavior. Use the lyric-clock start,
+    // then restore the active/pause-sync offset inside seekToLyricTime().
+    div.addEventListener("click", () => seekToLyricTime(line.startMs));
 
     // Background vocals: the panel emits one .line.bg-line per background run,
     // right after the main line, with .bg-word children. Returned as siblings so
@@ -585,11 +656,26 @@
       if (!bg.words || !bg.words.length) return;
       const bgEl = makeEl(pipDoc, "div", "line bg-line");
       if (line.opposite) bgEl.classList.add("OppositeAligned");
-      buildWordsInto(bgEl, bg.words, records, true);
+      if (bg.lineTimed) bgEl.classList.add("line-timed");
+      if (staticLyrics) bgEl.classList.add("static");
+      buildWordsInto(bgEl, bg.words, records, true, !!bg.lineTimed);
+      if (romanizationEnabled && bg.romaji) {
+        bgEl.appendChild(makeEl(pipDoc, "div", "romaji", bg.romaji));
+      }
+      // Background vocals use their own time window, just like the main panel.
+      bgEl.addEventListener("click", () => seekToLyricTime(bg.startMs));
       elements.push(bgEl);
+      bgIntervals.push({ el: bgEl, startMs: bg.startMs, endMs: bg.endMs });
     });
 
-    lineSets[index] = { records: records, elements: elements };
+    lineSets[index] = {
+      records: records,
+      elements: elements,
+      intervals: [
+        { el: div, startMs: line.startMs, endMs: line.endMs },
+        ...bgIntervals,
+      ],
+    };
     return elements;
   }
 
@@ -630,9 +716,13 @@
     if (!word.letterCapable) {
       const span = makeEl(pipDoc, "span", "word");
       span.textContent = text;
-      span.style.setProperty("--gradient-position", "-20%");
+      span.style.setProperty("--gradient-position", staticLyrics ? "100%" : "-20%");
       span.style.setProperty("--text-shadow-opacity", "0%");
       span.style.setProperty("--text-shadow-blur-radius", "4px");
+      span.style.setProperty("--ym-sl-base-scale", staticLyrics || lineTimed ? "1" : "0.95");
+      span.style.transform = staticLyrics || lineTimed
+        ? "translateY(0)"
+        : "translateY(calc(var(--DefaultLyricsSize) * 0.01))";
       return makeAnimRecord(span, startMs, endMs, "word", lineTimed);
     }
     const group = makeEl(pipDoc, "div", "letterGroup");
@@ -644,9 +734,13 @@
       const letter = makeEl(pipDoc, "span", "letter Emphasis", char);
       if (char.trim().length === 0) letter.classList.add("SpaceLetter");
       if (i === chars.length - 1) letter.classList.add("LastLetterInWord");
-      letter.style.setProperty("--gradient-position", "-20%");
+      letter.style.setProperty("--gradient-position", staticLyrics ? "100%" : "-20%");
       letter.style.setProperty("--text-shadow-opacity", "0%");
       letter.style.setProperty("--text-shadow-blur-radius", "4px");
+      letter.style.setProperty("--ym-sl-base-scale", staticLyrics || lineTimed ? "1" : "0.95");
+      letter.style.transform = staticLyrics || lineTimed
+        ? "translateY(0)"
+        : "translateY(calc(var(--DefaultLyricsSize) * 0.01))";
       group.appendChild(letter);
       // Letters inherit their word's lineTimed (the panel applies the same gate
       // to letters via word.LineTimed at the word level).
@@ -656,6 +750,53 @@
     const rec = makeAnimRecord(group, startMs, endMs, "word", lineTimed);
     rec.letters = letters;
     return rec;
+  }
+
+  function buildProviderRow(provider) {
+    const row = makeEl(pipDoc, "div", "ym-sl-provider");
+    row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-label", "Lyrics provided by"));
+    row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-name", provider));
+    return row;
+  }
+
+  function buildPersonRow(label, person) {
+    const row = makeEl(pipDoc, "div", "ym-sl-uploader");
+    row.appendChild(makeEl(pipDoc, "span", "ym-sl-uploader-label", label));
+    const link = makeEl(pipDoc, "a", "ym-sl-uploader-link");
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    if (person && person.url) link.href = person.url;
+    if (person && person.avatar) {
+      const img = makeEl(pipDoc, "img", "ym-sl-uploader-avatar");
+      img.alt = "";
+      img.src = person.avatar;
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+      link.appendChild(img);
+    }
+    link.appendChild(makeEl(pipDoc, "span", "ym-sl-uploader-name", person && person.username));
+    if (!person || !person.url) link.classList.add("no-link");
+    row.appendChild(link);
+    return row;
+  }
+
+  function buildCreditsFooter() {
+    if (!songwriters.length && !(attribution && (attribution.provider || attribution.uploader || attribution.maker))) return null;
+    const footer = makeEl(pipDoc, "div", "ym-sl-credits");
+    if (songwriters.length) {
+      footer.appendChild(makeEl(pipDoc, "div", "ym-sl-credits-label", "Written By"));
+      const names = makeEl(pipDoc, "div", "ym-sl-credits-names");
+      songwriters.forEach((name, index) => {
+        if (index) names.appendChild(pipDoc.createTextNode(", "));
+        names.appendChild(makeEl(pipDoc, "span", "ym-sl-credits-name", name));
+      });
+      footer.appendChild(names);
+    }
+    if (attribution && attribution.provider) footer.appendChild(buildProviderRow(attribution.provider));
+    if (attribution && attribution.uploader) footer.appendChild(buildPersonRow("Uploaded by", attribution.uploader));
+    if (attribution && attribution.maker) footer.appendChild(buildPersonRow("Made by", attribution.maker));
+    return footer;
   }
 
   function buildLinesBox() {
@@ -679,19 +820,36 @@
       lineEls.push(els[0]);
     });
     content.appendChild(track);
+    const footer = buildCreditsFooter();
+    if (footer) content.appendChild(footer);
   }
 
   function activeIndexAt(posMs) {
     if (!lines.length || posMs === null || posMs === undefined) return -1;
-    let lo = 0, hi = lines.length - 1, found = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (posMs < lines[mid].startMs) hi = mid - 1;
-      else { found = mid; lo = mid + 1; }
+    // The main panel uses an overlap-safe, last-match-wins lookup because a
+    // widened lead line can overlap the next lead during a late bg vocal. The
+    // old PiP binary search assumed disjoint windows and could highlight the
+    // wrong line or return no line during that overlap.
+    let found = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (posMs >= line.startMs && posMs < line.endMs) found = i;
     }
-    if (found === -1) return -1;
-    // Past the end of that line: only still "active" if the next has not begun.
     return found;
+  }
+
+  function updateLineStates(posMs) {
+    lineSets.forEach((set) => {
+      (set.intervals || []).forEach((interval) => {
+        const state = staticLyrics
+          ? "Static"
+          : getState(posMs, interval.startMs, interval.endMs);
+        interval.el.classList.toggle("static", state === "Static");
+        interval.el.classList.toggle("Active", state === "Active");
+        interval.el.classList.toggle("NotSung", state === "NotSung");
+        interval.el.classList.toggle("Sung", state === "Sung");
+      });
+    });
   }
 
   /* The panel's own animation, running on the panel's own springs and splines
@@ -889,21 +1047,26 @@
     // animate(): lyricPositionMs = positionMs - getOffsetForPosition(positionMs).
     const lyricPos = lyricPositionMs(pos);
     const idx = activeIndexAt(lyricPos);
+    const targetPos = scrollLeadEnabled ? lyricPos + scrollLeadMs : lyricPos;
+    const targetIdx = activeIndexAt(targetPos);
+    updateLineStates(lyricPos);
     if (idx !== lastRenderedActive) {
       lastRenderedActive = idx;
-      renderActive(idx);
     }
-    if (idx >= 0) {
-      if (kit) animateLine(idx, lyricPos, dt);
-      else fillWithoutKit(idx, lyricPos);
+    if (targetIdx !== lastRenderedTarget) {
+      lastRenderedTarget = targetIdx;
+      renderActive(targetIdx);
     }
-    // Settle every non-active line's springs to rest (panel-faithful behavior).
-    // Without this, restRecords' "SetGoal(1)" goal would never be reached because
-    // the springs only Step inside animateLine (which runs only for the active
-    // line). The storeNeedsAnimation short-circuit makes this O(1) for the lines
-    // that have already settled.
+    updateManualScrollRecovery(idx);
+    stepCenterSpring(dt);
+    // The panel evaluates every model line from its own StartTime/EndTime each
+    // frame. Do the same here: background-vocal intervals are independent of
+    // their lead line, and a late bg must keep filling while the next lead is
+    // already active. This replaces the old "only active primary line" shortcut.
     for (let s = 0; s < lineSets.length; s++) {
-      if (s !== idx) settleLineSet(lineSets[s], dt);
+      if (staticLyrics) continue;
+      if (kit) animateLine(s, lyricPos, dt);
+      else if (s === idx) fillWithoutKit(s, lyricPos);
     }
     const toggle = pipEl("ym-pip-toggle");
     if (toggle) {
@@ -920,19 +1083,9 @@
   function renderActive(activeIdx) {
     if (!lineEls.length) return;
     lineSets.forEach((set, i) => {
-      const isActive = i === activeIdx;
-      const isSung = activeIdx >= 0 && i < activeIdx;
-      set.elements.forEach((el) => {
-        el.classList.toggle("Active", isActive);
-        el.classList.toggle("Sung", isSung);
-        el.classList.toggle("NotSung", !isActive && !isSung);
-      });
+      // Far-line is PiP-only presentation chrome; the actual Active/Sung/
+      // NotSung state is assigned from each interval in updateLineStates().
       lineEls[i].classList.toggle("ym-pip-far", activeIdx >= 0 && Math.abs(i - activeIdx) > 4);
-      // Only the ACTIVE line is animated, so a line that stops being active would
-      // otherwise keep whatever glow and scale it last had. The panel's springs
-      // settle those to rest; without this the highlight halo lingers on every
-      // line already sung.
-      if (!isActive) restRecords(set.records);
     });
     centerOn(activeIdx);
   }
@@ -999,24 +1152,129 @@
     }
   }
 
-  // Bring the active line to the vertical middle of the viewport box. Distance-
-  // scaled duration matches the panel (clamp(180 + distance*0.22, 180, 420) ms).
-  // The active line's BOUNCE was not this transition — it was the spring-goal
-  // divergence (blends applied unconditionally instead of only when !lineTimed);
-  // that is fixed in animateLine now. This CSS-transition centering is what the
-  // PiP shipped with and what scrolled reliably.
-  let lastCenterY = 0;
+  // Bring the active line to the vertical middle of the actual scroll box. The
+  // main panel writes scrollTop; the PiP does the same, so its credits remain in
+  // normal flow at the bottom and the user can scroll past the last lyric.
+  // Same camera constants as spicy-lyrics.js's scroll spring.
+  const SCROLL_SPRING_STIFFNESS = 110;
+  const SCROLL_SPRING_DAMPING = 21;
+  const SCROLL_MAX_VELOCITY = 4000;
+  let centerTargetY = null;
+  let pipManualScrollPaused = false;
+  let pipManualScrollWasAway = false;
+  let centerY = 0;
+  let centerVelocity = 0;
+  let centerInitialized = false;
+
+  function setJumpVisible(visible) {
+    const button = pipEl("ym-pip-jump");
+    if (button) button.classList.toggle("visible", !!visible);
+  }
+
+  function activeLineInView(activeIdx) {
+    const box = pipEl("ym-pip-lines");
+    const target = lineEls[activeIdx];
+    if (!box || !target) return false;
+    const boxRect = box.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const visibleTop = boxRect.top + Math.min(32, box.clientHeight * 0.12);
+    const visibleBottom = boxRect.bottom - Math.min(32, box.clientHeight * 0.12);
+    return targetRect.bottom > visibleTop && targetRect.top < visibleBottom;
+  }
+
+  function jumpToCurrentLyric() {
+    const p = player();
+    const pos = p && typeof p.getPositionMs === "function" ? p.getPositionMs() : null;
+    const lyricPos = lyricPositionMs(pos);
+    const activeIdx = activeIndexAt(lyricPos);
+    if (activeIdx < 0) return;
+    pipManualScrollPaused = false;
+    pipManualScrollWasAway = false;
+    centerTargetY = null;
+    centerVelocity = 0;
+    centerInitialized = false;
+    centerOn(activeIdx);
+    setJumpVisible(false);
+  }
+
+  function writeCameraScroll(box, top) {
+    if (!box) return;
+    // Explicit instant is important even though CSS says auto: it prevents a
+    // browser-native scroll animation from competing with our JS spring.
+    try { box.scrollTo({ top, left: 0, behavior: "instant" }); }
+    catch (e) { box.scrollTop = top; }
+  }
+
   function centerOn(activeIdx) {
     const box = pipEl("ym-pip-lines");
-    const track = box && box.querySelector(".ym-pip-track");
     const target = lineEls[activeIdx];
-    if (!box || !track || !target) return;
-    const y = box.clientHeight / 2 - target.offsetHeight / 2 - target.offsetTop;
-    const distance = Math.abs(y - lastCenterY);
-    lastCenterY = y;
-    const duration = Math.max(180, Math.min(420, 180 + distance * 0.22));
-    track.style.transition = "transform " + duration + "ms cubic-bezier(.22,.61,.36,1)";
-    track.style.transform = "translateY(" + Math.round(y) + "px)";
+    if (!box || !target || pipManualScrollPaused) return;
+    const targetScroll = target.offsetTop - (box.clientHeight - target.offsetHeight) / 2;
+    const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
+    const clamped = Math.max(0, Math.min(maxScroll, targetScroll));
+    if (!centerInitialized) {
+      centerY = clamped;
+      centerTargetY = clamped;
+      centerVelocity = 0;
+      centerInitialized = true;
+      writeCameraScroll(box, clamped);
+      return;
+    }
+    centerTargetY = clamped;
+  }
+
+  function updateManualScrollRecovery(activeIdx) {
+    if (activeIdx < 0) {
+      setJumpVisible(false);
+      return;
+    }
+    const inView = activeLineInView(activeIdx);
+    if (pipManualScrollPaused && !inView) {
+      // Do not resume merely because a wheel event fired while the current line
+      // is still visible. That was the snap-back bug: the next rAF immediately
+      // cleared the pause before the browser had applied the user's scroll.
+      pipManualScrollWasAway = true;
+    }
+    if (pipManualScrollPaused && pipManualScrollWasAway && inView) {
+      // Once the user really scrolled away and then brought the active line back
+      // into view, resume automatic following just like the main panel.
+      pipManualScrollPaused = false;
+      pipManualScrollWasAway = false;
+      centerTargetY = null;
+      centerVelocity = 0;
+      centerInitialized = false;
+      centerOn(activeIdx);
+      setJumpVisible(false);
+      return;
+    }
+    setJumpVisible(pipManualScrollPaused && !inView);
+  }
+
+  function stepCenterSpring(dt) {
+    const box = pipEl("ym-pip-lines");
+    if (!box || centerTargetY == null || pipManualScrollPaused) return;
+    const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
+    centerTargetY = Math.max(0, Math.min(maxScroll, centerTargetY));
+    if (!smoothScrolling) {
+      centerY = centerTargetY;
+      centerVelocity = 0;
+      writeCameraScroll(box, centerY);
+      return;
+    }
+    // Keep the camera's fractional position in JS. Reading scrollTop back on
+    // every frame quantizes it to the browser's integer scroll position and can
+    // turn a small spring step into a visible one-pixel snap at line changes.
+    const displacement = centerTargetY - centerY;
+    if (Math.abs(displacement) < 1 && Math.abs(centerVelocity) < 8) {
+      centerY = centerTargetY;
+      centerVelocity = 0;
+    } else {
+      centerVelocity +=
+        (displacement * SCROLL_SPRING_STIFFNESS - centerVelocity * SCROLL_SPRING_DAMPING) * dt;
+      centerVelocity = Math.max(-SCROLL_MAX_VELOCITY, Math.min(SCROLL_MAX_VELOCITY, centerVelocity));
+      centerY += centerVelocity * dt;
+    }
+    writeCameraScroll(box, centerY);
   }
 
   function stopSync() {
@@ -1031,11 +1289,27 @@
     if (!payload) return;
     lines = Array.isArray(payload.lines) ? payload.lines : [];
     linesVideoId = payload.videoId || null;
+    staticLyrics = !!payload.staticLyrics;
+    romanizationEnabled = payload.romanizationEnabled !== false;
+    songwriters = Array.isArray(payload.songwriters) ? payload.songwriters : [];
+    attribution = payload.attribution || null;
+    smoothScrolling = payload.smoothScrolling !== false;
+    scrollLeadEnabled = payload.scrollLeadEnabled === true;
+    scrollLeadMs = Number(payload.scrollLeadMs) || 0;
     lastRenderedActive = -2;
+    lastRenderedTarget = -2;
+    centerTargetY = null;
+    pipManualScrollPaused = false;
+    pipManualScrollWasAway = false;
+    centerY = 0;
+    centerVelocity = 0;
+    centerInitialized = false;
     if (!pipWin || pipWin.closed || !pipDoc) return;
     setHeader();
     buildLinesBox();
-    renderActive(activeIndexAt(lyricPositionMs(player() ? player().getPositionMs() : null)));
+    const pos = lyricPositionMs(player() ? player().getPositionMs() : null);
+    updateLineStates(pos);
+    renderActive(activeIndexAt(pos));
   }
 
   // While the PiP is open the synced-tab panel's lyrics are redundant (and waste
@@ -1110,13 +1384,10 @@
     }
     if (!supported()) return; // no PiP in this browser — no button at all
     if (!btnHandle) mountButton();
-    // Live-apply the lyric-size slider to an already-open PiP window without a
-    // rebuild: only the --ym-pip-zoom var needs to change for the clamp() above.
-    const z = settings.zoom;
-    if (z != null) {
-      const content = pipEl("ym-pip-content");
-      if (content) content.style.setProperty("--ym-pip-zoom", String(z));
-    }
+    // Live-copy the panel's current lyric settings into an already-open PiP.
+    // The panel owns the size slider now, so no PiP-only zoom variable exists.
+    const panelWrap = pipEl("ym-sl-panel");
+    if (panelWrap) copyPanelVars(panelWrap);
   }
 
   function mountButton() {

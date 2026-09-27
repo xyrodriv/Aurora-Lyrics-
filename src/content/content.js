@@ -714,7 +714,6 @@
       jsUrl: chrome.runtime.getURL("src/extensions/pip-lyrics.js"),
       settings: [
         { key: "master", label: "Enable PiP lyrics", type: "toggle", default: true },
-        { key: "zoom", label: "Lyric size", min: 0.5, max: 3.0, step: 0.05, default: 1.7, display: "percent" },
         { key: "showTransport", label: "Show play / previous / next in the window", type: "toggle", default: true },
       ],
     },
