@@ -303,6 +303,11 @@
   const LRCLIB_PATHS = new Set(["/api/get", "/api/search"]);
   const UNISON_ORIGIN = "https://unison.boidu.dev";
   const UNISON_PATHS = new Set(["/lyrics"]);
+  const MUSICBRAINZ_ORIGIN = "https://musicbrainz.org";
+  // MusicBrainz asks clients to keep request volume low. The resolver calls
+  // this only after ListenBrainz misses, and this gate makes the fallback
+  // polite even when several tracks change quickly.
+  let musicBrainzNextAt = 0;
   const spotifyArtworkCache = new Map();
   const fetchLRCLIB = async (rawUrl) => {
     const url = new URL(String(rawUrl || ""));
@@ -324,6 +329,46 @@
     if (url.origin !== UNISON_ORIGIN || !UNISON_PATHS.has(url.pathname)) {
       throw new Error("Unsupported Unison endpoint.");
     }
+    const response = await fetch(url.href, {
+      headers: { Accept: "application/json" },
+      credentials: "omit",
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+      data: response.ok ? await response.json() : null,
+    };
+  };
+  const waitForMusicBrainz = async () => {
+    const now = Date.now();
+    const wait = Math.max(0, musicBrainzNextAt - now);
+    musicBrainzNextAt = Math.max(now, musicBrainzNextAt) + 1100;
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+  };
+  const quoteMusicBrainz = (value) => String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .trim();
+  const fetchMusicBrainzRecordingSearch = async (title, artist, album, durationMs) => {
+    const recording = quoteMusicBrainz(title);
+    const creditedArtist = quoteMusicBrainz(artist);
+    if (!recording) return { ok: false, status: 400, data: null };
+    const terms = [`recording:\"${recording}\"`];
+    if (creditedArtist) terms.push(`artist:\"${creditedArtist}\"`);
+    if (album) terms.push(`release:\"${quoteMusicBrainz(album)}\"`);
+    if (Number.isFinite(Number(durationMs)) && Number(durationMs) > 0) {
+      // MusicBrainz's `dur` field is milliseconds. Keep this as a scoring hint;
+      // the title/artist query remains useful when the duration is rounded.
+      terms.push(`dur:${Math.max(0, Math.round(Number(durationMs) - 5000))}..${Math.round(Number(durationMs) + 5000)}`);
+    }
+    const url = new URL("/ws/2/recording/", MUSICBRAINZ_ORIGIN);
+    url.search = new URLSearchParams({
+      query: terms.join(" AND "),
+      fmt: "json",
+      inc: "url-rels",
+      limit: "10",
+    }).toString();
+    await waitForMusicBrainz();
     const response = await fetch(url.href, {
       headers: { Accept: "application/json" },
       credentials: "omit",
@@ -1138,6 +1183,9 @@
           case "clearSpicyCache": await clearSpicyCache(); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
           case "fetchUnison": r = await fetchUnison(args[0]); break;
+          case "fetchMusicBrainzRecordingSearch":
+            r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
+            break;
           case "fetchCoverArt": r = await fetchCoverArt(args[0], args[1]); break;
           default: throw new Error("unknown method " + method);
         }

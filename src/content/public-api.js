@@ -651,6 +651,8 @@
     clearSpicyCache: () => cmd("clearSpicyCache"),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchUnison: (url) => cmd("fetchUnison", [url]),
+    fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
+      cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
     fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
   };
   console.log("[Aurora Lyrics] public API ready (page world) v" + window.YTMod.version);

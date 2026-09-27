@@ -28,14 +28,15 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
-  // YTM → Spotify id resolver. Song.link/Odesli was shut down
-  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401), and MusicBrainz was dropped for
-  // being slow and rate-limited (400 requests/window, up to ~16 per song).
+  // YTM -> Spotify id resolver. Song.link/Odesli was shut down
+  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
+  // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
+  // search + Spotify URL relations. MusicBrainz is deliberately last in the ID
+  // layer because it is slower/rate-limited, but it covers mappings LB misses.
   //
   // ListenBrainz runs `labs.api.listenbrainz.org`, MetaBrainz's free dataset
-  // hoster. It publishes the recording→Spotify mapping directly — no key, no
-  // account, no backend, and CORS `*` so we can call it from here. This is the
-  // resolver; MusicBrainz is gone.
+  // hoster. It publishes the recording->Spotify mapping directly — no key, no
+  // account, no backend, and CORS `*` so we can call it from here.
   const LISTENBRAINZ_LABS_API = "https://labs.api.listenbrainz.org";
   // Per-request cap. This sits on the critical path of a track change, so it
   // must never be the reason a song hangs.
@@ -1192,11 +1193,15 @@
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
   let currentSongwriters = [];
-  // Spicy Lyrics upload attribution for the currently loaded lyrics, when they
-  // came from the Spicy Lyrics API. Null for every other source. Shape mirrors
-  // the API's Body.UploadAttribution.Uploader:
+  // Attribution for the currently loaded lyrics. `currentProvider` is a display
+  // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
+  // `currentUploader` / `currentMaker` are the credited people and are only ever
+  // non-null for a community sync (source === "spicy_lyrics"). Shape mirrors the
+  // API's Body.UploadAttribution.{Uploader,Maker}:
   //   { id, username, avatar, hasProfileBanner, url }
   let currentUploader = null;
+  let currentMaker = null;
+  let currentProvider = "";
   // Credits carried by the *next* loadTTML call. Set immediately before an
   // external load so loadTTML (which is also used for imports and cached TTML)
   // can attach them without changing its signature for every caller.
@@ -3904,6 +3909,29 @@
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
       font-weight: 600;
       line-height: 1;
+    }
+    /* "Lyrics provided by <provider>" — shown for EVERY API source, because
+       developers.spicylyrics.org/md/attribution makes displaying the provider a
+       binding condition (ToS section 6), not a nicety. Plain text: the provider
+       carries no url of its own. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 12px;
+      font-size: 13px;
+      color: rgba(255,255,255,.5);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
+      color: rgba(255,255,255,.85);
+      font-weight: 600;
+    }
+    /* Tighter leading when the provider is followed by a person row, and when
+       two person rows stack (uploader then maker) — otherwise the three
+       attribution lines float apart. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider + .ym-sl-uploader,
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader + .ym-sl-uploader {
+      margin-top: 6px;
     }
     tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
     tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
@@ -6750,7 +6778,7 @@
     exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
   }
 
-  function loadTTML(xml, source) {
+  function loadTTML(xml, source, provider) {
     const rawXml = String(xml || "");
     const parsed = parseTTML(rawXml);
     if (!parsed.length) {
@@ -6769,18 +6797,29 @@
     // results only). Clearing here means imports, cached TTML and Unison never
     // inherit a stale uploader from a previous track.
     if (pendingSpicyCredits) {
-      currentUploader = pendingSpicyCredits.uploader || null;
+      const attr = pendingSpicyCredits.attribution || null;
+      currentProvider = (attr && attr.provider) || "";
+      currentUploader = (attr && attr.uploader) || null;
+      currentMaker = (attr && attr.maker) || null;
       if (!currentSongwriters.length && pendingSpicyCredits.songwriters.length) {
         currentSongwriters = pendingSpicyCredits.songwriters;
       }
       pendingSpicyCredits = null;
     } else if (source === "imported") {
       // A TTML loaded from a local file (not via the Spicy Lyrics API) has no
-      // upload attribution. Surface it as a Local Database credit instead of
-      // showing nothing — AJ, 2026-09-26. No url, so buildUploaderRow renders
-      // it as plain text (no dead link).
+      // provider and no credited people — the attribution rule governs API
+      // responses, not files the user brought. Surface it as a Local Database
+      // credit instead of showing nothing — AJ, 2026-09-26. No url, so
+      // buildPersonRow renders it as plain text (no dead link).
+      currentProvider = "";
+      currentMaker = null;
       currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
     } else {
+      // Unison can return TTML too, but it has no Spicy UploadAttribution
+      // object. The caller supplies its provider explicitly so the footer still
+      // says where these lyrics came from.
+      currentProvider = typeof provider === "string" ? provider : "";
+      currentMaker = null;
       currentUploader = null;
     }
     currentTTMLSource = source === "imported" ? "imported" : "external";
@@ -6790,12 +6829,14 @@
     return applied;
   }
 
-  function loadLRCLyrics(data, durationMs) {
+  function loadLRCLyrics(data, durationMs, provider = "LRCLIB") {
     currentLyricsIsTTML = false;
     currentTTMLSource = "none";
     importedTTMLXml = "";
     currentSongwriters = [];
     currentUploader = null;
+    currentMaker = null;
+    currentProvider = typeof provider === "string" ? provider : "LRCLIB";
     autoScrollUserPaused = false;
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
@@ -6947,7 +6988,14 @@
   // single unit. Symptom: "the lyrics are line by line, not word by word"
   // on a track whose API body is `Type: "Syllable"` with real per-word times.
   // Re-serializing on read would avoid this class entirely; until then, bump.
-  const SPICY_CACHE_VERSION = 3;
+  //
+  // v4 — the cached `attribution` SHAPE changed: it used to be the flattened
+  // uploader ({ id, username, avatar, url, songwriters }) and is now
+  // { source, provider, uploader, maker, songwriters }. ⚠️ Anything written
+  // between the v3 bump and this one is tagged v3 but holds the OLD shape, so
+  // it would never be swept AND would render no credit at all. Hence v4, not
+  // "v3 is already new enough".
+  const SPICY_CACHE_VERSION = 4;
   const SPICY_CACHE_LIMIT = 80;
   // Negative results expire far sooner than positive ones: "this song has no
   // synced lyrics" is far more likely to change (someone uploads it) than an
@@ -7283,6 +7331,87 @@
    * artist answers for the overwhelming majority of songs in one request, so the
    * feat-credit permutations only run when that fails.
    */
+  function spotifyTrackIdFromMusicBrainzUrl(value) {
+    const raw = String(value || "");
+    const uri = /^spotify:track:([A-Za-z0-9]{22})$/i.exec(raw);
+    if (uri) return uri[1];
+    const web = /open\.spotify\.com\/(?:intl-[^/]+\/)?track\/([A-Za-z0-9]{22})/i.exec(raw);
+    return web ? web[1] : "";
+  }
+
+  function musicBrainzSpotifyId(recording) {
+    const relations = recording && Array.isArray(recording.relations) ? recording.relations : [];
+    for (const relation of relations) {
+      const resource = relation && relation.url && relation.url.resource;
+      const id = spotifyTrackIdFromMusicBrainzUrl(resource);
+      if (id) return id;
+    }
+    return "";
+  }
+
+  function scoreMusicBrainzRecording(recording, track) {
+    if (!recording || !track) return -1;
+    const wantedTitle = normLoose(track.title);
+    const gotTitle = normLoose(recording.title);
+    if (!wantedTitle || !gotTitle) return -1;
+    let score = gotTitle === wantedTitle ? 8 : 0;
+    if (!score && (gotTitle.includes(wantedTitle) || wantedTitle.includes(gotTitle))) score = 4;
+    if (!score) return -1;
+    const wantedArtist = normLoose(track.artist);
+    const artistNames = Array.isArray(recording["artist-credit"])
+      ? recording["artist-credit"].map((credit) => normLoose(credit && (credit.name || credit.artist && credit.artist.name)))
+      : [];
+    if (wantedArtist && artistNames.some((name) => name === wantedArtist)) score += 6;
+    else if (wantedArtist && artistNames.some((name) => name && (name.includes(wantedArtist) || wantedArtist.includes(name)))) score += 3;
+    const wantedDuration = Number(track.durationMs);
+    const gotDuration = Number(recording.length);
+    if (Number.isFinite(wantedDuration) && wantedDuration > 0 && Number.isFinite(gotDuration) && gotDuration > 0) {
+      const delta = Math.abs(gotDuration - wantedDuration);
+      if (delta <= 1500) score += 4;
+      else if (delta <= 5000) score += 2;
+    }
+    return score;
+  }
+
+  async function resolveSpotifyIdViaMusicBrainz(track, controller, key) {
+    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") {
+      return { id: null, transient: false };
+    }
+    if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+    try {
+      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
+        track.title,
+        track.artist,
+        track.album,
+        track.durationMs
+      );
+      if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+      if (!response || response.status === 429 || response.status >= 500) {
+        return { id: null, transient: true };
+      }
+      if (!response.ok || !response.data || !Array.isArray(response.data.recordings)) {
+        return { id: null, transient: false };
+      }
+      const candidates = response.data.recordings
+        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
+        .filter((candidate) => candidate.score > 0 && musicBrainzSpotifyId(candidate.recording))
+        .sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      if (!best) {
+        console.warn(`[SpicyLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
+        return { id: null, transient: false };
+      }
+      const id = musicBrainzSpotifyId(best.recording);
+      console.log(`[SpicyLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
+      return { id, transient: false };
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.warn("[SpicyLyrics] MusicBrainz fallback failed:", error && error.message);
+      }
+      return { id: null, transient: !controller.signal.aborted };
+    }
+  }
+
   async function resolveSpotifyIdUncached(track, controller, key) {
     const title = track && track.title;
     if (!title) {
@@ -7303,19 +7432,22 @@
     let transientFailure = false;
     let sawAnyAnswer = false;
 
-    for (const t of titles) {
+    lbLadder: for (const t of titles) {
       for (const a of artists) {
         for (const r of releases) {
           if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
           // A 429 elsewhere means the rest of this window is gone. Bail with
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
-          if (lbThrottledUntil > Date.now()) return { id: null, transient: true };
+          if (lbThrottledUntil > Date.now()) {
+            console.warn("[SpicyLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
+            break lbLadder;
+          }
           if (attempts >= LB_MAX_ATTEMPTS) {
             // Budget exhausted without a definitive answer, so the caller must
             // not record this as a permanent miss.
-            console.warn(`[SpicyLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted for "${title}".`);
-            return { id: null, transient: true };
+            console.warn(`[SpicyLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
+            break lbLadder;
           }
           attempts++;
 
@@ -7332,13 +7464,18 @@
       }
     }
 
-    // Every attempt failed at the transport level, so we have no information
-    // about whether the song is resolvable. Report that honestly.
-    if (!sawAnyAnswer && transientFailure) {
-      console.warn(`[SpicyLyrics] ListenBrainz was unreachable for "${title}"; not caching a miss.`);
+    console.warn(`[SpicyLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
+    // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
+    // behind ListenBrainz: it is slower and rate-limited, but it covers some
+    // recordings whose direct ListenBrainz -> Spotify mapping is missing.
+    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key);
+    if (musicBrainz.id) return musicBrainz;
+    // Every mapping layer failed at the transport level, so we have no evidence
+    // that the song is genuinely unresolvable. Do not negative-cache that.
+    if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
+      console.warn(`[SpicyLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; not caching a miss.`);
       return { id: null, transient: true };
     }
-    console.warn(`[SpicyLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}).`);
     return { id: null, transient: false };
   }
 
@@ -7400,25 +7537,81 @@
       .replace(/>/g, "&gt;");
   }
 
-  // Normalises the API's UploadAttribution into the small shape the panel
-  // footer renders. The API returns a Discord identity; we only care about the
-  // display name, the avatar, and the public profile URL to link to.
-  function parseUploadAttribution(body) {
-    const attr = body && body.UploadAttribution;
-    const uploader = attr && attr.Uploader;
-    if (!uploader || typeof uploader !== "object") return null;
-    const username = typeof uploader.username === "string" ? uploader.username.trim() : "";
-    const id = uploader.id != null ? String(uploader.id) : "";
+  // Attribution is a BINDING condition of using the API — section 6 of the Terms
+  // makes developers.spicylyrics.org/md/attribution part of the terms you accept.
+  // The rule is conditional on `source`, so it must never be hardcoded:
+  //
+  //   * ALWAYS display the provider.
+  //   * When source is `spicy_lyrics`, ALSO display and link the UPLOADER and
+  //     the MAKER — the people who actually made the sync.
+  //   * For every OTHER source (apple_music, spotify, ...) those fields do not
+  //     exist. Rendering them anyway is explicitly called out as wrong: it
+  //     produces an empty or broken credit line.
+  //
+  // "Wherever the lyrics appear" — so this goes in the panel footer, not on an
+  // about page or in a tooltip nobody opens.
+  const SPICY_PROVIDER_LABELS = {
+    spicy_lyrics: "Spicy Lyrics",
+    apple_music: "Apple Music",
+    spotify: "Spotify",
+    musixmatch: "Musixmatch",
+    lrclib: "LRCLIB",
+    genius: "Genius",
+    netease: "NetEase",
+  };
+
+  // Unknown sources still have to be credited, so fall back to a prettified
+  // version of the raw string rather than showing nothing.
+  function spicyProviderLabel(source) {
+    if (!source) return "";
+    if (SPICY_PROVIDER_LABELS[source]) return SPICY_PROVIDER_LABELS[source];
+    return source
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  // One credited person (an uploader or a maker). The API returns a Discord
+  // identity; we only keep the display name, the avatar, and the profile URL.
+  function attributionPerson(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const username = typeof raw.username === "string" ? raw.username.trim() : "";
+    const id = raw.id != null ? String(raw.id) : "";
     if (!username && !id) return null;
-    const url = typeof uploader.url === "string" && /^https?:\/\//i.test(uploader.url)
-      ? uploader.url
+    const url = typeof raw.url === "string" && /^https?:\/\//i.test(raw.url)
+      ? raw.url
       : (id ? `https://spicylyrics.org/uid/${id}` : "");
-    const avatar = typeof uploader.avatar === "string" ? uploader.avatar : "";
     return {
       id,
       username: username || "Unknown",
-      avatar,
+      avatar: typeof raw.avatar === "string" ? raw.avatar : "",
       url,
+    };
+  }
+
+  function parseUploadAttribution(body) {
+    // No body means there is nothing to credit. Without this the provider
+    // fallback below would invent a "Spicy Lyrics" credit for a result that
+    // carries no attribution at all.
+    if (!body || typeof body !== "object") return null;
+    const source = typeof body.source === "string" ? body.source.trim().toLowerCase() : "";
+    const attr = body && body.UploadAttribution;
+    // Only community syncs carry people. Everything else has a provider and no
+    // one else to credit. A response with no `source` at all is treated as a
+    // community sync: this function only ever runs on a Spicy API response, so
+    // an absent source means an older/partial payload, not an unknown provider.
+    const community = !source || source === "spicy_lyrics";
+    // Same reasoning: the provider is Spicy Lyrics whenever the source is
+    // missing. "Always display the provider" is the binding half of the rule, so
+    // it must never come back empty from an API result.
+    const provider = spicyProviderLabel(source) || "Spicy Lyrics";
+    const uploader = community ? attributionPerson(attr && attr.Uploader) : null;
+    const maker = community ? attributionPerson(attr && attr.Maker) : null;
+    if (!provider && !uploader && !maker) return null;
+    return {
+      source,
+      provider,
+      uploader,
+      maker,
       songwriters: Array.isArray(body && body.SongWriters)
         ? body.SongWriters.filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim())
         : [],
@@ -7668,7 +7861,9 @@
         // Attribution + songwriters ride along with the API result; stash them
         // before loadTTML so the credits footer can render them.
         pendingSpicyCredits = {
-          uploader: spicyResult.attribution || null,
+          // The whole attribution object, not just the uploader: the footer
+          // needs the provider (every source) and the maker (community syncs).
+          attribution: spicyResult.attribution || null,
           songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
         };
         if (loadTTML(spicyResult.ttml, "external")) {
@@ -7688,11 +7883,11 @@
       const unisonData = await fetchUnisonLyrics(track, key, controller);
       if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
       if (unisonData && unisonData.format === "ttml") {
-        if (loadTTML(unisonData.lyrics, "external")) return;
+        if (loadTTML(unisonData.lyrics, "external", "Unison")) return;
         console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; falling back to LRCLIB.");
       }
       if (unisonData && unisonData.format === "lrc") {
-        if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs)) return;
+        if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return;
         console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; falling back to LRCLIB.");
       }
     } catch (error) {
@@ -8417,16 +8612,29 @@
       });
       footer.appendChild(namesEl);
     }
-    if (currentUploader) footer.appendChild(buildUploaderRow(currentUploader));
+    // Order matters: the provider is the credit every source owes, then the
+    // people who made the sync (community syncs only).
+    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider));
+    if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
+    if (currentMaker) footer.appendChild(buildPersonRow("Made by", currentMaker));
     return footer;
   }
 
-  // "Uploaded by <avatar> <username>" — links to the uploader's Spicy Lyrics
-  // profile. Only rendered for lyrics that came from the Spicy Lyrics API,
-  // which is the only source that carries upload attribution.
-  function buildUploaderRow(uploader) {
+  // "Lyrics provided by <provider>" — every API source owes this one, so it is
+  // plain text and never conditional on a person existing.
+  function buildProviderRow(provider) {
+    const row = h("div", { class: "ym-sl-provider" });
+    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
+    row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
+    return row;
+  }
+
+  // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
+  // profile. Used for both the uploader and the maker; only community syncs
+  // (source === "spicy_lyrics") have either.
+  function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
-    row.appendChild(h("span", { class: "ym-sl-uploader-label", text: "Uploaded by" }));
+    row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
 
     const link = h("a", {
       class: "ym-sl-uploader-link",
@@ -8740,7 +8948,9 @@
       }
     });
 
-    if (currentSongwriters.length || currentUploader) {
+    // The provider counts on its own: a non-community source (apple_music,
+    // spotify) has no credited people, and the provider must still be shown.
+    if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
       linesRoot.appendChild(buildCreditsFooter(currentSongwriters));
     }
 
