@@ -51,7 +51,8 @@
         "src/content/public-api.js",
         "src/extensions/*",
         "changelog.json",
-        "assets/manifest-logo.webp"
+        "assets/manifest-logo.webp",
+        "assets/art/*"
       ],
       "matches": [
         "https://music.youtube.com/*"

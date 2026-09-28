@@ -590,6 +590,9 @@
       version: "1.0.0",
       lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/dynamic.js"),
+      // Per-add-on showcase art (AJ, 2026-09-28). Paths are extension-relative and
+      // resolved with chrome.runtime.getURL() at render time.
+      art: { video: "assets/art/aurora-bloom.mp4", poster: "assets/art/aurora-bloom.jpg" },
       settings: [
         { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 1.12, display: "decimal" },
         { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.60, display: "decimal" },
@@ -603,7 +606,7 @@
         // Force the animated Kawarp backdrop for EVERY music video, instead of
         // the duplicated blurred-video backdrop. Off = only still uploads
         // (Official Audio / Lyric Video) use Kawarp. Consumed by Aurora Lyrics.
-        { key: "preferKawarpAlways", label: "Prefer Kawarp for music videos", type: "toggle", default: false },
+        { key: "preferKawarpAlways", label: "Prefer Aurora Bloom for music videos", type: "toggle", default: false },
       ],
     },
     {
@@ -617,6 +620,7 @@
       version: "1.0.2",
       lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/artwork-accent.js"),
+      art: { video: "assets/art/ambient.mp4", poster: "assets/art/ambient.jpg" },
       // Glow slider removed from the UI on AJ's call (2026-09-28). The add-on
       // still ships a glow value internally — DEFAULT_SETTINGS.glow = 1.5
       // (150%) — so new installs land on a strong glow without exposing the
@@ -635,6 +639,7 @@
       lastUpdated: "2026-09-28",
       github: "https://github.com/Spikerko/spicy-lyrics",
       jsUrl: chrome.runtime.getURL("src/extensions/spicy-lyrics.js"),
+      art: { video: "assets/art/aurora-lyrics.mp4", poster: "assets/art/aurora-lyrics.jpg" },
       settings: [
         // Order is the reading order of the page. Everything WITHOUT `dev: true`
         // shows to everyone; everything with it is hidden until the 6-tap gesture
@@ -700,12 +705,12 @@
       version: "1.0.0",
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/sleep-timer.js"),
-      settings: [
-        { key: "master", label: "Enable sleep timer", type: "toggle", default: true },
-        { key: "defaultDelayMin", label: "Default stop after", min: 5, max: 180, step: 5, default: 30, display: "minutes" },
-        { key: "defaultFadeSeconds", label: "Default fade duration", min: 5, max: 120, step: 5, default: 20, display: "seconds" },
-        { key: "autoPause", label: "Pause when the volume reaches zero", type: "toggle", default: true },
-      ],
+      art: { image: "assets/art/sleep-timer.png" }, // still only — no video for this one
+      // Settings removed on AJ's call (2026-09-28): the add-on injects its own
+      // control panel at the bottom-right player bar, so duplicating them here was
+      // redundant. An empty array renders NO Settings section at all (same as
+      // Ambient); the add-on's own internal defaults still apply.
+      settings: [],
     },
     {
       id: "ytmod-pip-lyrics",
@@ -718,6 +723,7 @@
       version: "1.0.0",
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/pip-lyrics.js"),
+      art: { video: "assets/art/pip-lyrics.mp4", poster: "assets/art/pip-lyrics.jpg" },
       settings: [
         { key: "master", label: "Enable PiP lyrics", type: "toggle", default: true },
         { key: "showTransport", label: "Show play / previous / next in the window", type: "toggle", default: true },
@@ -844,17 +850,27 @@
         "aria-label": setting.label,
       });
       if (isToggle) input.checked = Boolean(values[setting.key]);
+      const isRange = !isText && !isToggle;
+      // Drives the filled portion of the track (see the range CSS).
+      const syncRangeFill = () => {
+        if (!isRange) return;
+        const lo = Number(setting.min || 0), hi = Number(setting.max || 100);
+        const pct = hi > lo ? ((Number(input.value) - lo) / (hi - lo)) * 100 : 0;
+        input.style.setProperty("--val", Math.max(0, Math.min(100, pct)) + "%");
+      };
       const updateSetting = () => {
         const value = settingValue(setting, isToggle ? input.checked : input.value);
         values = Object.assign({}, values, { [setting.key]: value });
         if (isToggle) input.checked = value;
         else input.value = value;
         valueEl.textContent = formatSettingValue(setting, value);
+        syncRangeFill();
         postExtensionSettings(ext.id, values);
         saveExtensionSettings(ext.id, values);
       };
       input.addEventListener(isToggle ? "change" : "input", updateSetting);
-      controls.set(setting.key, { input, valueEl, setting });
+      syncRangeFill();
+      controls.set(setting.key, { input, valueEl, setting, syncRangeFill });
       section.appendChild(h("div", { class: "ym-detail-setting-row" },
         h("div", { class: "ym-detail-setting-label", text: setting.label }),
         h("div", { class: "ym-detail-setting-control" }, input, valueEl)
@@ -864,10 +880,11 @@
     const reset = h("button", { class: "ym-detail-settings-reset", type: "button", text: "Reset to defaults" });
     reset.addEventListener("click", () => {
       values = getExtensionDefaults(ext);
-      controls.forEach(({ input, valueEl, setting }) => {
+      controls.forEach(({ input, valueEl, setting, syncRangeFill }) => {
         if (setting.type === "toggle") input.checked = Boolean(values[setting.key]);
         else input.value = values[setting.key];
         valueEl.textContent = formatSettingValue(setting, values[setting.key]);
+        if (syncRangeFill) syncRangeFill();
       });
       postExtensionSettings(ext.id, values);
       saveExtensionSettings(ext.id, values);
@@ -886,9 +903,11 @@
   const VERSION = "0.5.71";
   const ui = {
     category: "Extensions",
+    // view / density / floating are PINNED (AJ, 2026-09-28): the toolbar was
+    // removed and the panel is now always the centred glass card.
     view: "grid",
     density: "comfortable",
-    floating: false,
+    floating: true,
     floatX: null,
     floatY: null,
     dev: false,
@@ -921,7 +940,7 @@
     toast(ui.dev ? "Developer mode on" : "Developer mode off");
     // Settings only exist inside a detail view, so re-render whatever is on
     // screen to apply the change now instead of on the next navigation.
-    if (detailExt && $("#ym-detail")) renderDetail(detailExt);
+    if (detailExt && sheetOpen) renderDetail(detailExt);
   }
 
   function onTitleTap() {
@@ -941,6 +960,20 @@
 
   let overlay;
   let floatBtn = null;
+  // Detail sheet (AJ, 2026-09-28): the detail view is now a SHEET that morphs
+  // out of the clicked card's thumb, instead of swapping the whole section.
+  let sheetEl = null, sheetBg = null, sheetCover = null, sheetScrim = null,
+      sheetPoster = null, sheetText = null, sheetCloseBtn = null;
+  let tabThumb = null;       // sliding tab indicator (AJ, 2026-09-28)
+  let watermarkEl = null;    // ambient panel background (track cover, else the logo)
+  let watermarkAltEl = null; // second layer, cross-faded when the cover changes
+  let currentArtUrl = "";
+  let LOGO_URL = "";
+  let thumbVideoObserver = null; // plays list loops only while on screen
+  let sheetCard = null;      // the card the sheet morphed out of
+  let sheetOpen = false;
+  let sheetState = "closed"; // closed | opening | open | closing
+  let sheetAnims = [];
   let marketplaceCloseTimer = 0;
   let marketplaceCloseHandler = null;
   let marketplaceOpenTimer = 0;
@@ -955,6 +988,7 @@
       marketplaceCloseHandler = null;
     }
     overlay.classList.remove("hidden", "ym-leaving", "ym-opening");
+    refreshPanelArt();
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       renderSection();
       return;
@@ -974,6 +1008,8 @@
     // Hide any open Support modal so closing the marketplace (via × or Escape)
     // never strands a floating page on top of the main UI.
     if (supportOverlayEl) supportOverlayEl.classList.add("hidden");
+    // Reset the detail sheet instantly (no morph) so reopening starts clean.
+    if (sheetOpen) finishCloseDetail();
     if (marketplaceOpenTimer) clearTimeout(marketplaceOpenTimer);
     marketplaceOpenTimer = 0;
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -1133,17 +1169,115 @@
     const el = cards[kbIndex];
     if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
   }
+  // Ambient panel background (AJ, 2026-09-28): the now-playing cover, blurred and
+  // dimmed, so the panel picks up the track's colour. Falls back to the logo.
+  function currentTrackArt() {
+    const img =
+      document.querySelector("ytmusic-player-bar img.image") ||
+      document.querySelector("ytmusic-player-bar img") ||
+      document.querySelector("#song-image img") ||
+      document.querySelector("ytmusic-player-page img");
+    const src = img && img.getAttribute("src");
+    return src && /^https?:/.test(src) ? src : "";
+  }
+
+  function refreshPanelArt() {
+    if (!watermarkEl) return;
+    const art = currentTrackArt();
+    const url = art || LOGO_URL;
+    if (!url || url === currentArtUrl) return;
+    currentArtUrl = url;
+    const next = 'url("' + url + '")';
+    const isCover = !!art;
+
+    if (!watermarkAltEl || reducedMotion()) {
+      watermarkEl.style.backgroundImage = next;
+      watermarkEl.classList.toggle("is-cover", isCover);
+      return;
+    }
+    // Cross-fade: paint the incoming art on the alt layer, ease it up to the same
+    // dimness, then promote it and clear the alt. `background-image` itself cannot
+    // be transitioned, hence two layers (AJ, 2026-09-28).
+    const targetOp = isCover ? 0.2 : 0.14; // mirrors the CSS (.ym-watermark / .is-cover)
+    watermarkAltEl.style.backgroundImage = next;
+    watermarkAltEl.classList.toggle("is-cover", isCover);
+    const a = watermarkAltEl.animate(
+      [{ opacity: 0 }, { opacity: targetOp }],
+      { duration: 700, easing: "cubic-bezier(0.32,0.72,0,1)", fill: "both" });
+    a.onfinish = () => {
+      watermarkEl.style.backgroundImage = next;
+      watermarkEl.classList.toggle("is-cover", isCover);
+      watermarkAltEl.style.backgroundImage = "";
+      try { a.cancel(); } catch (_) {}
+    };
+  }
+
+  // Play a list thumb's loop only while it is on screen (AJ, 2026-09-28): a grid
+  // of autoplaying videos would otherwise keep decoding every one of them.
+  function observeThumbVideo(v) {
+    if (!v) return;
+    if (typeof IntersectionObserver === "undefined") {
+      const p = v.play(); if (p && p.catch) p.catch(() => {});
+      return;
+    }
+    if (!thumbVideoObserver) {
+      thumbVideoObserver = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          const el = e.target;
+          if (e.isIntersecting) { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
+          else { try { el.pause(); } catch (_) {} }
+        }
+      }, { root: null, threshold: 0.01 });
+    }
+    thumbVideoObserver.observe(v);
+  }
+
+  // Slide the tab indicator under the active tab. Runs on open, on tab click, and
+  // on resize (tab widths depend on their text).
+  function moveTabThumb() {
+    if (!overlay || !tabThumb) return;
+    const row = overlay.querySelector(".ym-tabs-row");
+    const active = row && row.querySelector(".ym-tab.active");
+    if (!active) return;
+    tabThumb.style.width = active.offsetWidth + "px";
+    tabThumb.style.transform = "translateX(" + active.offsetLeft + "px)";
+  }
+
+  // Switch category with motion: the current list fades OUT, then the new list
+  // renders and its cards fade in (the existing ym-card-in stagger via --d).
+  async function animateTabSwitch(t) {
+    const sec = $("#ym-section");
+    const EASE = "cubic-bezier(0.32,0.72,0,1)";
+    let out = null;
+    if (sec && !reducedMotion()) {
+      out = sec.animate(
+        [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-8px)" }],
+        { duration: 170, easing: EASE, fill: "both" });
+      try { await out.finished; } catch (_) {}
+    }
+    ui.category = t;
+    if (overlay) {
+      overlay.querySelectorAll(".ym-tab").forEach((el) => el.classList.toggle("active", el.dataset.tab === t));
+    }
+    moveTabThumb();
+    // Keep the section at opacity 0 THROUGH the re-render, then drop the fade so
+    // the new cards run their own ym-card-in stagger. Cancelling before the render
+    // (the first cut) flashed the OLD list back at full opacity first.
+    await renderSection();
+    if (out) { try { out.cancel(); } catch (_) {} }
+  }
+
   function marketKey(e) {
     if (overlay.classList.contains("hidden")) return;
     if (e.key === "Escape") {
       e.preventDefault();
-      if ($("#ym-detail")) renderSection();
+      if (sheetOpen) closeDetail();
       else closeMarketplace();
       return;
     }
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
-    if ($("#ym-detail")) return; // no card navigation while a detail view is open
+    if (sheetOpen) return; // no card navigation while the detail sheet is open
     const cards = $$(".ym-card-grid, .ym-card-list", $("#ym-section"));
     if (!cards.length) return;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); kbIndex++; focusCard(cards); }
@@ -1264,6 +1398,17 @@
   }
 
   function buildMarketplace() {
+    // Spicy Lyrics font for the whole panel (AJ, 2026-09-28). The stylesheet's
+    // relative woff2 URLs resolve against the extension, so a <link> is enough.
+    if (!document.getElementById("ym-font")) {
+      try {
+        const fontLink = document.createElement("link");
+        fontLink.id = "ym-font";
+        fontLink.rel = "stylesheet";
+        fontLink.href = chrome.runtime.getURL("src/extensions/fonts/spicy-lyrics.css");
+        document.head.appendChild(fontLink);
+      } catch (_) {}
+    }
     // Yellow Support button sits immediately to the left of the × (via
     // margin-left:auto in styles.css) and opens the dedicated Support page.
     const supportBtn = h("button", {
@@ -1298,8 +1443,9 @@
       close
     );
 
-    // Tabs row
+    // Tabs row (with a sliding indicator)
     const tabsRow = h("div", { class: "ym-tabs-row" });
+    tabThumb = h("span", { class: "ym-tab-thumb" });
     for (const t of ["Extensions", "Themes", "Installed"]) {
       const tab = h("button", {
         class: "ym-tab" + (t === ui.category ? " active" : ""),
@@ -1308,49 +1454,16 @@
         text: t,
       });
       tab.addEventListener("click", () => {
-        ui.category = t;
-        $$(".ym-tab", tabsRow).forEach((el) => el.classList.toggle("active", el.dataset.tab === t));
-        renderSection();
+        if (t === ui.category) return;
+        animateTabSwitch(t);
       });
       tabsRow.appendChild(tab);
     }
+    tabsRow.appendChild(tabThumb);
 
-    // Sort + search
-    const toolbar = h("div", { class: "ym-market-toolbar" });
-
-    // View toggle (grid <-> list) + density toggle (comfortable <-> compact)
-    const viewBtn = makeIconButton(
-      ui.view === "grid" ? ICON_LIST : ICON_GRID,
-      () => { ui.view = ui.view === "grid" ? "list" : "grid"; syncViewBtn(); setUI({ view: ui.view }); renderSection(); },
-      ui.view === "grid" ? "Switch to list view" : "Switch to grid view"
-    );
-    viewBtn.classList.add("ym-tool");
-    function syncViewBtn() {
-      const target = ui.view === "grid" ? "list" : "grid";
-      viewBtn.replaceChildren(svgIcon(target === "grid" ? ICON_GRID : ICON_LIST));
-      const t = target === "grid" ? "Switch to grid view" : "Switch to list view";
-      viewBtn.title = t; viewBtn.setAttribute("aria-label", t);
-    }
-    const densBtn = makeIconButton(ICON_DENSITY, () => {
-      ui.density = ui.density === "comfortable" ? "compact" : "comfortable";
-      syncDensBtn(); setUI({ density: ui.density }); renderSection();
-    }, "Density: " + ui.density);
-    densBtn.classList.add("ym-tool");
-    floatBtn = makeIconButton(ICON_FLOAT, () => {
-      ui.floating = !ui.floating;
-      applyMarketplaceMode(true);
-    }, "Use floating marketplace");
-    floatBtn.classList.add("ym-tool");
-    syncFloatButton();
-    function syncDensBtn() {
-      const t = "Density: " + ui.density;
-      densBtn.title = t; densBtn.setAttribute("aria-label", t);
-    }
-    toolbar.appendChild(viewBtn);
-    toolbar.appendChild(densBtn);
-    toolbar.appendChild(floatBtn);
-
-    tabsRow.appendChild(toolbar);
+    // Toolbar (view / density / float) REMOVED on AJ's call (2026-09-28): the
+    // panel is now a single fixed glass card, so there is nothing to switch.
+    // ui.view / ui.density / ui.floating stay pinned to their defaults below.
 
     // Hint about the secret 6-tap developer-mode gesture on the Aurora Lyrics
     // header title. Lives as its own slim bar between the header and the tabs
@@ -1362,11 +1475,39 @@
 
     const section = h("div", { class: "ym-section", id: "ym-section" });
 
-    overlay = h("div", { id: "ym-market", class: "hidden" }, header, devHint, tabsRow, section);
+    // Detail sheet — fills the panel and morphs out of the clicked card.
+    sheetCover = h("div", { class: "ym-sheet-cover" });
+    sheetScrim = h("div", { class: "ym-sheet-scrim" });
+    sheetBg = h("div", { class: "ym-sheet-bg" }, sheetCover, sheetScrim);
+    sheetPoster = h("div", { class: "ym-sheet-poster" });
+    sheetText = h("div", { class: "ym-sheet-text", id: "ym-sheet-text" });
+    const sheetInner = h("div", { class: "ym-sheet-inner" }, sheetPoster, sheetText);
+    const sheetScroll = h("div", { class: "ym-sheet-scroll" }, sheetInner);
+    sheetCloseBtn = makeIconButton(ICON_CLOSE, () => closeDetail(), "Close");
+    sheetCloseBtn.classList.add("ym-sheet-close");
+    sheetEl = h("div", { class: "ym-sheet", id: "ym-sheet" }, sheetBg, sheetCloseBtn, sheetScroll);
+
+    // Brand watermark (AJ, 2026-09-28): the logo, large, blurred and dimmed behind
+    // the glass — mirrors the demo. Resolved through the extension so the URL works
+    // regardless of the page origin.
+    try {
+      watermarkEl = h("div", { class: "ym-watermark" });
+      watermarkAltEl = h("div", { class: "ym-watermark ym-watermark-alt" });
+      LOGO_URL = chrome.runtime.getURL("assets/manifest-logo.webp");
+    } catch (_) { watermarkEl = null; watermarkAltEl = null; }
+
+    overlay = h("div", { id: "ym-market", class: "hidden" }, watermarkEl, watermarkAltEl, header, devHint, tabsRow, section, sheetEl);
+    refreshPanelArt();
+    // Keep the ambient background in step with the track while the panel is open
+    // (1.2s so a track change lands quickly).
+    window.setInterval(() => {
+      if (overlay && !overlay.classList.contains("hidden")) refreshPanelArt();
+    }, 1200);
     enableMarketplaceDrag(header);
     document.body.appendChild(overlay);
     applyMarketplaceMode(false);
     document.addEventListener("keydown", marketKey);
+    window.addEventListener("resize", moveTabThumb);
 
     renderSection();
   }
@@ -1379,6 +1520,8 @@
     // no cards and no empty-state message (see safeStorageGet).
     storageReadFailed = false;
     const reg = await getReg();
+    // Drop the previous cards' video observers before the nodes are removed.
+    if (thumbVideoObserver) thumbVideoObserver.disconnect();
     section.replaceChildren();
     kbIndex = -1;
 
@@ -1430,6 +1573,7 @@
       grid.appendChild(c);
     });
     section.appendChild(grid);
+    moveTabThumb();
   }
 
   function gridCard(ext, installed, enabled) {
@@ -1443,6 +1587,28 @@
     const mono = h("div", { class: "ym-thumb-mono", text: initial });
     mono.style.color = catColor;
     thumb.appendChild(mono);
+    // Per-add-on art (AJ, 2026-09-28). A video add-on plays its loop right in the
+    // LIST (visibility-gated below); a still-only add-on paints the image; neither
+    // -> the gradient + monogram.
+    const cardArt = ext.art || {};
+    if (cardArt.video) {
+      const vid = h("video", {
+        class: "ym-thumb-video",
+        src: extArtUrl(cardArt.video),
+        poster: extArtUrl(cardArt.poster || cardArt.image || ""),
+        loop: "", playsinline: "", autoplay: "", muted: "",
+        disablepictureinpicture: "", controlslist: "nodownload noplaybackrate",
+      });
+      vid.muted = true;
+      thumb.appendChild(vid);
+      observeThumbVideo(vid);
+      mono.style.display = "none";
+    } else if (cardArt.image || cardArt.poster) {
+      thumb.style.backgroundImage = 'url("' + extArtUrl(cardArt.image || cardArt.poster) + '")';
+      thumb.style.backgroundSize = "cover";
+      thumb.style.backgroundPosition = "center";
+      mono.style.display = "none";
+    }
     if (installed) {
       const badge = h("div", { class: "ym-thumb-badge", text: "INSTALLED" });
       thumb.appendChild(badge);
@@ -1492,8 +1658,9 @@
     }
     card.appendChild(action);
 
-    // Click anywhere on the card (except the action row) opens the detail view.
-    card.addEventListener("click", () => renderDetail(ext));
+    // Click anywhere on the card (except the action row) opens the detail SHEET,
+    // which morphs out of this card's thumb.
+    card.addEventListener("click", () => renderDetail(ext, card));
     action.addEventListener("click", (e) => e.stopPropagation());
 
     return card;
@@ -1519,23 +1686,15 @@
   const ICON_GITHUB =
     "M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.5.5.09.66-.22.66-.48 0-.24-.01-.87-.01-1.7-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02.8-.22 1.65-.33 2.5-.34.85.01 1.7.12 2.5.34 1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85 0 1.34-.01 2.42-.01 2.75 0 .27.16.58.67.48A10.02 10.02 0 0 0 22 12c0-5.52-4.48-10-10-10z";
 
-  async function renderDetail(ext) {
-    const section = $("#ym-section");
-    if (!section) return;
+  async function renderDetail(ext, card) {
     if (!ext || typeof ext.id !== "string") {
       console.warn("[YTMod] renderDetail called with no extension", ext);
-      section.replaceChildren();
-      section.appendChild(h("div", { class: "ym-empty", text: "Extension not found." }));
       return;
     }
     detailExt = ext; // remembered so setDevMode() can re-render this view in place
-    section.replaceChildren();
     const reg = await getReg();
     const installed = !!reg[ext.id];
     const enabled = reg[ext.id] && reg[ext.id].enabled;
-
-    const back = makeIconButton(ICON_BACK, () => renderSection(), "Back");
-    back.classList.add("ym-detail-back");
 
     const titles = h("div", { class: "ym-detail-titles" },
       h("h2", { class: "ym-detail-name", text: ext.name }),
@@ -1546,7 +1705,7 @@
     meta.appendChild(h("span", { class: "ym-detail-author", text: "by " + (ext.author || "?") }));
     meta.appendChild(h("span", { class: "ym-detail-version", text: "v" + (ext.version || "?") }));
 
-    const head = h("div", { class: "ym-detail-head" }, back, titles, meta);
+    const head = h("div", { class: "ym-detail-head" }, titles, meta);
 
     const desc = h("div", { class: "ym-detail-desc" });
     for (const para of String(ext.description || "").split("\n").filter(Boolean)) {
@@ -1575,13 +1734,13 @@
       if (state) tg.setAttribute("checked", "");
       tg.addEventListener("click", () => {
         state = !state;
-        setEnabled(ext.id, state).then(() => renderDetail(ext));
+        setEnabled(ext.id, state).then(() => renderDetail(ext, sheetCard));
       });
       action.appendChild(status);
       action.appendChild(tg);
     } else {
       const b = h("tp-yt-paper-button", { class: "ym-install", text: "Install", raised: "" });
-      b.addEventListener("click", () => install(ext.id).then(() => renderDetail(ext)));
+      b.addEventListener("click", () => install(ext.id).then(() => renderDetail(ext, sheetCard)));
       action.appendChild(b);
     }
 
@@ -1596,13 +1755,240 @@
       const settings = await buildSettingsSection(ext);
       if (settings) wrap.appendChild(settings);
     }
-    section.appendChild(wrap);
+
+    // Paint the sheet: a per-add-on video / image if given, else the card's thumb
+    // artwork. The video plays only while the sheet is open (paused on close).
+    const a = ext.art || {};
+    const fallback = thumbArt(card || sheetCard);
+    let videoReady = null; // resolves when the sheet video is on the right frame
+    // Never let a still inherit the previous add-on's video frame: drop any
+    // leftover <video> AND reset the poster background before painting (AJ, 2026-09-28).
+    sheetPoster.querySelectorAll("video").forEach((v) => { try { v.pause(); } catch (_) {} v.remove(); });
+    sheetPoster.replaceChildren();
+    sheetPoster.style.backgroundImage = "";
+    if (a.video) {
+      // No `controls` at all (AJ, 2026-09-28) — no scrubber, no pause. Muted +
+      // playsinline so it autoplays; disablepictureinpicture kills the PiP button.
+      const v = h("video", {
+        class: "ym-sheet-video",
+        src: extArtUrl(a.video),
+        loop: "",
+        playsinline: "",
+        autoplay: "",
+        muted: "",
+        disablepictureinpicture: "",
+        controlslist: "nodownload noplaybackrate",
+      });
+      v.muted = true; // the attribute alone does not always satisfy the autoplay policy
+      // Pin the size INLINE as well as in CSS: for one frame before the stylesheet
+      // applies, a <video> lays out at its INTRINSIC 720×960, which read as "the
+      // vid gets big then snaps back to normal" (AJ, 2026-09-28).
+      v.style.position = "absolute";
+      v.style.inset = "0";
+      v.style.width = "100%";
+      v.style.height = "100%";
+      v.style.objectFit = "cover";
+      v.style.opacity = "0"; // hidden until it sits on the list loop's frame
+      const srcVid = card && card.querySelector(".ym-thumb-video");
+      // Resolve once the video is on the SAME frame as the list loop. We AWAIT this
+      // before the morph, so the poster never paints frame 1 first and there is no
+      // still-frame gap either (AJ, 2026-09-28).
+      videoReady = new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (done) return; done = true; v.style.opacity = ""; resolve(); };
+        const syncTime = () => {
+          if (!srcVid) { finish(); return; }
+          const t = srcVid.currentTime;
+          if (isFinite(t) && t > 0) {
+            try { v.currentTime = t; } catch (_) { finish(); return; }
+            v.addEventListener("seeked", finish, { once: true });
+            return;
+          }
+          finish();
+        };
+        if (v.readyState >= 1) syncTime();
+        else v.addEventListener("loadedmetadata", syncTime, { once: true });
+        window.setTimeout(finish, 400); // never hang the morph
+      });
+      sheetPoster.appendChild(v);
+      const poster = extArtUrl(a.image || a.poster);
+      sheetPoster.style.backgroundImage = poster ? 'url("' + poster + '")' : "";
+      sheetCover.style.backgroundImage = poster ? 'url("' + poster + '")' : fallback;
+    } else if (a.image || a.poster) {
+      // A still. extArtUrl() returns a BARE url, which is an invalid
+      // background-image value and paints nothing — that blanked the Sleep Timer
+      // poster (AJ, 2026-09-28). Always wrap it.
+      const cssImg = 'url("' + extArtUrl(a.image || a.poster) + '")';
+      sheetPoster.style.backgroundImage = cssImg;
+      sheetCover.style.backgroundImage = cssImg;
+    } else {
+      // No art at all: mirror the LIST tile — category gradient + monogram — so the
+      // poster is not an empty box (AJ, 2026-09-28).
+      const catColor = CAT_COLOR[ext.category] || "#888";
+      sheetPoster.style.background = "linear-gradient(135deg, " + catColor + "55, " + catColor + "18)";
+      sheetPoster.appendChild(h("div", { class: "ym-sheet-mono", text: (ext.name || "?").charAt(0).toUpperCase() }));
+      sheetCover.style.backgroundImage = fallback;
+    }
+    sheetText.replaceChildren(wrap);
+
+    // Wait for the sheet video's frame, but never longer than a beat: a slow
+    // metadata load must not stall the whole open (AJ, 2026-09-28). In the common
+    // (cached) case the sync lands in a few ms and this is instant.
+    if (videoReady) {
+      try {
+        await Promise.race([videoReady, new Promise((r) => window.setTimeout(r, 120))]);
+      } catch (_) {}
+    }
+
+    if (card) showSheet(card);            // morph out of the clicked card
+    else if (!sheetOpen) showSheet(null); // fade in (reopened without a card)
+  }
+
+  /* ---- the detail sheet: a FLIP morph out of the card's thumb ------------- */
+  const SHEET_EASE = "cubic-bezier(0.32,0.72,0,1)";
+  const SHEET_EASE_CLOSE = "cubic-bezier(1,0,0.68,0.28)";
+  const SHEET_DUR = 560;
+  const SHEET_CLOSE_DUR = 300; // closing should feel snappy, not a mirror of the open
+
+  function reducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  // Catalog `art` paths are extension-relative (assets/art/…); turn them into a
+  // URL the page can actually load. Absolute URLs pass straight through.
+  function extArtUrl(p) {
+    if (!p) return "";
+    if (/^(https?:|data:|blob:|chrome-extension:)/.test(p)) return p;
+    try { return chrome.runtime.getURL(p); } catch (_) { return p; }
+  }
+
+  // The card's poster artwork = its .ym-thumb background (the category gradient,
+  // or later a per-add-on image / video).
+  function thumbArt(card) {
+    const t = card && card.querySelector(".ym-thumb");
+    return t ? getComputedStyle(t).backgroundImage : "";
+  }
+
+  function cancelSheetAnims() {
+    sheetAnims.forEach((a) => { try { a.cancel(); } catch (_) {} });
+    sheetAnims = [];
+  }
+
+  function showSheet(card) {
+    if (sheetOpen) { if (card) sheetCard = card; return; }
+    sheetCard = card || null;
+    if (card) card.classList.add("is-open"); // hide the card's thumb during the morph
+    // Freeze the list loop (renderDetail already read its time for the sync).
+    const thumbVid = card && card.querySelector(".ym-thumb-video");
+    if (thumbVid) { try { thumbVid.pause(); } catch (_) {} }
+    sheetEl.classList.add("open");
+    // Sit BELOW the header so the header stays visible and draggable while the
+    // detail is open (AJ, 2026-09-28) — otherwise the sheet swallowed the drag.
+    const head = overlay.querySelector(".ym-head");
+    if (head) sheetEl.style.top = head.offsetHeight + "px";
+    sheetOpen = true;
+    sheetState = "opening";
+
+    if (!card || reducedMotion() || !sheetEl.animate) { sheetState = "open"; return; }
+
+    const pr = sheetEl.getBoundingClientRect();
+    const from = card.querySelector(".ym-thumb").getBoundingClientRect();
+    const to = sheetPoster.getBoundingClientRect();
+    const s = from.width / to.width;
+    const cardR = 16, posterR = 20;
+    const o = { duration: SHEET_DUR, easing: SHEET_EASE, fill: "both" };
+
+    sheetAnims = [
+      sheetBg.animate([
+        { top: (from.top - pr.top) + "px", left: (from.left - pr.left) + "px", width: from.width + "px", height: from.height + "px", borderRadius: cardR + "px" },
+        { top: "0px", left: "0px", width: pr.width + "px", height: pr.height + "px", borderRadius: "0px" }
+      ], o),
+      sheetCover.animate([
+        { inset: "0px", filter: "blur(0px) saturate(1)" },
+        { inset: "-70px", filter: "blur(26px) saturate(1.25)" }
+      ], o),
+      sheetScrim.animate([{ opacity: 0 }, { opacity: 1 }], o),
+      sheetPoster.animate([
+        { transform: "translate(" + (from.left - to.left) + "px," + (from.top - to.top) + "px) scale(" + s + ")", borderRadius: (cardR / s) + "px" },
+        { transform: "translate(0px,0px) scale(1)", borderRadius: posterR + "px" }
+      ], o),
+      sheetText.animate([{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "translateY(0px)" }],
+        { duration: 420, delay: 140, easing: SHEET_EASE, fill: "both" }),
+      sheetCloseBtn.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 360, delay: 200, easing: "ease-out", fill: "both" })
+    ];
+    sheetAnims[0].onfinish = () => { if (sheetState === "opening") sheetState = "open"; };
+  }
+
+  function finishCloseDetail() {
+    cancelSheetAnims();
+    // Hand the time back to the list loop so it resumes where the sheet left off.
+    const sv = sheetPoster && sheetPoster.querySelector("video");
+    const thumbVid = sheetCard && sheetCard.querySelector(".ym-thumb-video");
+    if (thumbVid) {
+      // The time was already handed over in closeDetail() (at close start); just
+      // resume so we don't re-seek here and flash a frame (AJ, 2026-09-28).
+      const p = thumbVid.play(); if (p && p.catch) p.catch(() => {});
+    }
+    if (sheetCard) sheetCard.classList.remove("is-open");
+    if (sv) { try { sv.pause(); } catch (_) {} }
+    if (sheetPoster) sheetPoster.replaceChildren();
+    sheetEl.classList.remove("open");
+    sheetOpen = false;
+    sheetState = "closed";
+    sheetCard = null;
+  }
+
+  function closeDetail() {
+    if (!sheetOpen || sheetState === "closing") return;
+    sheetState = "closing";
+    const card = sheetCard;
+    cancelSheetAnims();
+    // Hand the sheet video's time to the list loop NOW, so by the time the morph
+    // ends and the loop is revealed it is already in sync — otherwise it briefly
+    // shows its old frame first (AJ, 2026-09-28).
+    const sheetVid = sheetPoster && sheetPoster.querySelector("video");
+    const thumbVid = card && card.querySelector(".ym-thumb-video");
+    if (sheetVid && thumbVid && isFinite(sheetVid.currentTime)) {
+      try { thumbVid.currentTime = sheetVid.currentTime; } catch (_) {}
+    }
+    if (!card || reducedMotion() || !sheetEl.animate) { finishCloseDetail(); return; }
+
+    const pr = sheetEl.getBoundingClientRect();
+    const from = card.querySelector(".ym-thumb").getBoundingClientRect();
+    const to = sheetPoster.getBoundingClientRect();
+    const s = from.width / to.width;
+    const cardR = 16, posterR = 20;
+    const o = { duration: SHEET_CLOSE_DUR, easing: SHEET_EASE_CLOSE, fill: "both" };
+    const quick = { duration: 150, easing: "ease-out", fill: "both" };
+
+    sheetAnims = [
+      sheetBg.animate([
+        { top: "0px", left: "0px", width: pr.width + "px", height: pr.height + "px", borderRadius: "0px" },
+        { top: (from.top - pr.top) + "px", left: (from.left - pr.left) + "px", width: from.width + "px", height: from.height + "px", borderRadius: cardR + "px" }
+      ], o),
+      sheetCover.animate([
+        { inset: "-70px", filter: "blur(26px) saturate(1.25)" },
+        { inset: "0px", filter: "blur(0px) saturate(1)" }
+      ], o),
+      sheetScrim.animate([{ opacity: 1 }, { opacity: 0 }], o),
+      sheetPoster.animate([
+        { transform: "translate(0px,0px) scale(1)", borderRadius: posterR + "px" },
+        { transform: "translate(" + (from.left - to.left) + "px," + (from.top - to.top) + "px) scale(" + s + ")", borderRadius: (cardR / s) + "px" }
+      ], o),
+      sheetText.animate([{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(10px)" }], quick),
+      sheetCloseBtn.animate([{ opacity: 1 }, { opacity: 0 }], quick)
+    ];
+    sheetAnims[0].onfinish = finishCloseDetail;
   }
 
   /* ---- nav button (top-right, before the utility controls) ---- */
   function mountNavButton() {
     if (document.getElementById("ym-nav-btn")) return true;
-    const btn = makeIconButton(ICON_APPS, () => openMarketplace(), "Aurora Lyrics — Marketplace");
+    const btn = makeIconButton(ICON_APPS, () => {
+      // The hint has done its job the moment they click it.
+      clearNavHint();
+      openMarketplace();
+    }, "Aurora Lyrics — Marketplace");
     btn.id = "ym-nav-btn";
     const bar = $("ytmusic-nav-bar");
     if (bar) {
@@ -1618,10 +2004,45 @@
     return true;
   }
 
+  /* ---- popup -> page: flash the launcher ------------------------------------
+     The toolbar popup exists only to send people to this button, but it closes
+     the instant the pointer moves onto the page — so the hint has to OUTLIVE the
+     popup. That is why this is a timed burst rather than a state the popup turns
+     on and off: by the time the user's cursor reaches the nav bar, the popup is
+     already gone and could not switch anything off. */
+  const NAV_HINT_MS = 4300; // just past the CSS animation (0.85s x 5)
+  let navHintTimer = 0;
+
+  function clearNavHint() {
+    if (navHintTimer) { window.clearTimeout(navHintTimer); navHintTimer = 0; }
+    const btn = document.getElementById("ym-nav-btn");
+    if (btn) btn.classList.remove("ym-nav-hint");
+  }
+
+  function highlightNavButton() {
+    // Nothing to point at while the marketplace is already open.
+    if (overlay && !overlay.classList.contains("hidden")) return;
+    let btn = document.getElementById("ym-nav-btn");
+    // The nav bar can still be unmounted if the popup opens during page load.
+    if (!btn) { mountNavButton(); btn = document.getElementById("ym-nav-btn"); }
+    if (!btn) return;
+    // Restart cleanly: an animation does not replay while its class is already
+    // present, so drop it and force a reflow before re-adding (repeat opens).
+    btn.classList.remove("ym-nav-hint");
+    void btn.offsetWidth;
+    btn.classList.add("ym-nav-hint");
+    if (navHintTimer) window.clearTimeout(navHintTimer);
+    navHintTimer = window.setTimeout(() => {
+      navHintTimer = 0;
+      btn.classList.remove("ym-nav-hint");
+    }, NAV_HINT_MS);
+  }
+
   /* ---- messages from the popup ---- */
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg) return;
     if (msg.type === "ytmod-open") openMarketplace();
+    else if (msg.type === "ytmod-hint-nav") highlightNavButton();
     else if (msg.type === "ytmod-setEnabled") setEnabled(msg.id, msg.on).then(renderSection);
   });
 
@@ -2037,13 +2458,11 @@
     }
     if (registryChanged) await setReg(reg);
     for (const id in reg) if (reg[id].enabled) applyExtension(id, true);
-    // Restore persisted view preferences (view + density).
+    // view / density / floating are PINNED (toolbar removed, AJ 2026-09-28) and
+    // the card is CENTRED: the old dragged position is deliberately NOT restored,
+    // so an accidental header drag (e.g. tapping the title 6× for dev mode) can't
+    // leave the panel stranded in a corner across reloads.
     const savedUI = await getUI();
-    if (savedUI.view === "grid" || savedUI.view === "list") ui.view = savedUI.view;
-    if (savedUI.density === "comfortable" || savedUI.density === "compact") ui.density = savedUI.density;
-    if (typeof savedUI.floating === "boolean") ui.floating = savedUI.floating;
-    if (Number.isFinite(savedUI.floatX)) ui.floatX = savedUI.floatX;
-    if (Number.isFinite(savedUI.floatY)) ui.floatY = savedUI.floatY;
     // Deliberately an explicit `=== true`: an absent or junk key means off, and
     // nothing but the 6-tap gesture is allowed to turn this on.
     if (savedUI.dev === true) ui.dev = true;

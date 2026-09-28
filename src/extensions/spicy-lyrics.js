@@ -1021,6 +1021,11 @@
      Deliberately minimal: only one flag plus the DOM restore points needed to
      put YTM's real <video> and our live lyrics panel back where they came from. */
   let fsActive = false;
+  // Tab-driven panel state, parked while fullscreen owns the panel. Fullscreen
+  // forces panelVisible on (the render loop gates on it) but must put the tab
+  // state back on exit, or leaving fullscreen while another tab is active
+  // strands the panel on screen. null = nothing parked.
+  let fsSavedPanelVisible = null;
   let fsOverlay = null;
   let fsMediaHost = null;
   let fsLyricsHost = null;
@@ -1169,6 +1174,16 @@
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
+  // QOL #1 (2026-09-28): end-of-track credits reveal. When a SYNCHRONISED track
+  // reaches its final ~1.5s, glide the panel to the bottom so the .ym-sl-credits
+  // block (provider / uploaded-by / made-by) scrolls into view. Static (unsynced)
+  // lyrics already reach the bottom on their own via driveStaticAutoScroll, so
+  // this only engages for synced lyrics.
+  let creditsFooterEl = null;        // the footer element, or null when there are no credits
+  let creditsRevealEngaged = false;  // we are in the end zone and have taken over the scroll
+  let creditsRevealActive = false;   // owns the scroll target on the current frame
+  let creditsRevealDismissed = false;// the user manually scrolled away -> stay out until next track
+  const CREDITS_REVEAL_MS = 1500;    // reveal during the final 1.5s of the track
   let scrollCandidateIndices = [];
   // Loading-skeleton plumbing. `lyricsSkeletonToken` is bumped by every panel
   // reset, which invalidates a skeleton paint still queued on rAF/`setTimeout`.
@@ -1970,6 +1985,30 @@
     /* Fullscreen overlay is always block; media + lyrics are absolute so
        layout changes (side / background / lyrics-only) animate via CSS
        transitions instead of snapping. */
+    /* Registered so the band anchor can ANIMATE. publishFsBandVars() measures
+       the media pane and writes --ym-sl-fs-band-top / --ym-sl-fs-title-h; the
+       title, chip and scrubber are positioned with calc() off them. When a new
+       music video changes the pane's aspect ratio, the whole stack has to glide
+       to the new anchor — but an UNREGISTERED custom property flips instantly.
+       That is why the first reposition looked smooth (the pane's own width
+       transition carried it) and every later one snapped (AJ, 2026-09-28).
+       Registering them as <length> makes the transition below work; if a browser
+       lacks @property the values simply flip as before. */
+    @property --ym-sl-fs-band-top {
+      syntax: "<length>";
+      inherits: true;
+      initial-value: 828px;
+    }
+    @property --ym-sl-fs-title-h {
+      syntax: "<length>";
+      inherits: true;
+      initial-value: 26px;
+    }
+    .ym-sl-fs-overlay {
+      transition:
+        --ym-sl-fs-band-top .35s cubic-bezier(.22,.61,.36,1),
+        --ym-sl-fs-title-h .35s cubic-bezier(.22,.61,.36,1);
+    }
     .ym-sl-fs-overlay {
       position: fixed;
       inset: 0;
@@ -2251,7 +2290,10 @@
       box-shadow: none;
       opacity: 0;
       pointer-events: auto;
-      transition: opacity .22s ease, background-color .3s ease, transform .35s cubic-bezier(.22,.61,.36,1);
+      transition: opacity .22s ease, background-color .3s ease,
+        transform .35s cubic-bezier(.22,.61,.36,1),
+        top .35s cubic-bezier(.22,.61,.36,1),
+        bottom .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-play-chip,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-play-chip {
@@ -2328,7 +2370,8 @@
       padding: 0 18px;
       pointer-events: auto;
       opacity: 0;
-      transition: opacity .25s ease, background-color .3s ease;
+      transition: opacity .25s ease, background-color .3s ease,
+        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-scrubber,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-scrubber {
@@ -2903,8 +2946,13 @@
       opacity: 0;
       transform: translateX(-50%) translateY(6px);
       animation: ym-sl-fs-title-in .34s cubic-bezier(.22,.61,.36,1) .08s forwards;
-      /* Crossfade on a track change - see .ym-sl-fs-title-leaving below. */
-      transition: opacity .24s ease, transform .24s ease;
+      /* Crossfade on a track change - see .ym-sl-fs-title-leaving below.
+         bottom/top are transitioned so the title glides when the media band
+         moves (a different MV aspect ratio changes --ym-sl-fs-band-top) instead
+         of snapping (AJ, 2026-09-28). */
+      transition: opacity .24s ease, transform .24s ease,
+        font-size .35s cubic-bezier(.22,.61,.36,1),
+        bottom .35s cubic-bezier(.22,.61,.36,1), top .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-title-artist { font-weight: 800; }
     .ym-sl-fs-title-track { font-weight: 400; opacity: .82; }
@@ -4499,7 +4547,7 @@
       text-align: center;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
-      margin: 48px 4px 16px;
+      margin: 48px 4px 22px;
       padding-top: 18px;
       border-top: 1px solid rgba(255,255,255,.12);
       opacity: .85;
@@ -4527,14 +4575,20 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-top: 12px;
+      margin-top: 22px;
       font-size: 13px;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
       color: rgba(255,255,255,.5);
       font-weight: 600;
       letter-spacing: .02em;
+      /* Keep the label above the pill's glow halo (the halo is a negative-z
+         pseudo that would otherwise wash over this text). */
+      position: relative;
+      z-index: 1;
     }
+    /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
+       caused the conic to fill the pill interior; reverting to the direct link). */
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
       pointer-events: auto;
       display: inline-flex;
@@ -4545,8 +4599,9 @@
       background: rgba(255,255,255,.07);
       color: rgba(255,255,255,.9);
       text-decoration: none;
-      /* box-shadow here so the sampled pfp glow fades in once it lands. */
-      transition: background-color .18s ease, color .18s ease, box-shadow .5s ease;
+      position: relative;
+      isolation: isolate;
+      transition: background-color .18s ease, color .18s ease;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link:hover {
       background: rgba(255,255,255,.14);
@@ -4565,16 +4620,76 @@
       flex: none;
       background: rgba(255,255,255,.12);
     }
-    /* Attribution glow (AJ, 2026-09-28): the whole credited-person PILL glows in
-       a colour sampled from their own pfp — the same trick the Ambient add-on
-       uses on album art, but per-person. --ym-sl-pfp-accent is set by
-       sampleAvatarColor() on the row (the pill inherits it); the fallback is a
-       neutral white so an unsampled (or blocked) avatar still reads as glowing.
-       Intensity eased back a touch on AJ's call. */
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
-      box-shadow:
-        0 0 15px 2px color-mix(in srgb, var(--ym-sl-pfp-accent, #ffffff) 78%, transparent),
-        0 0 34px 6px color-mix(in srgb, var(--ym-sl-pfp-accent, #ffffff) 40%, transparent);
+    /* Registered so Chrome definitely re-resolves the conic when the JS rAF loop
+       updates the angle on :root (AJ's Chrome would not reliably repaint a conic
+       driven by an UNregistered custom property — the v6 failure). inherits:true
+       so the :root value cascades to every pill's ::before/::after. No CSS
+       animation targets it, so it simply follows the JS-set value. */
+    @property --ym-sl-pfp-spin {
+      syntax: "<angle>";
+      inherits: true;
+      initial-value: 0deg;
+    }
+    /* Attribution glow v9 (AJ, 2026-09-28): two colours as a THIN BAND HUGGING
+       the pill's EDGE. The pill itself stays pill-shaped and STATIC — only the
+       COLOUR SEAM glides around the perimeter (a light travelling round the
+       border), so it reads as "gliding", never a rigid spin.
+
+       Mechanism: a masked pill-shaped ring (XOR mask; padding = ring
+       thickness) painted with a conic-gradient whose 'from' angle is the
+       registered --ym-sl-pfp-spin (inherits). A single CSS animation on the
+       PANEL drives that angle — pure CSS, no JS rAF, no per-frame style
+       invalidation (v8's rAF loop tanked fps to ~20 by setProperty-ing the root
+       every frame; v9 is compositor-friendly). The soft glow is a SECOND masked
+       ring, wider (10px) and blurred (10px), so the halo follows the seam.
+       No fill inside the pill. --ym-sl-pfp-accent-a/-b set on the ROW by
+       buildPersonRow (complementary default pair; sampleAvatarColor() upgrades
+       when the canvas is readable). */
+    /* Glide driver (v10, AJ, 2026-09-28): a JS rAF (startPfpGlowEngine())
+       sets --ym-sl-pfp-spin on EACH .ym-sl-uploader-link every frame — scoped
+       to the pill (NOT :root), so only the pill + its pseudos get invalidated
+       (v8's root-level setProperty tanked fps to ~20 by cascade-invalidating
+       the whole tree). JS-driven because AJ's Chrome reliably repaints the
+       conic on JS setProperty but NOT on CSS @keyframes animation of the
+       same registered @property (v6/v9 freeze). Crisp ::before ring (z:-1)
+       sits on top; soft glow ::after (z:-2) paints behind it.
+       prefers-reduced-motion is handled in the JS engine. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::before {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: inherit;
+      padding: 2px;
+      background: conic-gradient(
+        from var(--ym-sl-pfp-spin, 0deg),
+        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
+        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
+      );
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+      pointer-events: none;
+      z-index: -1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::after {
+      content: "";
+      position: absolute;
+      inset: -8px;
+      border-radius: inherit;
+      background: conic-gradient(
+        from var(--ym-sl-pfp-spin, 0deg),
+        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
+        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
+      );
+      filter: blur(6px);
+      opacity: .35;
+      pointer-events: none;
+      z-index: -2;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
       font-weight: 600;
@@ -4588,7 +4703,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      margin-top: 12px;
+      margin-top: 22px;
       font-size: 13px;
       color: rgba(255,255,255,.5);
     }
@@ -4708,6 +4823,26 @@
        These selectors carry the full :not() chain (specificity 0,5,0) so they
        beat the per-variant bottom rules and the short-viewport media queries,
        which is why bottom is reset to auto here. */
+    /* Cover-art side layout: the SAME top-anchored stack as the music-video case
+       below, so the title / chip / scrubber change ONE property (top) between
+       the two modes and can therefore TRANSITION. The old rules anchored them
+       with bottom: 160 / 74 / 24px, and bottom(auto) <-> top(length) is not
+       animatable — that is why the whole stack snapped on every MV <-> cover
+       swap (AJ, 2026-09-28). The values land within a few px of the old ones,
+       because the cover pane's bottom (100% - 218px) is what feeds
+       --ym-sl-fs-band-top. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      top: var(--ym-sl-fs-band-top, 828px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
+      bottom: auto;
+    }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
       top: var(--ym-sl-fs-band-top, 828px);
       bottom: auto;
@@ -6591,6 +6726,8 @@
     if (!liveVideo && !hasAttached) return;
 
     fsMediaHost.style.opacity = "0";
+    // Timestamp for the settle gate that decides when the pane may come back.
+    fsMediaSwapAt = performance.now();
     fsVideoModeSwapTimer = setTimeout(() => {
       fsVideoModeSwapTimer = 0;
       // Guard each separately: touching fsMediaHost.style when fsMediaHost is
@@ -6639,6 +6776,15 @@
         if (fsArtImg && fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
         fsArtImg = null;
         stopFullscreenKawarp();
+        // Hide the whole PANE, not just the video. The pane still carries the
+        // cover-art geometry and animates to the video's aspect ratio, so
+        // revealing it here showed a SQUARE card with the old art's shape
+        // (AJ, 2026-09-28). awaitFsVideoReady() reveals the pane and the video
+        // together, once frames are actually advancing.
+        lv.style.setProperty("opacity", "0", "important");
+        lv.style.setProperty("transition", "opacity .35s ease", "important");
+        awaitFsVideoReady(lv);
+        return;
       } else if (!lv && ha) {
         // Detach the stale video and fall back to cover art.
         const saved = fsSavedVideo;
@@ -6666,6 +6812,14 @@
         }
         fsSavedVideo = null;
         fsOverlay.classList.remove("ym-sl-fs-has-video");
+        // Drop the video's aspect ratio too — it is stale the instant the video
+        // goes, and leaving it behind kept the pane on the MV's shape (it still
+        // read 1920/1080 at the cover reveal).
+        fsOverlay.style.removeProperty("--ym-sl-fs-video-ar");
+        // The video is gone, so any pending "waiting for it to be ready" is moot
+        // — drop it, or its spinner could appear over the cover art that is
+        // about to load (AJ, 2026-09-28).
+        cancelFsVideoReady();
         // If we were in Video Background, it has nothing to blur now - drop
         // back to Video + Lyrics so a non-MV skip can't strand a broken
         // backdrop (AJ 2026-09-28). Guard with the call: applyFullscreenLayout
@@ -6682,15 +6836,162 @@
         // parsed track can still be the old one.
         const artUrl = (t && t.artworkUrl) || getDomArtworkUrl();
         if (artUrl) {
-          fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
-          fsMediaHost.appendChild(fsArtImg);
-          setFsArtSrc(fsArtImg, hiResArt(artUrl));
+          // Reuse the card the reconcile tick may already have made — creating a
+          // second one here left the pane showing the cover twice, side by side
+          // (AJ, 2026-09-28).
+          const img = ensureFsArtImg();
+          if (img) setFsArtSrc(img, hiResArt(artUrl));
         }
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+        // Re-publish the band NOW. The pane's geometry just changed, and waiting
+        // for the 2s tick left the title on the OLD (video) anchor, so it
+        // overlapped the cover art until the tick moved it down (AJ, 2026-09-28).
+        // Deferred a frame so the new layout is measurable, and the band's own
+        // transition then carries the stack to the right place before the pane
+        // reveal finishes.
+        requestAnimationFrame(publishFsBandVars);
       }
-      // Fade back in.
-      fsMediaHost.style.opacity = "";
-    }, 260);
+      // Fade back in, once the new geometry has settled. (The MV attach path
+      // returns above and reveals the pane itself, once the video is actually
+      // producing frames.)
+      revealFsMediaPane();
+    }, FS_MEDIA_SWAP_MS);
+  }
+
+  // ---- music-video ready gate -------------------------------------------
+  // A skip attaches YTM's ONE recycled <video>, which still reports readyState /
+  // videoWidth / !paused from the PREVIOUS track — so those alone revealed a
+  // stale or poster frame (the "thumbnail" AJ kept seeing, 2026-09-28). The gate
+  // therefore ALSO requires the playback clock to move, the only reliable proof
+  // that the NEW content is rendering.
+  //
+  // The caller leaves the media PANE hidden while it waits — the pane still has
+  // the cover-art geometry, so showing it exposed a square card. This reveals the
+  // pane AND the video together, and shows a DEDICATED spinner (not the shared
+  // lyrics one, so the two lifecycles can never hide each other) once the wait
+  // passes FS_SPINNER_DELAY_MS. FS_VIDEO_READY_MAX_MS is the hard cap so it can
+  // never get stuck.
+  //
+  // FS_MEDIA_SWAP_MS matches the .ym-sl-fs-media opacity transition (.35s), so
+  // the outgoing card finishes fading before the DOM swap removes it.
+  const FS_MEDIA_SWAP_MS = 350;
+  const FS_VIDEO_READY_MAX_MS = 8000;
+  const FS_VIDEO_READY_POLL_MS = 150;
+  let fsVideoReadySeq = 0;
+  let fsVideoSpinnerEl = null;
+
+  // The pane's geometry — its width, plus the aspect ratio the JS publishes via
+  // --ym-sl-fs-video-ar — and the backdrop layers all take a beat to settle after
+  // a media-mode swap, so revealing the pane immediately showed a
+  // half-transitioned box: the cover cropped into the video's 16:9 frame with the
+  // old blurred backdrop still behind it, and the pane still square on the way
+  // into an MV (AJ, 2026-09-28). Every swap now holds the pane hidden for at
+  // least this long.
+  const FS_MEDIA_SETTLE_MS = 800;
+  let fsMediaSwapAt = 0;
+  let fsPaneRevealSeq = 0;
+
+  function revealFsMediaPaneNow() {
+    if (!fsMediaHost) return;
+    fsMediaHost.style.opacity = "";
+  }
+
+  // Reveal the pane, but never sooner than FS_MEDIA_SETTLE_MS after the swap
+  // began, so the new geometry and backdrop have landed.
+  function revealFsMediaPane() {
+    const wait = Math.max(0, FS_MEDIA_SETTLE_MS - (performance.now() - fsMediaSwapAt));
+    const seq = ++fsPaneRevealSeq;
+    if (wait <= 0) { revealFsMediaPaneNow(); return; }
+    window.setTimeout(() => {
+      if (seq !== fsPaneRevealSeq) return;
+      revealFsMediaPaneNow();
+    }, wait);
+  }
+
+  // Dedicated to the video-ready wait: same look as the loading spinner but a
+  // separate node, driven by its own lifecycle.
+  function ensureFsVideoSpinner() {
+    if (fsVideoSpinnerEl) return fsVideoSpinnerEl;
+    if (!fsOverlay) return null;
+    fsVideoSpinnerEl = h("div", { class: "ym-sl-fs-spinner", "aria-hidden": "true" });
+    const svg = fsSvgIcon(FS_ICON_SPINNER, "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-spinner-icon");
+    fsVideoSpinnerEl.appendChild(svg);
+    return fsVideoSpinnerEl;
+  }
+
+  function hideFsVideoSpinner() {
+    if (fsVideoSpinnerEl) fsVideoSpinnerEl.classList.remove("visible");
+  }
+
+  // Invalidate a pending wait (video detached, or fullscreen exited) so its
+  // spinner can never linger over a later track.
+  function cancelFsVideoReady() {
+    fsVideoReadySeq++;
+    hideFsVideoSpinner();
+  }
+
+  function awaitFsVideoReady(video) {
+    const seq = ++fsVideoReadySeq;
+    hideFsVideoSpinner();
+    if (!fsActive || !video) { revealFsMediaPane(); return; }
+    let spinnerTimer = 0;
+    let pollTimer = 0;
+    let giveUpTimer = 0;
+    let lastTime = video.currentTime;
+    let progressed = false;
+    let done = false;
+    function cleanup() {
+      done = true;
+      if (spinnerTimer) { window.clearTimeout(spinnerTimer); spinnerTimer = 0; }
+      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
+      if (giveUpTimer) { window.clearTimeout(giveUpTimer); giveUpTimer = 0; }
+      video.removeEventListener("playing", check);
+      video.removeEventListener("timeupdate", check);
+      video.removeEventListener("seeked", check);
+    }
+    function finish() {
+      if (done || seq !== fsVideoReadySeq) return;
+      cleanup();
+      hideFsVideoSpinner();
+      video.style.setProperty("opacity", "1", "important");
+      revealFsMediaPane();
+    }
+    function check() {
+      if (done || seq !== fsVideoReadySeq) return;
+      const t = video.currentTime;
+      if (t > lastTime + 0.02) progressed = true;
+      lastTime = t;
+      if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) finish();
+    }
+    function poll() {
+      if (done || seq !== fsVideoReadySeq) return;
+      check();
+      if (!done && seq === fsVideoReadySeq) {
+        pollTimer = window.setTimeout(poll, FS_VIDEO_READY_POLL_MS);
+      }
+    }
+    video.addEventListener("playing", check);
+    video.addEventListener("timeupdate", check);
+    video.addEventListener("seeked", check);
+    poll(); // timeupdate is throttled, so poll as the backstop
+    spinnerTimer = window.setTimeout(() => {
+      spinnerTimer = 0;
+      if (done || seq !== fsVideoReadySeq || !fsActive) return;
+      // Show the pane so the spinner is visible; by now the aspect-ratio
+      // transition has settled, so this is no longer the old square card.
+      revealFsMediaPane();
+      const el = ensureFsVideoSpinner();
+      if (!el || !fsMediaHost) return;
+      if (el.parentElement !== fsMediaHost) fsMediaHost.appendChild(el);
+      void el.offsetWidth;
+      el.classList.add("visible");
+    }, FS_SPINNER_DELAY_MS);
+    giveUpTimer = window.setTimeout(() => {
+      giveUpTimer = 0;
+      if (done || seq !== fsVideoReadySeq) return;
+      finish();
+    }, FS_VIDEO_READY_MAX_MS);
   }
 
   // Artwork fallback straight off the player bar's own thumbnail. It is always
@@ -6738,6 +7039,35 @@
     }, 1500);
   }
 
+  // The pane must hold at most ONE sharp cover card. Two code paths can create
+  // it — the 2s reconcile tick and the MV -> cover swap in syncFsVideoMode — and
+  // when both ran for the same skip the second overwrote fsArtImg while the
+  // first stayed in the DOM, so the pane showed the cover TWICE, side by side
+  // (AJ, 2026-09-28). This is now the single create-or-reuse entry point.
+  // A YouTube video thumbnail is NOT cover art — it is the music video's own
+  // hqdefault (letterboxed, low-res) and the real video is about to fill the
+  // pane. Rendering it put that thumbnail in a square card for the ~1s before
+  // the video attached (AJ, 2026-09-28: the reconcile resolved
+  // i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
+  // lives on yt3/lh3.googleusercontent.com, so the /vi/ path is the tell.
+  function isVideoThumbnailUrl(url) {
+    return typeof url === "string" && /^https?:\/\/i\.ytimg\.com\/vi\//.test(url);
+  }
+
+  function ensureFsArtImg() {
+    if (!fsMediaHost) return null;
+    if (fsArtImg && !fsArtImg.isConnected) fsArtImg = null;
+    const cards = fsMediaHost.querySelectorAll(".ym-sl-fs-art");
+    for (let i = 0; i < cards.length; i++) {
+      if (cards[i] !== fsArtImg) cards[i].remove();
+    }
+    if (!fsArtImg) {
+      fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
+      fsMediaHost.appendChild(fsArtImg);
+    }
+    return fsArtImg;
+  }
+
   // Reconcile the fullscreen media pane's content against the current track.
   // CREATE-OR-UPDATE, deliberately: the old code only ever updated an existing
   // <img>, and fsArtImg was created in exactly two places (entry, and the
@@ -6751,7 +7081,13 @@
     // flag can say "a video owns the pane" while the element is already dead.
     // That mismatch is what left the pane on a stale video instead of loading
     // the new cover art after an MV -> song skip (AJ, 2026-09-28).
-    if (findPlayerVideo()) {
+    // Bail when a video is attached AT ALL. findPlayerVideo() additionally
+    // requires dimensions, so during a skip it reports null while the video is
+    // still sitting in the pane — and creating the card then put a cover image
+    // (clamped to the MV pane's short height, hence cropped and small) beside
+    // the video until the detach (AJ, 2026-09-28; the trace caught
+    // reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
+    if (findPlayerVideo() || fsSavedVideo) {
       // Symmetric teardown: never leave a cover card sitting on top of a video.
       // MV -> MV returns early inside syncFsVideoMode, so nothing else clears it.
       if (fsArtImg) {
@@ -6764,18 +7100,33 @@
     const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
     const hi = hiResArt(artUrl);
     if (!hi) return;
-    if (!fsArtImg) {
-      fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
-      fsMediaHost.appendChild(fsArtImg);
-      setFsArtSrc(fsArtImg, hi);
+    if (isVideoThumbnailUrl(hi)) {
+      // The MV's own thumbnail, not cover art: drop any card and keep the pane
+      // hidden until the video attaches and reveals it.
+      if (fsArtImg) {
+        if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
+        fsArtImg = null;
+      }
+      if (fsMediaHost) fsMediaHost.style.opacity = "0";
       return;
     }
-    setFsArtSrc(fsArtImg, hi);
+    const img = ensureFsArtImg();
+    if (img) setFsArtSrc(img, hi);
   }
 
   function enterFullscreenMode() {
     if (fsActive || !panelEl) return;
     fsActive = true;
+    // Fullscreen owns the panel from here, so tab-driven setPanel() is ignored
+    // (it early-returns on fsActive). But animate() gates on panelVisible, so
+    // entering from a non-Lyrics tab (Comments, …) would leave panelVisible
+    // false and the panel painted-but-frozen. Force it on and park the tab state
+    // to restore on exit. Cannot call setPanel(true) — fsActive is already true.
+    fsSavedPanelVisible = panelVisible;
+    panelVisible = true;
+    // QOL #1: entering fullscreen cancels the credits reveal (its scroll target
+    // belongs to the main panel; fullscreen uses its own lyrics host).
+    cancelCreditsReveal();
     // Fullscreen takes over the backdrop entirely, so stop the page-wide Kawarp
     // for every track (song or music video) — only one Kawarp ever runs.
     suspendPageKawarp();
@@ -6842,6 +7193,15 @@
     // injected <style> tag in place for the next overflow.
     fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
     fsTitleRO.observe(fsTitleEl);
+    // The band anchor is measured from THIS title's height, and its font-size is
+    // TRANSITIONED (.35s) — so a measurement taken right after a mode swap reads
+    // the mid-zoom height, and the chip / scrubber (which stack off title-h)
+    // stayed on the stale value until the 2s tick corrected them, which read as a
+    // 2s animation delay on the controls only (AJ, 2026-09-28). Re-publish once
+    // the size transition has actually finished.
+    fsTitleEl.addEventListener("transitionend", (event) => {
+      if (event.propertyName === "font-size") publishFsBandVars();
+    });
     // Request native browser fullscreen immediately while the user activation
     // from the click is still fresh. documentElement is always present, always
     // laid out, and always allowed; requesting on fsOverlay failed silently in
@@ -7013,6 +7373,20 @@
     // drop the panel back to the top of the song.
     recentreActiveLine();
 
+    // Put back the tab-driven visibility we overrode on entry. Without this,
+    // exiting fullscreen while the active tab is NOT ours (Comments, …) leaves
+    // the panel on screen, because `hidden` was removed on entry and never
+    // restored. fsActive is already false here, so the DOM classes are the only
+    // thing left to reconcile.
+    if (fsSavedPanelVisible !== null) {
+      const wasVisible = fsSavedPanelVisible;
+      fsSavedPanelVisible = null;
+      panelVisible = wasVisible;
+      if (panelEl) panelEl.classList.toggle("hidden", !wasVisible);
+      if (tabBar) tabBar.classList.toggle("ym-sl-custom-active", wasVisible);
+      if (tabEl) tabEl.classList.toggle("ym-sl-active", wasVisible);
+    }
+
     if (fsBgRefresh) { clearInterval(fsBgRefresh); fsBgRefresh = null; }
     stopBgDrawLoop();
     if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -7077,6 +7451,12 @@
     // Bright-video controls scrim: the flag drives a class on fsOverlay, which
     // was just removed, so just drop it for the next entry.
     fsBrightVideo = false;
+    // Invalidate any pending video-ready reveal (and drop its spinner) so it
+    // cannot restore a pane that no longer exists.
+    cancelFsVideoReady();
+    fsVideoSpinnerEl = null;
+    // Drop any pending settle-gated pane reveal too.
+    fsPaneRevealSeq++;
     // Idle fill ring: the node lived in fsOverlay (removed), so drop the ref
     // and any pending show/leave timers.
     if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
@@ -7237,18 +7617,7 @@
         // first, then let it settle onto the native tab.
         const fromTab = tabEl;
         setPanel(false);
-        if (!fromTab) return;
-        placeSelectionBar(fromTab, nativeTab);
-        // YTM updates the bar later in this same task; re-assert on the next
-        // frame so OUR span is the one that shows, then settle.
-        requestAnimationFrame(() => {
-          placeSelectionBar(fromTab, nativeTab);
-          if (selectionBarTimer) window.clearTimeout(selectionBarTimer);
-          selectionBarTimer = window.setTimeout(() => {
-            selectionBarTimer = 0;
-            placeSelectionBar(nativeTab, nativeTab);
-          }, SELECTION_BAR_SETTLE_MS);
-        });
+        handOffSelectionBar(fromTab, nativeTab);
       };
       tabBar.addEventListener("click", tabBar.__ymNativeClickHandler, true);
       tabBar.addEventListener("tap", tabBar.__ymNativeClickHandler, true);
@@ -7289,7 +7658,23 @@
       event.preventDefault();
       event.stopPropagation();
       if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-      setPanel(!panelVisible);
+      if (!panelVisible) {
+        setPanel(true);
+        return;
+      }
+      // Toggling OFF. YTM never sees this click (stopped above), so it does not
+      // move its own underline — and setPanel(false) cannot either, because
+      // syncSelectionBar() bails while the panel is closed. Without this the line
+      // stays parked under SYNCED while the native tab's text lights back up
+      // (AJ, 2026-09-28). Hand it to whichever native tab is still selected.
+      const nativeTab = tabBar
+        ? tabBar.querySelector("tp-yt-paper-tab.iron-selected:not(.ym-sl-tab)")
+        : null;
+      const fromTab = tabEl;
+      // setPanel(false) clears nativeTabAtOpen, so read the fallback BEFORE it.
+      const fallbackTab = nativeTabAtOpen;
+      setPanel(false);
+      handOffSelectionBar(fromTab, nativeTab || fallbackTab);
     };
     tab.addEventListener("tap", blockNativeTap, true);
     tab.addEventListener("keydown", (event) => {
@@ -7346,6 +7731,27 @@
     const pct = (left / base) * 100;
     const scale = Math.max(0.001, (right - left) / base);
     bar.style.transform = "translateX(" + pct + "%) scaleX(" + scale + ")";
+  }
+
+  // Hand YTM's underline from OUR tab back to a native one. YTM animates its
+  // indicator from ITS OWN last selection, which is stale while our tab is the
+  // highlighted one — so its stretch would span the wrong pair of tabs. Drive the
+  // span ourselves: STRETCH across both, then CONTRACT onto the native tab, which
+  // is what YTM does natively. Shared by both exits — a native tab clicked while
+  // the panel is open, and clicking SYNCED again to close it (AJ, 2026-09-28).
+  function handOffSelectionBar(fromEl, toEl) {
+    if (!fromEl || !toEl) return;
+    placeSelectionBar(fromEl, toEl);
+    // YTM re-writes the bar later in this same task; re-assert on the next frame
+    // so OUR span is the one that shows, then settle.
+    requestAnimationFrame(() => {
+      placeSelectionBar(fromEl, toEl);
+      if (selectionBarTimer) window.clearTimeout(selectionBarTimer);
+      selectionBarTimer = window.setTimeout(() => {
+        selectionBarTimer = 0;
+        placeSelectionBar(toEl, toEl);
+      }, SELECTION_BAR_SETTLE_MS);
+    });
   }
 
   // Copy YTM's own tab-indicator move (AJ, 2026-09-28): on click the line
@@ -7495,7 +7901,10 @@
   // runs alongside a 60fps draw loop.
   function publishFsBandVars() {
     if (!fsOverlay || !fsMediaHost) return;
-    if (!fsSavedVideo) return;
+    // No video guard any more: the cover-art side layout anchors its title /
+    // chip / scrubber off the SAME band (see the top-anchored no-video rules), so
+    // the band has to be published for cover art too — otherwise the stack has
+    // no shared property to transition and snaps (AJ, 2026-09-28).
     const paneRect = fsMediaHost.getBoundingClientRect();
     // A pre-layout read returns 0; skip rather than publish a bogus anchor.
     if (!paneRect.height) return;
@@ -8099,6 +8508,10 @@
 
   function handleManualScrollIntent() {
     if (!lineScrollEl) return;
+    // QOL #1: a manual scroll during the end-of-track reveal dismisses it so the
+    // panel does not yank back down to the credits while the user is browsing.
+    creditsRevealDismissed = true;
+    creditsRevealActive = false;
     // The user has taken the scroll. Kill the spring outright rather than
     // retargeting: a spring still holding a target would keep pulling against
     // their wheel/touch input, which reads as the panel fighting them.
@@ -8360,6 +8773,52 @@
     // animating (hidden tab, no lines yet).
     lastScrollTargetLine = -1;
     recentreActiveLineNow();
+  }
+
+  // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
+  // its tail. Returns true while the reveal owns the scroll target this frame, so
+  // animate() can skip the normal line-follow retarget and let the credits glide
+  // into view (spring if smoothScrolling is on, else the element's CSS ease).
+  function updateCreditsReveal(positionMs, activeIndex, lyricPositionMs) {
+    // Static lyrics already scroll to the bottom on their own via
+    // driveStaticAutoScroll; pause-pick mode owns the scroll too; and we need a
+    // credits footer and a live scroll container to do anything at all.
+    if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
+      if (!creditsFooterEl) creditsRevealActive = false;
+      return false;
+    }
+    // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not
+    // when it starts being sung — so the credits glide in right as the last lyric
+    // completes. nearEnd is a fallback for the rare case there are credits but no
+    // lyric lines (provider-only), where EndTime compares are meaningless.
+    const lastLine = modelLines.length ? modelLines[modelLines.length - 1] : null;
+    const finalLineEnded = lastLine && lyricPositionMs >= lastLine.EndTime;
+    const player = window.YTMod && window.YTMod.player;
+    const durationMs = player && typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : 0;
+    const nearEnd = durationMs > 0 && (durationMs - positionMs) <= CREDITS_REVEAL_MS;
+    if (!finalLineEnded && !nearEnd) {
+      // Left the end zone (new track, seek back, or ended-and-advanced): release
+      // the latches so the reveal can fire again next time the track reaches its
+      // tail. The normal line-follow retarget resumes on the next frame.
+      creditsRevealEngaged = false;
+      creditsRevealDismissed = false;
+      creditsRevealActive = false;
+      return false;
+    }
+    if (creditsRevealDismissed) return false; // user took over -> stay out
+    creditsRevealEngaged = true;
+    creditsRevealActive = true;
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    setScrollTarget(maxScrollTop, false);
+    return true;
+  }
+
+  function cancelCreditsReveal() {
+    creditsRevealEngaged = false;
+    creditsRevealDismissed = false;
+    creditsRevealActive = false;
   }
 
   // Smoothly follow playback with the native scroll position for static
@@ -10336,13 +10795,74 @@
     return row;
   }
 
-  // Sample a credited person's avatar for the attribution glow (AJ,
-  // 2026-09-28) — the same idea as the Ambient add-on's artwork accent, but
-  // per person: draw the image tiny, average the non-extreme pixels weighted by
-  // saturation, and return an rgb(). cdn.discordapp.com serves
-  // Access-Control-Allow-Origin: *, so the canvas is not tainted; ANY failure
-  // (broken / blocked / no CORS) resolves null and the caller leaves the
-  // neutral fallback glow. Results are cached per URL.
+  // RGB <-> HSL, used only to push the two sampled colours apart when the avatar
+  // is too flat for the spin to read (see sampleAvatarColor).
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l: l };
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h;
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    return { h: h / 6, s: s, l: l };
+  }
+
+  function hslToRgb(h, s, l) {
+    const hue = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    if (s === 0) {
+      const v = Math.round(l * 255);
+      return [v, v, v];
+    }
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return [
+      Math.round(hue(p, q, h + 1 / 3) * 255),
+      Math.round(hue(p, q, h) * 255),
+      Math.round(hue(p, q, h - 1 / 3) * 255),
+    ];
+  }
+
+  // Average one vertical slice of the 24x24 avatar sample, chroma-weighted and
+  // skipping near-black / near-white pixels. Returns [r,g,b] or null.
+  function averageAvatarSlice(data, x0, x1) {
+    let r = 0, g = 0, b = 0, w = 0;
+    for (let y = 0; y < 24; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * 24 + x) * 4;
+        const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+        const max = Math.max(pr, pg, pb);
+        const min = Math.min(pr, pg, pb);
+        const light = (max + min) / 510;
+        if (light < 0.12 || light > 0.92) continue;
+        const weight = 0.3 + ((max - min) / 255) * 1.7;
+        r += pr * weight; g += pg * weight; b += pb * weight; w += weight;
+      }
+    }
+    if (!w) return null;
+    return [Math.round(r / w), Math.round(g / w), Math.round(b / w)];
+  }
+
+  // Sample a credited person's avatar for the attribution glow (AJ, 2026-09-28) —
+  // the same idea as the Ambient add-on's artwork accent, but per person and
+  // returning TWO colours, because the pill's glow SPINS between them and one
+  // flat colour would have no motion. The avatar is split down the middle and
+  // each half averaged; if the two come out too alike (a flat avatar), the second
+  // is pushed round the hue wheel so the spin still reads. cdn.discordapp.com
+  // serves Access-Control-Allow-Origin: *, so the canvas is not tainted; ANY
+  // failure (broken / blocked / no CORS) resolves null and the caller leaves the
+  // neutral white fallback. Results are cached per URL.
   const avatarColorCache = new Map();
   function sampleAvatarColor(url) {
     if (!url) return Promise.resolve(null);
@@ -10352,7 +10872,7 @@
       img.crossOrigin = "anonymous";
       img.referrerPolicy = "no-referrer";
       img.onload = () => {
-        let color = null;
+        let pair = null;
         try {
           const canvas = document.createElement("canvas");
           canvas.width = 24;
@@ -10361,28 +10881,124 @@
           if (ctx) {
             ctx.drawImage(img, 0, 0, 24, 24);
             const data = ctx.getImageData(0, 0, 24, 24).data;
-            let r = 0, g = 0, b = 0, w = 0;
-            for (let i = 0; i < data.length; i += 4) {
-              const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-              const max = Math.max(pr, pg, pb);
-              const min = Math.min(pr, pg, pb);
-              const light = (max + min) / 510;
-              if (light < 0.12 || light > 0.92) continue; // skip near-black/white
-              const weight = 0.3 + ((max - min) / 255) * 1.7;
-              r += pr * weight; g += pg * weight; b += pb * weight; w += weight;
-            }
-            if (w > 0) {
-              color = "rgb(" + Math.round(r / w) + ", " + Math.round(g / w) + ", " + Math.round(b / w) + ")";
+            const left = averageAvatarSlice(data, 0, 12);
+            const right = averageAvatarSlice(data, 12, 24);
+            const first = left || right;
+            let second = right || left;
+            if (first && second) {
+              const dist = Math.abs(first[0] - second[0]) +
+                Math.abs(first[1] - second[1]) +
+                Math.abs(first[2] - second[2]);
+              if (dist < 70) {
+                // Too alike to read as motion: push the second colour round the
+                // hue wheel (lifting its saturation a little) so the spin shows.
+                const hsl = rgbToHsl(second[0], second[1], second[2]);
+                second = hslToRgb(
+                  (hsl.h + 0.11) % 1,
+                  Math.min(1, Math.max(0.45, hsl.s * 1.1 + 0.15)),
+                  Math.min(0.78, Math.max(0.42, hsl.l))
+                );
+              }
+              pair = {
+                a: "rgb(" + first[0] + ", " + first[1] + ", " + first[2] + ")",
+                b: "rgb(" + second[0] + ", " + second[1] + ", " + second[2] + ")",
+              };
             }
           }
-        } catch (_) { color = null; }
+        } catch (_) { pair = null; }
         if (avatarColorCache.size > 120) avatarColorCache.clear();
-        avatarColorCache.set(url, color);
-        resolve(color);
+        avatarColorCache.set(url, pair);
+        resolve(pair);
       };
       img.onerror = () => { avatarColorCache.set(url, null); resolve(null); };
       img.src = url;
     });
+  }
+
+  // Stable per-person two-tone glow when the avatar can't be sampled (AJ,
+  // 2026-09-28). Hashes the username to a base hue, then takes its COMPLEMENT
+  // (+180deg) for the second colour — so every pill gets a maximum-contrast
+  // pair regardless of where the hash lands, and the rotating seam is always
+  // unmistakably visible. Never white-on-white, which read as a static overlay
+  // with no motion. sampleAvatarColor() may upgrade these to the pfp's own
+  // colours when the canvas is readable.
+  function defaultPairFor(name) {
+    let h = 0;
+    name = String(name || "");
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    const base = h % 360;
+    const complementary = (base + 180) % 360;
+    return {
+      a: "hsl(" + base + ", 92%, 62%)",
+      b: "hsl(" + complementary + ", 92%, 62%)",
+    };
+  }
+
+  // AJ, 2026-09-28 (v10): drive the gliding colour seam with a single rAF,
+  // but SCOPED to each .ym-sl-uploader-link (NOT :root) — v8's root-level
+  // setProperty cascade-invalidated the whole tree and tanked fps to ~20.
+  // Scoping to the pill means only the pill + its 2 pseudos get invalidated
+  // per frame. JS setProperty (not CSS @keyframes) because AJ's Chrome
+  // reliably repaints the conic on JS writes but NOT on @keyframes animation
+  // of the registered @property (v6/v9 freeze). `currentSpinDeg` is exposed
+  // so buildPersonRow can stamp new pills with the live angle (no first-
+  // frame flicker on track change). prefers-reduced-motion → never start the
+  // rAF; startPfpGlowEngine() stamps 0deg on every pill.
+  let pfpGlowRAF = 0;
+  let currentSpinDeg = 0;
+  // QOL #1 follow-on (2026-09-28): the profile-glow rAF must NOT repaint the
+  // blurred conic while the credits block is scrolled off-screen (mid-song, panel
+  // hidden, or fullscreen-reparented). pfpGlowCreditsInView is driven by an
+  // IntersectionObserver on .ym-sl-credits; the frame only advances + stamps while
+  // it is true, so off-screen pills cost nothing — yet the seam resumes exactly
+  // where it left off when they scroll back into view.
+  let pfpGlowCreditsInView = true;
+  let pfpGlowObserver = null;
+  function setSpinOnAllPills(deg) {
+    const v = (+deg).toFixed(2) + "deg";
+    const pills = document.querySelectorAll(".ym-sl-uploader-link");
+    for (let i = 0; i < pills.length; i++) {
+      pills[i].style.setProperty("--ym-sl-pfp-spin", v);
+    }
+  }
+  function ensurePfpGlowObserver() {
+    if (pfpGlowObserver || typeof IntersectionObserver === "undefined") return;
+    pfpGlowObserver = new IntersectionObserver((entries) => {
+      // One observed target at a time (the live credits block); use its latest state.
+      for (const e of entries) {
+        if (e.target === creditsFooterEl) pfpGlowCreditsInView = e.isIntersecting;
+      }
+    }, { root: null, threshold: 0 });
+  }
+  function startPfpGlowEngine() {
+    if (pfpGlowRAF) return;
+    const reduce = !!(window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    if (reduce) {
+      setSpinOnAllPills(0);
+      return;
+    }
+    ensurePfpGlowObserver();
+    const PERIOD_MS = 4200;
+    const GLOW_MIN_MS = 1000 / 40; // ~40fps updates: identical-looking for a slow
+                                   // 4.2s glide, but halves conic+blur repaint cost
+    let glowClock = 0;             // advances ONLY while the credits are visible,
+                                   // so the seam resumes exactly where it left off
+    let lastGlowFrame = 0;
+    let lastGlowPaint = -1e9;
+    (function frame(now) {
+      const dt = lastGlowFrame ? now - lastGlowFrame : 0;
+      lastGlowFrame = now;
+      if (pfpGlowCreditsInView) {
+        glowClock += dt;
+        if (glowClock - lastGlowPaint >= GLOW_MIN_MS) {
+          lastGlowPaint = glowClock;
+          currentSpinDeg = (glowClock / PERIOD_MS * 360) % 360;
+          setSpinOnAllPills(currentSpinDeg);
+        }
+      }
+      pfpGlowRAF = requestAnimationFrame(frame);
+    })(performance.now());
   }
 
   // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
@@ -10391,6 +11007,14 @@
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
+
+    // Default two-tone glow colours (AJ, 2026-09-28): a stable per-person hue pair
+    // set immediately, so the pill always has a visible gliding seam even before/
+    // without a sampled avatar. sampleAvatarColor() upgrades these below when the
+    // canvas is readable.
+    const glow = defaultPairFor(uploader.username || label || "spicy");
+    row.style.setProperty("--ym-sl-pfp-accent-a", glow.a);
+    row.style.setProperty("--ym-sl-pfp-accent-b", glow.b);
 
     const link = h("a", {
       class: "ym-sl-uploader-link",
@@ -10412,10 +11036,13 @@
       img.referrerPolicy = "no-referrer";
       // A dead/blocked avatar must not leave a broken-image glyph in the panel.
       img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
-      // Glow the avatar in a colour sampled from the pfp itself (AJ,
-      // 2026-09-28). Async + cached; on any failure the neutral fallback stands.
-      sampleAvatarColor(uploader.avatar).then((color) => {
-        if (color && img.isConnected) row.style.setProperty("--ym-sl-pfp-accent", color);
+      // Upgrade the pill's two glow colours to the pfp's own colours (AJ,
+      // 2026-09-28) when the canvas is readable; otherwise the username-hash
+      // default already set above stands. Async + cached.
+      sampleAvatarColor(uploader.avatar).then((pair) => {
+        if (!pair || !img.isConnected) return;
+        row.style.setProperty("--ym-sl-pfp-accent-a", pair.a);
+        row.style.setProperty("--ym-sl-pfp-accent-b", pair.b);
       });
       link.appendChild(img);
     }
@@ -10428,6 +11055,11 @@
       link.classList.add("no-link");
     }
     row.appendChild(link);
+    // Stamp the current glide angle on the new pill so it doesn't flicker at
+    // 0deg for one frame before the rAF catches it (especially on track
+    // change, when pills are recreated).
+    link.style.setProperty("--ym-sl-pfp-spin", currentSpinDeg.toFixed(2) + "deg");
+    startPfpGlowEngine();
     return row;
   }
 
@@ -10744,9 +11376,22 @@
 
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
+    // Unobserve the previous track's credits block before it is replaced, then
+    // observe the new one so the profile-glow rAF only paints while it's on-screen.
+    if (pfpGlowObserver && creditsFooterEl) pfpGlowObserver.unobserve(creditsFooterEl);
     if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
-      linesRoot.appendChild(buildCreditsFooter(currentSongwriters));
+      creditsFooterEl = buildCreditsFooter(currentSongwriters);
+      linesRoot.appendChild(creditsFooterEl);
+      if (pfpGlowObserver) pfpGlowObserver.observe(creditsFooterEl);
+    } else {
+      creditsFooterEl = null;
     }
+    // A new track invalidates any in-progress credits reveal: position is about to
+    // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
+    // doing it here avoids a one-frame flash of the previous song parked at bottom.
+    creditsRevealEngaged = false;
+    creditsRevealActive = false;
+    creditsRevealDismissed = false;
 
     // Re-apply the pause sync marker: the line elements were just rebuilt, so any
     // class on the old nodes is gone.
@@ -11469,7 +12114,13 @@
     // would be correct for one frame only. It also outranks the lead-line target:
     // while the panel is being re-placed we want the line the user is HEARING,
     // not the one early scroll is aiming at.
-    if (recentreUntilMs > now) {
+    // QOL #1: when a synced track reaches its final line, the credits reveal owns
+    // the scroll target (gliding to the bottom). While it is active, skip the
+    // normal line-follow retarget so the two do not fight.
+    const creditsReveal = updateCreditsReveal(positionMs, activeIndex, lyricPositionMs);
+    if (creditsReveal) {
+      // credits reveal owns the scroll target this frame
+    } else if (recentreUntilMs > now) {
       recentreActiveLineNow();
       lastScrollTargetLine = lastActiveLine;
     } else if (scrollIndex !== lastScrollTargetLine) {
