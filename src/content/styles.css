@@ -121,6 +121,17 @@
 #ym-market .ym-head .ym-sub { color: #aaaaaa; font-size: 14px; }
 #ym-market #ym-close { margin-left: auto; }
 
+/* Dev-mode hint bar (the 6-tap gesture is on the Aurora Lyrics header title) */
+.ym-dev-hint {
+  flex: 0 0 auto;
+  padding: 9px 28px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #9a9a9a;
+  background: rgba(8,8,8,.55);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+
 /* Tabs row */
 #ym-market .ym-tabs-row {
   flex: 0 0 auto;
@@ -361,6 +372,19 @@
   margin: 0 4px 0 0;
   opacity: .88;
   transition: background-color .16s ease, opacity .16s ease, transform .12s ease;
+  /* Custom affordance (AJ, 2026-09-28): the injected launcher glows softly so
+     it reads as something Aurora Lyrics added, not a native YTM control.
+     drop-shadow (not box-shadow) because the button has no opaque background —
+     it haloes the visible waffle glyph. Swap the rgb() for a red for the other
+     option AJ floated. */
+  animation: ym-nav-glow 3.2s ease-in-out infinite;
+}
+@keyframes ym-nav-glow {
+  0%, 100% { filter: drop-shadow(0 0 3px rgba(255,255,255,.5)); }
+  50%      { filter: drop-shadow(0 0 9px rgba(255,255,255,.95)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ym-icon-btn#ym-nav-btn { animation: none; filter: drop-shadow(0 0 6px rgba(255,255,255,.7)); }
 }
 .ym-icon-btn#ym-nav-btn:hover { opacity: 1; }
 .ym-icon-btn#ym-nav-btn:active { transform: scale(.92); }

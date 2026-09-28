@@ -1,11 +1,11 @@
 # Aurora Lyrics
 
-> Synced lyrics, artwork tools, themes, and shortcuts for YouTube Music.
+> Synced lyrics, artwork tools, and themes for YouTube Music.
 
 Aurora Lyrics is an MV3 browser extension for YouTube Music that renders
 karaoke-style **synced lyrics** alongside the player, plus a suite of companion
-add-ons (dynamic themes, artwork accent, fullscreen mode, keyboard shortcuts,
-PiP, sleep timer, and smooth motion).
+add-ons (dynamic themes, artwork accent, fullscreen mode, PiP, sleep timer, and
+smooth motion).
 
 ## Features
 
@@ -26,7 +26,6 @@ PiP, sleep timer, and smooth motion).
 - **Companion add-ons** (managed from the in-app marketplace panel):
   - Dynamic theme + Kawarp backdrop
   - Artwork Accent
-  - Keyboard Shortcuts
   - PiP Lyrics
   - Sleep Timer
   - Smooth Motion
@@ -68,7 +67,6 @@ spicy-ytm/
 │   │   ├── spicy-lyrics.js     # Synced Lyrics renderer (main)
 │   │   ├── dynamic.js          # Dynamic theme + Kawarp backdrop
 │   │   ├── artwork-accent.js   # Artwork Accent
-│   │   ├── keyboard-shortcuts.js
 │   │   ├── pip-lyrics.js
 │   │   ├── sleep-timer.js
 │   │   ├── smooth-motion.js

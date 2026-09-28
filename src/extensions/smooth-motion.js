@@ -334,16 +334,20 @@
   function pagesOn() { return settings.master !== false && settings.pages !== false; }
 
   function applySettings(next) {
+    // AJ 2026-09-28: Aurora Flow has no settings UI — every module is always
+    // on. Ignore the incoming `next` and force all gates true so the gates
+    // below (guideOn / pagesOn / etc.) and the root class toggles land in the
+    // enabled state regardless of what content.js sends.
     settings = Object.assign({}, settings, next || {});
-    const master = settings.master !== false;
-    const on = (key) => master && settings[key] !== false;
+    const master = true;
+    const on = (_key) => true;
     const root = document.documentElement;
     root.classList.toggle("ym-sm-on", master);
     root.classList.toggle("ym-sm-guide", on("guide"));
     root.classList.toggle("ym-sm-search", on("search"));
     root.classList.toggle("ym-sm-pages", on("pages"));
     root.classList.toggle("ym-sm-micro", on("micro"));
-    if (settings.guide !== false) syncGuideState();
+    syncGuideState();
     // The video glide belongs to this module too: it is what keeps the player
     // looking right while the panel reflows, and it covers a devtools open or a
     // window resize with the same code. Drop the observer when the module is off.

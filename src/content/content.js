@@ -581,58 +581,79 @@
   const AVAILABLE = [
     {
       id: "ytmod-dynamic",
-      name: "Dynamic",
+      name: "Aurora Bloom",
       author: "Aurora Lyrics",
       category: "Themes",
       stars: 5,
       tags: ["theme", "dynamic", "kawarp", "artwork"],
-      description: "A full-page Kawarp theme that turns the current track artwork into a moving background with transparent navigation, side rail, search header, and glass player controls.",
+      description: "An immersive full-screen theme that turns the playing track into a flowing, full-page backdrop.",
       version: "1.0.0",
-      lastUpdated: "2026-08-20",
+      lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/dynamic.js"),
       settings: [
-        { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 0.78, display: "decimal" },
-        { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.7, display: "decimal" },
+        { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 1.12, display: "decimal" },
+        { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.60, display: "decimal" },
         { key: "blurPasses", label: "Blur passes", min: 2, max: 8, step: 1, default: 6, display: "passes" },
         { key: "warpIntensity", label: "Warp intensity", min: 0.2, max: 1, step: 0.05, default: 1, display: "decimal" },
+        // Music videos don't use Kawarp, so they get their own blurred backdrop
+        // (drawn in spicy-lyrics.js). This slider is SEPARATE from "Brightness"
+        // above (which drives Kawarp) and controls that MV backdrop's brightness.
+        // dev-only (AJ, 2026-09-28). Consumed cross-add-on by Aurora Lyrics.
+        { key: "backdropBrightness", label: "Music video backdrop brightness", min: 0, max: 2.0, step: 0.05, default: 1.15, display: "decimal", dev: true },
+        // Force the animated Kawarp backdrop for EVERY music video, instead of
+        // the duplicated blurred-video backdrop. Off = only still uploads
+        // (Official Audio / Lyric Video) use Kawarp. Consumed by Aurora Lyrics.
+        { key: "preferKawarpAlways", label: "Prefer Kawarp for music videos", type: "toggle", default: false },
       ],
     },
     {
       id: "ytmod-artwork-accent",
-      name: "Artwork Accent",
+      name: "Ambient",
       author: "Aurora Lyrics",
       category: "Themes",
       stars: 5,
       tags: ["artwork", "accent", "dynamic", "theme"],
-      description: "Samples the current cover art and uses its strongest color for the progress bar, volume slider, and toggle controls.",
+      description: "Adds a soft glow around the now-playing artwork and tints the player controls to match.",
       version: "1.0.2",
-      lastUpdated: "2026-08-20",
+      lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/artwork-accent.js"),
-      settings: [
-        { key: "glow", label: "Glow amount", min: 0, max: 1.5, step: 0.05, default: 1, display: "percent" },
-      ],
+      // Glow slider removed from the UI on AJ's call (2026-09-28). The add-on
+      // still ships a glow value internally — DEFAULT_SETTINGS.glow = 1.5
+      // (150%) — so new installs land on a strong glow without exposing the
+      // control. Existing users keep whatever glow they had stored.
+      settings: [],
     },
     {
       id: "ytmod-spicy-lyrics",
-      name: "Synced Lyrics",
-      author: "Spicy Lyrics source (edited)",
+      name: "Aurora Lyrics",
+      author: "Aurora Lyrics",
       category: "Extensions",
       stars: 5,
       tags: ["lyrics", "synced", "karaoke", "ttml"],
-      description: "The edited Spicy Lyrics renderer for YouTube Music: synced TTML and LRCLIB lyrics, karaoke highlighting, background vocals, and temporary or permanent TTML imports. The page-wide Dynamic theme is separate.",
+      description: "Karaoke-style synced lyrics that follow the music line-by-line and word-by-word.",
       version: "0.2.0",
-      lastUpdated: "2026-08-20",
+      lastUpdated: "2026-09-28",
       github: "https://github.com/Spikerko/spicy-lyrics",
       jsUrl: chrome.runtime.getURL("src/extensions/spicy-lyrics.js"),
       settings: [
         // Order is the reading order of the page. Everything WITHOUT `dev: true`
         // shows to everyone; everything with it is hidden until the 6-tap gesture
         // has been used — see visibleSettings(). Keep the non-dev entries first.
-        { key: "size", label: "Lyric size", min: 0.75, max: 3.0, step: 0.05, default: 1.30, display: "percent" },
+        // Lyric size ceiling raised to 600% on AJ's call (2026-09-28); default
+        // bumped to 145% because the 130% default was too small on his main
+        // monitor.
+        { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.45, display: "percent" },
         { key: "romanizationEnabled", label: "Romanization (JP / KR)", type: "toggle", default: true },
         { key: "legibilityBackdrop", label: "Legibility backdrop", type: "toggle", default: false },
+        // Extends the adaptive lyric readability shade (which Video Background
+        // already uses) to the SIDE layout for music videos, where the lyrics
+        // sit over the blurred video backdrop. AJ, 2026-09-28.
+        { key: "mvLyricsShade", label: "Shade lyrics over bright music video", type: "toggle", default: true },
         { type: "header", label: "Scrolling" },
-        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true },
+        // smoothScrolling flipped to OFF (2026-09-28) to match AJ's screenshot
+        // of the default settings: he wants the raw "jump to the active line"
+        // behavior by default. Smooth scroll is still available as an opt-in.
+        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: false },
         { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
         { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
         // ---- developer mode only ------------------------------------------
@@ -642,6 +663,9 @@
         { key: "syllableAnimation", label: "Syllable animation intensity", min: 0, max: 1.5, step: 0.05, default: 1.0, display: "percent", dev: true },
         { key: "verticalAnimation", label: "Vertical animation intensity", min: 0, max: 3, step: 0.05, default: 1.25, display: "percent", dev: true },
         { key: "adaptiveSpacing", label: "Adaptive word spacing", type: "toggle", default: true, dev: true },
+        // NOTE: the MV blurred-backdrop brightness slider lives in AURORA BLOOM
+        // (ytmod-dynamic), not here — that is where the backdrop controls live.
+        // Aurora Lyrics reads it cross-add-on (see handleHostMessage).
         // NOTE: "Vertical position" used to live here. It was removed as a setting
         // on AJ's call (2026-09-26) — the slider is gone and spicy-lyrics.js pins
         // the offset at its -80px default, so a value stored while the slider
@@ -649,39 +673,21 @@
       ],
     },
     {
-      id: "ytmod-keyboard-shortcuts",
-      name: "Keyboard Shortcuts",
-      author: "Aurora Lyrics",
-      category: "Extensions",
-      stars: 5,
-      tags: ["keyboard", "shortcuts", "hotkeys", "productivity"],
-      description: "Page shortcuts for YouTube Music: Alt+L toggles the Synced Lyrics panel, Alt+M opens the Aurora Lyrics Marketplace. Ignored while typing in a field.",
-      version: "0.1.0",
-      lastUpdated: "2026-09-02",
-      jsUrl: chrome.runtime.getURL("src/extensions/keyboard-shortcuts.js"),
-      settings: [
-        { key: "togglePanel", label: "Alt+L — toggle lyrics panel", type: "toggle", default: true },
-        { key: "openMarketplace", label: "Alt+M — open Marketplace", type: "toggle", default: true },
-      ],
-    },
-    {
       id: "ytmod-smooth-motion",
-      name: "Smooth Motion",
+      name: "Aurora Flow",
       author: "Aurora Lyrics",
       category: "Themes",
       stars: 5,
       tags: ["animation", "motion", "transitions", "ui", "smooth"],
-      description: "Adds tasteful motion to YouTube Music: eased left-panel reflow, animated search suggestions, page-change transitions, and micro-interactions. Every module can be toggled independently.",
+      description: "Smooth, fluid animations throughout the interface.",
       version: "1.0.0",
-      lastUpdated: "2026-09-16",
+      lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/smooth-motion.js"),
-      settings: [
-        { key: "master", label: "Enable all motion", type: "toggle", default: true },
-        { key: "guide", label: "Left panel reflow", type: "toggle", default: true },
-        { key: "search", label: "Search suggestions", type: "toggle", default: true },
-        { key: "pages", label: "Page transitions", type: "toggle", default: true },
-        { key: "micro", label: "Micro-interactions", type: "toggle", default: true },
-      ],
+      // Toggles removed on AJ's call (2026-09-28). Aurora Flow is always on;
+      // every module (left panel reflow, search suggestions, page transitions,
+      // micro-interactions) is force-enabled inside smooth-motion.js, so the
+      // settings panel renders empty by design.
+      settings: [],
     },
     {
       id: "ytmod-sleep-timer",
@@ -708,7 +714,7 @@
       category: "Extensions",
       stars: 5,
       tags: ["lyrics", "pip", "picture-in-picture", "always-on-top", "window"],
-      description: "Puts the synced lyrics in a floating always-on-top picture-in-picture window, so you can keep them on screen while you work in another tab. Reads the live lines from Synced Lyrics, with word-level highlighting.",
+      description: "Puts the synced lyrics in a floating always-on-top picture-in-picture window, so you can keep them on screen while you work in another tab. Reads the live lines from Aurora Lyrics, with word-level highlighting.",
       version: "1.0.0",
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/pip-lyrics.js"),
@@ -1346,9 +1352,17 @@
 
     tabsRow.appendChild(toolbar);
 
+    // Hint about the secret 6-tap developer-mode gesture on the Aurora Lyrics
+    // header title. Lives as its own slim bar between the header and the tabs
+    // so it is discoverable without cluttering the header row (AJ 2026-09-28).
+    const devHint = h("div", {
+      class: "ym-dev-hint",
+      text: "Want to change settings for an extension? Click the Aurora Lyrics title 6 times to enable developer mode, 6 times to turn it off.",
+    });
+
     const section = h("div", { class: "ym-section", id: "ym-section" });
 
-    overlay = h("div", { id: "ym-market", class: "hidden" }, header, tabsRow, section);
+    overlay = h("div", { id: "ym-market", class: "hidden" }, header, devHint, tabsRow, section);
     enableMarketplaceDrag(header);
     document.body.appendChild(overlay);
     applyMarketplaceMode(false);

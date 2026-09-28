@@ -9,7 +9,11 @@
 
   const EXT_ID = "ytmod-artwork-accent";
   const FALLBACK_COLOR = "#1DB954";
-  const DEFAULT_SETTINGS = { glow: 1 };
+  // Glow slider removed from the catalog on AJ's call (2026-09-28), so the
+  // value is no longer user-facing — but the runtime default still matters
+  // for new installs (where content.js sends {} and applySettings falls back
+  // here). 1.5 = "150%" on the former percent slider.
+  const DEFAULT_SETTINGS = { glow: 1.5 };
   let style = null;
   let currentAccent = FALLBACK_COLOR;
   let raf = 0;
