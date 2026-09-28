@@ -1631,6 +1631,12 @@
   const UPDATE_RELEASES_URL = "https://github.com/xyrodriv/Aurora-Lyrics-/releases";
   const UPDATE_FETCH_TIMEOUT_MS = 6000;
 
+  // Persistent top-bar banner (the "waiting for update" notice). Separate from
+  // the dismissible popup: this stays until the installed version catches up.
+  let updateIndicatorEl = null;
+  let updateIndicatorPosIv = null;
+  let lastAvailableRelease = null;
+
   // safeStorageSet takes the payload object itself, so the state has to be
   // nested under its key here. Writing it flat silently stored top-level
   // `lastSeenVersion`, which the getter below never read back — every load
@@ -1806,6 +1812,16 @@
     if (!version) return;
     const state = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {};
     const dismissed = Array.isArray(state.dismissed) ? state.dismissed : [];
+    // A pending update is shown as a persistent top-bar banner, separate from
+    // the dismissible popup. It stays until the installed version catches up.
+    if (state.pendingUpdate) {
+      if (compareVersions(state.pendingUpdate, version) > 0) {
+        showUpdateIndicator(state.pendingUpdate);
+      } else {
+        await saveUpdateState(Object.assign({}, state, { pendingUpdate: null, pendingRelease: null }));
+        hideUpdateIndicator();
+      }
+    }
     // console.debug is hidden unless the console filter is set to Verbose, so
     // this stays out of the way for real users but is there when diagnosing.
     console.debug("[Aurora Lyrics] update check: running v" + version +
@@ -1833,12 +1849,27 @@
 
     const now = Date.now();
     if (Number.isFinite(state.lastCheckAt) && now - state.lastCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
-    await saveUpdateState(Object.assign({}, state, { lastCheckAt: now }));
 
     const latest = newestRelease(await readRemoteChangelog());
-    if (!latest) return;
-    if (compareVersions(latest.version, version) <= 0) return;
-    if (dismissed.indexOf(latest.version) !== -1) return;
+    if (!latest) {
+      await saveUpdateState(Object.assign({}, state, { lastCheckAt: now }));
+      return;
+    }
+    if (compareVersions(latest.version, version) <= 0) {
+      await saveUpdateState(Object.assign({}, state, { lastCheckAt: now }));
+      return;
+    }
+    if (dismissed.indexOf(latest.version) !== -1) {
+      await saveUpdateState(Object.assign({}, state, { lastCheckAt: now }));
+      return;
+    }
+    await saveUpdateState(Object.assign({}, state, {
+      lastCheckAt: now,
+      pendingUpdate: latest.version,
+      pendingRelease: latest
+    }));
+    lastAvailableRelease = latest;
+    showUpdateIndicator(latest.version);
     showUpdateModal({
       mode: "available",
       version: latest.version,
@@ -1851,6 +1882,114 @@
         await saveUpdateState(Object.assign({}, s, { dismissed: d }));
       }
     });
+  }
+
+  function showUpdateIndicator(version) {
+    if (updateIndicatorEl) return;
+    const banner = h("div", {
+      class: "ym-upd-banner",
+      role: "status",
+      "aria-label": "A newer version of Aurora Lyrics is available",
+      title: "A newer version of Aurora Lyrics is available - Chrome installs it automatically, or restart Chrome to fetch now"
+    });
+    const logo = h("div", { class: "ym-upd-banner-logo", "aria-hidden": "true" });
+    try {
+      const logoSrc = chrome.runtime.getURL("assets/manifest-logo.webp");
+      const pre = new Image();
+      pre.onload = () => { logo.style.backgroundImage = 'url("' + logoSrc + '")'; };
+      pre.onerror = () => {};
+      pre.src = logoSrc;
+    } catch (_) {}
+    const text = h("div", { class: "ym-upd-banner-text" },
+      h("div", { class: "ym-upd-banner-title", text: "Update available" }),
+      h("div", { class: "ym-upd-banner-sub", text: "v" + version })
+    );
+    banner.appendChild(logo);
+    banner.appendChild(text);
+    const closeBtn = h("button", {
+      class: "ym-upd-banner-close",
+      type: "button",
+      "aria-label": "Dismiss update reminder",
+      title: "Dismiss",
+      text: "×"
+    });
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dismissUpdateIndicator();
+    });
+    banner.appendChild(closeBtn);
+    banner.addEventListener("click", openAvailableFromIndicator);
+    document.body.appendChild(banner);
+    updateIndicatorEl = banner;
+    // The YTM nav bar (and thus #ym-nav-btn) may not be mounted yet when this
+    // fires during boot — runUpdateCheck runs immediately while mountNavButton
+    // retries on an interval. Position now, and retry until the button exists.
+    if (!positionBanner(banner)) {
+      let tries = 0;
+      updateIndicatorPosIv = setInterval(() => {
+        tries++;
+        if (positionBanner(banner) || tries > 40) {
+          clearInterval(updateIndicatorPosIv);
+          updateIndicatorPosIv = null;
+        }
+      }, 300);
+    }
+  }
+
+  // Place the banner just LEFT of the waffle, same height. Returns true once the
+  // nav button is found and positioned, false if it isn't mounted yet.
+  function positionBanner(banner) {
+    const nav = document.getElementById("ym-nav-btn");
+    if (!nav) return false;
+    try {
+      const r = nav.getBoundingClientRect();
+      banner.style.top = Math.round(r.top) + "px";
+      banner.style.right = (window.innerWidth - r.left + 8) + "px";
+      return true;
+    } catch (_) {
+      banner.style.top = "16px";
+      banner.style.right = "16px";
+      return true;
+    }
+  }
+
+  async function openAvailableFromIndicator() {
+    let s = {};
+    try { s = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {}; } catch (_) {}
+    const rel = s.pendingRelease || lastAvailableRelease;
+    if (!rel) return;
+    showUpdateModal({
+      mode: "available",
+      version: rel.version,
+      release: rel,
+      onDismiss: async () => {
+        const cur = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {};
+        const d = Array.isArray(cur.dismissed) ? cur.dismissed : [];
+        if (d.indexOf(rel.version) === -1) d.push(rel.version);
+        if (d.length > 12) d.splice(0, d.length - 12);
+        await saveUpdateState(Object.assign({}, cur, { dismissed: d }));
+      }
+    });
+  }
+
+  function hideUpdateIndicator() {
+    if (updateIndicatorPosIv) { clearInterval(updateIndicatorPosIv); updateIndicatorPosIv = null; }
+    if (updateIndicatorEl && updateIndicatorEl.parentNode) updateIndicatorEl.parentNode.removeChild(updateIndicatorEl);
+    updateIndicatorEl = null;
+  }
+
+  // Dismiss the persistent banner for good: hide it and clear the pending state
+  // (plus record the version as dismissed) so neither the banner nor the modal
+  // re-surfaces for this version on the next load.
+  async function dismissUpdateIndicator() {
+    hideUpdateIndicator();
+    try {
+      const s = (await safeStorageGet(UPDATE_STORAGE_KEY, {})) || {};
+      const d = Array.isArray(s.dismissed) ? s.dismissed : [];
+      if (s.pendingUpdate && d.indexOf(s.pendingUpdate) === -1) d.push(s.pendingUpdate);
+      if (d.length > 12) d.splice(0, d.length - 12);
+      await saveUpdateState(Object.assign({}, s, { pendingUpdate: null, pendingRelease: null, dismissed: d }));
+    } catch (_) {}
   }
 
   /* ---- boot ---- */

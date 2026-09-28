@@ -985,3 +985,52 @@
   .ym-upd-overlay.ym-upd-leaving, .ym-upd-card.ym-upd-leaving { animation: none; }
 }
 
+/* Persistent "update available" banner — sits just LEFT of the waffle in the
+   YT Music top bar. Compact blue→green gradient card. */
+.ym-upd-banner {
+  position: fixed;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 210px;
+  padding: 4px 10px;
+  border: 1px solid rgba(140,230,200,.45);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(74,144,226,.88), rgba(80,227,194,.88));
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  color: #fff;
+  cursor: pointer;
+  animation: ym-upd-banner-in .26s cubic-bezier(.22,.61,.36,1);
+}
+.ym-upd-banner:hover { filter: brightness(1.1); }
+.ym-upd-banner:focus-visible { outline: 2px solid rgba(255,255,255,.6); outline-offset: 2px; }
+.ym-upd-banner-logo {
+  width: 28px; height: 28px; flex: 0 0 auto;
+  border-radius: 7px;
+  background-size: cover; background-position: center;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
+}
+.ym-upd-banner-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.ym-upd-banner-title { font-size: 13px; font-weight: 700; line-height: 1.2; letter-spacing: .01em; }
+.ym-upd-banner-sub { font-size: 11px; font-weight: 600; opacity: .85; }
+.ym-upd-banner-close {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0; padding: 0;
+  border: none; border-radius: 50%;
+  background: rgba(255,255,255,.16);
+  color: #fff;
+  font-size: 15px; line-height: 1;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.ym-upd-banner-close:hover { background: rgba(255,255,255,.3); }
+.ym-upd-banner-close:focus-visible { outline: 2px solid rgba(255,255,255,.7); outline-offset: 1px; }
+@keyframes ym-upd-banner-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .ym-upd-banner { animation: none; }
+}
+
