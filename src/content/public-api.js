@@ -225,7 +225,17 @@
     },
     getPositionMs() {
       const media = findPlaybackMedia();
-      if (media) return media.currentTime * 1000;
+      if (media) {
+        const seconds = media.currentTime;
+        // currentTime is NaN while the media has no metadata yet, and briefly
+        // around a seek or track change. Returning it would hand NaN to the
+        // lyrics animator, which writes it into --gradient-position as "NaN%";
+        // that makes calc() invalid, which invalidates the whole
+        // background-image and paints the glyphs transparent for one frame -
+        // the black flicker. Report "no position" instead so the animator
+        // simply skips the frame.
+        if (Number.isFinite(seconds)) return seconds * 1000;
+      }
       const s = findSeekSlider();
       return s ? sliderToMs(s) : null;
     },
@@ -636,6 +646,12 @@
     addPlayerBarButton,
     bus,
     // Bridge methods (resolved in the content script's isolated world).
+    // saveExtensionSettings lets an add-on persist its OWN settings, for the
+    // controls that live in its UI rather than in the marketplace settings list.
+    // NOTE: content.js only DELIVERS the keys declared in the catalog schema, so
+    // a key an add-on persists this way must still exist there (it can be marked
+    // dev:true to keep it out of the visible settings list).
+    saveExtensionSettings: (id, values) => cmd("saveExtensionSettings", [id, values]),
     openMarketplace: () => cmd("openMarketplace"),
     closeMarketplace: () => cmd("closeMarketplace"),
     install: (id) => cmd("install", [id]),

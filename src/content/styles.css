@@ -9,9 +9,20 @@
      monitor while the type, gutters and 220px card columns stayed desktop-sized,
      so a 1024x600 laptop clipped the cards (AJ's screenshot).
      Driven by vmin because the panel is bounded by the SHORTER axis: a 1024x600
-     laptop is short, not narrow. 16px == the original design (scale 1.0) and it
-     only starts shrinking below ~1600x900, so big monitors are untouched. */
-  --ym-u: clamp(12.5px, 0.85vmin + 8px, 16px);
+     laptop is short, not narrow. 16px == the original design (scale 1.0).
+     GROWTH ON BIG DISPLAYS (AJ, 2026-09-28): the first pass capped this at 16px,
+     which meant every display above ~941px on its short axis — 1080p, 1440p and
+     4K alike — rendered at exactly the original size, so the panel read as small
+     on a big screen (AJ: "a little too small"). The ramp is steeper now and the
+     ceiling is 20px (+25%).
+     The two magic numbers: the ramp gives 13.1px at 1024x600 — UNCHANGED from
+     the first pass, so small displays are untouched — and exactly 20px at
+     1920x1080. The ceiling is `min(20px, 1.95vh - 0.8px)`; the second term is
+     the largest unit whose content still fits the viewport, i.e.
+     (100vh - 40px) / 51.25, using the shell's own height factor. That is what
+     keeps the no-scrolling promise structural rather than lucky: the unit can
+     never grow past the space actually available to it. */
+  --ym-u: clamp(12.5px, 1.4375vmin + 4.5px, min(20px, 1.95vh - 0.8px));
   position: fixed; inset: 0; z-index: 2147483000;
   width: 100%; height: 100%;
   max-width: none; max-height: none;
@@ -1111,15 +1122,21 @@
   font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
 }
 #ym-market.ym-floating {
-  /* Viewport-proportional caps, so the SHELL genuinely shrinks on a small display
-     instead of merely being clamped to it (AJ, 2026-09-28). A first pass used
-     86vw/84vh and that still ate ~88% of a 1024x600 screen: the CONTENTS had
-     scaled but the CARD had not (AJ's screenshot). 72vw == 920px at 1280 wide, so
-     it is simply "the design width, proportional below 1280"; 74vh is the same
-     idea against height (it trims ~2% off a 1080p panel, imperceptible). The
-     calc() pair stays on as the hard gutter floor. */
-  width: min(920px, 72vw, calc(100vw - 40px));
-  height: min(820px, 74vh, calc(100vh - 40px));
+  /* The shell TRACKS --ym-u instead of sitting on its own px caps (AJ,
+     2026-09-28). 57.5 and 51.25 are the design's own ratios — 920/16 and
+     820/16 — so the card is still exactly 920x820 at scale 1.0, and grows or
+     shrinks in lockstep with everything inside it. That lockstep is the point:
+     when the unit grows but the shell does not, the contents overflow and the
+     panel starts scrolling again, which is what the first pass was fixing.
+     72vw stays the width cap — "the design width, proportional below 1280",
+     since 72vw == 920px at 1280 wide. The height cap moves from 74vh to
+     100vh - 40px: on a 1080p display 74vh is only ~799px against ~820px of
+     content, so it was already trimming, and a +25% panel has nowhere to go
+     without it. --ym-u's own ceiling is derived from this same 51.25 factor,
+     so this cap should never actually bind — it is the backstop, not the
+     mechanism. The calc() pair stays on as the hard gutter floor. */
+  width: min(calc(var(--ym-u) * 57.5), 72vw, calc(100vw - 40px));
+  height: min(calc(var(--ym-u) * 51.25), calc(100vh - 40px));
   max-width: calc(100vw - 40px);
   max-height: calc(100vh - 40px);
 }

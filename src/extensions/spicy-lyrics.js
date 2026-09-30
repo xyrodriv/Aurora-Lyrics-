@@ -936,6 +936,17 @@
   }
 
   function getProgress(positionMs, startMs, endMs) {
+    // NaN-safe. Every comparison against NaN is false, so without this guard a
+    // non-finite playhead or span falls straight through to clamp(NaN) = NaN and
+    // gets written into --gradient-position as "NaN%", which invalidates the
+    // whole background-image and blanks the glyph for a frame. See tick().
+    if (
+      !Number.isFinite(positionMs) ||
+      !Number.isFinite(startMs) ||
+      !Number.isFinite(endMs)
+    ) {
+      return 0;
+    }
     if (positionMs <= startMs) return 0;
     if (positionMs >= endMs) return 1;
     return clamp((positionMs - startMs) / (endMs - startMs), 0, 1);
@@ -4241,6 +4252,21 @@
       white-space: pre;
       min-width: 0.3ch;
     }
+    /* Register --gradient-position so a bad write can never blank the fill.
+       As an UNREGISTERED custom property it accepts ANY token, so a bad value
+       stores without complaint and then makes
+       calc(var(--gradient-position) + 20% + var(--gradient-offset)) invalid -
+       which invalidates the whole background-image declaration and paints the
+       glyph transparent for a frame (the black flicker). Registered as a
+       percentage, an out-of-syntax value resolves to the initial value instead
+       of poisoning the gradient. The JS guards its own writes too (see tick());
+       this is the second line of defence.
+       Upstream was developing exactly this: default_backup.css:383. */
+    @property --gradient-position {
+      syntax: "<percentage>";
+      inherits: true;
+      initial-value: -20%;
+    }
     /* Only the leaf text elements (.word/.letter) carry the gradient clip.
        Putting background-clip:text on the .letterGroup wrapper clips its child
        letters to the (empty) wrapper box and makes them vanish once the active
@@ -4249,6 +4275,14 @@
     #ym-sl-panel.SpicyRenderer .line .letter {
       -webkit-text-fill-color: transparent;
       background-clip: text;
+      /* KEEP THIS HINT. It was briefly removed (2026-09-29) on the theory that
+         compositing caused the black flicker. Two things came back from AJ:
+         the flicker did NOT stop, and the animation went visibly chunky -
+         "you can see the pixels its movement and its not smooth like it was".
+         So compositing is REQUIRED for smooth glyph motion, and it is NOT the
+         flicker cause. Do not try to fix the flicker by removing this again.
+         (Upstream keeps the same hint: Mixed.css:37.) */
+      will-change: transform, opacity;
       /* Paint every state with the same gradient-clip technique (only the
          gradient's brightness differs per state). This keeps stroke weight
          identical while a line is Active vs Sung/NotSung; swapping to a solid
@@ -4352,48 +4386,31 @@
     #ym-sl-panel.SpicyRenderer .line.Active .letterGroup { opacity: 1; }
     #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung:not(.letterGroup),
     #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung .letter {
-      /* Always gradient-clip (thin), like the sung/active bg words, so unsung
-         bg words never read bold. The old solid fill here caused the per-word
-         "blink" (thick until sung). Keep them dim + glow-less until sung; the
-         sweep is supplied by the base gradient rule and rests at -20%. */
-      -webkit-text-fill-color: transparent;
-      background-image: linear-gradient(
-        var(--gradient-degrees),
-        rgba(255,255,255,var(--gradient-alpha)) var(--gradient-position),
-        rgba(255,255,255,var(--gradient-alpha-end))
-          calc(var(--gradient-position) + 20% + var(--gradient-offset))
-      );
+      /* Keep unsung bg words dim and glow-less until they are sung; the sweep
+         itself comes from the BASE .word/.letter gradient rule and already
+         rests at -20%.
+         The gradient-clip must NOT be re-declared here. A state-class rule that
+         declares background-image drags that property into the class-toggle
+         invalidation set, and re-rasterising a clipped gradient at the instant
+         the state class flips is what painted the glyphs black for a frame.
+         (AJ: "when a new word plays the last word gets dimmer" - the bg-word
+         flicker.) Only custom properties are set here: the per-frame sweep
+         already animates those without glitching. */
       --gradient-position: -20%;
       --text-shadow-opacity: 0% !important;
     }
-    /* Active background-vocal words must use the same animated gradient as
-       primary words. The resting WordNotSung override above is intentionally
-       limited to the inactive background words.
-
-       Both this rule and the WordNotSung one above MUST exclude .letterGroup via
-       :not(.letterGroup). The base gradient-clip rule deliberately omits
-       .letterGroup (see the note on .word/.letter further up), so a wrapper that
-       receives background-image WITHOUT background-clip:text paints the gradient
-       as a filled rectangle behind its letters instead of clipping it to the
-       glyphs -- the pale box that appeared around long bg-vocal words such as
-       "Keep". The .letter children still get the gradient and they do carry
-       background-clip:text. The wrapper is meant to stay inert, which is also
-       what animateWord() enforces with an inline background-image:none -- but
-       that inline style is powerless against the !important below, so the
-       exclusion has to happen here. */
-    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.Active:not(.letterGroup),
-    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.Active .letter,
-    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordSung:not(.letterGroup),
-    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordSung .letter {
-      background-image: linear-gradient(
-        var(--gradient-degrees),
-        rgba(255,255,255,var(--gradient-alpha)) var(--gradient-position),
-        rgba(255,255,255,var(--gradient-alpha-end))
-          calc(var(--gradient-position) + 20% + var(--gradient-offset))
-      ) !important;
-      -webkit-text-fill-color: transparent !important;
-      color: transparent !important;
-    }
+    /* A rule used to live here that re-declared the gradient-clip for
+       .bg-word.Active and .bg-word.WordSung with !important. It was pure
+       duplication of the base .word/.letter rule - bg words carry BOTH the
+       "word" and "bg-word" classes (see appendWords), so the base rule already
+       paints them - and the duplication WAS the bug: it put background-image
+       into the invalidation set of the Active and WordSung state classes, so
+       every Active-to-Sung flip re-rasterised the clipped gradient and flashed
+       the glyphs black. Removing it leaves the base rule as the single source
+       of the gradient in every state.
+       The :not(.letterGroup) exclusion it needed is no longer required either:
+       the base rule never targets .letterGroup, so a wrapper can only receive a
+       background-image from animateWord()'s inline none, and stays inert. */
     #ym-sl-panel.SpicyRenderer .line.rtl {
       direction: rtl !important;
       transform-origin: right center !important;
@@ -5323,12 +5340,28 @@
   }
 
   function findPlayerVideo() {
+    // NEVER fall back to a document-wide `document.querySelector("video")`.
+    // While fullscreen is open, YTM's video has been reparented into
+    // fsMediaHost — so both container selectors below stop matching, and that
+    // fallback picked up the FIRST <video> in the document instead. On AJ's
+    // Chrome that is another extension's 720x960 element, which reports
+    // videoWidth > 0, so findPlayerVideo() claimed "a video is live" forever
+    // (AJ, 2026-09-28; the trace caught vids[0] as a chrome-extension: source
+    // alongside our own pane node at 0x0).
+    // Consequence of the false positive: syncFsVideoMode() never got past its
+    // `liveVideo && hasAttached` early return, so the MV -> cover-art detach
+    // never ran — no cover card, no Kawarp, and the band never re-anchored.
+    // ORDER MATTERS: our own reparented node first (it is the only candidate
+    // once it is outside ytmusic-player), then YTM's containers for the case
+    // where we do not own a video yet (the cover -> MV attach path).
     const video =
+      (fsSavedVideo && fsSavedVideo.node) ||
       document.querySelector("ytmusic-player video") ||
-      document.querySelector("#movie_player video") ||
-      document.querySelector("video");
+      document.querySelector("#movie_player video");
     // A song with no music video still leaves an empty <video> in the DOM, so
-    // only treat it as real media once it actually has frame dimensions.
+    // only treat it as real media once it actually has frame dimensions. The
+    // trace confirms YTM's recycled element drops to 0x0 on an audio-only
+    // track, and that is exactly what lets the MV -> cover detach fire.
     return video && video.videoWidth > 0 ? video : null;
   }
 
@@ -7112,6 +7145,12 @@
     }
     const img = ensureFsArtImg();
     if (img) setFsArtSrc(img, hi);
+    // The guard above is a ONE-WAY hide (cover-art mode has no other route back
+    // to visible: syncFsVideoMode early-returns once the swap settles, and
+    // awaitFsVideoReady needs a video). Clear it here now that real cover art is
+    // actually in the pane, so a hide that outlived its video cannot strand the
+    // pane blank. Harmless when the pane is already visible.
+    if (fsMediaHost.style.opacity === "0") revealFsMediaPaneNow();
   }
 
   function enterFullscreenMode() {
@@ -11153,11 +11192,36 @@
       const rom = romanize(kanaOnly);
       return rom && rom !== kanaOnly && /[A-Za-z]/.test(rom) ? rom : "";
     };
+    // A line's PLAIN TEXT, with spaces between words.
+    // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
+    // NEXT syllable" (parseTTML infers it from the absence of whitespace between
+    // spans — see the word-scan above), so a space belongs before every syllable
+    // whose PREDECESSOR is not part of a word. The empty join produced
+    // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+    // then rendered as one giant word on the share card. The panel itself never
+    // showed this because it renders from `words`, not from `text` — but `text`
+    // is a published bus field, so every consumer was getting the broken form.
+    const syllablesToText = (syllables) => {
+      const list = syllables || [];
+      let out = "";
+      for (let i = 0; i < list.length; i++) {
+        const prev = list[i - 1];
+        const prevText = prev ? (prev.Text || "") : "";
+        const curText = list[i].Text || "";
+        // Guard against double spaces if a source ever ships the whitespace
+        // inside the syllable text itself.
+        if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
+          out += " ";
+        }
+        out += curText;
+      }
+      return out;
+    };
     (content || []).forEach((line) => {
       const lead = line && line.Lead;
       if (!lead || !lead.Syllables || !lead.Syllables.length) return;
       lines.push({
-        text: lead.Syllables.map((w) => w.Text || "").join(""),
+        text: syllablesToText(lead.Syllables),
         startMs: lead.StartTime * 1000,
         endMs: lead.EndTime * 1000,
         lineTimed: !!line.LineTimed,
@@ -11694,7 +11758,12 @@
      So the hint is applied here, per element, only while its springs are awake,
      and dropped the moment it settles. In steady state a handful of elements on
      the active line carry it instead of the entire song. */
-  const HINT_ON = "transform, opacity";
+  // The hint is declared PERMANENTLY in CSS now (see the .word/.letter rule).
+  // Toggling will-change per word made the background-clip:text layer churn, and
+  // the clip flickers dark every time that layer changes - so this is
+  // deliberately empty and setAnimatingHint() is effectively a no-op. Upstream
+  // does the same (spicy-lyrics Mixed.css:37).
+  const HINT_ON = "";
 
   function setAnimatingHint(element, animating) {
     if (!element) return;
@@ -12059,6 +12128,11 @@
 
   function animate(positionMs) {
     if (!panelVisible || !modelLines.length) return;
+    // Defensive twin of the tick() guard: no non-finite playhead may reach the
+    // animators, whatever the caller. Without this, NaN propagates into
+    // --gradient-position as "NaN%" and blanks the clipped background for a
+    // frame. See the long note in tick().
+    if (!Number.isFinite(positionMs)) return;
     const now = performance.now();
     const deltaTime = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;
@@ -12078,7 +12152,13 @@
     // Pick the active per-track offset slot (video vs. song) based on what is
     // actually playing, then shift the lyric clock without moving the player.
     recomputeActiveOffsetMode(false);
-    const lyricPositionMs = Math.max(0, positionMs - getOffsetForPosition(positionMs));
+    // Math.max(0, NaN) is NaN, NOT 0 - so a non-finite sync offset would poison
+    // the whole frame exactly like a non-finite playhead. Fall back to the
+    // un-offset playhead rather than propagating NaN into --gradient-position.
+    const offsetForPosition = getOffsetForPosition(positionMs);
+    const lyricPositionMs = Number.isFinite(offsetForPosition)
+      ? Math.max(0, positionMs - offsetForPosition)
+      : positionMs;
     const activeIndex = findLineIndexAt(lyricPositionMs);
 
     updateFullscreenGapDimming(lyricPositionMs, activeIndex);
@@ -12251,7 +12331,25 @@
     raf = requestAnimationFrame(tick);
     if (!window.YTMod || !window.YTMod.player) return;
     const position = window.YTMod.player.getPositionMs();
-    if (position != null) animate(position);
+    // Number.isFinite, NOT "!= null". A media element's currentTime reports NaN
+    // in transient states (seeking, metadata not loaded yet, track change), and
+    // NaN != null is TRUE - so the old guard let NaN straight through. A single
+    // NaN frame poisons the whole render:
+    //   getState(NaN, ...)    -> every comparison against NaN is false, so it
+    //                            answers "Active" for EVERY word, and
+    //   getProgress(NaN, ...) -> falls through to clamp(NaN) = NaN, so
+    //   gradient = -20 + 120 * NaN = NaN
+    // and the word is written "--gradient-position: NaN%". A custom property
+    // accepts ANY token, so that stores without complaint - but it makes
+    // calc(NaN% + 20% + 0%) invalid, which invalidates the entire
+    // background-image declaration. The glyph is painted ONLY by that clipped
+    // background (-webkit-text-fill-color is transparent), so it goes fully
+    // transparent for one frame: the black flicker. It lands hardest on the
+    // active line and on bg words because those have their text-shadow faded to
+    // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
+    // springs simply advance on the next good frame. (AJ: "some lines just
+    // flicker black for a very very short time".)
+    if (Number.isFinite(position)) animate(position);
   }
 
   // Track + offset housekeeping used to run inside tick(), so two document-wide

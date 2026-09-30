@@ -239,10 +239,23 @@
       position: relative;
       flex: 1 1 auto;
       min-height: 0;
+      /* border-box is REQUIRED for the padding below to do anything: as a
+         stretched flex item this element defaults to content-box, so padding
+         would be added OUTSIDE the box (past the window edge) instead of
+         insetting the content. */
+      box-sizing: border-box;
       overflow-x: hidden;
       overflow-y: auto;
+      /* Reserve the scrollbar's space explicitly, and keep a generous right
+         inset: the ACTIVE line's glyphs paint PAST the layout box (a transform
+         does not change layout), and overflow-x:hidden clips whatever escapes. */
+      scrollbar-gutter: stable;
+      padding-right: 32px;
       overscroll-behavior: contain;
-      scroll-behavior: auto !important;
+      /* smooth, so the one-shot "auto" writes (smoothScrolling OFF) actually
+         EASE. The per-frame spring writes pass behavior:"instant" to override
+         this, so the two never fight. */
+      scroll-behavior: smooth;
       scroll-snap-type: none;
       overflow-anchor: none;
       scrollbar-width: thin;
@@ -251,9 +264,10 @@
     .ym-pip-jump {
       position: absolute;
       z-index: 5;
-      left: 50%;
+      /* Bottom-LEFT, so it sits to the side of the centred transport controls
+         rather than on top of them. */
+      left: 12px;
       bottom: 12px;
-      transform: translateX(-50%);
       display: none;
       padding: 7px 12px;
       border: 1px solid rgba(255,255,255,.18);
@@ -313,7 +327,29 @@
       text-align: left;
       cursor: pointer;
     }
-    #ym-sl-panel.SpicyRenderer .line.OppositeAligned { text-align: right; }
+    /* A narrow window has to WRAP. The panel lays a line out as a wrapping flex
+       row of .word elements, but that row is only as wide as its CONTENT unless
+       we pin it - so it runs past the edge and .ym-pip-lines (overflow-x:hidden)
+       cuts it off mid-word. Pin the row to the box width, keep wrapping on, and
+       allow a break inside a long word. */
+    #ym-sl-panel.SpicyRenderer .line {
+      width: 100% !important;
+      max-width: 100% !important;
+      flex-wrap: wrap !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
+    }
+    /* Duet lines go on the RIGHT. The panel does this with justify-content:
+       flex-end, but its rule is scoped to .SpicyLyricsScrollContainer.HasDuetLines
+       - a wrapper the PiP does not have - and text-align does NOT move flex
+       items, so duet lines always landed on the left here. Align them directly.
+       NO BACKTICKS IN THIS COMMENT: the CSS lives inside a JS template literal. */
+    #ym-sl-panel.SpicyRenderer .line.OppositeAligned:not(.rtl) {
+      justify-content: flex-end !important;
+      padding-left: 8%;
+      text-align: right;
+      transform-origin: right center;
+    }
     /* Own class: the panel relies on its scroll container plus adaptive spacing
        to fade distant lines, which a small window has no room for. */
     #ym-sl-panel.SpicyRenderer .line.ym-pip-far { opacity: .2 !important; }
@@ -369,6 +405,7 @@
   let lineSets = [];   // animation records, parallel to lineEls
   let kit = null;      // the panel's published animation kit (lyrics:renderer)
   let lastFrameAt = 0;
+  let lastTrackCheckAt = 0;
   let unsubscribe = null;
   let unsubscribeKit = null;
   let unsubscribeSync = null;
@@ -460,7 +497,10 @@
     jump.type = "button";
     jump.setAttribute("aria-label", "Jump to current lyric");
     jump.addEventListener("click", () => jumpToCurrentLyric());
-    linesBox.appendChild(jump);
+    // OVERLAY, not content: appended to the fixed .ym-pip root, NOT to the
+    // scroll box. As a child of .ym-pip-lines it scrolled away with the lyrics
+    // (an absolutely-positioned child of a scroll container scrolls with it).
+    root.appendChild(jump);
     // The PiP uses the same scroll semantics as the main panel. A manual wheel
     // gesture stops the camera spring so it cannot fight the user's scroll.
     linesBox.addEventListener("wheel", () => {
@@ -821,7 +861,36 @@
     });
     content.appendChild(track);
     const footer = buildCreditsFooter();
-    if (footer) content.appendChild(footer);
+    if (footer) {
+      content.appendChild(footer);
+      // Stamp the live glide angle on the fresh pills so they do not flicker at
+      // 0deg for one frame before syncLoop's next tick.
+      stampPipPills(pipSpinDeg());
+    }
+    // The lines have no measurable height until the browser has laid them out,
+    // so a centering pass right now clamps to 0 and then SPRINGS to the real
+    // position - which reads as the lyrics "bouncing" when the window opens.
+    // Re-centre on the next frame, and once more after the window has settled
+    // its size (the OS often restores the previous PiP size just after open).
+    recenterAfterLayout();
+  }
+
+  // Snap (never spring) the camera to the current line once layout is ready.
+  function recenterAfterLayout() {
+    if (!pipWin || pipWin.closed) return;
+    const settle = () => {
+      if (!pipWin || pipWin.closed) return;
+      centerInitialized = false;
+      centerTargetY = null;
+      centerVelocity = 0;
+      const p = player();
+      const pos = p && typeof p.getPositionMs === "function" ? p.getPositionMs() : null;
+      centerOn(activeIndexAt(lyricPositionMs(pos)));
+    };
+    pipWin.requestAnimationFrame(() => {
+      settle();
+      pipWin.requestAnimationFrame(settle);
+    });
   }
 
   function activeIndexAt(posMs) {
@@ -1031,6 +1100,43 @@
     });
   }
 
+  /* ---- credit-pill glow ----------------------------------------------------
+     The panel animates `--ym-sl-pfp-spin` on ITS .ym-sl-uploader-link pills from
+     its own rAF, which only ever queries the MAIN document - so the PiP's copy of
+     the credits pill sat frozen at 0deg. Run the same glide here, on THIS
+     document's pills. Same 4.2s period and ~40fps throttle as spicy-lyrics.js. */
+  const PIP_GLOW_PERIOD_MS = 4200;
+  const PIP_GLOW_MIN_MS = 1000 / 40;
+  let pipGlowClock = 0;
+  let pipGlowLastPaint = -1e9;
+  let pipGlowReduce = false;
+  try {
+    pipGlowReduce = !!(window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  } catch (e) {}
+
+  function pipSpinDeg() {
+    return (pipGlowClock / PIP_GLOW_PERIOD_MS * 360) % 360;
+  }
+
+  function stampPipPills(deg) {
+    if (!pipDoc) return;
+    const v = (+deg).toFixed(2) + "deg";
+    const pills = pipDoc.querySelectorAll(".ym-sl-uploader-link");
+    for (let i = 0; i < pills.length; i++) {
+      pills[i].style.setProperty("--ym-sl-pfp-spin", v);
+    }
+  }
+
+  function stepPipGlow(dtMs) {
+    if (!pipDoc) return;
+    if (pipGlowReduce) { stampPipPills(0); return; }
+    pipGlowClock += dtMs;
+    if (pipGlowClock - pipGlowLastPaint < PIP_GLOW_MIN_MS) return;
+    pipGlowLastPaint = pipGlowClock;
+    stampPipPills(pipSpinDeg());
+  }
+
   function syncLoop() {
     if (!pipWin || pipWin.closed) { stopSync(); return; }
     rafId = pipWin.requestAnimationFrame(syncLoop);
@@ -1042,6 +1148,26 @@
     const dt = lastFrameAt ? Math.min(0.05, (now - lastFrameAt) / 1000) : 0.016;
     lastFrameAt = now;
     const pos = p.getPositionMs ? p.getPositionMs() : null;
+    // Track changed under us: NEVER keep showing the PREVIOUS song's lyrics.
+    // The panel republishes lyrics:lines when the new lyrics land, but until
+    // then the PiP happily displays the old ones ("it just plays what it was
+    // on"). Re-pull the latest published payload; if that is still the old
+    // track, clear to the loading hint rather than lie about the song.
+    if (now - lastTrackCheckAt > 500) {
+      lastTrackCheckAt = now;
+      const t = p.getTrack ? p.getTrack() : null;
+      const vid = t && t.videoId ? String(t.videoId) : null;
+      if (vid && linesVideoId && vid !== linesVideoId) {
+        const cached = (window.YTMod && window.YTMod.bus) ? window.YTMod.bus.last("lyrics:lines") : null;
+        if (cached && cached.videoId && String(cached.videoId) === vid) {
+          onLines(cached);
+        } else {
+          lines = [];
+          linesVideoId = vid;
+          buildLinesBox();
+        }
+      }
+    }
     // The synced tab shifts the lyric clock by the sync offset; the PiP must do
     // the same or every line/word lands that offset early. Mirror the panel's
     // animate(): lyricPositionMs = positionMs - getOffsetForPosition(positionMs).
@@ -1059,6 +1185,8 @@
     }
     updateManualScrollRecovery(idx);
     stepCenterSpring(dt);
+    // Glide the credits pill's seam (the panel's own rAF cannot see this doc).
+    stepPipGlow(dt * 1000);
     // The panel evaluates every model line from its own StartTime/EndTime each
     // frame. Do the same here: background-vocal intervals are independent of
     // their lead line, and a late bg must keep filling while the next lead is
@@ -1183,25 +1311,30 @@
   }
 
   function jumpToCurrentLyric() {
-    const p = player();
-    const pos = p && typeof p.getPositionMs === "function" ? p.getPositionMs() : null;
-    const lyricPos = lyricPositionMs(pos);
-    const activeIdx = activeIndexAt(lyricPos);
-    if (activeIdx < 0) return;
+    // Target the line the camera is GLIDING toward (the scroll-lead line), which
+    // is what the main panel targets too. Centring the line being SUNG instead
+    // fights the very next frame's retarget back to the lead line, so the jump
+    // lands short and then drifts - the "jump to current doesn't work" bug.
+    const idx = lastRenderedTarget >= 0 ? lastRenderedTarget : lastRenderedActive;
+    if (idx < 0) return;
     pipManualScrollPaused = false;
     pipManualScrollWasAway = false;
     centerTargetY = null;
     centerVelocity = 0;
-    centerInitialized = false;
-    centerOn(activeIdx);
+    centerInitialized = false; // snap, do not glide
+    centerOn(idx);
     setJumpVisible(false);
   }
 
-  function writeCameraScroll(box, top) {
+  function writeCameraScroll(box, top, instant) {
     if (!box) return;
-    // Explicit instant is important even though CSS says auto: it prevents a
-    // browser-native scroll animation from competing with our JS spring.
-    try { box.scrollTo({ top, left: 0, behavior: "instant" }); }
+    // `instant` (the default) is the PER-FRAME spring writer: it must not kick
+    // off a browser-native eased scroll that would fight the spring. Passing
+    // instant === false is the ONE-SHOT path, handed to the element's own CSS
+    // scroll-behavior (smooth) - used when smoothScrolling is OFF, mirroring the
+    // main panel's writeScrollTop(top, false).
+    const behavior = instant === false ? "auto" : "instant";
+    try { box.scrollTo({ top, left: 0, behavior }); }
     catch (e) { box.scrollTop = top; }
   }
 
@@ -1221,6 +1354,10 @@
       return;
     }
     centerTargetY = clamped;
+    // smoothScrolling OFF: hand the move to the element's own CSS ease, ONCE per
+    // target change (stepCenterSpring then does nothing). Without this the PiP
+    // wrote the new scrollTop instantly every frame and had NO scroll animation.
+    if (!smoothScrolling) writeCameraScroll(box, clamped, false);
   }
 
   function updateManualScrollRecovery(activeIdx) {
@@ -1256,9 +1393,8 @@
     const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
     centerTargetY = Math.max(0, Math.min(maxScroll, centerTargetY));
     if (!smoothScrolling) {
-      centerY = centerTargetY;
-      centerVelocity = 0;
-      writeCameraScroll(box, centerY);
+      // The one-shot CSS ease issued by centerOn() owns this move. Writing per
+      // frame here is what left the PiP with NO scroll animation at all.
       return;
     }
     // Keep the camera's fractional position in JS. Reading scrollTop back on

@@ -724,10 +724,77 @@
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/pip-lyrics.js"),
       art: { video: "assets/art/pip-lyrics.mp4", poster: "assets/art/pip-lyrics.jpg" },
+      // Settings removed on AJ's call (2026-09-29): the add-on's own defaults
+      // (DEFAULTS = { master: true, showTransport: true }) are what we want, and
+      // an empty array renders NO Settings section at all (same as Ambient).
+      settings: [],
+    },
+    {
+      id: "ytmod-share-lyric",
+      name: "Share a Lyric",
+      author: "Aurora Lyrics",
+      category: "Extensions",
+      stars: 5,
+      tags: ["lyrics", "share", "image", "export", "png"],
+      description: "Turns the line you are on into a square image you can post anywhere - the lyric, the artwork and the track, drawn on your own machine. Nothing is uploaded.",
+      version: "1.0.0",
+      lastUpdated: "2026-09-28",
+      jsUrl: chrome.runtime.getURL("src/extensions/share-lyric.js"),
+      // Showcase clip, recorded by the add-on itself (3:4, Kawarp backdrop). The
+      // poster is optional: without it the sheet falls back to the card's thumb
+      // and the grid to the category gradient.
+      art: { video: "assets/art/share-lyric.mp4" },
       settings: [
-        { key: "master", label: "Enable PiP lyrics", type: "toggle", default: true },
-        { key: "showTransport", label: "Show play / previous / next in the window", type: "toggle", default: true },
+        { key: "showArt", label: "Show the artwork on the card", type: "toggle", default: true },
+        { key: "showTrackInfo", label: "Show the track name and artist", type: "toggle", default: true },
+        { key: "showTimestamp", label: "Show the lyric timestamp on the card", type: "toggle", default: true },
+        // These two are driven by the toggles in the share preview popup, not by
+        // the settings list. `dev: true` keeps them out of the visible list while
+        // leaving them IN the schema — which is what makes them persist and be
+        // delivered, since content.js only sends keys it declares here.
+        { key: "portrait", label: "3:4 portrait card", type: "toggle", default: false, dev: true },
+        { key: "video", label: "4-second video export", type: "toggle", default: false, dev: true },
       ],
+    },
+    {
+      id: "ytmod-next-up",
+      name: "Next Up",
+      author: "Aurora Lyrics",
+      category: "Extensions",
+      stars: 5,
+      tags: ["queue", "next", "up-next", "pill", "playback"],
+      description: "Shows what is playing next in a small pill beside the artwork, so you can see it without opening the queue. Click the pill to skip straight to that track.",
+      version: "1.0.0",
+      lastUpdated: "2026-09-28",
+      jsUrl: chrome.runtime.getURL("src/extensions/next-up.js"),
+      // Still-only art: the 3:4 card exported from the preview page
+      // (DEVELOPERS/previews/next-up.html, --layout player).
+      art: { image: "assets/art/next-up.png" },
+      settings: [
+        { key: "showArt", label: "Show the cover art in the pill", type: "toggle", default: true },
+        { key: "alignRight", label: "Put the pill on the right instead of the left", type: "toggle", default: false },
+        // Off by default: it repaints every frame while the pill is visible.
+        { key: "smoothGlow", label: "Smooth glow (60fps)", type: "toggle", default: false },
+      ],
+    },
+    {
+      id: "ytmod-song-notes",
+      name: "Song Notes",
+      author: "Aurora Lyrics",
+      category: "Extensions",
+      stars: 5,
+      tags: ["notes", "memo", "per-song", "utility"],
+      description: "Save plain-text notes for any song and read them back the next time it plays. Notes are stored in your browser, keyed to the video, and the button shows a dot when the current song has one.",
+      version: "1.0.0",
+      lastUpdated: "2026-09-29",
+      jsUrl: chrome.runtime.getURL("src/extensions/song-notes.js"),
+      // Still-only art (like Sleep Timer): the 3:4 Kawarp card exported from the
+      // preview page. Paths are extension-relative and assets/art/* is already
+      // covered by web_accessible_resources.
+      art: { image: "assets/art/song-notes.png" },
+      // No settings: the add-on is a single button plus its own popup, and empty
+      // settings render no Settings section at all (same as Ambient / Sleep Timer).
+      settings: [],
     },
   ];
   const findAvail = (id) => AVAILABLE.find((a) => a.id === id);
@@ -1311,6 +1378,7 @@
           case "closeMarketplace": closeMarketplace(); r = true; break;
           case "install": await install(args[0]); r = true; break;
           case "setExtensionEnabled": await setEnabled(args[0], args[1]); r = true; break;
+          case "saveExtensionSettings": await saveExtensionSettings(args[0], args[1]); r = true; break;
           case "getRegistry": r = await getReg(); break;
           case "getAvailable": r = AVAILABLE.slice(); break;
           case "registerExtension": r = await registerExtension(args[0]); break;
@@ -1762,58 +1830,76 @@
     const fallback = thumbArt(card || sheetCard);
     let videoReady = null; // resolves when the sheet video is on the right frame
     // Never let a still inherit the previous add-on's video frame: drop any
-    // leftover <video> AND reset the poster background before painting (AJ, 2026-09-28).
+    // leftover <video> from BOTH the poster and the blurred cover before painting
+    // (AJ, 2026-09-28; cover-video cleanup added 2026-09-29).
     sheetPoster.querySelectorAll("video").forEach((v) => { try { v.pause(); } catch (_) {} v.remove(); });
+    sheetCover.querySelectorAll("video").forEach((v) => { try { v.pause(); } catch (_) {} v.remove(); });
     sheetPoster.replaceChildren();
     sheetPoster.style.backgroundImage = "";
+    sheetCover.style.backgroundImage = "";
     if (a.video) {
       // No `controls` at all (AJ, 2026-09-28) — no scrubber, no pause. Muted +
       // playsinline so it autoplays; disablepictureinpicture kills the PiP button.
-      const v = h("video", {
-        class: "ym-sheet-video",
-        src: extArtUrl(a.video),
-        loop: "",
-        playsinline: "",
-        autoplay: "",
-        muted: "",
-        disablepictureinpicture: "",
-        controlslist: "nodownload noplaybackrate",
-      });
-      v.muted = true; // the attribute alone does not always satisfy the autoplay policy
-      // Pin the size INLINE as well as in CSS: for one frame before the stylesheet
-      // applies, a <video> lays out at its INTRINSIC 720×960, which read as "the
-      // vid gets big then snaps back to normal" (AJ, 2026-09-28).
-      v.style.position = "absolute";
-      v.style.inset = "0";
-      v.style.width = "100%";
-      v.style.height = "100%";
-      v.style.objectFit = "cover";
-      v.style.opacity = "0"; // hidden until it sits on the list loop's frame
       const srcVid = card && card.querySelector(".ym-thumb-video");
-      // Resolve once the video is on the SAME frame as the list loop. We AWAIT this
-      // before the morph, so the poster never paints frame 1 first and there is no
-      // still-frame gap either (AJ, 2026-09-28).
-      videoReady = new Promise((resolve) => {
-        let done = false;
-        const finish = () => { if (done) return; done = true; v.style.opacity = ""; resolve(); };
-        const syncTime = () => {
-          if (!srcVid) { finish(); return; }
-          const t = srcVid.currentTime;
-          if (isFinite(t) && t > 0) {
-            try { v.currentTime = t; } catch (_) { finish(); return; }
-            v.addEventListener("seeked", finish, { once: true });
-            return;
-          }
-          finish();
-        };
-        if (v.readyState >= 1) syncTime();
-        else v.addEventListener("loadedmetadata", syncTime, { once: true });
-        window.setTimeout(finish, 400); // never hang the morph
-      });
-      sheetPoster.appendChild(v);
+      // One sharp copy in the 3:4 poster, one blurred copy in the full-bleed cover.
+      // The cover copy is what makes the background SAMPLE THE LIVE VIDEO (AJ,
+      // 2026-09-29): Share-a-Lyric ships no poster image, so before this its
+      // sheetCover fell back to a plain category gradient — the user reported the
+      // background "doesn't sample the video like the other extensions do". Mounting
+      // the same loop into the cover (already blurred + inset:-70px by .ym-sheet-cover)
+      // fixes it and upgrades every video add-on's backdrop from a static poster
+      // still to the live loop.
+      const buildSheetVideo = () => {
+        const el = h("video", {
+          class: "ym-sheet-video",
+          src: extArtUrl(a.video),
+          loop: "",
+          playsinline: "",
+          autoplay: "",
+          muted: "",
+          disablepictureinpicture: "",
+          controlslist: "nodownload noplaybackrate",
+        });
+        el.muted = true; // the attribute alone does not always satisfy the autoplay policy
+        // Pin the size INLINE as well as in CSS: for one frame before the stylesheet
+        // applies, a <video> lays out at its INTRINSIC 720×960, which read as "the
+        // vid gets big then snaps back to normal" (AJ, 2026-09-28).
+        el.style.position = "absolute";
+        el.style.inset = "0";
+        el.style.width = "100%";
+        el.style.height = "100%";
+        el.style.objectFit = "cover";
+        el.style.opacity = "0"; // hidden until it sits on the list loop's frame
+        return el;
+      };
+      const vp = buildSheetVideo(); // sharp, in the poster
+      const vc = buildSheetVideo(); // blurred, in the cover backdrop
+      sheetPoster.appendChild(vp);
+      sheetCover.appendChild(vc);
       const poster = extArtUrl(a.image || a.poster);
       sheetPoster.style.backgroundImage = poster ? 'url("' + poster + '")' : "";
-      sheetCover.style.backgroundImage = poster ? 'url("' + poster + '")' : fallback;
+      sheetCover.style.backgroundImage = ""; // the cover video shows through
+      // Resolve once BOTH sheet videos sit on the SAME frame as the list loop. We
+      // AWAIT this before the morph, so neither the poster nor the cover paints
+      // frame 1 first and there is no still-frame gap (AJ, 2026-09-28).
+      videoReady = new Promise((resolve) => {
+        let done = false, pending = 2;
+        const finish = () => { if (done) return; done = true; vp.style.opacity = ""; vc.style.opacity = ""; resolve(); };
+        const onSeeked = () => { if (--pending <= 0) finish(); };
+        const syncOne = (el) => {
+          if (!srcVid) { onSeeked(); return; }
+          const t = srcVid.currentTime;
+          if (isFinite(t) && t > 0) {
+            try { el.currentTime = t; } catch (_) { onSeeked(); return; }
+            el.addEventListener("seeked", onSeeked, { once: true });
+            return;
+          }
+          onSeeked();
+        };
+        const onReady = (el) => { if (el.readyState >= 1) syncOne(el); else el.addEventListener("loadedmetadata", () => syncOne(el), { once: true }); };
+        onReady(vp); onReady(vc);
+        window.setTimeout(finish, 400); // never hang the morph
+      });
     } else if (a.image || a.poster) {
       // A still. extArtUrl() returns a BARE url, which is an invalid
       // background-image value and paints nothing — that blanked the Sleep Timer
@@ -1923,6 +2009,7 @@
     cancelSheetAnims();
     // Hand the time back to the list loop so it resumes where the sheet left off.
     const sv = sheetPoster && sheetPoster.querySelector("video");
+    const cv = sheetCover && sheetCover.querySelector("video");
     const thumbVid = sheetCard && sheetCard.querySelector(".ym-thumb-video");
     if (thumbVid) {
       // The time was already handed over in closeDetail() (at close start); just
@@ -1931,6 +2018,7 @@
     }
     if (sheetCard) sheetCard.classList.remove("is-open");
     if (sv) { try { sv.pause(); } catch (_) {} }
+    if (cv) { try { cv.pause(); } catch (_) {} cv.remove(); }
     if (sheetPoster) sheetPoster.replaceChildren();
     sheetEl.classList.remove("open");
     sheetOpen = false;
@@ -1946,7 +2034,7 @@
     // Hand the sheet video's time to the list loop NOW, so by the time the morph
     // ends and the loop is revealed it is already in sync — otherwise it briefly
     // shows its old frame first (AJ, 2026-09-28).
-    const sheetVid = sheetPoster && sheetPoster.querySelector("video");
+    const sheetVid = (sheetPoster && sheetPoster.querySelector("video")) || (sheetCover && sheetCover.querySelector("video"));
     const thumbVid = card && card.querySelector(".ym-thumb-video");
     if (sheetVid && thumbVid && isFinite(sheetVid.currentTime)) {
       try { thumbVid.currentTime = sheetVid.currentTime; } catch (_) {}
