@@ -57,16 +57,20 @@ YTMod-compatible marketplace.
 ## Project structure
 
 ```
-spicy-ytm/
+Aurora Lyrics/
 ├── manifest.json              # MV3 extension manifest (name, permissions, hosts)
 ├── LICENSE                    # GNU AGPL-3.0
+├── scripts/
+│   └── build-aurora-lyrics.mjs # concatenates the fragments below into the injected script
 ├── src/
+│   ├── spicy-lyrics/          # SOURCE fragments for the renderer (edit these)
+│   │   └── NN-*.jsfrag        #   01-bootstrap … 21-onboarding, concatenated in order
 │   ├── content/               # Isolated-world injector + marketplace UI
 │   │   ├── content.js         # Bootstraps the add-on registry + marketplace panel
 │   │   ├── public-api.js      # window.YTMod bridge (player, bus, lyric helpers)
 │   │   └── styles.css         # Marketplace + Support overlay styles
 │   ├── extensions/            # Individual add-ons (web_accessible_resources)
-│   │   ├── spicy-lyrics.js     # Synced Lyrics renderer (main)
+│   │   ├── aurora-lyrics.js     # GENERATED from src/aurora-lyrics/ — do not edit
 │   │   ├── dynamic.js          # Dynamic theme + Kawarp backdrop
 │   │   ├── artwork-accent.js   # Artwork Accent
 │   │   ├── pip-lyrics.js
@@ -81,7 +85,17 @@ spicy-ytm/
 
 ## Development
 
-There is no build step — the source is plain JavaScript and CSS.
+The synced-lyrics renderer is assembled from ordered fragments. Edit the
+numbered files in `src/aurora-lyrics/` (`01-bootstrap.jsfrag` …
+`21-onboarding.jsfrag`) and rebuild the injected script:
+
+```sh
+node scripts/build-aurora-lyrics.mjs          # writes src/extensions/aurora-lyrics.js
+node scripts/build-aurora-lyrics.mjs --check  # fails if the built file is stale
+```
+
+**Never edit `src/extensions/aurora-lyrics.js` directly — it is generated.** The
+rest of the source is plain JavaScript and CSS with no build step.
 
 - `src/content/content.js` and `src/content/public-api.js` are
   `web_accessible_resources` and hot-reload on a YouTube Music tab reload.
@@ -91,14 +105,21 @@ There is no build step — the source is plain JavaScript and CSS.
   those files, run `node --check <file>` before committing — an unescaped
   backtick there terminates the literal early and silently breaks the script.
 
-## License
+## License and attribution
 
 Licensed under the **GNU Affero General Public License v3.0** — see
 [`LICENSE`](./LICENSE).
 
-Aurora Lyrics is a focused adaptation of the original **Spicy Lyrics** Syllable
-renderer by **Spikerko**, which is AGPL-3.0 licensed. That license and
-attribution must be preserved when distributing adapted builds.
+**Aurora Lyrics is an unofficial project.** It is a focused adaptation of the
+original **Spicy Lyrics** Syllable renderer by **Spikerko** (AGPL-3.0), and it
+uses the **Spicy Lyrics API** to fetch community syncs. It is **not made,
+endorsed, or supported by Spicy Lyrics** or by Spikerko, and it is not
+affiliated with either. The upstream license and attribution must be preserved
+when distributing adapted builds.
+
+Lyrics fetched through the Spicy Lyrics API are credited on screen, in the
+lyrics panel, from the `source` field of each response — the provider is always
+named, and community syncs name and link the uploader and the maker.
 
 ## Support
 

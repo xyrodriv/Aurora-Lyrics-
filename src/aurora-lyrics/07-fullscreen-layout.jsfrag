@@ -1,0 +1,611 @@
+  function findPlayerVideo() {
+    // NEVER fall back to a document-wide `document.querySelector("video")`.
+    // While fullscreen is open, YTM's video has been reparented into
+    // fsMediaHost — so both container selectors below stop matching, and that
+    // fallback picked up the FIRST <video> in the document instead. On AJ's
+    // Chrome that is another extension's 720x960 element, which reports
+    // videoWidth > 0, so findPlayerVideo() claimed "a video is live" forever
+    // (AJ, 2026-09-28; the trace caught vids[0] as a chrome-extension: source
+    // alongside our own pane node at 0x0).
+    // Consequence of the false positive: syncFsVideoMode() never got past its
+    // `liveVideo && hasAttached` early return, so the MV -> cover-art detach
+    // never ran — no cover card, no Kawarp, and the band never re-anchored.
+    // ORDER MATTERS: our own reparented node first (it is the only candidate
+    // once it is outside ytmusic-player), then YTM's containers for the case
+    // where we do not own a video yet (the cover -> MV attach path).
+    const video =
+      (fsSavedVideo && fsSavedVideo.node) ||
+      document.querySelector("ytmusic-player video") ||
+      document.querySelector("#movie_player video");
+    // A song with no music video still leaves an empty <video> in the DOM, so
+    // only treat it as real media once it actually has frame dimensions. The
+    // trace confirms YTM's recycled element drops to 0x0 on an audio-only
+    // track, and that is exactly what lets the MV -> cover detach fire.
+    return video && video.videoWidth > 0 ? video : null;
+  }
+
+  // Bump a YouTube image CDN URL to a larger size so the cover art fills the
+  // fullscreen pane crisply instead of rendering as a tiny thumbnail. The CDN
+  // accepts a trailing =wWIDTH-hHEIGHT hint and resizes server-side.
+  function hiResArt(url) {
+    if (!url || typeof url !== "string") return url;
+    if (/=w\d+(-h\d+)?/.test(url)) return url.replace(/=w\d+(-h\d+)?/, "=w1024-h1024");
+    return url + "=w1024-h1024";
+  }
+
+  function setFullscreenLyricsShadeTarget(target) {
+    // Do not smooth this in JavaScript. The CSS opacity transition already
+    // provides a short visual fade, while assigning the sampled value directly
+    // prevents the old brightness sample from keeping a stale black gradient
+    // visible after the video has returned to a dark or colorful frame.
+    fsLyricsShadeTarget = Math.max(0, Math.min(0.9, target));
+    fsLyricsShadeLevel = fsLyricsShadeTarget;
+    if (fsOverlay) {
+      const opacity = fsLyricsShadeLevel.toFixed(3);
+      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", opacity);
+      if (fsLyricsShade) fsLyricsShade.style.opacity = opacity;
+    }
+  }
+
+  // Count "bright" pixels of ANY hue, not just near-white.
+  // Perceptual luma weights green heavily (0.7152), so a vivid red scores only
+  // ~54 and a vivid blue ~18 — both would be missed by a luma test even though
+  // they wash out lyric text just as badly as white. HSV value (the max RGB
+  // channel) treats saturated bright colours and near-white the same way, which
+  // is the behaviour that actually protects readability.
+  function getBrightResponse(pixels) {
+    const BRIGHT_CHANNEL = 190;
+    let bright = 0;
+    let count = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const red = pixels[i];
+      const green = pixels[i + 1];
+      const blue = pixels[i + 2];
+      const max = red > green ? (red > blue ? red : blue) : (green > blue ? green : blue);
+      if (max > BRIGHT_CHANNEL) bright++;
+      count++;
+    }
+    return count ? bright / count : 0;
+  }
+
+  function applyFullscreenShadePixels(pixels, shadeAllowed) {
+    const response = getBrightResponse(pixels);
+    // Bright colours are far more common than near-white, so require a slightly
+    // larger share of the panel before the gradient starts, then ramp to full.
+    // Skipped when the lyrics are hidden/dimmed — the sample is then only
+    // feeding the controls scrim below.
+    if (shadeAllowed !== false) {
+      const target = Math.max(0, Math.min(1, (response - 0.2) / 0.45)) * 0.9;
+      setFullscreenLyricsShadeTarget(target);
+    }
+    setFullscreenBrightVideo(response);
+  }
+
+  // Toggle the controls scrim with hysteresis: ON above 0.5 bright-pixel share,
+  // OFF below 0.38. The gap keeps a video that sits near the threshold from
+  // flickering the scrim on and off every sample.
+  function setFullscreenBrightVideo(response) {
+    // The scrim is a Video Background thing only; ignore samples that were
+    // taken purely for the MV side-layout lyric shade.
+    if (fsLayoutMode !== "background") { clearFullscreenBrightVideo(); return; }
+    let on = fsBrightVideo;
+    if (!on && response > 0.5) on = true;
+    else if (on && response < 0.38) on = false;
+    if (on === fsBrightVideo) return;
+    fsBrightVideo = on;
+    if (fsOverlay) fsOverlay.classList.toggle("ym-sl-fs-bright-video", on);
+  }
+
+  function clearFullscreenBrightVideo() {
+    if (!fsBrightVideo) return;
+    fsBrightVideo = false;
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-bright-video");
+  }
+
+  // Opt-in MV lyric shade: a class on the overlay turns the readability shade
+  // on in the SIDE layout too (see the .ym-sl-fs-mv-shade CSS rule). No-op
+  // before the overlay exists; applyFullscreenLayout() re-syncs it on entry.
+  function syncFsMvShadeClass() {
+    if (!fsOverlay) return;
+    fsOverlay.classList.toggle("ym-sl-fs-mv-shade", !!currentSettings.mvLyricsShade);
+  }
+
+  // True when the current layout should run the adaptive lyric shade: always in
+  // Video Background, plus the SIDE layout for music videos when the opt-in
+  // mvLyricsShade setting is on. Shared by the sampler and applyFullscreenLayout.
+  function fsShadeLayoutActive() {
+    if (fsLayoutMode === "background") return true;
+    return !!currentSettings.mvLyricsShade && fsLayoutMode === "side" && hasFsVideo();
+  }
+
+  // Map the on-screen lyric band to sample-canvas coordinates.
+  // The <video> fills the overlay and paints with object-fit: cover (changed
+  // from contain on 2026-09-27 so the fullscreen MV pane no longer shows the
+  // two black letterbox bands). Cover means the frame OVERFLOWS the overlay
+  // instead of being letterboxed, so the scale factor is max() rather than
+  // min() and the horizontal offset is negative. Sampling the raw frame by
+  // screen percentage alone still drifts whenever the video aspect differs
+  // from the overlay's, so convert the screen band (53%..100%, full height)
+  // into frame pixels first, then scale into the canvas, which always holds
+  // the whole frame.
+  function getShadeSampleRect() {
+    const fallback = { x: FS_SHADE_SAMPLE_X, y: 0, w: FS_SHADE_SAMPLE_SW, h: FS_SHADE_SAMPLE_H };
+    // MV side layout: the lyrics sit over the AMBIENT CANVAS, which is a
+    // full-stretch copy of the frame (drawBgFrame draws it to fill the canvas),
+    // so screen x% maps straight to frame x%. The cover math below assumes the
+    // video fills the overlay, which is only true in Video Background — use the
+    // raw 53%..100% band here.
+    if (fsLayoutMode !== "background") return fallback;
+    const video = fsSavedVideo && fsSavedVideo.node;
+    if (!fsOverlay || !video || !video.videoWidth || !video.videoHeight) return fallback;
+    const overlayW = fsOverlay.clientWidth;
+    const overlayH = fsOverlay.clientHeight;
+    if (!overlayW || !overlayH) return fallback;
+
+    // cover: the frame is scaled until it covers the overlay on both axes, so
+    // the larger ratio wins and at least one axis overflows.
+    const scale = Math.max(overlayW / video.videoWidth, overlayH / video.videoHeight);
+    if (!(scale > 0)) return fallback;
+    const contentW = video.videoWidth * scale;
+    const offsetX = (overlayW - contentW) / 2;
+
+    // Frame pixels covered by the on-screen lyric band.
+    const fx0 = Math.max(0, Math.min(video.videoWidth, (overlayW * FS_SHADE_REGION_LEFT - offsetX) / scale));
+    const fx1 = Math.max(0, Math.min(video.videoWidth, (overlayW - offsetX) / scale));
+    if (fx1 <= fx0) return fallback;
+
+    // Frame pixels -> canvas pixels (canvas is the whole frame, stretched).
+    const sx = Math.floor((fx0 / video.videoWidth) * FS_SHADE_SAMPLE_W);
+    const ex = Math.ceil((fx1 / video.videoWidth) * FS_SHADE_SAMPLE_W);
+    const x = Math.max(0, Math.min(FS_SHADE_SAMPLE_W - 1, sx));
+    const w = Math.max(1, Math.min(FS_SHADE_SAMPLE_W - x, ex - x));
+    // Full height: the lyric band runs bottom to top.
+    return { x, y: 0, w, h: FS_SHADE_SAMPLE_H };
+  }
+
+  function ensureFullscreenShadeCapture() {
+    const video = fsSavedVideo && fsSavedVideo.node;
+    if (!video || fsLyricsShadeStream || typeof video.captureStream !== "function") return false;
+    try {
+      fsLyricsShadeStream = video.captureStream();
+      fsLyricsShadeTrack = fsLyricsShadeStream.getVideoTracks()[0] || null;
+      if (!fsLyricsShadeTrack) return false;
+      if (typeof MediaStreamTrackProcessor === "function") {
+        fsLyricsShadeReader = new MediaStreamTrackProcessor({ track: fsLyricsShadeTrack }).readable.getReader();
+      }
+      if (typeof ImageCapture === "function") fsLyricsShadeCapture = new ImageCapture(fsLyricsShadeTrack);
+      return !!(fsLyricsShadeReader || fsLyricsShadeCapture);
+    } catch (_) {
+      fsLyricsShadeReader = null;
+      fsLyricsShadeCapture = null;
+      fsLyricsShadeTrack = null;
+      fsLyricsShadeStream = null;
+      return false;
+    }
+  }
+
+  async function sampleFullscreenLyricsBrightness() {
+    if (fsLyricsShadeSampleInFlight) return;
+    // The shade normally runs only in Video Background (lyrics over the
+    // full-bleed video). The opt-in mvLyricsShade extends it to the SIDE
+    // layout for music videos, where the lyrics sit over the blurred video
+    // backdrop. Anywhere else there is nothing to measure: clear both the
+    // lyric shade and the controls scrim.
+    if (!fsActive || !fsShadeLayoutActive() || !fsSavedVideo) {
+      setFullscreenLyricsShadeTarget(0);
+      clearFullscreenBrightVideo();
+      return;
+    }
+    // The LYRIC shade is pointless whenever the lyrics are not actually visible:
+    // the manual hide toggle plus the intro / gap / final dim states all set the
+    // lyric column to opacity:0 and show only the "..." dots, so a shade over a
+    // bright video would read as a stray black band behind the dots. But the
+    // CONTROLS scrim still needs a brightness reading in exactly that case (AJ:
+    // bright video, lyrics hidden, controls invisible), so keep sampling and
+    // only suppress the shade.
+    const shadeAllowed =
+      !fsLyricsHidden && !fsLyricsGapDimmed && !fsLyricsIntroDimmed && !fsLyricsFinalDimmed;
+    if (!shadeAllowed) setFullscreenLyricsShadeTarget(0);
+    const now = performance.now();
+    if (now - fsLyricsShadeLastSampleAt < FS_LYRICS_SHADE_SAMPLE_MS) return;
+    fsLyricsShadeLastSampleAt = now;
+    const video = fsSavedVideo.node;
+    if (!video.videoWidth || !video.videoHeight) return;
+    if (!fsLyricsShadeCanvas) {
+      fsLyricsShadeCanvas = document.createElement("canvas");
+      fsLyricsShadeCanvas.width = FS_SHADE_SAMPLE_W;
+      fsLyricsShadeCanvas.height = FS_SHADE_SAMPLE_H;
+      fsLyricsShadeCtx = fsLyricsShadeCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    fsLyricsShadeSampleInFlight = true;
+    try {
+      if (!fsLyricsShadeCanvasTainted && fsLyricsShadeCtx) {
+        try {
+          fsLyricsShadeCtx.drawImage(video, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
+          const rect = getShadeSampleRect();
+          applyFullscreenShadePixels(
+            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
+            shadeAllowed
+          );
+          return;
+        } catch (_) {
+          fsLyricsShadeCanvasTainted = true;
+        }
+      }
+      if (!ensureFullscreenShadeCapture()) {
+        setFullscreenLyricsShadeTarget(0);
+        clearFullscreenBrightVideo();
+        return;
+      }
+      let frame = null;
+      if (fsLyricsShadeReader) {
+        const result = await fsLyricsShadeReader.read();
+        frame = result && result.value;
+      } else if (fsLyricsShadeCapture) {
+        frame = await fsLyricsShadeCapture.grabFrame();
+      }
+      if (!frame) {
+        setFullscreenLyricsShadeTarget(0);
+        clearFullscreenBrightVideo();
+        return;
+      }
+      fsLyricsShadeCtx.drawImage(frame, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
+      const rect = getShadeSampleRect();
+      applyFullscreenShadePixels(
+        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
+        shadeAllowed
+      );
+      if (typeof frame.close === "function") frame.close();
+    } catch (_) {
+      setFullscreenLyricsShadeTarget(0);
+      clearFullscreenBrightVideo();
+    } finally {
+      fsLyricsShadeSampleInFlight = false;
+    }
+  }
+
+  function formatFullscreenOffset(ms) {
+    const sign = ms > 0 ? "+" : "";
+    return sign + (ms / 1000).toFixed(1) + "s";
+  }
+
+  // Paint the live <video> into the ambient backdrop canvas at ~1/6 overlay
+  // resolution. The CSS blur on the canvas then smooths + scales it to fill
+  // the entire overlay as the ambient backdrop. One drawImage per video frame
+  // is all this costs; the heavy blur is applied once to a static layer
+  // instead of re-blurring the live video every compositor frame. At a 64px
+  // blur the 1/6 backing store is invisible, so this is free quality to trade
+  // away for performance.
+  function drawBgFrame() {
+    if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    const now = performance.now();
+    if (now - fsBgLastDrawAt < FS_BG_FRAME_INTERVAL_MS) return;
+    fsBgLastDrawAt = now;
+    const v = fsSavedVideo.node;
+    if (!v.videoWidth || !v.videoHeight) return;
+    // Publish the real frame aspect ratio so the CSS can size the media pane to
+    // match it (see the .ym-sl-fs-has-video .ym-sl-fs-media rule). Matching the
+    // ratios makes object-fit: cover a no-op, which is what removes the side
+    // cropping without bringing back letterbox bars. Only written when it
+    // changes, so this is not a per-frame style invalidation.
+    if (fsOverlay) {
+      const ar = v.videoWidth + " / " + v.videoHeight;
+      if (fsOverlay.style.getPropertyValue("--ym-sl-fs-video-ar") !== ar) {
+        fsOverlay.style.setProperty("--ym-sl-fs-video-ar", ar);
+        // The pane's height (and therefore the band anchor) just changed, but
+        // the new aspect-ratio has not been laid out yet, so measure on the
+        // next frame instead of reading a stale rect.
+        requestAnimationFrame(publishFsBandVars);
+      }
+    }
+    const targetW = Math.max(2, Math.round(fsBgCanvas.clientWidth / 6));
+    const targetH = Math.max(2, Math.round(fsBgCanvas.clientHeight / 6));
+    if (fsBgCanvas.width !== targetW || fsBgCanvas.height !== targetH) {
+      fsBgCanvas.width = targetW;
+      fsBgCanvas.height = targetH;
+    }
+    try {
+      // Bake the blur into the canvas instead of applying it with CSS. A
+      // stylesheet filter on a <canvas> was being silently dropped in the live
+      // build; ctx.filter is a canvas API and cannot be overridden by CSS, so
+      // the result is deterministic. Blurring a ~320x180 backing store costs
+      // almost nothing, and the upscale to fullscreen multiplies the radius:
+      // 10px here renders as roughly 70px of blur on a 1080p overlay (turned
+      // down from 18px / ~130px at AJ's request — still clearly blurred but
+      // less heavy). Brightness is now user-controlled: the "Music video
+      // backdrop brightness" slider in AURORA BLOOM feeds
+      // currentSettings.backdropBrightness (default 1.15), delivered
+      // cross-add-on via handleHostMessage.
+      fsBgCtx.filter = "blur(10px) saturate(1.4) brightness(" + currentSettings.backdropBrightness + ")";
+      fsBgCtx.drawImage(v, 0, 0, targetW, targetH);
+      fsBgCtx.filter = "none";
+    } catch (_) {
+      try { fsBgCtx.filter = "none"; } catch (_e) {}
+      // Direct draw can be blocked by cross-origin taint. The canvas keeps
+      // its last frame, which is fine for an ambient backdrop.
+    }
+  }
+
+  // Drive the backdrop redraw from the video's actual paint cadence so we
+  // only do work when a new frame is available, and never compete with the
+  // 60Hz lyrics animation loop.
+  function startBgDrawLoop() {
+    if (fsBgRaf) return;
+    const v = fsSavedVideo && fsSavedVideo.node;
+    if (v && typeof v.requestVideoFrameCallback === "function") {
+      const loop = () => {
+        if (!fsActive) return;
+        drawBgFrame();
+        fsBgRaf = v.requestVideoFrameCallback(loop);
+      };
+      fsBgRaf = v.requestVideoFrameCallback(loop);
+    } else {
+      const step = () => {
+        fsBgRaf = null;
+        if (!fsActive) return;
+        drawBgFrame();
+        fsBgRaf = requestAnimationFrame(step);
+      };
+      fsBgRaf = requestAnimationFrame(step);
+    }
+  }
+
+  function stopBgDrawLoop() {
+    const v = fsSavedVideo && fsSavedVideo.node;
+    if (fsBgRaf) {
+      if (v && typeof v.cancelVideoFrameCallback === "function") {
+        try { v.cancelVideoFrameCallback(fsBgRaf); } catch (_) {}
+      } else {
+        cancelAnimationFrame(fsBgRaf);
+      }
+    }
+    fsBgRaf = null;
+  }
+
+  function updateFullscreenGapDimming(lyricPositionMs, activeIndex) {
+    if (!fsOverlay) return;
+    const canDim = fsLayoutMode === "background" && !!fsSavedVideo;
+    if (!canDim || !modelLines.length || !scrollCandidateIndices.length) {
+      if (fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
+        fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
+        fsLyricsGapDimmed = false;
+        fsLyricsIntroDimmed = false;
+        fsLyricsFinalDimmed = false;
+      }
+      return;
+    }
+
+    const activeLine = activeIndex >= 0 ? modelLines[activeIndex] : null;
+    const finalHideDelay = currentLyricsIsTTML ? 0 : FS_FINAL_LYRICS_HIDE_MS;
+    const finalExpired = cachedLastRealLyricEndMs > 0 &&
+      lyricPositionMs >= cachedLastRealLyricEndMs + finalHideDelay;
+    const beforeFirstLyric = Number.isFinite(cachedFirstRealLyricStartMs) &&
+      lyricPositionMs < cachedFirstRealLyricStartMs;
+    let shouldDim = beforeFirstLyric || finalExpired;
+
+    if (!finalExpired && !beforeFirstLyric && activeLine && activeLine.DotLine) {
+      // Later generated dot lines span instrumental gaps. Keep the lyrics
+      // hidden until shortly before the next real lyric starts.
+      shouldDim = activeLine.EndTime - lyricPositionMs > FS_LYRICS_RESTORE_LEAD_MS;
+    } else if (!finalExpired && !beforeFirstLyric && !activeLine) {
+      // A gap without generated dots: only dim when there is no active line AND a real next line.
+      const previousLine = activeIndex > 0 ? modelLines[activeIndex - 1] : null;
+      const nextLine = activeIndex >= 0 ? modelLines[activeIndex + 1] : null;
+      const previousEnd = previousLine ? previousLine.EndTime : lyricPositionMs;
+      const nextStart = nextLine ? nextLine.StartTime : Infinity;
+      const gapMs = nextStart - previousEnd;
+      shouldDim = Number.isFinite(nextStart) &&
+        gapMs >= FS_LYRICS_GAP_DIM_MS &&
+        nextStart - lyricPositionMs > FS_LYRICS_RESTORE_LEAD_MS;
+    }
+
+    if (shouldDim !== fsLyricsGapDimmed) {
+      fsLyricsGapDimmed = shouldDim;
+      fsOverlay.classList.toggle("ym-sl-fs-gap-dim", shouldDim);
+    }
+    if (beforeFirstLyric !== fsLyricsIntroDimmed) {
+      fsLyricsIntroDimmed = beforeFirstLyric;
+      fsOverlay.classList.toggle("ym-sl-fs-intro-dim", beforeFirstLyric);
+    }
+    if (finalExpired !== fsLyricsFinalDimmed) {
+      fsLyricsFinalDimmed = finalExpired;
+      fsOverlay.classList.toggle("ym-sl-fs-final-dim", finalExpired);
+    }
+    // No lyrics are on screen in any hidden / intro / gap / final state, so the
+    // readability shade has nothing to protect. Clear it immediately so a bright
+    // video doesn't leave a black band behind the "..." dots until the next
+    // 240ms brightness sample. The sampler also guards on these flags, this just
+    // removes the stale-gradient delay.
+    if (fsLyricsHidden || fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
+      setFullscreenLyricsShadeTarget(0);
+    }
+  }
+
+  const FS_LAYOUT_NAMES = {
+    side: "Video + Lyrics",
+    background: "Video Background",
+    lyrics: "Lyrics Only",
+  };
+  const FS_LAYOUT_ORDER = ["side", "background", "lyrics"];
+
+  function hasFsVideo() {
+    return !!(fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video"));
+  }
+
+  // The "Video Background" mode blurs the live music video as a backdrop. For
+  // audio-only tracks (cover art, no MV) there is nothing to use, so the cycle
+  // button SKIPS it instead of offering a broken layout. AJ 2026-09-28.
+  function nextFsLayoutMode(current) {
+    const i0 = FS_LAYOUT_ORDER.indexOf(current);
+    for (let step = 1; step <= FS_LAYOUT_ORDER.length; step++) {
+      const cand = FS_LAYOUT_ORDER[(i0 + step) % FS_LAYOUT_ORDER.length];
+      if (cand !== "background" || hasFsVideo()) return cand;
+    }
+    return "side";
+  }
+
+  /**
+   * Spell out the current layout AND the next one in the cycle button's
+   * tooltip. A cycle button has no open state to browse, so without this the
+   * order would be unguessable.
+   */
+  function updateFsLayoutButtonTitle() {
+    if (!fsLayoutSelect) return;
+    const current = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
+    const nextMode = nextFsLayoutMode(fsLayoutMode);
+    const next = FS_LAYOUT_NAMES[nextMode] || nextMode;
+    const text = "Layout: " + current + " - click for " + next;
+    fsLayoutSelect.title = text;
+    fsLayoutSelect.setAttribute("aria-label", text);
+    // Keep the text label in step too: music videos show the label rather than
+    // the glyph, so it has to name the mode the user is actually on.
+    const label = fsLayoutSelect.querySelector(".ym-sl-fs-btn-label");
+    if (label) label.textContent = current;
+  }
+
+  function applyFullscreenLayout(mode) {
+    if (!fsOverlay) return;
+    // Belt-and-suspenders: never land on Video Background without an MV
+    // (e.g. if savedMode was "background" and the track has no video).
+    if (mode === "background" && !hasFsVideo()) mode = "side";
+    fsLayoutMode = mode === "background" || mode === "lyrics" ? mode : "side";
+    if (fsLayoutMode !== "background") {
+      // The controls scrim only exists in Video Background; drop it at once
+      // rather than waiting up to a sample tick to clear it.
+      clearFullscreenBrightVideo();
+      fsLyricsGapDimmed = false;
+      fsLyricsIntroDimmed = false;
+      fsLyricsFinalDimmed = false;
+      fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
+    }
+    // Clear the lyric shade only when the NEW layout cannot show it — the MV
+    // side layout can, when mvLyricsShade is on.
+    if (!fsShadeLayoutActive()) setFullscreenLyricsShadeTarget(0);
+    // The column's left/width are CSS-transitioned (no frost re-measure needed).
+    fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
+    fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
+    // Keep the opt-in MV-shade class in step with the setting on entry/switches.
+    syncFsMvShadeClass();
+    if (fsLayoutSelect) {
+      // Now a button rather than a <select>, so the mode rides on the dataset
+      // instead of .value, and the tooltip is refreshed so the announced
+      // "current - next" pair stays accurate after every switch.
+      if (fsLayoutSelect.dataset.layoutMode !== fsLayoutMode) {
+        fsLayoutSelect.dataset.layoutMode = fsLayoutMode;
+      }
+      updateFsLayoutButtonTitle();
+    }
+    try { localStorage.setItem("better_lyrics_fullscreen_layout_v1", fsLayoutMode); } catch (_) {}
+    recomputeActiveOffsetMode(true);
+    // Switching layout resizes and moves the lyrics column with a CSS transition,
+    // so the old scrollTop no longer centres the active line — and nothing
+    // corrected it until the next line change happened to retarget the spring.
+    // Hence "the camera doesn't stay on the active line". The window keeps
+    // re-placing it for the length of the transition.
+    recentreActiveLine();
+  }
+
+  function findPlayerButton(labels) {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return null;
+    const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
+    return buttons.find((button) => {
+      const text = [button.getAttribute("aria-label"), button.getAttribute("title"), button.id, button.textContent]
+        .filter(Boolean).join(" ");
+      return labels.some((label) => new RegExp(label, "i").test(text));
+    }) || null;
+  }
+
+  function clickPlayerButton(kind) {
+    // Shuffle / Repeat are ANCHORED with ^: the player bar holds unrelated
+    // controls whose text can contain these words, whereas YTM's own buttons are
+    // labelled "Shuffle" and "Repeat off" / "Repeat all" / "Repeat one" — so the
+    // aria-label is always at the START of the joined text findPlayerButton builds.
+    const labels = kind === "previous"
+      ? ["previous", "back", "prev"]
+      : kind === "next"
+        ? ["next", "skip"]
+        : kind === "shuffle"
+          ? ["^shuffle"]
+          : kind === "repeat"
+            ? ["^repeat"]
+            : ["play", "pause"];
+    const button = findPlayerButton(labels);
+    if (button) button.click();
+  }
+
+  function findPlayerVolumeRange() {
+    return document.querySelector("ytmusic-player-bar tp-yt-paper-slider[aria-label*='volume' i]") ||
+      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]");
+  }
+
+  function setPlayerVolume(value) {
+    const range = findPlayerVolumeRange();
+    if (range) {
+      range.value = String(clamp(value, 0, 100));
+      range.dispatchEvent(new Event("input", { bubbles: true }));
+      range.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  function syncFullscreenVolumeControl() {
+    if (!fsPlayerVolumeRange) return;
+    const source = findPlayerVolumeRange();
+    if (!source) return;
+    const sourceValue = Number(source.value);
+    const sourceMax = Number(source.max);
+    if (!Number.isFinite(sourceValue) || !Number.isFinite(sourceMax) || sourceMax <= 0) return;
+    const percent = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    // The track is a <div> (no .value). Skip while the user is driving it so the
+    // 500ms refresh loop doesn't fight an in-progress drag/focus.
+    if (document.activeElement !== fsPlayerVolumeRange) {
+      fsPlayerVolumeValue = percent;
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", percent + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(percent));
+    }
+  }
+
+  function formatClock(ms) {
+    const total = Math.max(0, Math.floor(Number(ms) / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  // While the user is driving the seek bar the 500ms sync must not fight them.
+  // This used to key off `document.activeElement !== fsPlayerSeekRange`, but a
+  // range KEEPS focus after a click, so the guard never lifted: the thumb froze
+  // wherever it was clicked while --slider-fill (written outside the guard)
+  // kept advancing underneath it. Exactly AJ's 2026-09-28 report - "the dot
+  // just stays there and doesnt follow the fill". A short timestamp window is
+  // self-healing: a real drag refreshes it through the input event, and it
+  // expires on its own if the pointerup is missed.
+  const FS_SEEK_USER_GRACE_MS = 1200;
+  let fsSeekUserAt = 0;
+
+  function syncFullscreenSeekControl() {
+    if (!fsPlayerSeekRange || !window.YTMod || !window.YTMod.player) return;
+    const position = Number(window.YTMod.player.getPositionMs());
+    const duration = Number(window.YTMod.player.getDurationMs());
+    if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) return;
+    const percent = clamp((position / duration) * 100, 0, 100);
+    if (performance.now() - fsSeekUserAt > FS_SEEK_USER_GRACE_MS) {
+      fsPlayerSeekRange.value = String(position);
+    }
+    fsPlayerSeekRange.max = String(duration);
+    fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
+    if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
+    if (fsTimeTotal) fsTimeTotal.textContent = formatClock(duration);
+  }
+
+  /* ---- fullscreen loading spinner ----------------------------------------
+     A track change can take a while (the lyrics fetch over the network, or the
+     video buffering), and the fullscreen overlay has no other affordance for
+     it - the lyrics skeleton only covers the lyrics column. So: after
+     FS_SPINNER_DELAY_MS show a centred spinner, and fade it out the moment the
+     lyrics land. 2s delay and a 0.4s fade are exactly what Spicy Lyrics uses
+     for its own loader (fetchLyrics.ts: setTimeout(..., 2000), and
+     LoaderContainer.css: transition opacity 0.4s ease-in-out), and the icon +
+     spin are theirs too.
+     Driven from the lyrics skeleton's lifecycle because that is the only
+     reliable "this track is loading" signal the extension has. */

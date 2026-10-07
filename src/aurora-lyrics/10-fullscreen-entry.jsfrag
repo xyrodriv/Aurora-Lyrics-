@@ -1,0 +1,621 @@
+  function enterFullscreenMode() {
+    if (fsActive || !panelEl) return;
+    fsActive = true;
+    // Fullscreen owns the panel from here, so tab-driven setPanel() is ignored
+    // (it early-returns on fsActive). But animate() gates on panelVisible, so
+    // entering from a non-Lyrics tab (Comments, …) would leave panelVisible
+    // false and the panel painted-but-frozen. Force it on and park the tab state
+    // to restore on exit. Cannot call setPanel(true) — fsActive is already true.
+    fsSavedPanelVisible = panelVisible;
+    panelVisible = true;
+    // QOL #1: entering fullscreen cancels the credits reveal (its scroll target
+    // belongs to the main panel; fullscreen uses its own lyrics host).
+    cancelCreditsReveal();
+    // Fullscreen takes over the backdrop entirely, so stop the page-wide Kawarp
+    // for every track (song or music video) — only one Kawarp ever runs.
+    suspendPageKawarp();
+    // The toolbar (and its Options button) is hidden in fullscreen, so close the
+    // overlay rather than leaving it stranded behind the fullscreen surface.
+    const openOptions = document.querySelector(".ym-sl-options-overlay");
+    if (openOptions) openOptions.classList.add("hidden");
+
+    fsSavedPanel = { parent: panelEl.parentElement, next: panelEl.nextSibling };
+
+    // Self-contained blurred-artwork backdrop. We render our own rather than
+    // reparenting dynamic.js's Kawarp host because dynamic.js's rootObserver
+    // actively yanks pageBgHost back into pageBgRoot, stealing it out of the
+    // overlay within a frame.
+    const initialTrack = getCurrentTrack();
+    const initialArt = initialTrack && initialTrack.artworkUrl;
+    fsBgImg = h("img", {
+      class: "ym-sl-fs-bg-img",
+      src: hiResArt(initialArt) || "",
+      alt: "",
+    });
+    const tint = h("div", { class: "ym-sl-fs-bg-tint" });
+
+    fsMediaHost = h("div", { class: "ym-sl-fs-media" });
+    fsLyricsHost = h("div", { class: "ym-sl-fs-lyrics" });
+    fsLyricsShade = h("div", { class: "ym-sl-fs-lyrics-shade", "aria-hidden": "true" });
+    // The has-video class is added below once we know whether YTM's <video> is
+    // real. Video-background mode uses the live video directly plus the
+    // readability gradient; there is no cloned or blurred video layer.
+    fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
+    document.body.appendChild(fsOverlay);
+    // Overlay title ("Artist Track"). Built here rather than inside
+    // buildFullscreenControls() because it is not a control: it belongs to the
+    // overlay surface and must exist independently of the chrome row.
+    fsTitleEl = h("div", { class: "ym-sl-fs-title", "aria-hidden": "true" });
+    // Apply the font family inline so nothing in the cascade can override it
+    // (inline style beats every class selector). The CSS rule below declares
+    // the same stack for the initial paint; the inline assignment is the
+    // belt-and-suspenders that keeps it visible.
+    fsTitleEl.style.fontFamily =
+      "\"SpicyLyrics\", \"Noto Sans Georgian\", \"Vazirmatn\"," +
+      " \"SF Pro Display\", \"SF Pro Text\", \"SF Pro\", -apple-system," +
+      " BlinkMacSystemFont, \"Helvetica Neue\", \"Segoe UI\", Arial, sans-serif";
+    // The renderer loads SpicyLyrics inside its own mount point, which can
+    // leave light-DOM elements (like this title) without the family. Re-pin
+    // the stylesheet at document level so the @font-face is visible here too.
+    // Best-effort: spikerko.org may CORS-block music.youtube.com, in which case
+    // the link silently fails and the inline fontFamily above still applies
+    // (falling through to the next family in the stack).
+    try {
+      if (!document.querySelector("link[data-aurora-spicy-font]")) {
+        const fontLink = document.createElement("link");
+        fontLink.rel = "stylesheet";
+        fontLink.href = "https://fonts.spikerko.org/spicy-lyrics/source.css";
+        fontLink.setAttribute("data-aurora-spicy-font", "1");
+        document.head.appendChild(fontLink);
+      }
+    } catch (_) {}
+    fsOverlay.appendChild(fsTitleEl);
+    // Fullscreen "Next up" list, bottom-left. Reuses the title's font stack so
+    // it reads as part of the composition (AJ: "Apple font" = Spicy Lyrics).
+    fsNextUp = h("div", { class: "ym-sl-fs-nextup", "aria-hidden": "true" });
+    fsNextUp.style.fontFamily = fsTitleEl.style.fontFamily;
+    fsOverlay.appendChild(fsNextUp);
+
+    // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
+    // abandoned, so there is nothing left to open. The Next up list above is
+    // now display-only.)
+    // Adopt the art video into the pane. It has been playing in the player view
+    // (its normal home) since the track started, so the animated cover is on screen
+    // with no HLS startup at all — this is what makes entry instant (AJ, 2026-10-03).
+    // placeArtVideo() also restores YTM's own player-view cover, which the overlay
+    // is about to cover anyway.
+    if (fsArtVideo && fsArtVideo.parentElement !== fsMediaHost) {
+      placeArtVideo();
+      const warmPlay = fsArtVideo.play();
+      if (warmPlay && warmPlay.catch) warmPlay.catch(() => {});
+    }
+    refreshFsTitle();
+    // Kick the media reconcile NOW instead of waiting up to 2s for the refresh
+    // tick. Entry builds the static cover card immediately, but the animated
+    // cover's lookup was only ever started by the tick — so entering fullscreen
+    // on a track whose art was already CACHED still showed the YTM cover first for
+    // up to two seconds before the animated one appeared (AJ, 2026-10-03).
+    reconcileFsMediaArt();
+    // Long-title marquee: re-measure whenever the title's box changes width
+    // (viewport resize, pane resize, font swap). updateFsTitleMarquee() itself
+    // is idempotent — when the text fits it removes the class and leaves the
+    // injected <style> tag in place for the next overflow.
+    fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
+    fsTitleRO.observe(fsTitleEl);
+    // The band anchor is measured from THIS title's height, and its font-size is
+    // TRANSITIONED (.35s) — so a measurement taken right after a mode swap reads
+    // the mid-zoom height, and the chip / scrubber (which stack off title-h)
+    // stayed on the stale value until the 2s tick corrected them, which read as a
+    // 2s animation delay on the controls only (AJ, 2026-09-28). Re-publish once
+    // the size transition has actually finished.
+    fsTitleEl.addEventListener("transitionend", (event) => {
+      if (event.propertyName === "font-size") publishFsBandVars();
+    });
+    // Request native browser fullscreen immediately while the user activation
+    // from the click is still fresh. documentElement is always present, always
+    // laid out, and always allowed; requesting on fsOverlay failed silently in
+    // some Chrome versions when the element had just been appended. Done
+    // before the rest of the setup so the activation token cannot be consumed
+    // by anything else in this function first.
+    try {
+      const target = document.documentElement;
+      if (target.requestFullscreen) {
+        const p = target.requestFullscreen();
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      }
+    } catch (_) {}
+    fsLyricsShadeTimer = window.setInterval(() => sampleFullscreenLyricsBrightness(), FS_LYRICS_SHADE_SAMPLE_MS);
+
+    // Left: YTM's real <video> when there is one, otherwise the cover art.
+    const video = findPlayerVideo();
+    if (video) {
+      const wasPlaying = !video.paused;
+      const resumeAt = video.currentTime;
+      fsSavedVideo = {
+        node: video,
+        parent: video.parentElement,
+        next: video.nextSibling,
+        cssText: video.style.cssText,
+      };
+      fsOverlay.classList.add("ym-sl-fs-has-video");
+
+      // Ambient blurred backdrop: a low-res duplicate of the live video that
+      // the CSS blurs + dims to fill the entire overlay. The sharp video sits
+      // on top in fsMediaHost, so the empty letterbox space and the area
+      // behind the lyrics both get the blurred ambient fill.
+      fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
+      fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
+      fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
+      fsBgLastDrawAt = 0;
+      // Defer the first draw + loop start until the canvas is laid out so
+      // clientWidth/clientHeight are valid for sizing.
+      requestAnimationFrame(() => {
+        drawBgFrame();
+        startBgDrawLoop();
+      });
+
+      fsMediaHost.appendChild(video);
+      // YTM may keep player-bar inline styles on the node after reparenting.
+      // Override them directly so the video reliably fills the media pane
+      // regardless of what YTM left behind. (Media host positioning itself is
+      // handled by the animated CSS rules, not inline.)
+      video.style.setProperty("position", "absolute", "important");
+      video.style.setProperty("top", "0", "important");
+      video.style.setProperty("left", "0", "important");
+      video.style.setProperty("right", "0", "important");
+      video.style.setProperty("bottom", "0", "important");
+      video.style.setProperty("width", "100%", "important");
+      video.style.setProperty("height", "100%", "important");
+      video.style.setProperty("max-width", "none", "important");
+      video.style.setProperty("max-height", "none", "important");
+      // Fill the media pane edge-to-edge so the 16:9 video never leaves the
+      // two horizontal black bars AJ reported on 2026-09-27. The video is
+      // cropped instead of letterboxed - matches what Ableton / Spicy do for
+      // their fullscreen MV pane, and the host already has rounded corners
+      // so the cropped edges look intentional rather than truncated.
+      video.style.setProperty("object-fit", "cover", "important");
+      video.style.setProperty("background", "transparent", "important");
+      // Reparenting a media element can pause it in some engines; nudge it back.
+      if (wasPlaying && video.paused) {
+        try {
+          video.currentTime = resumeAt;
+          video.play().catch(() => {});
+        } catch (_) {}
+      }
+      // Still uploads (Official Audio / Lyric Video) hand the ambient backdrop
+      // to Kawarp. Must run after the canvas exists, since Kawarp only takes
+      // over by adding a class that hides it.
+      applyStaticVideoBackdrop();
+    } else {
+      const track = getCurrentTrack();
+      const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
+      if (artUrl) {
+        fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
+        fsMediaHost.appendChild(fsArtImg);
+        setFsArtSrc(fsArtImg, hiResArt(artUrl));
+      }
+      // Song fullscreen: replace the blurred cover backdrop with Kawarp when the
+      // Dynamic add-on is active (it suspends its page-wide instance for us).
+      startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+    }
+
+    // Right: the live lyrics panel. Same node, so timing/scroll are preserved.
+    fsLyricsHost.appendChild(panelEl);
+    panelEl.classList.remove("hidden");
+    buildFullscreenControls();
+    // Detaching a scrollable element resets its scrollTop to 0, so without this
+    // fullscreen always opened on the TOP of the song no matter where the
+    // playhead was. The recentre window also rides out the overlay's entrance
+    // layout, which is still moving for a few frames after this point.
+    recentreActiveLine();
+
+    // Keep the cover-art layers in sync if the track changes mid-fullscreen.
+    // The sharp card art (fsArtImg) and the blurred backdrop (fsBgImg) are
+    // separate nodes; refreshing only the backdrop left the square cover card
+    // showing the previous song's artwork after a skip.
+    fsBgRefresh = setInterval(() => {
+      if (!fsActive) return;
+      // Catch a track swap between MV and no-MV mid-fullscreen so the backdrop
+      // switches from cover art to the live video (or back). Without this,
+      // fullscreen opened on a no-MV track is stuck on cover art forever.
+      syncFsVideoMode();
+      // Also re-derive the band anchor: this is the only place that notices a
+      // viewport resize while fullscreen is open (the pane is centred and
+      // sized from the viewport, so both its width and height move).
+      publishFsBandVars();
+      // Catch a track change between a live video and a still upload
+      // (Official Audio / Lyric Video) while staying in MV mode. Idempotent.
+      applyStaticVideoBackdrop();
+      const t = getCurrentTrack();
+      const u = t && t.artworkUrl;
+      const hi = hiResArt(u);
+      if (hi) {
+        if (fsBgImg && fsBgImg.getAttribute("src") !== hi) fsBgImg.setAttribute("src", hi);
+        if (fsKawarpActive) syncFullscreenKawarpArt(hi);
+      }
+      // Owns creating AND updating the sharp cover card, so a skip that lands
+      // before the new artwork URL exists cannot leave the pane empty.
+      reconcileFsMediaArt();
+    }, 2000);
+
+    // Native fullscreen is requested near the top of enterFullscreenMode(),
+    // while the click's user activation is still fresh. The earlier call
+    // targets document.documentElement so the activation token and a laid-out
+    // element are guaranteed.
+
+    document.addEventListener("keydown", handleFsKeydown, true);
+    document.addEventListener("fullscreenchange", handleFsFullscreenChange);
+    startFsIdleTracking();
+  }
+
+  function exitFullscreenMode() {
+    if (!fsActive) return;
+    if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
+    // A swap killed mid-flight would leave the chrome faded out; clear it so
+    // fullscreen can never come back with invisible controls.
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-swapping");
+    fsActive = false;
+    stopFsIdleTracking();
+    document.removeEventListener("keydown", handleFsKeydown, true);
+    document.removeEventListener("fullscreenchange", handleFsFullscreenChange);
+
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        const pending = document.exitFullscreen();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
+      }
+    } catch (_) {}
+
+    // Restore the video to the exact slot it came from.
+    if (fsSavedVideo && fsSavedVideo.node && fsSavedVideo.parent) {
+      const { node, parent, next } = fsSavedVideo;
+      if (next && next.parentNode === parent) parent.insertBefore(node, next);
+      else parent.appendChild(node);
+      if (Object.prototype.hasOwnProperty.call(fsSavedVideo, "cssText")) {
+        node.style.cssText = fsSavedVideo.cssText;
+      }
+    }
+    // Restore the lyrics panel to the exact slot it came from.
+    if (fsSavedPanel && fsSavedPanel.parent && panelEl) {
+      const { parent, next } = fsSavedPanel;
+      if (next && next.parentNode === parent) parent.insertBefore(panelEl, next);
+      else parent.appendChild(panelEl);
+    }
+    // Same reparenting reset as on the way in: leaving fullscreen would otherwise
+    // drop the panel back to the top of the song.
+    recentreActiveLine();
+
+    // Put back the tab-driven visibility we overrode on entry. Without this,
+    // exiting fullscreen while the active tab is NOT ours (Comments, …) leaves
+    // the panel on screen, because `hidden` was removed on entry and never
+    // restored. fsActive is already false here, so the DOM classes are the only
+    // thing left to reconcile.
+    if (fsSavedPanelVisible !== null) {
+      const wasVisible = fsSavedPanelVisible;
+      fsSavedPanelVisible = null;
+      panelVisible = wasVisible;
+      if (panelEl) panelEl.classList.toggle("hidden", !wasVisible);
+      syncNativePanel(wasVisible);
+    }
+
+    if (fsBgRefresh) { clearInterval(fsBgRefresh); fsBgRefresh = null; }
+    stopBgDrawLoop();
+    if (fsBgCanvas && fsBgCanvas.parentElement) {
+      fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+    }
+    fsBgCanvas = null;
+    fsBgCtx = null;
+    fsBgLastDrawAt = 0;
+    if (fsLyricsShadeTimer) { clearInterval(fsLyricsShadeTimer); fsLyricsShadeTimer = 0; }
+    if (fsLyricsShadeReader) { try { fsLyricsShadeReader.cancel(); } catch (_) {} }
+    if (fsLyricsShadeTrack) { try { fsLyricsShadeTrack.stop(); } catch (_) {} }
+    if (fsLyricsShadeStream) { try { fsLyricsShadeStream.getTracks().forEach((track) => track.stop()); } catch (_) {} }
+    fsLyricsShadeReader = null;
+    fsLyricsShadeCapture = null;
+    fsLyricsShadeTrack = null;
+    fsLyricsShadeStream = null;
+    fsLyricsShadeCanvas = null;
+    fsLyricsShadeCtx = null;
+    fsLyricsShadeCanvasTainted = false;
+    fsLyricsShadeSampleInFlight = false;
+    fsLyricsShade = null;
+    fsLyricsShadeLevel = 0;
+    fsLyricsShadeTarget = 0;
+    fsLyricsShadeLastSampleAt = 0;
+    // Hand the backdrop back: dispose our Kawarp, then let the Dynamic add-on
+    // resume its page-wide one so exactly one is ever running.
+    stopFullscreenKawarp();
+    resumePageKawarp();
+    fsBgImg = null;
+    // Clear the cover-card crossfade handlers and invalidate any in-flight
+    // load callback so a slow decode landing after teardown cannot reveal a
+    // stale <img> (or attach to a new one created on next entry).
+    if (fsArtImg) {
+      fsArtImg.onload = null;
+      fsArtImg.onerror = null;
+    }
+    fsArtImg = null;
+    ++fsArtImgSeq;
+    // Send the animated cover home to the player view instead of destroying it: the
+    // engine and its buffer survive, so re-entering fullscreen on the same track is
+    // instant too. fsActive is already false here, so placeArtVideo() re-parents it
+    // into #song-image and re-hides YTM's own cover. It is VISIBLE there, so resume
+    // it — the old off-screen warm host needed a pause, this home does not
+    // (AJ, 2026-10-03). Only fall back to a full teardown when there is nothing to
+    // keep alive.
+    if (fsArtVideo && fsArtVideo.isConnected) {
+      placeArtVideo();
+      const backPlay = fsArtVideo.play();
+      if (backPlay && backPlay.catch) backPlay.catch(() => {});
+    } else {
+      destroyAnimatedArt();
+    }
+    const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
+    if (fsOptionsOverlay) fsOptionsOverlay.remove();
+    if (fsOverlay) fsOverlay.remove();
+    fsOverlay = null;
+    fsMediaHost = null;
+    fsLyricsHost = null;
+    fsControls = null;
+    fsLayoutSelect = null;
+    // Long-title marquee teardown (2026-09-28). Disconnect the resize observer
+    // and clear any inline shift/marquee state on the inner so a second
+    // fullscreen entry starts from a clean baseline. fsTitleInner is gone
+    // with its parent.
+    if (fsTitleRO) { fsTitleRO.disconnect(); fsTitleRO = null; }
+    fsTitleInner = null;
+    // The title node lives inside fsOverlay, which was just removed above.
+    fsTitleEl = null;
+    fsNextUp = null;
+    // Same for the "no lyrics" notice: its node went with the overlay, so this
+    // only has to drop the ref and any pending dismiss timer.
+    clearFsNoLyricsNotice();
+    // Drop any in-flight track-change crossfade so its swap cannot fire after
+    // the overlay is gone (the callback also null-checks, this is belt+braces).
+    if (fsTitleSwapTimer) { window.clearTimeout(fsTitleSwapTimer); fsTitleSwapTimer = 0; }
+    // The loading spinner lives inside fsOverlay too. Drop its pending timer so
+    // it cannot fire after the overlay is gone.
+    fsSpinnerEl = null;
+    if (fsSpinnerTimer) { window.clearTimeout(fsSpinnerTimer); fsSpinnerTimer = 0; }
+    // Bright-video controls scrim: the flag drives a class on fsOverlay, which
+    // was just removed, so just drop it for the next entry.
+    fsBrightVideo = false;
+    // Invalidate any pending video-ready reveal (and drop its spinner) so it
+    // cannot restore a pane that no longer exists.
+    cancelFsVideoReady();
+    fsVideoSpinnerEl = null;
+    // Drop any pending settle-gated pane reveal too.
+    fsPaneRevealSeq++;
+    // Idle fill ring: the node lived in fsOverlay (removed), so drop the ref
+    // and any pending show/leave timers.
+    if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
+    if (fsIdleRingLeaveTimer) { window.clearTimeout(fsIdleRingLeaveTimer); fsIdleRingLeaveTimer = 0; }
+    fsIdleRing = null;
+    fsHavePointer = false;
+    // Forget the last backdrop decision so the next entry re-evaluates it
+    // instead of early-returning against a stale key.
+    fsStaticVideoKey = "";
+    fsOffsetRange = null;
+    fsOffsetValue = null;
+    fsLyricsToggle = null;
+    fsLyricsHidden = false;
+    fsLyricsGapDimmed = false;
+    fsLyricsIntroDimmed = false;
+    fsLyricsFinalDimmed = false;
+    if (fsPlayerStateTimer) clearInterval(fsPlayerStateTimer);
+    fsPlayerStateTimer = 0;
+    fsPlayerControls = null;
+    fsPlayerPlayButton = null;
+    fsPlayerShuffleButton = null;
+    fsPlayerRepeatButton = null;
+    fsPlayerVolumeRange = null;
+    fsPlayerSeekRange = null;
+    fsTimeCurrent = null;
+    fsTimeTotal = null;
+    fsScrubTip = null;
+    fsSavedVideo = null;
+    fsSavedPanel = null;
+  }
+
+  // Escape: let the BROWSER drive it. The old handler called preventDefault()
+  // and then exitFullscreenMode() itself, which suppressed Chrome's own
+  // "Escape leaves fullscreen" path and did not reliably land either - so Esc
+  // appeared to do nothing (AJ, 2026-09-28). With no preventDefault the browser
+  // exits fullscreen and the fullscreenchange handler below unwinds our
+  // overlay, which is the same path F11 and the browser chrome already use.
+  // The explicit exit is kept ONLY for the case where native fullscreen never
+  // engaged (requestFullscreen can be refused), where no fullscreenchange fires.
+  function handleFsKeydown(event) {
+    if (!fsActive || event.key !== "Escape") return;
+    if (document.fullscreenElement) return;
+    exitFullscreenMode();
+  }
+
+  // If the browser leaves native fullscreen by any other route (F11, browser
+  // chrome), unwind our overlay too so nothing is left stranded on screen.
+  function handleFsFullscreenChange() {
+    if (fsActive && !document.fullscreenElement) exitFullscreenMode();
+  }
+
+  /* ---- redirect YTM's own video fullscreen button ------------------------
+     YTM's video chrome has its own "Enter full screen" button. Clicking it used
+     to switch YTM into its page-level fullscreen view (not the Fullscreen API -
+     YTM just hides its own UI), which fought our overlay. Redirect that click
+     into enterFullscreenMode() so the affordance feels native and there is only
+     ever one fullscreen.
+     Registered once, in the capture phase on WINDOW so it runs before anything
+     YTM bound on the button or on document. `tap` is intercepted as well as
+     `click` because YTM's button is a Polymer yt-icon-button, which can be
+     driven by Polymer's gesture event rather than a plain click.
+     Matched on aria-label rather than a class: the button's only stable hook is
+     aria-label="Enter full screen" (its class is the generic
+     "style-scope yt-icon-button"), so the test is a loose regex over that label.
+     It deliberately does NOT match "Exit full screen" - that label only exists
+     while YTM is in its own fullscreen, which this prevents, and hijacking it
+     would leave no way out. */
+  function installNativeFullscreenRedirect() {
+    const redirect = (event) => {
+      if (fsActive || !panelEl) return;
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      const hit = target.closest("[aria-label]");
+      if (!hit) return;
+      const label = (hit.getAttribute("aria-label") || "").toLowerCase();
+      if (!/enter\s*full\s*screen/.test(label)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      enterFullscreenMode();
+    };
+    window.addEventListener("click", redirect, true);
+    window.addEventListener("tap", redirect, true);
+  }
+
+  function syncNativePanel(on) {
+    // Only the tab CONTENT node (#tab-renderer) is hidden/shown — the native tab
+    // bar is left alone so YTM keeps driving its own selection + underline.
+    const host = document.querySelector("#tab-renderer") || panelHost;
+    if (!host) return;
+    // The class drives CSS that (a) hides EVERY native child — including ones YTM
+    // adds LATER, like the "Lyrics not available" message — and (b) removes the
+    // host's always-on scrollbar, redundant with the panel's own internal scroll.
+    host.classList.toggle("ym-sl-panel-active", on);
+    for (const child of Array.from(host.children)) {
+      if (child === panelEl) continue;
+      child.classList.toggle("ym-sl-native-hidden", on);
+    }
+  }
+
+  function cleanupTabBar(bar) {
+    if (!bar) return;
+    if (bar.__ymSelectionObserver) {
+      bar.__ymSelectionObserver.disconnect();
+      delete bar.__ymSelectionObserver;
+    }
+    if (lyricsTabObserver) {
+      lyricsTabObserver.disconnect();
+      lyricsTabObserver = null;
+    }
+    // The Lyrics tab is YTM's OWN — leave it in the DOM; just drop our marker.
+    if (tabEl) tabEl.classList.remove("ym-sl-lyrics-tab");
+    tabEl = null;
+    tabMountParent = null;
+  }
+
+  function scheduleMountTab() {
+    if (mountTabTimer) return;
+    mountTabTimer = window.setTimeout(() => {
+      mountTabTimer = 0;
+      mountTab();
+    }, 400);
+  }
+
+  // YTM disables the native Lyrics tab (disabled + aria-disabled + tabindex -1 +
+  // inline pointer-events:none) whenever the track has no lyrics on YTM. Aurora
+  // enables it so its own lyrics can live in the REAL tab.
+  // PATTERN (from the Better Lyrics extension): observe ONLY the tab, react ONLY to
+  // the `disabled` attribute, and NEVER touch `class` from the observer. Observing
+  // the whole bar and mutating on every mutation is an infinite feedback loop that
+  // freezes the page (that is what broke take 1).
+  function enableLyricsTab(tab) {
+    if (!tab) return;
+    if (lyricsTabObserver) lyricsTabObserver.disconnect();
+    tab.classList.add("ym-sl-lyrics-tab");
+    tab.removeAttribute("disabled");
+    tab.setAttribute("aria-disabled", "false");
+    tab.removeAttribute("tabindex");
+    try { tab.disabled = false; } catch (_) {}
+    if (tab.style && tab.style.pointerEvents) {
+      tab.style.removeProperty("pointer-events");
+    }
+    lyricsTabObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.attributeName === "disabled") {
+          tab.removeAttribute("disabled");
+          tab.setAttribute("aria-disabled", "false");
+        }
+      }
+    });
+    lyricsTabObserver.observe(tab, { attributes: true });
+  }
+
+  // YTM marks the selected tab with aria-selected="true" (Better Lyrics gates on
+  // exactly this). This is a READ-ONLY observer: it never mutates, so it cannot loop.
+  function lyricsTabSelected() {
+    return !!tabEl && tabEl.getAttribute("aria-selected") === "true";
+  }
+
+  function mountTab() {
+    const bar = findTabBar();
+    if (!bar) {
+      scheduleMountTab();
+      return;
+    }
+    if (tabBar && tabBar !== bar) cleanupTabBar(tabBar);
+    tabBar = bar;
+    mountPanel(bar);
+
+    // Use YTM's OWN Lyrics tab instead of a clone: un-disable it, then show
+    // Aurora's panel whenever it is the selected tab.
+    const tabs = Array.from(bar.querySelectorAll("tp-yt-paper-tab"));
+    let lyricsTab = null;
+    for (const tab of tabs) {
+      if ((tab.textContent || "").trim().toLowerCase().includes("lyrics")) {
+        lyricsTab = tab;
+        break;
+      }
+    }
+    if (!lyricsTab) {
+      scheduleMountTab();
+      return;
+    }
+    tabEl = lyricsTab;
+    tabMountParent = tabEl.parentElement;
+    enableLyricsTab(tabEl);
+
+    if (!bar.__ymSelectionObserver) {
+      bar.__ymSelectionObserver = new MutationObserver(() => {
+        if (!tabEl) return;
+        const selected = lyricsTabSelected();
+        if (selected !== panelVisible) setPanel(selected);
+      });
+      bar.__ymSelectionObserver.observe(bar, {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ["aria-selected"],
+      });
+    }
+    const selected = lyricsTabSelected();
+    if (selected !== panelVisible) setPanel(selected);
+  }
+
+  function setPanel(on) {
+    // While fullscreen is up, the lyrics panel is owned by the overlay. Ignore
+    // tab-driven visibility changes so the lyrics can't be hidden underneath us.
+    if (fsActive) return;
+    panelVisible = on;
+    // Hide YTM's own tab content and show Aurora's panel in its place. The native
+    // tab bar (and its #selectionBar) are left entirely to YTM.
+    syncNativePanel(on);
+    if (!panelEl) return;
+    panelEl.classList.toggle("hidden", !on);
+    if (on) {
+      refreshTrack();
+      syncTrackLyrics();
+    }
+  }
+
+  /**
+   * Paint the fullscreen overlay title.
+   *
+   * Rebuilt rather than patched so the artist/track split is right in every
+   * combination: no name, one name, or both. A single textContent write cannot
+   * hold the two halves at different weights, so the children are re-created
+   * and the separating space is skipped when either half is missing.
+   */
+  // Track-change crossfade for the overlay title. The old credit fades out,
+  // the text swaps, and removing the leaving class re-arms the entrance
+  // animation so the new credit fades in. Must match the .24s transition in
+  // the .ym-sl-fs-title-leaving rule.
+  const FS_TITLE_SWAP_MS = 240;
+  let fsTitleSwapTimer = 0;
+

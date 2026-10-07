@@ -5,7 +5,7 @@
    on a <canvas> and saved locally, so this stays inside the project's
    "no backend, no account" promise (see PRIVACY.md).
 
-   WHY A SEPARATE ADD-ON, and why it never touches spicy-lyrics.js:
+   WHY A SEPARATE ADD-ON, and why it never touches aurora-lyrics.js:
    the synced renderer already publishes everything a consumer needs on the
    inter-add-on bus (public-api.js, "Topics in use"):
        lyrics:lines   { trackKey, videoId, title, artist, lines:[{ text, ... }] }

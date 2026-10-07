@@ -37,6 +37,12 @@
   const ICON_PAUSE = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
   const ICON_PREV = "M6 6h2v12H6zm3.5 6l8.5 6V6z";
   const ICON_NEXT = "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z";
+  // Shuffle / Repeat / Repeat-one — the panel's own glyphs (08-fullscreen-controls),
+  // so the PiP's toggles match the fullscreen chip exactly.
+  const ICON_SHUFFLE = "M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z";
+  const ICON_REPEAT = "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z";
+  const ICON_REPEAT_ONE = "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z";
+  const ICON_VOLUME = "M3 10v4h4l5 4V6L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12z";
 
   // Same vendored Kawarp module the Dynamic theme and the fullscreen backdrop
   // use, so the PiP gets the identical fluid treatment rather than a lookalike.
@@ -109,7 +115,7 @@
   }
 
   // Re-derive the host's lyric clock from the raw player position + the sync
-  // state published on "lyrics:sync". This mirrors spicy-lyrics.js
+  // state published on "lyrics:sync". This mirrors aurora-lyrics.js
   // getOffsetForPosition() exactly, so the PiP tracks the synced tab instead of
   // running on raw playback (which would be early/late by the offset).
   function offsetForPosition(positionMs) {
@@ -214,10 +220,39 @@
     .ym-pip > .ym-pip-transport { position: relative; z-index: 2; }
     .ym-pip-head {
       display: flex;
-      align-items: baseline;
-      gap: 8px;
+      align-items: center;
+      gap: 10px;
       flex: 0 0 auto;
       margin-bottom: 10px;
+      min-width: 0;
+    }
+    /* Cover art thumbnail (AJ, 2026-10-07). Hidden until the track supplies
+       artwork, so a track with none leaves no gap. */
+    .ym-pip-art {
+      width: 40px;
+      height: 40px;
+      flex: 0 0 auto;
+      border-radius: 6px;
+      object-fit: cover;
+      background: rgba(255, 255, 255, .08);
+      display: none;
+    }
+    .ym-pip-art.has-art { display: block; }
+    /* Source label, pushed to the right edge of the header (AJ, 2026-10-07). */
+    .ym-pip-source {
+      margin-left: auto;
+      flex: 0 0 auto;
+      font-size: 11px;
+      color: rgba(255, 255, 255, .38);
+      white-space: nowrap;
+    }
+    /* The title/artist stack beside the art. min-width:0 is what lets the
+       ellipsis actually engage inside a flex row. */
+    .ym-pip-meta {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      gap: 1px;
     }
     .ym-pip-title {
       font-size: 14px;
@@ -246,10 +281,13 @@
       box-sizing: border-box;
       overflow-x: hidden;
       overflow-y: auto;
-      /* Reserve the scrollbar's space explicitly, and keep a generous right
-         inset: the ACTIVE line's glyphs paint PAST the layout box (a transform
-         does not change layout), and overflow-x:hidden clips whatever escapes. */
-      scrollbar-gutter: stable;
+      /* NO VISIBLE SCROLLBAR (AJ, 2026-10-07): the draggable thumb on the right
+         was unwanted. Hiding it also means the gutter must go — with
+         scrollbar-gutter:stable a blank strip would still be reserved. The 32px
+         right inset STAYS: it is there because the ACTIVE line's glyphs paint past
+         the layout box (a transform does not change layout) and overflow-x:hidden
+         would clip them. Scrolling itself is unchanged; "Jump to current" is the
+         discoverable way back to the active line. */
       padding-right: 32px;
       overscroll-behavior: contain;
       /* smooth, so the one-shot "auto" writes (smoothScrolling OFF) actually
@@ -258,9 +296,9 @@
       scroll-behavior: smooth;
       scroll-snap-type: none;
       overflow-anchor: none;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,.3) transparent;
+      scrollbar-width: none;
     }
+    .ym-pip-lines::-webkit-scrollbar { display: none; width: 0; height: 0; }
     .ym-pip-jump {
       position: absolute;
       z-index: 5;
@@ -360,6 +398,9 @@
       justify-content: center;
       gap: 14px;
       padding-top: 8px;
+      /* The volume sits at the far right WITHOUT dragging the centred transport
+         off-centre — an auto margin would eat all the free space. */
+      position: relative;
     }
     .ym-pip-transport button {
       width: 34px;
@@ -377,6 +418,58 @@
     .ym-pip-transport button:hover { background: rgba(255, 255, 255, .12); color: #fff; }
     .ym-pip-transport button svg { width: 22px; height: 22px; fill: currentColor; }
     .ym-pip-transport .ym-pip-main svg { width: 28px; height: 28px; }
+    /* ---- seek row, shuffle/repeat, volume (AJ, 2026-10-07) ---------------- */
+    .ym-pip-seek {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 8px;
+    }
+    .ym-pip-time {
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: rgba(255, 255, 255, .6);
+      min-width: 30px;
+    }
+    .ym-pip-time:last-child { text-align: right; }
+    /* Shared range look for the seek + volume sliders. */
+    .ym-pip-seek-range,
+    .ym-pip-volume {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .22);
+      cursor: pointer;
+    }
+    .ym-pip-seek-range { flex: 1 1 auto; min-width: 0; }
+    .ym-pip-seek-range::-webkit-slider-thumb,
+    .ym-pip-volume::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+    }
+    /* Shuffle / Repeat are dimmed at rest and full white when engaged — the class
+       is set from the LIVE player state in syncLoop, so they cannot lie. */
+    .ym-pip-transport .ym-pip-opt { color: rgba(255, 255, 255, .55); }
+    .ym-pip-transport .ym-pip-opt.active { color: #fff; }
+    .ym-pip-vol {
+      position: absolute;
+      right: 0;
+      top: calc(50% + 4px);
+      transform: translateY(-50%);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: rgba(255, 255, 255, .7);
+    }
+    .ym-pip-vol svg { width: 18px; height: 18px; fill: currentColor; flex: 0 0 auto; }
+    .ym-pip-volume { width: 70px; }
     .ym-pip-hint {
       flex: 0 0 auto;
       text-align: center;
@@ -397,6 +490,7 @@
   let songwriters = [];
   let attribution = null;
   let smoothScrolling = true;
+  let simpleLyrics = false;
   let scrollLeadEnabled = false;
   let scrollLeadMs = 0;
   let lastRenderedActive = -2;
@@ -409,6 +503,7 @@
   let unsubscribe = null;
   let unsubscribeKit = null;
   let unsubscribeSync = null;
+  let unsubscribeSettings = null;
   // Resolved sync state from the host (lyrics:sync): the base offset and any
   // MV-pause re-sync segment. Mirrors the panel's getOffsetForPosition() so the
   // PiP lyric clock matches the synced tab instead of running on raw playback.
@@ -484,10 +579,21 @@
     root.appendChild(scrim);
 
     const head = makeEl(doc, "div", "ym-pip-head");
-    head.appendChild(makeEl(doc, "div", "ym-pip-title", "Aurora Lyrics"));
+    // Cover art (AJ, 2026-10-07): a small square thumbnail beside the title, like
+    // the fullscreen header. The src is set in setHeader() from the track's
+    // artworkUrl; it stays empty (and collapses) until a track is known.
+    const art = makeEl(doc, "img", "ym-pip-art");
+    art.id = "ym-pip-art";
+    art.alt = "";
+    head.appendChild(art);
+    const meta = makeEl(doc, "div", "ym-pip-meta");
+    meta.appendChild(makeEl(doc, "div", "ym-pip-title", "Aurora Lyrics"));
     const artist = makeEl(doc, "div", "ym-pip-artist", "");
     artist.id = "ym-pip-artist";
-    head.appendChild(artist);
+    meta.appendChild(artist);
+    head.appendChild(meta);
+    // Source label (AJ, 2026-10-07) — dim, pushed to the far right of the header.
+    head.appendChild(makeEl(doc, "div", "ym-pip-source", "Aurora Lyrics"));
     root.appendChild(head);
 
     const linesBox = makeEl(doc, "div", "ym-pip-lines");
@@ -505,13 +611,15 @@
     // gesture stops the camera spring so it cannot fight the user's scroll.
     linesBox.addEventListener("wheel", () => {
       pipManualScrollPaused = true;
+      pipManualScrollAt = performance.now();
       centerTargetY = null;
-      centerVelocity = 0;
+      resetCameraGlide();
     }, { passive: true });
     linesBox.addEventListener("touchstart", () => {
       pipManualScrollPaused = true;
+      pipManualScrollAt = performance.now();
       centerTargetY = null;
-      centerVelocity = 0;
+      resetCameraGlide();
     }, { passive: true });
     // The panel's stylesheet is scoped to #ym-sl-panel.SpicyRenderer, so the PiP
     // has to present that same wrapper for the lyric rules to apply at all.
@@ -527,7 +635,58 @@
     root.appendChild(linesBox);
 
     if (settings.showTransport !== false) {
+      // ---- seek row (AJ, 2026-10-07) --------------------------------------
+      // Times either side of a range, mirroring the fullscreen scrubber. The range
+      // is a 0..1000 RATIO, so it never depends on the duration arriving first.
+      const seekRow = makeEl(doc, "div", "ym-pip-seek");
+      const cur = makeEl(doc, "span", "ym-pip-time", "0:00");
+      cur.id = "ym-pip-time-cur";
+      const seek = makeEl(doc, "input", "ym-pip-seek-range");
+      seek.id = "ym-pip-seek";
+      seek.type = "range";
+      seek.min = "0";
+      seek.max = "1000";
+      seek.step = "1";
+      seek.value = "0";
+      seek.setAttribute("aria-label", "Seek");
+      const total = makeEl(doc, "span", "ym-pip-time", "0:00");
+      total.id = "ym-pip-time-total";
+      seekRow.appendChild(cur);
+      seekRow.appendChild(seek);
+      seekRow.appendChild(total);
+      root.appendChild(seekRow);
+      // While the user is dragging, the per-frame sync must not fight the thumb —
+      // the same grace window the fullscreen seek uses.
+      seek.addEventListener("pointerdown", () => { pipSeekUserAt = performance.now(); });
+      seek.addEventListener("input", () => { pipSeekUserAt = performance.now(); });
+      const commitSeek = () => {
+        pipSeekUserAt = performance.now();
+        const p = player();
+        const dur = p && p.getDurationMs ? Number(p.getDurationMs()) : 0;
+        if (!p || typeof p.seek !== "function" || !Number.isFinite(dur) || dur <= 0) return;
+        p.seek(Math.round((Number(seek.value) / 1000) * dur));
+      };
+      seek.addEventListener("change", commitSeek);
+      seek.addEventListener("pointerup", commitSeek);
+      pipSeekEl = seek;
+
+      // ---- transport row ---------------------------------------------------
       const bar = makeEl(doc, "div", "ym-pip-transport");
+
+      // Shuffle / Repeat drive YTM's OWN player-bar buttons (there is no YTMod API
+      // for them) through the panel's helper, and read the LIVE state back each
+      // tick so they can never lie about the real mode.
+      const shuffle = makeEl(doc, "button", "ym-pip-opt ym-pip-shuffle");
+      shuffle.id = "ym-pip-shuffle";
+      shuffle.type = "button";
+      shuffle.title = "Shuffle";
+      shuffle.setAttribute("aria-label", "Shuffle");
+      shuffle.setAttribute("aria-pressed", "false");
+      shuffle.appendChild(svgIcon(doc, ICON_SHUFFLE));
+      shuffle.addEventListener("click", () => {
+        if (kit && kit.clickPlayerButton) kit.clickPlayerButton("shuffle");
+      });
+
       const prev = makeEl(doc, "button", "");
       prev.type = "button";
       prev.title = "Previous";
@@ -550,9 +709,44 @@
       next.appendChild(svgIcon(doc, ICON_NEXT));
       next.addEventListener("click", () => { const p = player(); if (p && p.next) p.next(); });
 
+      const repeat = makeEl(doc, "button", "ym-pip-opt ym-pip-repeat");
+      repeat.id = "ym-pip-repeat";
+      repeat.type = "button";
+      repeat.title = "Repeat";
+      repeat.setAttribute("aria-label", "Repeat");
+      repeat.setAttribute("aria-pressed", "false");
+      repeat.appendChild(svgIcon(doc, ICON_REPEAT));
+      repeat.addEventListener("click", () => {
+        if (kit && kit.clickPlayerButton) kit.clickPlayerButton("repeat");
+      });
+
+      // Volume: a small speaker icon + a range, wired straight to the player API.
+      const volWrap = makeEl(doc, "div", "ym-pip-vol");
+      volWrap.appendChild(svgIcon(doc, ICON_VOLUME));
+      const vol = makeEl(doc, "input", "ym-pip-volume");
+      vol.id = "ym-pip-volume";
+      vol.type = "range";
+      vol.min = "0";
+      vol.max = "100";
+      vol.step = "1";
+      vol.value = "100";
+      vol.setAttribute("aria-label", "Volume");
+      vol.addEventListener("input", () => {
+        const p = player();
+        // setVolume takes 0..1 (it clamps), while the range is 0..100 — passing the
+        // raw 0..100 made every value >= 1 clamp to FULL volume, so nudging the
+        // slider up jumped straight to max (AJ, 2026-10-07).
+        if (p && typeof p.setVolume === "function") p.setVolume(Number(vol.value) / 100);
+      });
+      volWrap.appendChild(vol);
+      pipVolumeEl = vol;
+
+      bar.appendChild(shuffle);
       bar.appendChild(prev);
       bar.appendChild(main);
       bar.appendChild(next);
+      bar.appendChild(repeat);
+      bar.appendChild(volWrap);
       root.appendChild(bar);
     }
 
@@ -642,6 +836,14 @@
     const titleEl = pipDoc.querySelector(".ym-pip-title");
     if (titleEl) titleEl.textContent = (track && track.title) || "Aurora Lyrics";
     artist.textContent = (track && track.artist) || "";
+    const art = pipEl("ym-pip-art");
+    if (art) {
+      const url = (track && track.artworkUrl) || "";
+      // Only touch the src when it actually changes: re-assigning it restarts the
+      // image load and would flicker the thumbnail on every tick.
+      if (url && art.getAttribute("src") !== url) art.setAttribute("src", url);
+      art.classList.toggle("has-art", !!url);
+    }
     if (track && track.artworkUrl) syncKawarpArt(track.artworkUrl);
   }
 
@@ -660,7 +862,7 @@
         : null,
       lastState: null,
       letters: null,
-      // Mirror the panel's word.LineTimed flag (spicy-lyrics.js 6244, 6938-6945):
+      // Mirror the panel's word.LineTimed flag (aurora-lyrics.js 6244, 6938-6945):
       // line-timed words stay at scale 1 / yOffset 0 (no bounce), and only Glow
       // is animated. Honoring this is what kills the PiP's active-line bounce —
       // the previous version applied blendSyllableAnimation to Scale and YOffset
@@ -745,6 +947,13 @@
         group = null;
         parent.appendChild(el);
       }
+      // Tag the record (and its letters) with the LINE element it belongs to, so
+      // animateLine can promote the right line. Bg-vocal words live in a SEPARATE
+      // .line.bg-line sibling, so promoting only the lead line left every bg line
+      // unpromoted — which is why bg vocals stayed visibly steppy after the lead
+      // fix (AJ, 2026-10-07).
+      rec.lineEl = parent;
+      if (rec.letters) rec.letters.forEach((letter) => { letter.lineEl = parent; });
       records.push(rec);
     });
   }
@@ -882,7 +1091,7 @@
       if (!pipWin || pipWin.closed) return;
       centerInitialized = false;
       centerTargetY = null;
-      centerVelocity = 0;
+      resetCameraGlide();
       const p = player();
       const pos = p && typeof p.getPositionMs === "function" ? p.getPositionMs() : null;
       centerOn(activeIndexAt(lyricPositionMs(pos)));
@@ -929,9 +1138,20 @@
   function animateLine(activeIdx, posMs, dt) {
     const set = lineSets[activeIdx];
     const records = set && set.records;
-    if (!records || !kit) return false;
+    if (!records || !kit) {
+      // Nothing to animate: make sure no stale hint is left on this line's
+      // elements — the lead AND its bg-vocal siblings.
+      const els = (set && set.elements) || [];
+      for (let i = 0; i < els.length; i++) {
+        if (els[i] && els[i].classList) els[i].classList.remove("ym-sl-animating");
+      }
+      return false;
+    }
     const splines = kit.splines;
     let anyAwake = false;
+    // Every LINE that owns at least one awake word this frame. Bg vocals are
+    // separate .line.bg-line siblings, so the promotion below is per-owning-line.
+    const awakeLines = new Set();
     for (let w = 0; w < records.length; w++) {
       const rec = records[w];
       const state = getState(posMs, rec.startMs, rec.endMs);
@@ -947,7 +1167,7 @@
       // The word gradient is the panel's own: -20 -> 100 across the word while it
       // is being sung. Without this plain (non-letter) words never fill.
       const wordGradient = state === "Sung" ? 100 : state === "Active" ? -20 + 120 * progress : -20;
-      // Honor lineTimed for Scale/YOffset exactly as the panel does (spicy-lyrics.js
+      // Honor lineTimed for Scale/YOffset exactly as the panel does (aurora-lyrics.js
       // 6938-6945): line-timed words stay at scale 1 / yOffset 0 (no bounce), and
       // only Glow is animated. This is the bounce fix — the unconditional blends
       // were feeding a non-rest moving goal to every word's spring.
@@ -960,7 +1180,16 @@
       rec.springs.Glow.SetGoal(
         kit.blendSyllableAnimation(splines.GlowSpline.at(0), splines.GlowSpline.at(target)));
 
-      const selfAwake = stateChanged || kit.storeNeedsAnimation(rec.springs);
+      // Mirror the panel's simple-lyrics clause EXACTLY (19-animation-modes):
+      // Simple lyrics stubs the Scale/Glow springs, so storeNeedsAnimation reports
+      // false the moment they "settle" — but the gradient sweep still needs a
+      // per-frame write while the word is being sung. Without this the fill freezes
+      // at its state-flip value (the panel's "flash of fill, then dim" bug), which
+      // is why the PiP's simple mode animated differently from the panel's.
+      const selfAwake =
+        stateChanged ||
+        kit.storeNeedsAnimation(rec.springs) ||
+        (simpleLyrics && state === "Active");
       let lettersAwake = false;
       if (rec.letters && (state === "Active" || selfAwake)) {
         lettersAwake = animateLetters(rec, posMs, dt);
@@ -974,6 +1203,9 @@
         continue;
       }
       anyAwake = true;
+      // Track the LINE this word belongs to, not just "the active line" — a
+      // background vocal lives in its own sibling line element.
+      if (rec.lineEl) awakeLines.add(rec.lineEl);
       // Same compositor hint the panel applies per element while its springs are
       // awake — without it this animates unpromoted and reads as low frame rate.
       kit.setAnimatingHint(rec.el, true);
@@ -1000,6 +1232,27 @@
         kit.setStyleIfChanged(rec.el, "--text-shadow-blur-radius", (4 + 2 * glow) + "px", 0.5);
         kit.setStyleIfChanged(rec.el, "--text-shadow-opacity",
           Math.min(glow * 35, 100) + "%", 1);
+      }
+    }
+    // Mirror the panel's LINE-level compositor hint. The panel promotes via the
+    // .ym-sl-animating CLASS — its per-element setAnimatingHint is deliberately a
+    // no-op, because toggling will-change per word churns the background-clip:text
+    // layer — and that class is added by the PANEL's rAF, which cannot see this
+    // document. The PiP therefore called a no-op and its word transforms animated
+    // UNPROMOTED, which is the pixel-stepping AJ reports (AJ, 2026-10-07). The
+    // panel's stylesheet (copied in wholesale) already carries the
+    // .line.ym-sl-animating .word/.letter rules, so toggling the class is all it
+    // takes — and it comes off the moment every spring on the line has slept.
+    // Promote EVERY line that owns an awake word this frame. It cannot be a single
+    // "active line" toggle: background vocals render as their own .line.bg-line
+    // siblings, so they need their own promotion or they animate unpromoted and
+    // stay steppy while the lead line is smooth (AJ, 2026-10-07). Clearing is
+    // driven by the same set, so a line drops its hint the moment its springs sleep.
+    const setLineEls = (set && set.elements) || [];
+    for (let i = 0; i < setLineEls.length; i++) {
+      const el = setLineEls[i];
+      if (el && el.classList && el.classList.contains("line")) {
+        el.classList.toggle("ym-sl-animating", awakeLines.has(el));
       }
     }
     return anyAwake;
@@ -1104,7 +1357,7 @@
      The panel animates `--ym-sl-pfp-spin` on ITS .ym-sl-uploader-link pills from
      its own rAF, which only ever queries the MAIN document - so the PiP's copy of
      the credits pill sat frozen at 0deg. Run the same glide here, on THIS
-     document's pills. Same 4.2s period and ~40fps throttle as spicy-lyrics.js. */
+     document's pills. Same 4.2s period and ~40fps throttle as aurora-lyrics.js. */
   const PIP_GLOW_PERIOD_MS = 4200;
   const PIP_GLOW_MIN_MS = 1000 / 40;
   let pipGlowClock = 0;
@@ -1206,6 +1459,59 @@
         toggle.appendChild(svgIcon(pipDoc, want));
       }
     }
+    syncPipControls(p, pos);
+  }
+
+  function pipFormatClock(ms) {
+    const total = Math.max(0, Math.floor(Number(ms) / 1000));
+    return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
+  }
+
+  // Seek / volume / shuffle / repeat, refreshed each frame (AJ, 2026-10-07).
+  // Everything is read from the LIVE player, never from local toggle state, so
+  // the controls can never disagree with what YTM is actually doing.
+  function syncPipControls(p, pos) {
+    if (pipSeekEl) {
+      const dur = p && p.getDurationMs ? Number(p.getDurationMs()) : 0;
+      const at = Number(pos);
+      if (Number.isFinite(dur) && dur > 0 && Number.isFinite(at)) {
+        // Never fight a drag: skip the position write while the user has the thumb.
+        if (performance.now() - pipSeekUserAt > 1200) {
+          pipSeekEl.value = String(Math.round((Math.max(0, Math.min(dur, at)) / dur) * 1000));
+        }
+        const curEl = pipEl("ym-pip-time-cur");
+        const totEl = pipEl("ym-pip-time-total");
+        if (curEl) curEl.textContent = pipFormatClock(at);
+        if (totEl) totEl.textContent = pipFormatClock(dur);
+      }
+    }
+    if (pipVolumeEl && p && typeof p.getVolume === "function" && pipDoc.activeElement !== pipVolumeEl) {
+      // getVolume() returns an OBJECT ({ media, slider, muted }), not a number.
+      // media.volume is 0..1 — the range is 0..100. Reading it as a number gave
+      // "[object Object]", which the range coerced to 0 (AJ, 2026-10-07).
+      const info = p.getVolume();
+      const vol01 = info && typeof info.media === "number"
+        ? info.media
+        : (info && typeof info.slider === "number" ? info.slider / 100 : null);
+      if (vol01 !== null && Number.isFinite(vol01)) {
+        pipVolumeEl.value = String(Math.round(vol01 * 100));
+      }
+    }
+    if (!kit || !kit.readPlayerToggle) return;
+    const shuffleEl = pipEl("ym-pip-shuffle");
+    if (shuffleEl) shuffleEl.classList.toggle("active", kit.readPlayerToggle("shuffle") === "on");
+    const repeatEl = pipEl("ym-pip-repeat");
+    if (repeatEl) {
+      const rep = kit.readPlayerToggle("repeat");
+      repeatEl.classList.toggle("active", rep !== "off");
+      // Repeat-one carries its state in the GLYPH, exactly like the panel's chip.
+      const wantOne = rep === "one";
+      if (repeatEl.dataset.one !== String(wantOne)) {
+        repeatEl.dataset.one = String(wantOne);
+        while (repeatEl.firstChild) repeatEl.removeChild(repeatEl.firstChild);
+        repeatEl.appendChild(svgIcon(pipDoc, wantOne ? ICON_REPEAT_ONE : ICON_REPEAT));
+      }
+    }
   }
 
   function renderActive(activeIdx) {
@@ -1283,16 +1589,51 @@
   // Bring the active line to the vertical middle of the actual scroll box. The
   // main panel writes scrollTop; the PiP does the same, so its credits remain in
   // normal flow at the bottom and the user can scroll past the last lyric.
-  // Same camera constants as spicy-lyrics.js's scroll spring.
-  const SCROLL_SPRING_STIFFNESS = 110;
-  const SCROLL_SPRING_DAMPING = 21;
-  const SCROLL_MAX_VELOCITY = 4000;
+  //
+  // The camera glide is the PANEL'S OWN spring — kit.Spring, the analytic spr port
+  // — with the panel's constants, replacing the hand-integrated Euler spring this
+  // used to run ("pip has the old one", AJ, 2026-10-07). Same model as the panel:
+  // critically damped, ~0.8s settle, and a retarget KEEPS the velocity so
+  // back-to-back line changes read as one continuous glide.
+  const CAMERA_GLIDE_FREQ = 1;
+  const CAMERA_GLIDE_DAMPING = 1;
+  const CAMERA_GLIDE_SETTLE_PX = 0.25;
+  const CAMERA_GLIDE_SETTLE_SPEED = 0.05;
+  // How long after the user's last manual scroll gesture the camera may resume
+  // following on its own. Upstream's model (their USER_SCROLL_COOLDOWN); the old
+  // rule demanded they scroll the active line fully out of view AND back, so a
+  // small nudge paused the camera for the rest of the song and only the Jump
+  // button could restore it (AJ, 2026-10-07).
+  const PIP_MANUAL_RESUME_MS = 1200;
   let centerTargetY = null;
   let pipManualScrollPaused = false;
   let pipManualScrollWasAway = false;
+  let pipManualScrollAt = 0; // performance.now() of the last manual gesture
   let centerY = 0;
-  let centerVelocity = 0;
+  // The camera's spring. Null means "at rest / not gliding" — dropping it is how
+  // every reset point stops the motion (the spring owns the velocity now).
+  let cameraSpring = null;
+  let cameraLastPos = null;
   let centerInitialized = false;
+  // Last whole-pixel value written to scrollTop. scrollTop is integer-only, so
+  // the camera writes the whole part there and carries the remainder as a
+  // translate (see setCameraFraction) — otherwise the whole text block ticks one
+  // pixel at a time and the motion reads as pixels stepping (AJ, 2026-10-07).
+  let cameraLastWhole = null;
+  let cameraFraction = 0;
+  // Seek / volume controls (built in buildChrome, synced in syncLoop).
+  let pipSeekEl = null;
+  let pipSeekUserAt = 0;   // performance.now() of the last seek drag
+  let pipVolumeEl = null;
+
+  // Stop the camera glide and clear the sub-pixel carry. Used by every point that
+  // must halt the motion: a manual gesture, a jump, a snap, a resume.
+  function resetCameraGlide() {
+    cameraSpring = null;
+    cameraLastPos = null;
+    cameraLastWhole = null;
+    setCameraFraction(0);
+  }
 
   function setJumpVisible(visible) {
     const button = pipEl("ym-pip-jump");
@@ -1320,7 +1661,7 @@
     pipManualScrollPaused = false;
     pipManualScrollWasAway = false;
     centerTargetY = null;
-    centerVelocity = 0;
+    resetCameraGlide();
     centerInitialized = false; // snap, do not glide
     centerOn(idx);
     setJumpVisible(false);
@@ -1338,6 +1679,23 @@
     catch (e) { box.scrollTop = top; }
   }
 
+  // Sub-pixel carry for the camera. The PiP reuses the panel's stylesheet, so its
+  // .LyricsContent already carries the panel's transform rule
+  // (translateY(offset + --ym-sl-scroll-frac)) — writing the remainder here moves
+  // the text by the fraction the integer scrollTop cannot express, which is what
+  // removes the one-pixel ticking. The property is registered @property
+  // inherits:false in the copied stylesheet, so this write does not invalidate the
+  // whole subtree.
+  function setCameraFraction(fraction) {
+    const content = pipEl("ym-pip-content");
+    if (!content) return;
+    // Skip a write that would not visibly change anything (same guard the panel's
+    // setScrollFraction uses).
+    if (Math.abs(fraction - cameraFraction) < 0.01 && fraction !== 0) return;
+    cameraFraction = fraction;
+    content.style.setProperty("--ym-sl-scroll-frac", fraction === 0 ? "0px" : (-fraction) + "px");
+  }
+
   function centerOn(activeIdx) {
     const box = pipEl("ym-pip-lines");
     const target = lineEls[activeIdx];
@@ -1346,18 +1704,34 @@
     const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
     const clamped = Math.max(0, Math.min(maxScroll, targetScroll));
     if (!centerInitialized) {
+      // First placement: SNAP, never glide. The lines have no measurable height
+      // until layout, so a glide from 0 reads as the lyrics bouncing on open.
       centerY = clamped;
       centerTargetY = clamped;
-      centerVelocity = 0;
+      cameraSpring = null;
+      cameraLastPos = null;
       centerInitialized = true;
+      cameraLastWhole = clamped;
       writeCameraScroll(box, clamped);
+      setCameraFraction(0);
       return;
     }
     centerTargetY = clamped;
-    // smoothScrolling OFF: hand the move to the element's own CSS ease, ONCE per
-    // target change (stepCenterSpring then does nothing). Without this the PiP
-    // wrote the new scrollTop instantly every frame and had NO scroll animation.
-    if (!smoothScrolling) writeCameraScroll(box, clamped, false);
+    // Smooth Scrolling OFF (and not Simple Lyrics, which always glides — the
+    // panel's setScrollTarget treats them the same way): hand the move to the
+    // element's own CSS ease, ONCE per target change (stepCenterSpring then does
+    // nothing). Without this the PiP wrote the new scrollTop instantly every frame
+    // and had NO scroll animation.
+    if (!smoothScrolling && !simpleLyrics) { writeCameraScroll(box, clamped, false); return; }
+    // The glide: the spring is REUSED so its velocity carries into the new goal,
+    // which is what makes rapid line changes read as one motion.
+    if (!cameraSpring && kit && kit.Spring) {
+      cameraSpring = new kit.Spring(centerY, CAMERA_GLIDE_FREQ, CAMERA_GLIDE_DAMPING);
+    }
+    if (cameraSpring) {
+      cameraSpring.SetGoal(clamped);
+      cameraLastPos = null;
+    }
   }
 
   function updateManualScrollRecovery(activeIdx) {
@@ -1367,19 +1741,25 @@
     }
     const inView = activeLineInView(activeIdx);
     if (pipManualScrollPaused && !inView) {
-      // Do not resume merely because a wheel event fired while the current line
-      // is still visible. That was the snap-back bug: the next rAF immediately
-      // cleared the pause before the browser had applied the user's scroll.
+      // Remember that the user really scrolled away, so a gesture that never left
+      // the line cannot clear the pause before the browser applies it.
       pipManualScrollWasAway = true;
     }
-    if (pipManualScrollPaused && pipManualScrollWasAway && inView) {
-      // Once the user really scrolled away and then brought the active line back
-      // into view, resume automatic following just like the main panel.
+    // Resume automatic following once the user has been IDLE for a moment and the
+    // active line is in view. The old rule ALSO demanded they scroll the line
+    // fully out of view and back, so a small nudge that kept it visible paused the
+    // camera for the rest of the song and only "Jump to current" could restore it
+    // (AJ, 2026-10-07). The cooldown is upstream's model; the wasAway path is kept
+    // too, so a real scroll-away resumes the moment the line returns rather than
+    // waiting out the timer.
+    const idle = performance.now() - pipManualScrollAt;
+    if (pipManualScrollPaused && inView && (pipManualScrollWasAway || idle > PIP_MANUAL_RESUME_MS)) {
       pipManualScrollPaused = false;
       pipManualScrollWasAway = false;
       centerTargetY = null;
-      centerVelocity = 0;
+      resetCameraGlide();
       centerInitialized = false;
+      cameraLastWhole = null;
       centerOn(activeIdx);
       setJumpVisible(false);
       return;
@@ -1392,25 +1772,36 @@
     if (!box || centerTargetY == null || pipManualScrollPaused) return;
     const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
     centerTargetY = Math.max(0, Math.min(maxScroll, centerTargetY));
-    if (!smoothScrolling) {
-      // The one-shot CSS ease issued by centerOn() owns this move. Writing per
-      // frame here is what left the PiP with NO scroll animation at all.
+    if ((!smoothScrolling && !simpleLyrics) || !cameraSpring) {
+      // Either the one-shot CSS ease owns the move, or no glide is running.
+      setCameraFraction(0);
       return;
     }
-    // Keep the camera's fractional position in JS. Reading scrollTop back on
-    // every frame quantizes it to the browser's integer scroll position and can
-    // turn a small spring step into a visible one-pixel snap at line changes.
-    const displacement = centerTargetY - centerY;
-    if (Math.abs(displacement) < 1 && Math.abs(centerVelocity) < 8) {
-      centerY = centerTargetY;
-      centerVelocity = 0;
-    } else {
-      centerVelocity +=
-        (displacement * SCROLL_SPRING_STIFFNESS - centerVelocity * SCROLL_SPRING_DAMPING) * dt;
-      centerVelocity = Math.max(-SCROLL_MAX_VELOCITY, Math.min(SCROLL_MAX_VELOCITY, centerVelocity));
-      centerY += centerVelocity * dt;
+    // The analytic spr spring, stepped with the frame's dt (the caller already
+    // clamps it to <=0.05). Velocity carries across retargets by design.
+    const stepped = cameraSpring.Step(dt);
+    centerY = Math.max(0, Math.min(maxScroll, stepped));
+    const goal = centerTargetY;
+    const moved = cameraLastPos === null ? Infinity : Math.abs(centerY - cameraLastPos);
+    cameraLastPos = centerY;
+    const settled =
+      Math.abs(centerY - goal) < CAMERA_GLIDE_SETTLE_PX && moved < CAMERA_GLIDE_SETTLE_SPEED;
+    // Whole pixel to scrollTop, remainder as the compositor translate. Writing
+    // centerY straight into scrollTop quantized it, so the whole text block moved
+    // in one-pixel steps — the "you can see where the pixels are moving" report.
+    const whole = settled ? Math.round(goal) : Math.round(centerY);
+    const fraction = settled ? 0 : centerY - whole;
+    if (whole !== cameraLastWhole) {
+      writeCameraScroll(box, whole);
+      cameraLastWhole = whole;
     }
-    writeCameraScroll(box, centerY);
+    setCameraFraction(fraction);
+    if (settled) {
+      centerY = goal;
+      // Park the spring on the goal at rest so a later retarget starts clean.
+      cameraSpring.SetGoal(goal, true);
+      cameraLastPos = null;
+    }
   }
 
   function stopSync() {
@@ -1421,6 +1812,46 @@
   }
 
   // ---- lifecycle -----------------------------------------------------------
+  // Scroll/motion settings, applied from EITHER the lines payload or the live
+  // lyrics:settings event — so a toggle takes effect without waiting for a track
+  // change (the payload only re-emits then).
+  function applyScrollSettings(src) {
+    if (!src) return;
+    smoothScrolling = src.smoothScrolling !== false;
+    scrollLeadEnabled = src.scrollLeadEnabled === true;
+    scrollLeadMs = Number(src.scrollLeadMs) || 0;
+    const simple = src.simpleLyrics === true;
+    if (simple !== simpleLyrics) {
+      simpleLyrics = simple;
+      // Apple Music style lyrics is a RENDER MODE whose motion rules are scoped to
+      // body.ym-sl-simple-lyrics in the panel's stylesheet. The springs already
+      // switch (the kit's createWordSprings reads the panel's own setting), but
+      // without this class on the PiP's BODY the CSS half never applies — which is
+      // why the mode "kinda worked" here (AJ, 2026-10-07).
+      if (pipDoc && pipDoc.body) pipDoc.body.classList.toggle("ym-sl-simple-lyrics", simple);
+      // The word records capture their springs AT BUILD TIME, and createWordSprings
+      // only returns the Scale/Glow STUBS while the panel's setting is on — so a
+      // toggle has to REBUILD the lines, or the words keep the normal-mode zoom and
+      // glow springs and the mode never truly applies (AJ, 2026-10-07). The panel
+      // does the same thing (buildRendererLines on a simpleLyrics change).
+      if (lines.length && pipWin && !pipWin.closed && pipDoc) {
+        buildLinesBox();
+        const p = player();
+        const pos = lyricPositionMs(p ? p.getPositionMs() : null);
+        updateLineStates(pos);
+        lastRenderedActive = -2;
+        lastRenderedTarget = -2;
+        renderActive(activeIndexAt(pos));
+      }
+    }
+    // Smooth Scrolling switched off: drop the glide NOW, not on the next track.
+    if (!smoothScrolling) resetCameraGlide();
+  }
+
+  function onSettings(s) {
+    applyScrollSettings(s);
+  }
+
   function onLines(payload) {
     if (!payload) return;
     lines = Array.isArray(payload.lines) ? payload.lines : [];
@@ -1429,16 +1860,14 @@
     romanizationEnabled = payload.romanizationEnabled !== false;
     songwriters = Array.isArray(payload.songwriters) ? payload.songwriters : [];
     attribution = payload.attribution || null;
-    smoothScrolling = payload.smoothScrolling !== false;
-    scrollLeadEnabled = payload.scrollLeadEnabled === true;
-    scrollLeadMs = Number(payload.scrollLeadMs) || 0;
+    applyScrollSettings(payload);
     lastRenderedActive = -2;
     lastRenderedTarget = -2;
     centerTargetY = null;
     pipManualScrollPaused = false;
     pipManualScrollWasAway = false;
     centerY = 0;
-    centerVelocity = 0;
+    resetCameraGlide();
     centerInitialized = false;
     if (!pipWin || pipWin.closed || !pipDoc) return;
     setHeader();
@@ -1554,6 +1983,10 @@
       unsubscribeSync = window.YTMod.bus.on("lyrics:sync", (payload) => {
         syncState = payload || null;
       }, { replay: true });
+      // Live scroll/motion settings. Without this a toggle only reached the PiP on
+      // the NEXT lyrics payload, so "Smooth Scrolling off" and "Apple Music style
+      // lyrics" appeared to do nothing here (AJ, 2026-10-07).
+      unsubscribeSettings = window.YTMod.bus.on("lyrics:settings", onSettings, { replay: true });
     }
     applySettings(settings);
     window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
@@ -1563,6 +1996,7 @@
     if (unsubscribe) { unsubscribe(); unsubscribe = null; }
     if (unsubscribeKit) { unsubscribeKit(); unsubscribeKit = null; }
     if (unsubscribeSync) { unsubscribeSync(); unsubscribeSync = null; }
+    if (unsubscribeSettings) { unsubscribeSettings(); unsubscribeSettings = null; }
     closePip();
     if (btnHandle) { btnHandle.remove(); btnHandle = null; }
     lines = [];

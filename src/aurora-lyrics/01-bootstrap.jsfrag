@@ -1,0 +1,111 @@
+/*
+ * Aurora Lyrics — YTMod extension (unofficial).
+ *
+ * Renders lyrics using the Spicy Lyrics Syllable RENDERER, adapted from the
+ * original Spicy Lyrics project by Spikerko (AGPL-3.0). Aurora Lyrics is an
+ * UNOFFICIAL project: it is not made, endorsed, or supported by Spicy Lyrics
+ * or by Spikerko, and is not affiliated with either. Preserve the upstream
+ * license and attribution when distributing adapted builds.
+ *
+ * Community syncs come from the Spicy Lyrics API and are credited ON SCREEN
+ * wherever lyrics appear (see buildCreditsFooter / buildProviderRow), as the
+ * API terms require; API responses are cached for at most 30 days.
+ *
+ * YTMod-specific boundaries:
+ *   - playback position and seeking come from window.YTMod.player,
+ *   - lyrics are initially loaded from TTML imports,
+ *   - the renderer lives inside YT Music's native side panel.
+ */
+(function () {
+  "use strict";
+
+  // LOAD MARKER — confirms the updated Spicy Lyrics script actually executed in
+  // the page. If this line does NOT appear in the DevTools console after a full
+  // extension + tab reload, the new code is not being loaded (stale cache /
+  // wrong reload procedure), and any lyric-rendering change will have no effect.
+  console.log("[Aurora Lyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
+
+  // Keep the original internal ID so existing installs and saved lyrics remain active.
+  const EXT_ID = "ytmod-spicy-lyrics";
+  const UNISON_API = "https://unison.boidu.dev/lyrics";
+  const LRCLIB_API = "https://lrclib.net/api/get";
+  const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
+  const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
+  // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
+  // server-side only and would be exposed in this client-side extension.
+  const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  // YTM -> Spotify id resolver. Song.link/Odesli was shut down
+  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
+  // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
+  // search + Spotify URL relations. MusicBrainz is deliberately last in the ID
+  // layer because it is slower/rate-limited, but it covers mappings LB misses.
+  //
+  // ListenBrainz runs `labs.api.listenbrainz.org`, MetaBrainz's free dataset
+  // hoster. It publishes the recording->Spotify mapping directly — no key, no
+  // account, no backend, and CORS `*` so we can call it from here.
+  const LISTENBRAINZ_LABS_API = "https://labs.api.listenbrainz.org";
+  // Per-request cap. This sits on the critical path of a track change, so it
+  // must never be the reason a song hangs.
+  const LB_TIMEOUT_MS = 5000;
+  // Bounds the total work across the whole variant ladder. Without this, a
+  // pathological title (lots of parens variants) could issue dozens of calls
+  // and stall the panel while the user is already on the next song.
+  const LB_MAX_ATTEMPTS = 12;
+  // Set when ListenBrainz returns 429/5xx. While it is in the future we stop
+  // trying and report the failure as transient, instead of burning the rest of
+  // the song's budget on calls that cannot succeed.
+  let lbThrottledUntil = 0;
+  // The extension script is injected into the page world, where chrome.runtime
+  // is unavailable. Resolve the local font CSS from this script's own extension
+  // URL instead of resolving it against music.youtube.com.
+  const SCRIPT_URL = document.currentScript && document.currentScript.src || "";
+  const SPICY_LYRICS_FONT_CSS = SCRIPT_URL
+    ? new URL("fonts/spicy-lyrics.css", SCRIPT_URL).href
+    : "https://fonts.spikerko.org/spicy-lyrics/source.css";
+  // Bundled Kawarp WebGL module (the same one the Dynamic add-on uses). Resolved
+  // from this script's own extension URL because the page world cannot fetch
+  // chrome-extension:// resources by bare name.
+  const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
+  // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
+  // the page-wide one. animationSpeed is overridden per playback state.
+  const FS_KAWARP_OPTIONS = {
+    warpIntensity: 1,
+    blurPasses: 6,
+    animationSpeed: 0.1,
+    saturation: 1.5,
+    dithering: 0.008,
+    transitionDuration: 1000,
+    tintIntensity: 0,
+    scale: 1,
+  };
+  const GAP_DOTS_AFTER_SECONDS = 3;
+  const PRE_HIDDEN_DOT_LINE_MS = 500;
+  const LRCLIB_CACHE_LIMIT = 12;
+
+  const h = (tag, attrs, ...kids) => {
+    const e = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        const v = attrs[k];
+        if (v == null) continue;
+        if (k === "class") e.className = v;
+        else if (k === "text") e.textContent = v;
+        else if (k.startsWith("on") && typeof v === "function") {
+          e.addEventListener(k.slice(2).toLowerCase(), v);
+        } else {
+          e.setAttribute(k, v);
+        }
+      }
+    }
+    for (const kid of kids) {
+      if (kid == null) continue;
+      e.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+    }
+    return e;
+  };
+
+  function whenYTMod(cb) {
+    if (window.YTMod && window.YTMod.player) return cb();
+    setTimeout(() => whenYTMod(cb), 200);
+  }
+

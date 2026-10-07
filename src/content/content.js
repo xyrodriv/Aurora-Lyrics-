@@ -289,6 +289,32 @@
       res();
     });
   });
+  // ---- animated-cover-art cache (m8tec m3u8 URL per track key) --------------
+  // Same bridge pattern as the lyrics cache: one object, a per-entry `exp`, swept
+  // lazily on read. The track -> m3u8 mapping is stable, so a 30-day window is
+  // safe, and a persisted hit means the fullscreen cover appears with NO network
+  // round-trip (AJ, 2026-10-03).
+  const ART_CACHE_KEY = "ytmod_art_cache";
+  const getArtCache = () => new Promise((res) => {
+    chrome.storage.local.get(ART_CACHE_KEY, (r) => {
+      const saved = r[ART_CACHE_KEY];
+      if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+        console.debug(`[YTMod] Art cache loaded: ${Object.keys(saved).length} entries.`);
+        res(saved);
+      } else {
+        res({});
+      }
+    });
+  });
+  const setArtCache = (cache) => new Promise((res) => {
+    const count = cache && typeof cache === "object" ? Object.keys(cache).length : 0;
+    chrome.storage.local.set({ [ART_CACHE_KEY]: cache }, () => {
+      if (chrome.runtime.lastError) {
+        console.warn(`[YTMod] Art cache write FAILED (${count} entries):`, chrome.runtime.lastError.message);
+      }
+      res();
+    });
+  });
   const clearSpicyCache = () => new Promise((res) => {
     chrome.storage.local.remove(SPICY_CACHE_KEY, () => {
       if (chrome.runtime.lastError) {
@@ -599,7 +625,7 @@
         { key: "blurPasses", label: "Blur passes", min: 2, max: 8, step: 1, default: 6, display: "passes" },
         { key: "warpIntensity", label: "Warp intensity", min: 0.2, max: 1, step: 0.05, default: 1, display: "decimal" },
         // Music videos don't use Kawarp, so they get their own blurred backdrop
-        // (drawn in spicy-lyrics.js). This slider is SEPARATE from "Brightness"
+        // (drawn in aurora-lyrics.js). This slider is SEPARATE from "Brightness"
         // above (which drives Kawarp) and controls that MV backdrop's brightness.
         // dev-only (AJ, 2026-09-28). Consumed cross-add-on by Aurora Lyrics.
         { key: "backdropBrightness", label: "Music video backdrop brightness", min: 0, max: 2.0, step: 0.05, default: 1.15, display: "decimal", dev: true },
@@ -634,31 +660,47 @@
       category: "Extensions",
       stars: 5,
       tags: ["lyrics", "synced", "karaoke", "ttml"],
-      description: "Karaoke-style synced lyrics that follow the music line-by-line and word-by-word.",
+      // Terms of Service s5: naming the upstream as a dependency is allowed
+      // ("uses or is built on Spicy Lyrics is fine"), but the listing must NOT
+      // read as Spicy Lyrics' own product. Hence the plain "Unofficial." and a
+      // github link to THIS project rather than to Spikerko's repo, which would
+      // imply origin/endorsement.
+      description: "Unofficial. Karaoke-style synced lyrics that follow the music line-by-line and word-by-word. Built on the Spicy Lyrics Syllable renderer; community syncs fetched via the Spicy Lyrics API.",
       version: "0.2.0",
-      lastUpdated: "2026-09-28",
-      github: "https://github.com/Spikerko/spicy-lyrics",
-      jsUrl: chrome.runtime.getURL("src/extensions/spicy-lyrics.js"),
+      lastUpdated: "2026-10-07",
+      github: "https://github.com/xyrodriv/Aurora-Lyrics-",
+      jsUrl: chrome.runtime.getURL("src/extensions/aurora-lyrics.js"),
       art: { video: "assets/art/aurora-lyrics.mp4", poster: "assets/art/aurora-lyrics.jpg" },
       settings: [
         // Order is the reading order of the page. Everything WITHOUT `dev: true`
         // shows to everyone; everything with it is hidden until the 6-tap gesture
         // has been used — see visibleSettings(). Keep the non-dev entries first.
-        // Lyric size ceiling raised to 600% on AJ's call (2026-09-28); default
-        // bumped to 145% because the 130% default was too small on his main
-        // monitor.
-        { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.45, display: "percent" },
+        // Lyric size ceiling is 600%. Default back to 130% (AJ, 2026-10-07) —
+        // 145% (2026-09-28) read too big; 130% is the intended look.
+        { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.30, display: "percent" },
         { key: "romanizationEnabled", label: "Romanization (JP / KR)", type: "toggle", default: true },
         { key: "legibilityBackdrop", label: "Legibility backdrop", type: "toggle", default: false },
         // Extends the adaptive lyric readability shade (which Video Background
         // already uses) to the SIDE layout for music videos, where the lyrics
         // sit over the blurred video backdrop. AJ, 2026-09-28.
         { key: "mvLyricsShade", label: "Shade lyrics over bright music video", type: "toggle", default: true },
+        // Animated Apple Music cover art (m8tec HLS): swaps the cover for a looping
+        // clip in the player view and in fullscreen. Network-backed, so it gets a
+        // switch — and it defaults OFF (AJ, 2026-10-07): it is an opt-in extra,
+        // not something to turn on for every install unasked.
+        { key: "animatedArt", label: "Animated cover art", type: "toggle", default: false },
+        // Apple-Music-style MOTION only (AJ, 2026-10-01): no bounce, no zoom, no
+        // glow — the line just glides up smoothly. The gradient sweep is UNCHANGED
+        // from normal mode; an earlier attempt redirected it at a registered
+        // custom property and broke the active-line highlight, so the mode is now
+        // strictly the spring/spline swap.
+        { key: "simpleLyrics", label: "Apple Music style lyrics", type: "toggle", default: false },
         { type: "header", label: "Scrolling" },
-        // smoothScrolling flipped to OFF (2026-09-28) to match AJ's screenshot
-        // of the default settings: he wants the raw "jump to the active line"
-        // behavior by default. Smooth scroll is still available as an opt-in.
-        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: false },
+        // smoothScrolling back ON by default (AJ, 2026-10-07) — he prefers the
+        // eased glide into the active line. `disabledWhen` dims + locks the row
+        // while simpleLyrics is ON, because simple mode forces its own spring
+        // scroll and ignores this setting entirely (AJ, 2026-10-02).
+        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true, disabledWhen: "simpleLyrics" },
         { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
         { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
         // ---- developer mode only ------------------------------------------
@@ -672,7 +714,7 @@
         // (ytmod-dynamic), not here — that is where the backdrop controls live.
         // Aurora Lyrics reads it cross-add-on (see handleHostMessage).
         // NOTE: "Vertical position" used to live here. It was removed as a setting
-        // on AJ's call (2026-09-26) — the slider is gone and spicy-lyrics.js pins
+        // on AJ's call (2026-09-26) — the slider is gone and aurora-lyrics.js pins
         // the offset at its -80px default, so a value stored while the slider
         // existed cannot keep shifting the lyrics with no UI left to undo it.
       ],
@@ -934,14 +976,28 @@
         syncRangeFill();
         postExtensionSettings(ext.id, values);
         saveExtensionSettings(ext.id, values);
+        // A change can flip another row's disabledWhen condition (e.g. toggling
+        // Simple Lyrics locks Smooth Scrolling), so re-sync every row.
+        controls.forEach((entry) => { if (entry.syncDisabled) entry.syncDisabled(); });
       };
       input.addEventListener(isToggle ? "change" : "input", updateSetting);
       syncRangeFill();
-      controls.set(setting.key, { input, valueEl, setting, syncRangeFill });
-      section.appendChild(h("div", { class: "ym-detail-setting-row" },
+      const row = h("div", { class: "ym-detail-setting-row" },
         h("div", { class: "ym-detail-setting-label", text: setting.label }),
         h("div", { class: "ym-detail-setting-control" }, input, valueEl)
-      ));
+      );
+      // `disabledWhen`: dim + lock this row while the named setting is truthy
+      // (used by Smooth Scrolling, which Simple Lyrics overrides). Inline styles
+      // keep it self-contained -- there is no conditional-row CSS to extend.
+      const syncDisabled = () => {
+        const blocked = !!(setting.disabledWhen && values[setting.disabledWhen]);
+        row.style.opacity = blocked ? "0.45" : "";
+        row.style.pointerEvents = blocked ? "none" : "";
+        row.title = blocked ? "Apple Music style lyrics overrides this setting" : "";
+      };
+      syncDisabled();
+      controls.set(setting.key, { input, valueEl, setting, syncRangeFill, syncDisabled });
+      section.appendChild(row);
     }
 
     const reset = h("button", { class: "ym-detail-settings-reset", type: "button", text: "Reset to defaults" });
@@ -1388,6 +1444,8 @@
           case "getSpicyCache": r = await getSpicyCache(); break;
           case "setSpicyCache": await setSpicyCache(args[0]); r = true; break;
           case "clearSpicyCache": await clearSpicyCache(); r = true; break;
+          case "getArtCache": r = await getArtCache(); break;
+          case "setArtCache": await setArtCache(args[0]); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
           case "fetchUnison": r = await fetchUnison(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
@@ -2518,6 +2576,18 @@
   /* ---- boot ---- */
   async function boot() {
     injectPublicAPI(); // expose window.YTMod (page world) before any JS extension loads
+    // Vendored hls.js, loaded into the PAGE world (so window.Hls is directly
+    // usable by the spicy-lyrics add-on, which also runs page-world). Chrome /
+    // Comet cannot play HLS natively, and the animated Apple Music cover art
+    // from artwork.m8tec.top is delivered as an HLS .m3u8, so this dependency
+    // must be present before any fullscreen art is attached. Not registered as
+    // an "extension" — it exposes no UI and the Marketplace must not list it.
+    try {
+      const hlsNode = document.createElement("script");
+      hlsNode.src = chrome.runtime.getURL("src/extensions/hls.min.js");
+      hlsNode.className = "ym-vendor-script";
+      (document.head || document.documentElement).appendChild(hlsNode);
+    } catch (_) {}
     const reg = await getReg();
     let registryChanged = false;
     for (const removedId of ["ytmod-rose", "ytmod-compact"]) {

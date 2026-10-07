@@ -1,0 +1,747 @@
+  /* ---- compositor hint management ------------------------------------------
+     `will-change` is a promise about what is ABOUT to change, not a decoration.
+     Declared permanently in CSS it forced a promoted compositor layer per element
+     -- 70 lines + 571 words + every letter on one 3:28 track -- and nothing ever
+     demoted them, so layer count and GPU raster memory only grew as a session ran.
+     Because these elements also repaint every frame anyway (text-shadow glow,
+     background-image gradient stops), the promotion bought no repaint saving
+     either: worst of both worlds.
+
+     So the hint is applied here, per element, only while its springs are awake,
+     and dropped the moment it settles. In steady state a handful of elements on
+     the active line carry it instead of the entire song. */
+  // The hint is declared PERMANENTLY in CSS now (see the .word/.letter rule).
+  // Toggling will-change per word made the background-clip:text layer churn, and
+  // the clip flickers dark every time that layer changes - so this is
+  // deliberately empty and setAnimatingHint() is effectively a no-op. Upstream
+  // does the same (spicy-lyrics Mixed.css:37).
+  const HINT_ON = "";
+
+  function setAnimatingHint(element, animating) {
+    if (!element) return;
+    const want = animating ? HINT_ON : "";
+    // Cheap guard: this runs on the hot path for every animating word every
+    // frame, and re-writing an identical value still dirties style.
+    if (element.__ymWillChange === want) return;
+    element.__ymWillChange = want;
+    element.style.willChange = want;
+  }
+
+  // Called when a line leaves pendingAnimationLines, i.e. every spring on it has
+  // slept. Without this the hint set during animation would never be released and
+  // we would be back to a permanent promotion, just reached the slow way.
+  function releaseLineAnimationHints(line) {
+    // Drop the LINE-level compositor hint FIRST, and before the words guard: the
+    // class is what actually promotes the layers now, so it has to come off even
+    // when the line has no lead words.
+    if (line && line.HTMLElement) line.HTMLElement.classList.remove("ym-sl-animating");
+    const words = line && line.Syllables && line.Syllables.Lead;
+    if (!words) return;
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index];
+      setAnimatingHint(word.HTMLElement, false);
+      const letters = word.Letters;
+      if (!letters) continue;
+      for (let letterIndex = 0; letterIndex < letters.length; letterIndex++) {
+        setAnimatingHint(letters[letterIndex].HTMLElement, false);
+      }
+    }
+  }
+
+  /* ---- Simple lyrics (Apple Music style) ------------------------------------
+     The gradient sweep is a CSS animation, so the JS only has to START it. This
+     runs on WORD STATE CHANGE ONLY — never per frame. That is the entire point of
+     the mode: the normal path rewrites --gradient-position for every word 60-170
+     times a second, and this replaces all of it with one style write per word per
+     state change.
+     Ported from upstream's Simple Lyrics Mode (LyricsAnimator.ts). Upstream's
+     Pre_ head-start animation on the FOLLOWING word is deliberately not ported —
+     the sweep already starts from the keyframe's own -27.5%, which reads fine, and
+     it would add a setTimeout per word for a detail nobody asked for. */
+  function animateWord(word, lineState, positionMs, deltaTime) {
+    const state = getState(positionMs, word.StartTime, word.EndTime);
+    const progress = getProgress(positionMs, word.StartTime, word.EndTime);
+    const stateChanged = word.LastState !== state;
+    word.LastState = state;
+    if (stateChanged) {
+      word.HTMLElement.classList.toggle("WordNotSung", state === "NotSung");
+      word.HTMLElement.classList.toggle("WordSung", state === "Sung");
+    }
+
+    // No real per-word sync: show the line as a static block that lights up when
+    // active/sung instead of running syllable/letter karaoke springs — the
+    // dominant per-frame cost on partially-synced TTML imports (AJ, 2026-09-17).
+    if (word.NoKaraoke) {
+      const lit = state !== "NotSung";
+      setStyleIfChanged(word.HTMLElement, "--gradient-position", lit ? "100%" : "-20%", 0.1);
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", "1", 0.001);
+      setStyleIfChanged(word.HTMLElement, "transform", "translateY(0)", 0.001);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", "4px", 0.5);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", "0%", 1);
+      setAnimatingHint(word.HTMLElement, false);
+      return;
+    }
+
+    if (word.Dot) {
+      if (!word.AnimatorStore) {
+        word.AnimatorStore = createDotSprings();
+        word.AnimatorStore.Scale.SetGoal(DotScaleSpline.at(0), true);
+        word.AnimatorStore.YOffset.SetGoal(DotYOffsetSpline.at(0), true);
+        word.AnimatorStore.Glow.SetGoal(DotGlowSpline.at(0), true);
+        word.AnimatorStore.Opacity.SetGoal(DotOpacitySpline.at(0), true);
+      }
+      const targetScale = blendAnimation(
+        DotScaleSpline.at(0),
+        DotScaleSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetYOffset = blendAnimation(
+        DotYOffsetSpline.at(0),
+        DotYOffsetSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetGlow = blendAnimation(
+        DotGlowSpline.at(0),
+        DotGlowSpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0)
+      );
+      const targetOpacity = DotOpacitySpline.at(state === "Active" ? progress : state === "Sung" ? 1 : 0);
+      word.AnimatorStore.Scale.SetGoal(targetScale);
+      word.AnimatorStore.YOffset.SetGoal(targetYOffset);
+      word.AnimatorStore.Glow.SetGoal(targetGlow);
+      word.AnimatorStore.Opacity.SetGoal(targetOpacity);
+      if (!stateChanged && !storeNeedsAnimation(word.AnimatorStore)) {
+        setAnimatingHint(word.HTMLElement, false);
+        return;
+      }
+      setAnimatingHint(word.HTMLElement, true);
+      const scale = word.AnimatorStore.Scale.Step(deltaTime);
+      const yOffset = word.AnimatorStore.YOffset.Step(deltaTime);
+      const glow = word.AnimatorStore.Glow.Step(deltaTime);
+      const opacity = word.AnimatorStore.Opacity.Step(deltaTime);
+      setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001, yOffset);
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+      setStyleIfChanged(word.HTMLElement, "opacity", String(opacity), 0.001);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-blur-radius", `${4 + 6 * glow}px`, 0.5);
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${glow * 90}%`, 1);
+      return;
+    }
+
+    if (!word.AnimatorStore) {
+      word.AnimatorStore = createWordSprings(word);
+      word.AnimatorStore.Scale.SetGoal(word.LineTimed ? 1 : ScaleSpline.at(0), true);
+      word.AnimatorStore.YOffset.SetGoal(word.LineTimed ? 0 : YOffsetSpline.at(0), true);
+      word.AnimatorStore.Glow.SetGoal(GlowSpline.at(0), true);
+    }
+    const target = state === "Active" ? progress : state === "Sung" ? 1 : 0;
+    const targetScale = word.LineTimed
+      ? 1
+      : blendSyllableAnimation(ScaleSpline.at(0), ScaleSpline.at(target));
+    const targetYOffset = word.LineTimed
+      ? 0
+      : blendVerticalAnimation(YOffsetSpline.at(0), YOffsetSpline.at(target));
+    word.AnimatorStore.Scale.SetGoal(targetScale);
+    word.AnimatorStore.YOffset.SetGoal(targetYOffset);
+    word.AnimatorStore.Glow.SetGoal(blendSyllableAnimation(GlowSpline.at(0), GlowSpline.at(target)));
+
+    // A letter can only be moving while its word is active (or has just changed
+    // state), so a word that is already at rest can skip the letter pass
+    // entirely instead of walking dozens of spans.
+    // Simple lyrics stubs the Scale/Glow springs, so `storeNeedsAnimation` reports
+    // false the moment they "settle" — but the word's gradient sweep still needs a
+    // per-frame write while the word is being sung. Keep Active words awake in
+    // this mode, or the gradient freezes at its state-flip value: that was the
+    // "flash of fill at the line end, then dim" AJ saw (2026-10-02). In normal
+    // mode the glow spring chases a progress-driven goal and never sleeps during
+    // a line, which is what kept these writes flowing before the stubs existed.
+    const selfAwake =
+      stateChanged ||
+      storeNeedsAnimation(word.AnimatorStore) ||
+      (currentSettings.simpleLyrics && state === "Active");
+    let lettersAwake = false;
+    if (word.LetterGroup && (state === "Active" || selfAwake)) {
+      lettersAwake = animateLetters(word, state, lineState, positionMs, deltaTime);
+    }
+    // Nothing on this word or any of its letters changed: skip the spring steps
+    // and every style write. Rebuilding those strings for dozens of resting
+    // letter spans every frame was the single largest TTML cost.
+    if (!selfAwake && !lettersAwake) {
+      setAnimatingHint(word.HTMLElement, false);
+      return;
+    }
+    setAnimatingHint(word.HTMLElement, true);
+
+    const scale = word.AnimatorStore.Scale.Step(deltaTime);
+    const yOffset = word.AnimatorStore.YOffset.Step(deltaTime);
+    const glow = word.AnimatorStore.Glow.Step(deltaTime);
+    const gradient = state === "Sung" ? 100 : state === "Active" ? -20 + 120 * progress : -20;
+
+    setStyleIfChanged(word.HTMLElement, "transform", `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset}), 0)`, 0.001, yOffset);
+    setStyleIfChanged(word.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+    if (word.LetterGroup) {
+      // The wrapper must stay inert: no gradient of its own (a wrapper gradient
+      // double/ghosts the active letters). Two constraints that caused the
+      // "long words are dim" bug:
+      //  1. Never set the wrapper's -webkit-text-fill-color to "transparent" —
+      //     with background-clip:text on the wrapper it clips the child letters
+      //     to the empty wrapper box and long words vanish. "inherit" is safe.
+      //  2. Never set `text-shadow: none` on the wrapper. text-shadow is
+      //     INHERITED, and the line's NotSung/Sung glow is what actually paints
+      //     the glyphs (the fill is transparent). Clearing it on the wrapper
+      //     stops that glow reaching the letters, so letter-group words lose a
+      //     whole paint layer that regular words keep and render dimmer.
+      setStyleIfChanged(word.HTMLElement, "background-image", "none");
+      setStyleIfChanged(word.HTMLElement, "-webkit-text-fill-color", "inherit");
+      setStyleIfChanged(word.HTMLElement, "color", "inherit");
+    } else {
+      setStyleIfChanged(word.HTMLElement, "--gradient-position", `${gradient}%`, 0.1);
+      // A LINE-TIMED word's glow IS the line-fill highlight, and at the shared 35x
+      // multiplier it read too faint next to the letter glow's 185x. AJ asked for
+      // a little more (2026-10-02): 50x peaks near 50% opacity at the glow's
+      // natural peak of 1.0. Background-vocal words (word.BGWord) get 70x plus a
+      // wider radius, because the bg line no longer dims its glow via a <1 line
+      // opacity — so the glow now has to read as bright/white on its own (AJ,
+      // 2026-10-02 late: "the glow isnt bright or white still"). The letter-group
+      // bg path already peaks at 100% white at L12473.
+      const glowMultiplier = word.BGWord ? 60 : (word.LineTimed ? 50 : 35);
+      // Line-timed words get a slightly wider glow to match the boosted opacity
+      // (AJ, 2026-10-02: "up the radius a little bit").
+      setStyleIfChanged(
+        word.HTMLElement,
+        "--text-shadow-blur-radius",
+        `${word.BGWord ? 4 + 4 * glow : (word.LineTimed ? 4 + 3 * glow : 4 + 2 * glow)}px`,
+        0.5
+      );
+      setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${Math.min(glow * glowMultiplier, 100)}%`, 1);
+    }
+  }
+
+  // Hot path: called for every candidate line on every animation frame, so it
+  // must not allocate. The previous Object.values(store).some(...) built a fresh
+  // array plus a closure per word (and per letter) per frame — thousands of
+  // short-lived allocations every second. That is steady garbage, and it is the
+  // mechanism behind "the longer the session runs, the lower the FPS": minor GCs
+  // get more frequent as the heap fills, so frame pacing degrades over time even
+  // though the per-song workload is identical. Direct property reads allocate
+  // nothing. Spring stores have a fixed known shape (see create*Springs).
+  function storeNeedsAnimation(store) {
+    if (!store) return false;
+    if (store.Scale && !store.Scale.CanSleep()) return true;
+    if (store.YOffset && !store.YOffset.CanSleep()) return true;
+    if (store.Glow && !store.Glow.CanSleep()) return true;
+    if (store.Opacity && !store.Opacity.CanSleep()) return true;
+    return false;
+  }
+
+  function wordNeedsAnimation(word) {
+    if (storeNeedsAnimation(word.AnimatorStore)) return true;
+    const letters = word.Letters;
+    if (!letters) return false;
+    for (let index = 0; index < letters.length; index++) {
+      if (storeNeedsAnimation(letters[index].AnimatorStore)) return true;
+    }
+    return false;
+  }
+
+  const ADAPTIVE_MIN_GAP_PX = 1.5;
+
+  function resetLineAdaptiveSpacing(line) {
+    if (!line.Syllables || !line.Syllables.Lead) return;
+    line.Syllables.Lead.forEach((word) => {
+      if (!word.HTMLElement) return;
+      setStyleIfChanged(word.HTMLElement, "--ym-sl-adaptive-scale", "1", 0.001);
+      if (word.HTMLElement.parentElement &&
+        word.HTMLElement.parentElement.classList.contains("word-group")) {
+        setStyleIfChanged(
+          word.HTMLElement.parentElement,
+          "--ym-sl-adaptive-scale",
+          "1",
+          0.001
+        );
+      }
+    });
+    line.AdaptiveSpacingApplied = false;
+  }
+
+  function resetAdaptiveSpacing() {
+    modelLines.forEach(resetLineAdaptiveSpacing);
+  }
+
+  function applyAdaptiveSpacing(activeIndex, force) {
+    if (!currentSettings.adaptiveSpacing) return;
+    // Apple Music style lyrics skips the shrink pass entirely: its words rest at
+    // a static 0.95 scale, and this pass's inward pull read as "some rows are
+    // shifted to the right" on wrapped word-by-word lines (AJ, 2026-10-02). The
+    // reset is cheap per frame -- setStyleIfChanged's cache makes it a no-op
+    // once everything is back at 1 -- and it guarantees nothing stays
+    // half-squeezed from before the toggle was flipped.
+    if (currentSettings.simpleLyrics) {
+      resetAdaptiveSpacing();
+      return;
+    }
+    // Only recompute on a meaningful layout change (active-line change). The
+    // geometry reads below force a synchronous layout flush (getComputedStyle +
+    // offset*). Running that on a timer every frame was a constant reflow and a
+    // major source of per-frame jank — the measured word geometry only changes
+    // when the active line moves, so gating on `force` removes the reflow
+    // without changing the spacing result.
+    if (!force) return;
+
+    const measuredLines = [];
+    modelLines.forEach((line, index) => {
+      const relevant =
+        !line.DotLine &&
+        line.HTMLElement.isConnected &&
+        (line.RenderState === "Active" ||
+          (activeIndex >= 0 && Math.abs(index - activeIndex) <= 3) ||
+          (activeIndex < 0 && line.AdaptiveSpacingApplied));
+      if (!relevant) {
+        if (line.AdaptiveSpacingApplied) resetLineAdaptiveSpacing(line);
+        return;
+      }
+
+      const units = [];
+      const seenGroups = new Set();
+      for (const word of line.Syllables && line.Syllables.Lead || []) {
+        const element = word.HTMLElement;
+        if (!element || !element.isConnected) continue;
+        const group = element.parentElement &&
+          element.parentElement.classList.contains("word-group")
+          ? element.parentElement
+          : null;
+        if (group) {
+          if (seenGroups.has(group)) continue;
+          seenGroups.add(group);
+          units.push({ element: group });
+        } else if (!word.IsPartOfWord && !word.Dot) {
+          units.push({ element });
+        }
+      }
+      units.forEach((unit) => {
+        const element = unit.element;
+        unit.rect = {
+          left: element.offsetLeft,
+          right: element.offsetLeft + element.offsetWidth,
+          top: element.offsetTop,
+          height: element.offsetHeight,
+          width: element.offsetWidth,
+        };
+      });
+      const measuredUnits = units
+        .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+        .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+
+      const scaleTargets = new Map(measuredUnits.map(({ element }) => [element, 1]));
+      const fontSize = parseFloat(getComputedStyle(line.HTMLElement).fontSize) || 20;
+      const minimumGap = Math.max(ADAPTIVE_MIN_GAP_PX, Math.min(4, fontSize * 0.08));
+
+      for (let i = 1; i < measuredUnits.length; i++) {
+        const previous = measuredUnits[i - 1];
+        const current = measuredUnits[i];
+        const rowTolerance = Math.max(
+          4,
+          Math.min(previous.rect.height, current.rect.height) * 0.55
+        );
+        const sameRow =
+          Math.abs(
+            previous.rect.top + previous.rect.height / 2 -
+            (current.rect.top + current.rect.height / 2)
+          ) <= rowTolerance;
+        if (!sameRow) continue;
+
+        const gap = current.rect.left - previous.rect.right;
+        const pressure = minimumGap - gap;
+        if (pressure <= 0) continue;
+
+        const width = Math.max(1, previous.rect.width + current.rect.width);
+        const shrink = clamp(1 - (pressure / width) * 0.7, 0.95, 1);
+        scaleTargets.set(
+          previous.element,
+          Math.min(scaleTargets.get(previous.element), shrink)
+        );
+        scaleTargets.set(
+          current.element,
+          Math.min(scaleTargets.get(current.element), shrink)
+        );
+      }
+
+      measuredLines.push({ line, scaleTargets });
+      line.AdaptiveSpacingApplied = true;
+    });
+
+    // Read all geometry before writing styles so the pass does not alternate
+    // layout reads and writes for each neighboring lyric unit.
+    measuredLines.forEach(({ scaleTargets }) => {
+      scaleTargets.forEach((scale, element) => {
+        setStyleIfChanged(element, "--ym-sl-adaptive-scale", String(scale), 0.001);
+      });
+    });
+  }
+
+  // Which line is playing at `positionMs`, over the scroll-candidate lines.
+  // -1 during a gap between lines (an instrumental break), which callers must
+  // treat as "no line", not as "line 0".
+  //
+  // ⭐⭐ THIS IS A LINEAR SCAN ON PURPOSE. It used to be a binary search, which
+  // is only valid when the windows are SORTED **AND DISJOINT** — and they are
+  // not disjoint. A lead line is widened to cover its background vocals (see the
+  // x-bg block in parseTTML), and a background vocal routinely runs PAST the end
+  // of its lead, so the widened lead reaches into the NEXT line's window
+  // (measured: 494 ms of overlap on a real file). Under overlap the comparison
+  // stops being monotonic across the array, so the search walks straight past a
+  // line that genuinely covers `positionMs` and returns -1 — "no line is
+  // playing", which drops every line to its NotSung/Sung opacity and dims the
+  // whole panel. That is the reported "line blinks / flashes dark". It can also
+  // return the PREVIOUS line, so the highlight lags by the overlap and then
+  // jumps.
+  //
+  // The candidates were also only sorted by StartTime BY ACCIDENT: the renderer
+  // pushes them in document order and never sorts. So the old search depended on
+  // two properties it was never given — a latent bug that the lead widening
+  // simply made reachable on ordinary files.
+  //
+  // Cost: one integer comparison per candidate, at most twice per frame,
+  // allocating nothing. A few hundred comparisons a frame is not measurable
+  // beside the per-word style writes this feeds.
+  //
+  // Last match wins, so when two windows overlap the line that started most
+  // recently is the active one.
+  //
+  // Guard: .workbuddy-ai/scratch/test-line-lookup-overlap.mjs drives THIS
+  // function, sliced out of this file, over the windows the shipped parser
+  // produces — plus a synthetic overlap and a clamped-disjoint control.
+  function findLineIndexAt(positionMs) {
+    let found = -1;
+    for (let index = 0; index < scrollCandidateIndices.length; index++) {
+      const candidateIndex = scrollCandidateIndices[index];
+      const candidate = modelLines[candidateIndex];
+      if (positionMs >= candidate.StartTime && positionMs < candidate.EndTime) {
+        found = candidateIndex;
+      }
+    }
+    return found;
+  }
+
+  function lineNeedsAnimation(line) {
+    if (!line.Syllables || !line.Syllables.Lead) return false;
+    const words = line.Syllables.Lead;
+    for (let index = 0; index < words.length; index++) {
+      if (wordNeedsAnimation(words[index])) return true;
+    }
+    return false;
+  }
+
+  function animate(positionMs) {
+    if (!panelVisible || !modelLines.length) return;
+    // Defensive twin of the tick() guard: no non-finite playhead may reach the
+    // animators, whatever the caller. Without this, NaN propagates into
+    // --gradient-position as "NaN%" and blanks the clipped background for a
+    // frame. See the long note in tick().
+    if (!Number.isFinite(positionMs)) return;
+    const now = performance.now();
+    const deltaTime = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
+    lastFrameTime = now;
+
+    // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
+    // tracks playback — top at song start, bottom at song end. Paused while the
+    // user scrolls manually (AJ, 2026-09-18).
+    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl) {
+      driveStaticAutoScroll(positionMs);
+      setJumpButtonVisible(false);
+    }
+
+    // Pick the active per-track offset slot (video vs. song) based on what is
+    // actually playing, then shift the lyric clock without moving the player.
+    recomputeActiveOffsetMode(false);
+    // Math.max(0, NaN) is NaN, NOT 0 - so a non-finite sync offset would poison
+    // the whole frame exactly like a non-finite playhead. Fall back to the
+    // un-offset playhead rather than propagating NaN into --gradient-position.
+    const offsetForPosition = getOffsetForPosition(positionMs);
+    const lyricPositionMs = Number.isFinite(offsetForPosition)
+      ? Math.max(0, positionMs - offsetForPosition)
+      : positionMs;
+    const activeIndex = findLineIndexAt(lyricPositionMs);
+
+    updateFullscreenGapDimming(lyricPositionMs, activeIndex);
+
+    const activeLineChanged = activeIndex !== lastActiveLine;
+    if (activeLineChanged) {
+      lastActiveLine = activeIndex;
+      publishActiveLine(activeIndex);
+    }
+
+    // Scroll target, which is NOT the same question as "which line is active".
+    //
+    // Early scroll evaluates the line index at a position `scrollLeadMs` in the
+    // FUTURE, so the panel is already gliding before the line starts and arrives
+    // as it begins, instead of starting to move once it is already being sung.
+    // This shifts ONLY the scroll target: `activeIndex` above — and therefore
+    // every highlight, gradient fill and karaoke animation — still follows the
+    // real playback position, so the words never light up early.
+    // (Upstream Spicy Lyrics does the same with ProcessedPosition =
+    // Position + PositionOffset, and is explicit that Status follows the real
+    // position.)
+    const scrollLeadMs = currentSettings.scrollLeadEnabled ? currentSettings.scrollLeadMs : 0;
+    const scrollIndex = scrollLeadMs > 0
+      ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
+      : activeIndex;
+    // Gated on the target changing rather than on the active line changing: with
+    // a lead these differ, and this keeps scrollActiveLineIntoView — which reads
+    // layout via getBoundingClientRect — off the per-frame path.
+    //
+    // The recentre window is the deliberate exception. It runs for a few hundred
+    // ms after a structural change, because the layout is still moving under us
+    // (the fullscreen lyrics column is CSS-transitioned) and a single placement
+    // would be correct for one frame only. It also outranks the lead-line target:
+    // while the panel is being re-placed we want the line the user is HEARING,
+    // not the one early scroll is aiming at.
+    // QOL #1: when a synced track reaches its final line, the credits reveal owns
+    // the scroll target (gliding to the bottom). While it is active, skip the
+    // normal line-follow retarget so the two do not fight.
+    const creditsReveal = updateCreditsReveal(positionMs, activeIndex, lyricPositionMs);
+    if (creditsReveal) {
+      // credits reveal owns the scroll target this frame
+    } else if (recentreUntilMs > now) {
+      recentreActiveLineNow();
+      lastScrollTargetLine = lastActiveLine;
+    } else if (scrollIndex !== lastScrollTargetLine) {
+      lastScrollTargetLine = scrollIndex;
+      if (scrollIndex >= 0 && lineElements[scrollIndex]) {
+        scrollActiveLineIntoView(lineElements[scrollIndex]);
+      }
+    }
+
+    // If the user has scrolled away but the line that is now playing is already
+    // on screen, treat that as "caught up" and drop the jump button without
+    // requiring a click. The 8s idle return (manualScrollReturnTimer) covers the
+    // case where they scrolled to a different line and stopped.
+    if (manualScrollActive && isActiveLineInView()) {
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+    }
+
+    for (let index = 0; index < modelLines.length; index++) {
+      const line = modelLines[index];
+      const lineState = getState(lyricPositionMs, line.StartTime, line.EndTime);
+      const stateChanged = line.RenderState !== lineState;
+      if (stateChanged) {
+        line.RenderState = lineState;
+        // Static (unsynced) lines keep the .static CSS state so they stay bright
+        // and never get the per-state opacity/alpha overrides (AJ, 2026-09-18).
+        if (!staticLyricsActive) {
+          line.HTMLElement.classList.toggle("Active", lineState === "Active");
+          line.HTMLElement.classList.toggle("NotSung", lineState === "NotSung");
+          line.HTMLElement.classList.toggle("Sung", lineState === "Sung");
+        }
+      }
+      if (line.DotLine) {
+        // MUST use lyricPositionMs, not the raw positionMs. Everything else in
+        // this loop measures against the offset-adjusted clock
+        // (lyricPositionMs = positionMs - offset), so using the raw position
+        // here made the dots bounce out and vanish at a time that ignored the
+        // sync offset - early or late by exactly the offset, while the pause
+        // itself was still running (AJ, 2026-09-28).
+        const nearEnd = lyricPositionMs > line.EndTime - PRE_HIDDEN_DOT_LINE_MS;
+        const playing = lineState === "Active" && !nearEnd;
+        line.HTMLElement.classList.toggle("playing", playing);
+        if (playing) {
+          line.HTMLElement.classList.remove("bounce-out");
+        } else if (nearEnd && lineState === "Active") {
+          line.HTMLElement.classList.add("bounce-out");
+        }
+      }
+
+      // Keep an entering line's previous blur radius while its unsung halo fades
+      // into the active word glow. Zeroing it on this frame caused a visible
+      // dim-then-bright dip on both lead and background vocals. Other lines still
+      // update when the active line changes; gaps preserve their last value.
+      if (activeLineChanged && activeIndex >= 0 && lineState !== "Active") {
+        const distance = Math.abs(index - activeIndex);
+        const blur = distance === 0
+          ? 0
+          : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
+        setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+      }
+
+      // Scan only lines that can actually be moving: the active line, a line
+      // whose state just changed, or a line already known to still be settling.
+      // A resting neighbour is never woken by proximity — a line only starts
+      // moving when its OWN state flips, at which point `stateChanged` is true
+      // and it enters `pendingAnimationLines` until its springs sleep. The old
+      // +/-6 window forced a full word/letter spring scan across 13 lines on
+      // every frame for no benefit, and that scan (not the animation) was the
+      // dominant per-frame cost.
+      const shouldInspectAnimation =
+        stateChanged ||
+        lineState === "Active" ||
+        pendingAnimationLines.has(line);
+      const pendingAnimation = shouldInspectAnimation && lineNeedsAnimation(line);
+      // Only run the per-word/letter animation for the actively-playing line,
+      // lines whose state just changed, or lines whose springs are still
+      // settling. Previously this also ran for every line within ±4 of the
+      // active one on EVERY frame, which is the bulk of the per-frame cost and
+      // the source of the "laggier the longer the song plays" jank. Resting
+      // neighbours need no per-frame work — their classes were set when their
+      // state changed and their springs have already slept.
+      //
+      // `pendingAnimation` must apply to EVERY line, including background-vocal
+      // lines and the imported-TTML fullscreen path. Two earlier guards dropped
+      // it: (1) the fsImportedPerformance branch animated only on
+      // `stateChanged || Active`, and (2) background lines were capped at
+      // `stateChanged || Active`. Both meant that the instant a line flipped
+      // Active -> Sung its springs were never stepped again, so words froze
+      // mid-motion with scale/glow stuck at their active values. This is cheap:
+      // a resting line's springs are asleep, so `pendingAnimation` is false and
+      // it costs nothing per frame — settling is a short, bounded window.
+      const shouldAnimateLine =
+        lineState === "Active" || stateChanged || pendingAnimation;
+      if (line.Syllables && line.Syllables.Lead && shouldAnimateLine) {
+        // Imported TTML can contain hundreds of timed words and letter spans.
+        // In fullscreen, keep the active primary line and state transitions,
+        // but do not repeatedly walk every background-vocal syllable/spring.
+        const leadWords = line.Syllables.Lead;
+        for (let wordIndex = 0; wordIndex < leadWords.length; wordIndex++) {
+          animateWord(leadWords[wordIndex], lineState, lyricPositionMs, deltaTime);
+        }
+      }
+      // Membership in `pendingAnimationLines` means "this line may be holding
+      // compositor hints". It is keyed on `shouldAnimateLine`, NOT on
+      // `pendingAnimation`, and it deliberately sits OUTSIDE the branch above:
+      // a LineTimed line sets every spring goal instantly, so lineNeedsAnimation
+      // is never true for it and `pendingAnimation` would never add it — which
+      // left hints set by animateWord with no path to release them.
+      if (shouldAnimateLine) {
+        pendingAnimationLines.add(line);
+        // Word transforms still use the short-lived hint; line brightness is
+        // painted in the gradient and no longer needs an opacity layer.
+        if (line.HTMLElement) line.HTMLElement.classList.add("ym-sl-animating");
+      } else if (pendingAnimationLines.delete(line)) {
+        // The line has settled: release the compositor hints set while it was
+        // animating, so its words are not left permanently promoted.
+        releaseLineAnimationHints(line);
+      }
+    }
+
+    applyAdaptiveSpacing(activeIndex, activeLineChanged);
+  }
+
+  function tick() {
+    raf = requestAnimationFrame(tick);
+    // Before any early return, so an in-flight glide always lands.
+    stepScrollGlide();
+    if (!window.YTMod || !window.YTMod.player) return;
+    const position = window.YTMod.player.getPositionMs();
+    // Number.isFinite, NOT "!= null". A media element's currentTime reports NaN
+    // in transient states (seeking, metadata not loaded yet, track change), and
+    // NaN != null is TRUE - so the old guard let NaN straight through. A single
+    // NaN frame poisons the whole render:
+    //   getState(NaN, ...)    -> every comparison against NaN is false, so it
+    //                            answers "Active" for EVERY word, and
+    //   getProgress(NaN, ...) -> falls through to clamp(NaN) = NaN, so
+    //   gradient = -20 + 120 * NaN = NaN
+    // and the word is written "--gradient-position: NaN%". A custom property
+    // accepts ANY token, so that stores without complaint - but it makes
+    // calc(NaN% + 20% + 0%) invalid, which invalidates the entire
+    // background-image declaration. The glyph is painted ONLY by that clipped
+    // background (-webkit-text-fill-color is transparent), so it goes fully
+    // transparent for one frame: the black flicker. It lands hardest on the
+    // active line and on bg words because those have their text-shadow faded to
+    // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
+    // springs simply advance on the next good frame. (AJ: "some lines just
+    // flicker black for a very very short time".)
+    if (Number.isFinite(position)) animate(position);
+  }
+
+  // Track + offset housekeeping used to run inside tick(), so two document-wide
+  // querySelectorAll passes per second executed in the same rAF callback as the
+  // animation and competed with it for the frame budget -- any slowdown surfaced
+  // as panel stutter while the rest of the page stayed smooth. None of it needs
+  // frame accuracy, so it runs on its own timer and leaves the frame loop alone.
+  const HOUSEKEEPING_MS = 500;
+  let housekeepingTimer = 0;
+  /* ---- music-video off-sync notice -----------------------------------------
+     Official lyric timings do not match a music video's edit (cold opens, cut
+     verses, re-ordered choruses), so when a player video is live the lyrics are
+     likely desynced through no fault of the sync data. A pill at the top of the
+     panel says so (AJ, 2026-10-02): "Music video lyrics may be out of sync",
+     with a DISPLAYED 5-second timer bar, then it fades out and is removed.
+     Latched on the video ELEMENT so it shows once per video, not once per
+     housekeeping pass. Absolutely positioned, pointer-events:none, so it never
+     shifts the measured lyric layout or blocks a line. */
+  const MV_SYNC_NOTICE_MS = 5000;
+  const MV_SYNC_FADE_MS = 450;
+  let mvSyncChip = null;
+  let mvSyncChipVideo = null;
+  let mvSyncChipFadeTimer = 0;
+  let mvSyncChipRemoveTimer = 0;
+
+  function removeMvSyncChip() {
+    if (mvSyncChip) { mvSyncChip.remove(); mvSyncChip = null; }
+  }
+
+  function syncMvSyncNotice() {
+    if (!panelEl) return;
+    const video = findPlayerVideo();
+    if (!video) {
+      // No video: nothing to warn about. Clear the latch so a LATER video
+      // re-triggers the notice.
+      mvSyncChipVideo = null;
+      if (mvSyncChipFadeTimer) { clearTimeout(mvSyncChipFadeTimer); mvSyncChipFadeTimer = 0; }
+      if (mvSyncChipRemoveTimer) { clearTimeout(mvSyncChipRemoveTimer); mvSyncChipRemoveTimer = 0; }
+      removeMvSyncChip();
+      return;
+    }
+    if (mvSyncChip || mvSyncChipVideo === video) return;
+    mvSyncChipVideo = video;
+    mvSyncChip = h("div", { class: "ym-sl-mv-sync-chip" },
+      h("span", { text: "Music video lyrics may be out of sync" }),
+      h("span", { class: "ym-sl-mv-sync-chip-timer" })
+    );
+    panelEl.appendChild(mvSyncChip);
+    // The shrinking bar IS the displayed timer (CSS animation, 5s linear); this
+    // timeout only triggers the fade at the end of it.
+    mvSyncChipFadeTimer = setTimeout(() => {
+      mvSyncChipFadeTimer = 0;
+      if (!mvSyncChip) return;
+      mvSyncChip.classList.add("ym-sl-fading");
+      mvSyncChipRemoveTimer = setTimeout(() => {
+        mvSyncChipRemoveTimer = 0;
+        removeMvSyncChip();
+      }, MV_SYNC_FADE_MS);
+    }, MV_SYNC_NOTICE_MS);
+  }
+
+  function housekeeping() {
+    if (!window.YTMod || !window.YTMod.player) return;
+    // The media element is cached for the 60fps position read; re-resolve it here
+    // so a track change can never leave a stale element in the cache for longer
+    // than one housekeeping pass.
+    if (typeof window.YTMod.player.refreshMedia === "function") {
+      window.YTMod.player.refreshMedia();
+    }
+    refreshVideoOffsetControl();
+    refreshPausePickButtonState();
+    syncMvSyncNotice();
+    syncTrackLyrics();
+  }
+  function startHousekeeping() {
+    if (!housekeepingTimer) {
+      housekeepingTimer = window.setInterval(housekeeping, HOUSEKEEPING_MS);
+    }
+  }
+  function stopHousekeeping() {
+    if (housekeepingTimer) {
+      clearInterval(housekeepingTimer);
+      housekeepingTimer = 0;
+    }
+  }
+
+  function startTick() {
+    if (!raf) {
+      lastFrameTime = performance.now();
+      tick();
+    }
+    startHousekeeping();
+  }
+

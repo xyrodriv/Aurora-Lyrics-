@@ -1,0 +1,546 @@
+  function refreshTrack() {
+    const track = getCurrentTrack();
+    const label = track ? track.title + (track.artist ? " — " + track.artist : "") : "Synced Lyrics";
+    const trackEl = document.getElementById("ym-sl-track");
+    if (trackEl) trackEl.textContent = label;
+    refreshFsTitle();
+    // Reconcile the fullscreen media on the track change itself instead of
+    // waiting up to 2s for the refresh tick. The tick still covers the case
+    // where the new artwork URL is not published yet at this instant.
+    reconcileFsMediaArt();
+    // ...and start buffering the animated cover NOW, while the user is still on
+    // the page, so opening fullscreen has no HLS startup left to pay for.
+    warmAnimatedArt();
+    const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
+    if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+  }
+
+  function getCurrentTrack() {
+    return window.YTMod && window.YTMod.player && window.YTMod.player.getTrack
+      ? window.YTMod.player.getTrack()
+      : null;
+  }
+
+  function getTrackKey(track) {
+    if (!track || !track.title) return "";
+    return [track.artist || "", track.title].join("::").toLowerCase();
+  }
+
+  const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
+  const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
+  const VIDEO_OFFSET_LIMIT = 100;
+
+  // An offset entry is { video: ms, song: ms, pauseSync: {line, offset}|null }.
+  // Legacy v1 stored a bare number (the music-video offset); migrate those into the
+  // video slot. Entries written before pause sync existed simply have no
+  // pauseSync key, so it defaults to null here rather than dropping the entry.
+  function normalizeOffsetEntry(value) {
+    if (value && typeof value === "object") {
+      const entry = {
+        video: Number(value.video) || 0,
+        song: Number(value.song) || 0,
+        pauseSync: null,
+      };
+      const ps = value.pauseSync;
+      if (ps && typeof ps === "object" &&
+        Number.isFinite(Number(ps.line)) && Number.isFinite(Number(ps.offset))) {
+        entry.pauseSync = { line: Number(ps.line), offset: Number(ps.offset) };
+      }
+      return entry;
+    }
+    if (typeof value === "number") return { video: value, song: 0, pauseSync: null };
+    return { video: 0, song: 0, pauseSync: null };
+  }
+
+  function loadVideoOffsets() {
+    try {
+      const raw2 = window.localStorage && window.localStorage.getItem(OFFSET_STORAGE_KEY);
+      if (raw2) {
+        const parsed = JSON.parse(raw2);
+        if (parsed && typeof parsed === "object") {
+          const out = {};
+          for (const k in parsed) out[k] = normalizeOffsetEntry(parsed[k]);
+          return out;
+        }
+      }
+      // Migrate legacy v1 flat-number map into the new two-slot shape.
+      const raw1 = window.localStorage && window.localStorage.getItem(VIDEO_OFFSET_STORAGE_KEY);
+      if (raw1) {
+        const parsed = JSON.parse(raw1);
+        if (parsed && typeof parsed === "object") {
+          const out = {};
+          for (const k in parsed) out[k] = normalizeOffsetEntry(parsed[k]);
+          return out;
+        }
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  const videoOffsets = loadVideoOffsets();
+
+  function persistVideoOffsets() {
+    try {
+      if (window.localStorage) window.localStorage.setItem(OFFSET_STORAGE_KEY, JSON.stringify(videoOffsets));
+    } catch (_) {}
+  }
+
+  function formatOffset(ms) {
+    const sign = ms > 0 ? "+" : "";
+    return sign + (ms / 1000).toFixed(1) + "s";
+  }
+
+  function hasMusicVideo() {
+    return !!findPlayerVideo();
+  }
+
+  function getActiveOffsetMs() {
+    return activeOffsetMode === "video" ? offsetVideoMs : offsetSongMs;
+  }
+
+  /* ---- MV pause re-sync lookups ---------------------------------------------
+     getOffsetForLine  — which offset a line uses (click-to-seek).
+     getOffsetForPosition — which offset applies right now (the clock, every frame).
+
+     The lookup tests LYRIC time, not video time: if applying the sync offset lands
+     us at or past the sync line, we are in the post-pause segment. That is
+     equivalent to comparing positionMs against (pauseSync.line + pauseSync.offset)
+     — the video moment the sync line actually starts — but it stays monotone even
+     when the user dials in a negative offset. */
+  function getOffsetForLine(startTimeMs) {
+    if (pauseSync && Number.isFinite(startTimeMs) && startTimeMs >= pauseSync.line) {
+      return pauseSync.offset;
+    }
+    return getActiveOffsetMs();
+  }
+
+  function getOffsetForPosition(positionMs) {
+    if (!pauseSync) return getActiveOffsetMs();
+    if (positionMs - pauseSync.offset >= pauseSync.line) return pauseSync.offset;
+    return getActiveOffsetMs();
+  }
+
+  // Auto-select which slot is applied: a music video uses the video offset, an
+  // audio-only track uses the song offset. Throttled so we don't query the DOM
+  // every animation frame; force=true re-evaluates immediately (track change).
+  function recomputeActiveOffsetMode(force) {
+    const now = performance.now();
+    if (!force && now - lastOffsetModeCheckAt < 1000) return;
+    lastOffsetModeCheckAt = now;
+    const desired = hasMusicVideo() ? "video" : "song";
+    const changed = desired !== activeOffsetMode;
+    activeOffsetMode = desired;
+    if (changed) {
+      editingOffsetMode = desired;
+      refreshVideoOffsetControl();
+      lastActiveLine = -1;
+      publishSyncState();
+    }
+  }
+
+  // Updates BOTH the panel offset control and the fullscreen offset control,
+  // since either can be on screen. Each control carries the same child classes
+  // so a single pass refreshes both. We skip rewriting a field the user is
+  // actively typing in to avoid clobbering the caret.
+  function refreshVideoOffsetControl() {
+    const ms = editingOffsetMode === "video" ? offsetVideoMs : offsetSongMs;
+    const seconds = ms / 1000;
+    document.querySelectorAll(".ym-sl-video-offset, .ym-sl-fs-control-offset").forEach((root) => {
+      const range = root.querySelector("input[type=range]");
+      const number = root.querySelector("input.ym-sl-offset-number");
+      const value = root.querySelector(".ym-sl-video-offset-value, .ym-sl-fs-control-offset-value");
+      const scope = root.querySelector(".ym-sl-offset-scope");
+      const applied = root.querySelector(".ym-sl-offset-applied");
+      if (range && document.activeElement !== range) range.value = String(ms);
+      if (number && document.activeElement !== number) number.value = seconds.toFixed(1);
+      if (value) value.textContent = formatOffset(ms);
+      if (scope) scope.value = editingOffsetMode;
+      if (applied) applied.textContent = activeOffsetMode === "video" ? "video" : "song";
+    });
+  }
+
+  function setVideoOffsetMs(value, save) {
+    const numeric = Number(value);
+    const ms = Number.isFinite(numeric)
+      ? clamp(Math.round(numeric / 100) * 100, -30000, 30000)
+      : 0;
+    if (editingOffsetMode === "video") offsetVideoMs = ms;
+    else offsetSongMs = ms;
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (save && key) {
+      // Preserve the pause sync point: this assignment replaces the whole entry.
+      videoOffsets[key] = { video: offsetVideoMs, song: offsetSongMs, pauseSync };
+      const keys = Object.keys(videoOffsets);
+      while (keys.length > VIDEO_OFFSET_LIMIT) {
+        delete videoOffsets[keys.shift()];
+      }
+      persistVideoOffsets();
+    }
+    refreshVideoOffsetControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function loadVideoOffsetForTrack(track) {
+    const key = getTrackKey(track);
+    const entry = key ? (videoOffsets[key] || {}) : {};
+    offsetVideoMs = Number(entry.video) || 0;
+    offsetSongMs = Number(entry.song) || 0;
+    pauseSync = entry.pauseSync || null;
+    recomputeActiveOffsetMode(true);
+    editingOffsetMode = activeOffsetMode;
+    refreshVideoOffsetControl();
+    refreshPauseSyncControl();
+    publishSyncState();
+  }
+
+  /* ===================== MV pause re-sync ===================== */
+
+  const PAUSE_SYNC_MIN = -5000;
+  const PAUSE_SYNC_MAX = 30000;
+  const PAUSE_SYNC_STEP = 100;
+
+  function savePauseSync() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) return;
+    const existing = videoOffsets[key] || { video: offsetVideoMs, song: offsetSongMs };
+    existing.video = offsetVideoMs;
+    existing.song = offsetSongMs;
+    existing.pauseSync = pauseSync;
+    videoOffsets[key] = existing;
+    const keys = Object.keys(videoOffsets);
+    while (keys.length > VIDEO_OFFSET_LIMIT) delete videoOffsets[keys.shift()];
+    persistVideoOffsets();
+  }
+
+  // The line whose stored startTime matches the sync point, if it is still in the
+  // current render tree.
+  function findPauseSyncLine() {
+    if (!pauseSync) return null;
+    for (let index = 0; index < modelLines.length; index++) {
+      if (modelLines[index].StartTime === pauseSync.line) return modelLines[index];
+    }
+    return null;
+  }
+
+  function describePauseSyncLine() {
+    const line = findPauseSyncLine();
+    if (!line) return "a line from a previous lyrics file";
+    const words = line.Syllables && line.Syllables.Lead;
+    if (!words || !words.length) return "the sync line";
+    let text = "";
+    for (let index = 0; index < words.length && index < 5; index++) {
+      text += words[index].Text || "";
+    }
+    return '"' + (text.trim() || "the sync line") + '"';
+  }
+
+  function markPauseSyncLine() {
+    for (let index = 0; index < modelLines.length; index++) {
+      const line = modelLines[index];
+      const on = !!pauseSync && line.StartTime === pauseSync.line;
+      line.HTMLElement.classList.toggle("ym-sl-pause-mark", on);
+    }
+  }
+
+  function setPauseSyncLine(lineModel) {
+    if (!lineModel || !lineModel.isPrimary) return;
+    // Start at the offset already in effect, so picking a line never changes
+    // playback — the slider then moves from "no visible change" upwards. (Starting
+    // at 0 would snap the post-pause lines back to zero offset, which looks like
+    // the feature broke something.) Re-picking a line keeps what was dialled in.
+    const keep = pauseSync ? pauseSync.offset : getActiveOffsetMs();
+    pauseSync = { line: lineModel.StartTime, offset: keep };
+    exitPausePickMode();
+    savePauseSync();
+    refreshPauseSyncControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function setPauseSyncOffset(ms, save) {
+    if (!pauseSync) return;
+    const numeric = Number(ms);
+    pauseSync.offset = Number.isFinite(numeric)
+      ? clamp(Math.round(numeric / PAUSE_SYNC_STEP) * PAUSE_SYNC_STEP, PAUSE_SYNC_MIN, PAUSE_SYNC_MAX)
+      : 0;
+    if (save) savePauseSync();
+    refreshPauseSyncControl();
+    // Force the active line to re-resolve against the new offset.
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function clearPauseSync() {
+    pauseSync = null;
+    exitPausePickMode();
+    savePauseSync();
+    refreshPauseSyncControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function isPlaybackPaused() {
+    return !!(window.YTMod && window.YTMod.player &&
+      typeof window.YTMod.player.isPaused === "function" && window.YTMod.player.isPaused());
+  }
+
+  function enterPausePickMode() {
+    if (!isPlaybackPaused()) return;
+    pausePickMode = true;
+    if (linesRoot && linesRoot.parentElement) {
+      linesRoot.parentElement.classList.add("ym-sl-pause-mode");
+    }
+    if (pauseBanner && pauseBannerText) {
+      const pos = window.YTMod && window.YTMod.player ? window.YTMod.player.getPositionMs() : null;
+      pauseBannerText.textContent = Number.isFinite(pos)
+        ? "Click the line that starts after the pause (paused at " + formatClock(pos) + ")"
+        : "Click the line that starts after the pause";
+      pauseBanner.classList.remove("hidden");
+    }
+  }
+
+  function exitPausePickMode() {
+    pausePickMode = false;
+    if (linesRoot && linesRoot.parentElement) {
+      linesRoot.parentElement.classList.remove("ym-sl-pause-mode");
+    }
+    if (pauseBanner) pauseBanner.classList.add("hidden");
+  }
+
+  function formatClock(ms) {
+    const total = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function refreshPauseSyncControl() {
+    const ui = pauseUi;
+    if (!ui || !ui.root) return;
+    const has = !!pauseSync;
+    if (ui.pick) {
+      ui.pick.classList.toggle("hidden", has);
+      const paused = isPlaybackPaused();
+      ui.pick.disabled = !paused;
+      ui.pick.title = paused
+        ? "Pause the video, then pick the line that plays after the pause"
+        : "Pause the video first";
+    }
+    if (ui.editor) ui.editor.classList.toggle("hidden", !has);
+    if (!has) {
+      markPauseSyncLine();
+      return;
+    }
+    const ms = pauseSync.offset;
+    if (ui.line) ui.line.textContent = "Sync from " + describePauseSyncLine();
+    if (ui.range && document.activeElement !== ui.range) ui.range.value = String(ms);
+    if (ui.number && document.activeElement !== ui.number) ui.number.value = (ms / 1000).toFixed(1);
+    if (ui.value) ui.value.textContent = formatOffset(ms);
+    markPauseSyncLine();
+  }
+
+  function getPermanentTTML(trackKey) {
+    if (!window.YTMod || typeof window.YTMod.getPermanentLyrics !== "function") {
+      return Promise.resolve(null);
+    }
+    return window.YTMod.getPermanentLyrics(trackKey);
+  }
+
+  function savePermanentTTML(trackKey, xml) {
+    if (!window.YTMod || typeof window.YTMod.setPermanentLyrics !== "function") {
+      return Promise.reject(new Error("Permanent lyrics storage is unavailable."));
+    }
+    return window.YTMod.setPermanentLyrics(trackKey, xml);
+  }
+
+  function removePermanentTTML(trackKey) {
+    if (!window.YTMod || typeof window.YTMod.removePermanentLyrics !== "function") {
+      return Promise.resolve();
+    }
+    return window.YTMod.removePermanentLyrics(trackKey);
+  }
+
+  // (G) Delete the permanently-saved TTML for the current track. Lets the user
+  // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  async function deletePermanentTTMLForCurrentTrack() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) {
+      showLyricsMessage("No track loaded, so there is nothing to delete.");
+      return;
+    }
+    try {
+      await removePermanentTTML(key);
+      manualLyricsIsPermanent = false;
+      showLyricsMessage("Permanently-saved TTML removed for this track.");
+    } catch (error) {
+      console.warn("[SpicyLyrics] Could not delete permanent TTML:", error);
+      showLyricsMessage("Could not delete the saved TTML for this track.");
+    }
+    refreshPermanentDeleteState();
+  }
+
+  // Shows the "Delete saved" button only when a permanent TTML actually exists
+  // for the current track, so it is obvious there is something to remove.
+  async function refreshPermanentDeleteState() {
+    const btn = deletePermanentButton;
+    if (!btn) return;
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key) {
+      btn.classList.add("hidden");
+      return;
+    }
+    let saved = null;
+    try {
+      saved = await getPermanentTTML(key);
+    } catch (error) {
+      saved = null;
+    }
+    btn.classList.toggle("hidden", !saved);
+  }
+
+  // Shared teardown for "the panel is no longer showing a lyric line". Called by
+  // both the empty state and the loading skeleton, and it is the single place
+  // that invalidates a skeleton paint still queued on rAF/`setTimeout`.
+  function resetLyricsPanelState() {
+    lyricsSkeletonToken++;
+    lyricsSkeletonShown = false;
+    stopScrollGlide();
+    lastScrollTargetLine = -1;
+    // NOTE: the `offline` class is NOT touched here. It is a layout switch
+    // (centred empty-state box vs. the normal top-aligned scroller), so the
+    // empty state and the skeleton need opposite values and each sets its own.
+    modelLines = [];
+    lineElements = [];
+    scrollCandidateIndices = [];
+    lastActiveLine = -1;
+    manualScrollActive = false;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    setJumpButtonVisible(false);
+    // Tell the bus the lyrics are gone so the PiP (and any other subscriber of
+    // lyrics:lines) clears too. Without this the PiP retains the previous track's
+    // lyrics forever — the panel itself replaced linesRoot with the empty state,
+    // but the bus never publishes that fact, so the PiP's lines/videoId stay
+    // pinned to the last loaded track. videoId/title/artist are best-effort via
+    // getCurrentTrack() so the PiP can detect the track identity has changed.
+    if (window.YTMod && window.YTMod.bus) {
+      const t = (typeof getCurrentTrack === "function") ? getCurrentTrack() : null;
+      window.YTMod.bus.emit("lyrics:lines", {
+        trackKey: currentTrackKey || null,
+        videoId: t && t.videoId ? t.videoId : null,
+        title: t && t.title ? t.title : null,
+        artist: t && t.artist ? t.artist : null,
+        lines: [],
+      });
+      try {
+        document.documentElement.dataset.ymLyricLines = "0";
+      } catch (e) {}
+    }
+  }
+
+  const NO_LYRICS_MESSAGE = "No lyrics found.";
+  const LOAD_FAILED_MESSAGE = "Could not load lyrics. Try again later or import a TTML file.";
+
+  function showLyricsMessage(message) {
+    // A message means the lookup is OVER, so the fullscreen loading spinner has to
+    // come down with it. It used to keep spinning over a "No lyrics found." panel
+    // forever, because only the success paths ever called hideFsSpinner()
+    // (AJ, 2026-10-01).
+    hideFsSpinner();
+    // Fullscreen Video Background keeps the lyrics panel hidden until the first
+    // line actually plays (see the intro-dim rules), so a track with NO lyrics
+    // produced no feedback at all there — no panel, no message, nothing
+    // (AJ, 2026-10-01). BOTH failure messages raise the notice: from the user's
+    // side "no lyrics" and "couldn't load them" are the same dead end.
+    // Checked BEFORE the panel guard below, because the notice does not depend on
+    // the panel existing.
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+      showFsNoLyricsNotice(message);
+    }
+    if (!lineScrollEl || !linesRoot) return;
+    resetLyricsPanelState();
+    // Centred box, the way an empty state should read.
+    if (lineScrollEl) lineScrollEl.classList.add("offline");
+    const empty = h("div", { class: "ym-sl-empty" });
+    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
+    // Surface a Search button under the empty-state message — that's the
+    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
+    const emptySearch = h("button", {
+      class: "ym-sl-import ym-sl-empty-search",
+      type: "button",
+      "aria-label": "Search lyrics",
+      text: "Search",
+    });
+    emptySearch.addEventListener("click", () => toggleSearchPanel());
+    empty.appendChild(emptySearch);
+    linesRoot.replaceChildren(empty);
+  }
+
+  /* ---- fullscreen "no lyrics" notice ----------------------------------------
+     Video Background hides the lyrics panel until the first line plays, which is
+     a nice touch on a normal track — but it means a track with NO lyrics gives
+     no feedback whatsoever. This flashes a transient notice instead, so the user
+     is told AND can carry on watching the video (AJ, 2026-10-01).
+     Deliberately non-interactive: it must never block or capture the video. */
+  const FS_NO_LYRICS_MS = 5000;
+  let fsNoLyricsEl = null;
+  let fsNoLyricsCountEl = null;
+  let fsNoLyricsTimer = 0;
+
+  function showFsNoLyricsNotice(message) {
+    if (!fsActive || !fsOverlay) return;
+    // The other fullscreen layouts show the panel's own empty state, so the
+    // notice is Video Background only — elsewhere it would just be a second copy
+    // of the same sentence.
+    if (!fsOverlay.classList.contains("ym-sl-fs-mode-background")) return;
+    if (!fsNoLyricsEl) {
+      // The counter is aria-hidden: with aria-live on the pill, a value changing
+      // every second would make a screen reader announce each tick.
+      fsNoLyricsCountEl = h("span", {
+        class: "ym-sl-fs-notice-count",
+        "aria-hidden": "true",
+      });
+      fsNoLyricsEl = h(
+        "div",
+        { class: "ym-sl-fs-notice", role: "status", "aria-live": "polite" },
+        h("span", { class: "ym-sl-fs-notice-msg" }),
+        fsNoLyricsCountEl
+      );
+      fsOverlay.appendChild(fsNoLyricsEl);
+    }
+    // The text differs by cause ("No lyrics found." vs the load-failure line), so
+    // set it per call rather than baking it in at creation.
+    const msgEl = fsNoLyricsEl.firstElementChild;
+    if (msgEl && msgEl.textContent !== message) msgEl.textContent = message;
+    // Count the seconds down, so the dismissal is never a surprise.
+    let remaining = Math.round(FS_NO_LYRICS_MS / 1000);
+    if (fsNoLyricsCountEl) fsNoLyricsCountEl.textContent = String(remaining);
+    // Restart cleanly on a second skip: a notice still on screen would otherwise
+    // never re-animate, because the class never leaves.
+    fsNoLyricsEl.classList.remove("show");
+    void fsNoLyricsEl.offsetWidth;
+    fsNoLyricsEl.classList.add("show");
+    if (fsNoLyricsTimer) window.clearInterval(fsNoLyricsTimer);
+    fsNoLyricsTimer = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        window.clearInterval(fsNoLyricsTimer);
+        fsNoLyricsTimer = 0;
+        if (fsNoLyricsEl) fsNoLyricsEl.classList.remove("show");
+        return;
+      }
+      if (fsNoLyricsCountEl) fsNoLyricsCountEl.textContent = String(remaining);
+    }, 1000);
+  }
+
+  // The node lives inside fsOverlay, which is removed wholesale on exit, so this
+  // only has to drop the refs and any pending tick.
+  function clearFsNoLyricsNotice() {
+    if (fsNoLyricsTimer) { window.clearInterval(fsNoLyricsTimer); fsNoLyricsTimer = 0; }
+    fsNoLyricsEl = null;
+    fsNoLyricsCountEl = null;
+  }
+

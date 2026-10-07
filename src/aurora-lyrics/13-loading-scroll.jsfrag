@@ -1,0 +1,859 @@
+  /* ---- loading skeleton -----------------------------------------------------
+     A placeholder that looks like lyrics while we wait, instead of the words
+     "Looking for lyrics…". Two reasons it is worth more than it looks:
+
+     1. It holds the panel's layout. The empty state is a short centred block, so
+        when the real lyrics arrive the panel snaps from "two lines in the middle"
+        to "a full screen of lines"; with the skeleton the geometry barely moves.
+     2. It covers the blocking DOM build, not just the network. `loadTTML` ->
+        `buildRendererLines` creates every line, word and letter span in one
+        synchronous task, so the last frame the browser can paint is the one
+        BEFORE that task starts. Hence the deferred paint below.
+
+     The widths are a fixed ragged list rather than random per load: with random
+     widths the placeholder visibly reshuffles every time, which reads as a
+     glitch. Sixteen rows is about one screenful at the default size. */
+  const SKELETON_ROW_WIDTHS = [86, 62, 94, 71, 88, 55, 92, 66, 80, 97, 60, 84, 73, 90, 58, 76];
+
+  function showLyricsSkeleton() {
+    // Arm the fullscreen spinner first, before any early return, so a load that
+    // takes longer than FS_SPINNER_DELAY_MS still gets an affordance. No-op
+    // outside fullscreen.
+    showFsSpinnerSoon();
+    if (!linesRoot) return;
+    resetLyricsPanelState();
+    // Must be ONLINE: `offline` turns .LyricsContent into a centred flex box,
+    // which shrink-wraps its child — and the placeholder rows are empty divs with
+    // percentage widths, so they would collapse to zero. Online also means the
+    // skeleton picks up the same vertical offset and edge mask as real lyrics.
+    if (lineScrollEl) lineScrollEl.classList.remove("offline");
+    // Capture AFTER the reset, which is what bumps the token.
+    const token = lyricsSkeletonToken;
+    const wrap = h("div", {
+      class: "ym-sl-skeleton",
+      role: "status",
+      "aria-live": "polite",
+      "aria-label": "Loading lyrics",
+    });
+    for (let index = 0; index < SKELETON_ROW_WIDTHS.length; index++) {
+      const row = h("div", { class: "ym-sl-skeleton-row" });
+      row.style.width = `${SKELETON_ROW_WIDTHS[index]}%`;
+      wrap.appendChild(row);
+    }
+    const paint = () => {
+      // Superseded by a newer request, or the lyrics already landed.
+      if (token !== lyricsSkeletonToken) return;
+      if (!linesRoot) return;
+      linesRoot.replaceChildren(wrap);
+      lyricsSkeletonShown = true;
+    };
+    if (document.hidden) {
+      // requestAnimationFrame never fires in a hidden tab, so deferring here
+      // would leave the panel on the previous track's lyrics indefinitely.
+      paint();
+      return;
+    }
+    // Double rAF: the first callback runs before the next paint, the second runs
+    // after it. One frame is enough to get the element into the DOM, but we need
+    // the placeholder actually PAINTED before we hand control back to a caller
+    // that is about to block on the DOM build — and that is what the second
+    // frame guarantees.
+    requestAnimationFrame(() => requestAnimationFrame(paint));
+    // Backstop for rAF being throttled (background tab, occluded window,
+    // battery saver) rather than never firing. Cheap, and idempotent.
+    setTimeout(paint, 100);
+  }
+
+  // Backstop only. Every path that replaces the panel's contents — the renderer
+  // build, the empty state — already clears the skeleton, because they replace
+  // `linesRoot`'s children outright. This exists so a caller that forgets cannot
+  // leave a permanent placeholder on screen; it is the token bump that actually
+  // cancels a queued paint.
+  function hideLyricsSkeleton() {
+    // Always clear the fullscreen spinner, including on the early return below:
+    // the spinner's own 2s timer may still be pending, and leaving it armed
+    // would pop it up after the lyrics have already landed.
+    hideFsSpinner();
+    if (!lyricsSkeletonShown) {
+      lyricsSkeletonToken++;
+      return;
+    }
+    lyricsSkeletonShown = false;
+    lyricsSkeletonToken++;
+    if (linesRoot && linesRoot.firstElementChild &&
+        linesRoot.firstElementChild.classList &&
+        linesRoot.firstElementChild.classList.contains("ym-sl-skeleton")) {
+      linesRoot.replaceChildren();
+    }
+  }
+
+  function setJumpButtonVisible(visible) {
+    if (jumpButton) {
+      if (visible) {
+        // The same popup doubles as "Jump to current" (synced) and "Auto scroll"
+        // (unsynced) — label it for whichever mode is active (AJ, 2026-09-18).
+        if (staticLyricsActive) {
+          jumpButton.textContent = "Auto scroll";
+          jumpButton.title = "Resume automatic scrolling";
+          jumpButton.setAttribute(
+            "aria-label",
+            "Resume automatic scrolling"
+          );
+        } else {
+          jumpButton.textContent = "Jump to current";
+          jumpButton.title = "Jump to the currently playing lyric";
+          jumpButton.setAttribute(
+            "aria-label",
+            "Jump to the currently playing lyric"
+          );
+        }
+      }
+      jumpButton.classList.toggle("hidden", !visible);
+    }
+  }
+
+  function onJumpButtonClick() {
+    if (staticLyricsActive) {
+      // Resume the smooth auto-scroll that the manual scroll interrupted.
+      autoScrollUserPaused = false;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+    } else {
+      jumpToCurrentLyric();
+    }
+  }
+
+  function handleManualScrollIntent() {
+    if (!lineScrollEl) return;
+    // QOL #1: a manual scroll during the end-of-track reveal dismisses it so the
+    // panel does not yank back down to the credits while the user is browsing.
+    creditsRevealDismissed = true;
+    creditsRevealActive = false;
+    // The user has taken the scroll. Kill the spring outright rather than
+    // retargeting: a spring still holding a target would keep pulling against
+    // their wheel/touch input, which reads as the panel fighting them.
+    stopScrollGlide();
+    manualScrollActive = true;
+    if (staticLyricsActive) {
+      // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
+      // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
+      autoScrollUserPaused = true;
+    }
+    setJumpButtonVisible(true);
+    scheduleManualScrollReturn();
+  }
+
+  // If the user stops scrolling for FS_JUMP_RETURN_MS, snap back to the line
+  // that is currently playing. Re-armed on every scroll/key intent, so the
+  // timer measures "idle time", not "time since first scroll".
+  function scheduleManualScrollReturn() {
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    manualScrollReturnTimer = window.setTimeout(() => {
+      manualScrollReturnTimer = 0;
+      if (manualScrollActive && lineScrollEl && lastActiveLine >= 0 && lineElements[lastActiveLine]) {
+        jumpToCurrentLyric();
+      }
+    }, FS_JUMP_RETURN_MS);
+  }
+
+  // True when the currently playing line is anywhere on screen. Used to drop the
+  // "Jump to current" button the moment the user scrolls back onto the active
+  // line, instead of making them click it.
+  function isActiveLineInView() {
+    if (!lineScrollEl || lastActiveLine < 0 || !lineElements[lastActiveLine]) return false;
+    const rect = lineElements[lastActiveLine].getBoundingClientRect();
+    const view = lineScrollEl.getBoundingClientRect();
+    return rect.bottom >= view.top && rect.top <= view.bottom;
+  }
+
+  function handleManualScrollKey(event) {
+    if (event.defaultPrevented) return;
+    if ([
+      "ArrowUp",
+      "ArrowDown",
+      "PageUp",
+      "PageDown",
+      "Home",
+      "End",
+      " ",
+    ].includes(event.key)) {
+      handleManualScrollIntent();
+    }
+  }
+
+  function jumpToCurrentLyric() {
+    // Reinforce the line the panel is already gliding toward, not necessarily the
+    // one being sung: with early scroll on those differ, and targeting the active
+    // line here would fight the next frame's retarget back to the lead line.
+    const index = lastScrollTargetLine >= 0 ? lastScrollTargetLine : lastActiveLine;
+    if (!lineScrollEl || index < 0 || !lineElements[index]) return;
+    manualScrollActive = false;
+    setJumpButtonVisible(false);
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    scrollActiveLineIntoView(lineElements[index], true);
+  }
+
+  /* ---- auto-scroll ---------------------------------------------------------
+     One scroll position, THREE ways to reach it — and conflating the last two is
+     what made "smooth scrolling off" hard-cut between lines.
+
+       * spring glide (smoothScrolling ON) — a Fraktality `spr` spring, critically
+         damped, RETARGETABLE, and it KEEPS ITS VELOCITY across retargets. This is
+         upstream 6.3.153's model (see the glide block below).
+       * native ease  (smoothScrolling OFF, ordinary line change) — handed to the
+         element's own `scroll-behavior: smooth`. "Off" means the user did not ask
+         for the glide, not that the panel should teleport. Upstream models it the
+         same way: their scroll element carries `scroll-behavior: smooth`, with an
+         explicit `behavior: "instant"` reserved for the writes that must not
+         animate.
+       * hard jump    (`immediate`) — a structural change moved the lyrics out from
+         under the camera, so animating to catch up would be a lie about what just
+         happened.
+
+     Why a SPRING and not a fixed-duration tween (which is what this used to be): a
+     tween restarts from zero velocity every time the target moves, so on a fast
+     song — a new line every ~400ms — it never actually arrives and the panel reads
+     as stop-start. A spring handed a new target mid-flight just bends the curve
+     and carries on. Damping is critical (zeta 1.0), so there is no overshoot: a
+     lyric panel that wobbles past its line looks broken, not bouncy. */
+
+  /* The single scrollTop writer. `hard` picks the behaviour, and the difference
+     is load-bearing rather than cosmetic:
+
+       hard === true  -> behavior: "instant". This is the ONLY way to override the
+         element's own `scroll-behavior: smooth`; passing "auto" does not cancel
+         it, it DEFERS to it. Every per-frame writer (the spring, the static-lyrics
+         lerp) must use it, or each frame would kick off its own eased animation
+         and the two would fight — the spring would crawl and never satisfy its
+         settle test.
+
+       hard === false -> behavior: "auto" -> the CSS ease. One-shot only: issued
+         when the target CHANGES (once per line), never per frame. */
+  /* ---- line-follow glide: a SPRING (upstream 6.3.153's model, AJ 2026-10-07) ---
+     Upstream drives its smooth scroll with a Fraktality `spr` spring
+     (LyricsVirtualizer._smoothScrollToIndex): critically damped, ~0.8s to settle,
+     and — the part that matters — a RETARGET MID-FLIGHT KEEPS THE VELOCITY, so
+     back-to-back line changes read as ONE continuous glide instead of restarting.
+     We already carry that exact Spring class (see 03-animation-primitives); the
+     scroll simply never used it. This replaced a custom 1100ms ease-out-quartic
+     tween, which restarted from zero velocity every line and so never settled on
+     a fast song. */
+  const SCROLL_GLIDE_FREQ = 1;          // Hz    — upstream SMOOTH_SCROLL_FREQUENCY
+  const SCROLL_GLIDE_DAMPING = 1;       // ratio — 1 = critically damped, no overshoot
+  const SCROLL_GLIDE_SETTLE_PX = 0.25;  // within this of the goal...
+  const SCROLL_GLIDE_SETTLE_SPEED = 0.05; // ...and moving slower than this per frame
+  const SCROLL_GLIDE_MAX_STEP = 0.05;   // s — longest single spring step
+  const SCROLL_GLIDE_MAX_ELAPSED = 0.1; // s — most time one frame may account for
+  const SCROLL_GLIDE_MAX_RECONCILES = 3;
+
+  let scrollGlide = null;         // the Spring instance (reused across retargets)
+  let scrollGlideGoal = 0;
+  let scrollGlideActive = false;
+  let scrollGlideLastTs = null;
+  let scrollGlideLastPos = null;
+  let scrollGlideLastWhole = null;
+  let scrollGlideReconciles = 0;
+  let scrollGlideFraction = 0;
+  // Cached at RETARGET only. Reading scrollHeight per frame is a forced synchronous
+  // layout right after a scroll write — the classic thrash that made the glide
+  // stutter. The geometry only really changes on a line change (adaptive spacing),
+  // and every line change is a retarget, so re-reading here is enough.
+  let scrollGlideMaxScroll = 0;
+
+  // The glide is a scroll animation like any other, so a reduced-motion request
+  // bypasses it and takes the hard path (the CSS already drops the non-glide path
+  // to `scroll-behavior: auto` for those users, so this keeps the two consistent).
+  function scrollGlideReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  /* The single scrollTop writer. `hard` picks the behaviour, and the difference
+     is load-bearing rather than cosmetic:
+
+       hard === true  -> behavior: "instant". This is the ONLY way to override the
+         element's own `scroll-behavior: smooth`; passing "auto" does not cancel
+         it, it DEFERS to it. Every per-frame writer (the glide, the static-lyrics
+         lerp) must use it, or each frame would kick off its own eased animation
+         and the two would fight — the glide would crawl and never satisfy its
+         settle test.
+
+       hard === false -> behavior: "auto" -> the container's CSS ease. One-shot
+         only: issued when the target CHANGES (once per line), never per frame.
+         This is the Smooth-Scrolling-OFF path. */
+  function writeScrollTop(top, hard) {
+    if (!lineScrollEl) return;
+    if (typeof lineScrollEl.scrollTo === "function") {
+      lineScrollEl.scrollTo({ top: top, behavior: hard ? "instant" : "auto" });
+      return;
+    }
+    lineScrollEl.scrollTop = top;
+  }
+
+  // Sub-pixel carry. scrollTop only moves in whole pixels, which at the slow end
+  // of the glide shows up as the list ticking one pixel at a time. Write the whole
+  // part to scrollTop and carry the remainder as a compositor-only translate — on
+  // the SAME transform the lyric offset already uses, so no extra wrapper element
+  // is needed (upstream applies it to their virtual container instead).
+  function setScrollFraction(fraction) {
+    if (!lineScrollEl) return;
+    if (Math.abs(fraction - scrollGlideFraction) < 0.01 && fraction !== 0) return;
+    scrollGlideFraction = fraction;
+    lineScrollEl.style.setProperty("--ym-sl-scroll-frac", fraction === 0 ? "0px" : (-fraction) + "px");
+  }
+
+  function stopScrollGlide() {
+    scrollGlideActive = false;
+    scrollGlide = null;
+    scrollGlideLastTs = null;
+    scrollGlideLastPos = null;
+    scrollGlideLastWhole = null;
+    scrollGlideReconciles = 0;
+    setScrollFraction(0);
+    // Release the compositor promotion the glide held (see startScrollGlide).
+    if (lineScrollEl) lineScrollEl.style.willChange = "";
+  }
+
+  // Start or retarget the glide. The spring is REUSED so its velocity carries
+  // into the new goal — that is the whole point. `replacePosition` restarts from
+  // the current spot at rest (used by the reconcile below).
+  function startScrollGlide(goal, replacePosition) {
+    if (!lineScrollEl) return;
+    // Geometry read happens HERE (once per retarget), never per frame.
+    scrollGlideMaxScroll = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const clampedGoal = clamp(goal, 0, scrollGlideMaxScroll);
+    const current = scrollGlideActive
+      ? lineScrollEl.scrollTop + scrollGlideFraction
+      : lineScrollEl.scrollTop;
+    if (!scrollGlide) scrollGlide = new Spring(current, SCROLL_GLIDE_FREQ, SCROLL_GLIDE_DAMPING);
+    if (replacePosition) scrollGlide.SetGoal(current, true);
+    scrollGlideGoal = clampedGoal;
+    scrollGlide.SetGoal(clampedGoal);
+    scrollGlideReconciles = 0;
+    // Promote for the duration of the glide. The sub-pixel fraction rewrites the
+    // scroller's transform every frame, and the scroller ALSO carries the lyrics
+    // mask — without promotion each write re-rasterises the masked content. Held
+    // only while gliding, released in stopScrollGlide (per the standing rule that
+    // will-change is never left on permanently).
+    lineScrollEl.style.willChange = "transform";
+    scrollGlideActive = true;
+  }
+
+  // One frame of the glide. Elapsed is sliced so a low frame rate keeps the
+  // wall-clock timing while a real stall cannot jump the list forward.
+  function stepScrollGlide() {
+    if (!scrollGlideActive || !scrollGlide || !lineScrollEl) return;
+    // A user taking over always beats the glide.
+    if (manualScrollActive) { stopScrollGlide(); return; }
+    const now = performance.now();
+    let elapsed = scrollGlideLastTs === null
+      ? 1 / 60
+      : Math.min((now - scrollGlideLastTs) / 1000, SCROLL_GLIDE_MAX_ELAPSED);
+    scrollGlideLastTs = now;
+    let stepped = scrollGlide.Step(Math.min(elapsed, SCROLL_GLIDE_MAX_STEP));
+    elapsed -= SCROLL_GLIDE_MAX_STEP;
+    while (elapsed > 0) {
+      stepped = scrollGlide.Step(Math.min(elapsed, SCROLL_GLIDE_MAX_STEP));
+      elapsed -= SCROLL_GLIDE_MAX_STEP;
+    }
+    // Cached at retarget — NO layout read on an ordinary frame (see the state
+    // block above; a per-frame scrollHeight read is a forced synchronous layout).
+    const position = clamp(stepped, 0, scrollGlideMaxScroll);
+    const moved = scrollGlideLastPos === null ? Infinity : Math.abs(position - scrollGlideLastPos);
+    scrollGlideLastPos = position;
+    const settled =
+      Math.abs(position - scrollGlideGoal) < SCROLL_GLIDE_SETTLE_PX &&
+      moved < SCROLL_GLIDE_SETTLE_SPEED;
+    // Whole part to scrollTop, remainder as the compositor translate.
+    const whole = settled ? Math.round(scrollGlideGoal) : Math.round(position);
+    const fraction = settled ? 0 : position - whole;
+    if (whole !== scrollGlideLastWhole) {
+      writeScrollTop(whole, true);
+      scrollGlideLastWhole = whole;
+    }
+    setScrollFraction(fraction);
+    if (settled) {
+      // Landed off target — layout changed under the glide. Re-aim from where the
+      // list actually is, a bounded number of times, then accept it.
+      const actual = lineScrollEl.scrollTop;
+      if (Math.abs(actual - scrollGlideGoal) > 1 && scrollGlideReconciles < SCROLL_GLIDE_MAX_RECONCILES) {
+        scrollGlideReconciles += 1;
+        scrollGlideLastWhole = actual;
+        scrollGlideLastPos = null;
+        startScrollGlide(scrollGlideGoal, true);
+        return;
+      }
+      stopScrollGlide();
+    }
+  }
+
+  function setScrollTarget(target, immediate) {
+    if (!lineScrollEl) return;
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const clamped = clamp(target, 0, maxScrollTop);
+    if (immediate) {
+      // A structural change moved the lyrics out from under the camera: stop any
+      // glide and snap, because animating to catch up would be a lie.
+      stopScrollGlide();
+      writeScrollTop(clamped, true);
+      return;
+    }
+    if ((currentSettings.smoothScrolling || currentSettings.simpleLyrics) && !scrollGlideReducedMotion()) {
+      // The SPRING GLIDE (upstream 6.3.153's model). The spring is REUSED, so a
+      // line change arriving mid-flight bends the curve and keeps its velocity
+      // instead of restarting — that is what makes fast songs read as one glide.
+      startScrollGlide(clamped, false);
+      return;
+    }
+    // Smooth Scrolling off: the container's own CSS ease, one-shot.
+    stopScrollGlide();
+    writeScrollTop(clamped, false);
+  }
+
+  /* The old naive-Euler scroll spring lived here (SCROLL_SPRING_STIFFNESS/DAMPING,
+     stepScrollSpring, stopScrollSpring). It was DEAD — its target was never set
+     from outside — and it is superseded by the glide above, which drives the exact
+     `spr` Spring class (frame-rate independent, velocity-carrying) instead of
+     hand-integrated Euler steps. Removed 2026-10-07; the four lifecycle sites now
+     call stopScrollGlide(). */
+
+  function scrollActiveLineIntoView(element, force) {
+    // pausePickMode suspends auto-scroll the same way manual scrolling does, but it
+    // must NOT set manualScrollActive: that flag is auto-cleared by animate() as soon
+    // as the active line is back in view, which would drop the user out of pick mode
+    // the moment they scrolled near the playhead.
+    if (!lineScrollEl || !element || ((manualScrollActive || pausePickMode) && !force)) return;
+    // The old implementation cancelled its rAF here. The spring has no timer to
+    // cancel: retargeting IS the cancellation, and it keeps the velocity.
+    const lineRect = element.getBoundingClientRect();
+    const viewportRect = lineScrollEl.getBoundingClientRect();
+    const lineCenter = lineRect.top + lineRect.height / 2;
+    const viewportCenter = viewportRect.top + viewportRect.height / 2;
+    // Centre the line. (Upstream's live path nudges the target by -30px for
+    // centred lyrics and +85px when scrolling to the top; we always centre.)
+    const target = lineScrollEl.scrollTop + lineCenter - viewportCenter;
+    // `force` only means "ignore manualScrollActive" — it is NOT a request to skip
+    // the animation, so it does not make this immediate.
+    //
+    // `pendingInstantScroll` is the only thing that does, and it is not about
+    // preference: a structural change moved the lyrics out from under the camera
+    // (rebuilt lines, reparented panel, resized column). The user did not move the
+    // playhead, so animating to catch up is a lie about what just happened — and
+    // on a new track it means gliding all the way up from the previous song's
+    // final line.
+    //
+    // Note what is deliberately NOT here any more: `!currentSettings.smoothScrolling`.
+    // Treating "smooth scrolling off" as "immediate" is exactly what made every
+    // line change hard-cut; setScrollTarget now routes that case to the element's
+    // own CSS ease instead.
+    const immediate = pendingInstantScroll;
+    pendingInstantScroll = false;
+    setScrollTarget(target, immediate);
+  }
+
+  /* ---- re-centring after a structural change --------------------------------
+     Four different events leave the panel showing the WRONG PART OF THE SONG, and
+     they all failed the same way: the position was invalidated, and nothing
+     re-placed it until the next line change happened to retarget the spring.
+
+       1. New track. The `scrollTop = 0` reset in buildRendererLines is
+          static-lyrics-only, so synced lyrics keep the PREVIOUS song's bottom
+          position and the spring then glides the entire height of the song.
+       2. Entering fullscreen. panelEl is reparented into fsLyricsHost, and
+          detaching a scrollable element resets scrollTop to 0 — so the song
+          starts at the top no matter where the playhead is.
+       3. Switching the fullscreen layout. The lyrics column is CSS-transitioned,
+          so the geometry moves around a stale scrollTop.
+       4. Leaving fullscreen, for the same reason as (2).
+
+     All four are the same complaint — "the camera doesn't stay on the active
+     line" — so they share one mechanism. Instant, because in none of these cases
+     did the user move the playhead: the layout moved around it. */
+  function recentreActiveLineNow() {
+    // Never fight a user who is browsing lyrics by hand. pausePickMode is exempt
+    // for the same reason scrollActiveLineIntoView exempts it from force.
+    if (manualScrollActive || pausePickMode) return;
+    if (!lineScrollEl || staticLyricsActive) return;
+    const index = lastActiveLine >= 0 ? lastActiveLine : lastScrollTargetLine;
+    if (index < 0 || !lineElements[index]) return;
+    pendingInstantScroll = true;
+    scrollActiveLineIntoView(lineElements[index], true);
+  }
+
+  function recentreActiveLine() {
+    recentreUntilMs = performance.now() + RECENTRE_WINDOW_MS;
+    // Invalidate the gate so the next frame re-places even if the line index has
+    // not changed, then place immediately for the frames where the panel is not
+    // animating (hidden tab, no lines yet).
+    lastScrollTargetLine = -1;
+    recentreActiveLineNow();
+  }
+
+  // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
+  // its tail. Returns true while the reveal owns the scroll target this frame, so
+  // animate() can skip the normal line-follow retarget and let the credits glide
+  // into view (spring if smoothScrolling is on, else the element's CSS ease).
+  function updateCreditsReveal(positionMs, activeIndex, lyricPositionMs) {
+    // Static lyrics already scroll to the bottom on their own via
+    // driveStaticAutoScroll; pause-pick mode owns the scroll too; and we need a
+    // credits footer and a live scroll container to do anything at all.
+    if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
+      if (!creditsFooterEl) creditsRevealActive = false;
+      return false;
+    }
+    // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not
+    // when it starts being sung — so the credits glide in right as the last lyric
+    // completes. nearEnd is a fallback for the rare case there are credits but no
+    // lyric lines (provider-only), where EndTime compares are meaningless.
+    const lastLine = modelLines.length ? modelLines[modelLines.length - 1] : null;
+    const player = window.YTMod && window.YTMod.player;
+    const durationMs = player && typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : 0;
+    // `finalLineEnded` alone is not safe: in the frames around a track change the
+    // position can still be the PREVIOUS song's end while modelLines already
+    // belongs to the new one, which makes 0 >= anything false but
+    // stalePosition >= newLastLine.EndTime true -- and the reveal then drags the
+    // freshly recentred panel to the bottom of the new song. Require the position
+    // to also be inside the CURRENT song before trusting it (AJ, 2026-10-02).
+    const positionWithinSong = durationMs <= 0 || positionMs <= durationMs + 2000;
+    const finalLineEnded = !!lastLine && positionWithinSong && lyricPositionMs >= lastLine.EndTime;
+    const nearEnd = durationMs > 0 && (durationMs - positionMs) <= CREDITS_REVEAL_MS;
+    if (!finalLineEnded && !nearEnd) {
+      // Left the end zone (new track, seek back, or ended-and-advanced): release
+      // the latches so the reveal can fire again next time the track reaches its
+      // tail. The normal line-follow retarget resumes on the next frame.
+      creditsRevealEngaged = false;
+      creditsRevealDismissed = false;
+      creditsRevealActive = false;
+      return false;
+    }
+    if (creditsRevealDismissed) return false; // user took over -> stay out
+    creditsRevealEngaged = true;
+    creditsRevealActive = true;
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    setScrollTarget(maxScrollTop, false);
+    return true;
+  }
+
+  function cancelCreditsReveal() {
+    creditsRevealEngaged = false;
+    creditsRevealDismissed = false;
+    creditsRevealActive = false;
+  }
+
+  // Smoothly follow playback with the native scroll position for static
+  // (unsynced) lyrics: scrollTop = progress * maxScroll, eased each frame. At
+  // song start progress is 0 (top), at the end it is 1 (bottom). A small lerp
+  // factor keeps it slow and fluid; if playback is paused the target is fixed so
+  // the panel simply settles and holds (AJ, 2026-09-18).
+  function driveStaticAutoScroll(positionMs) {
+    const player = window.YTMod && window.YTMod.player;
+    const durationMs = player && typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : 0;
+    if (!durationMs || durationMs <= 0) return;
+    const progress = clamp(positionMs / durationMs, 0, 1);
+    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
+    const target = progress * maxScrollTop;
+    const current = lineScrollEl.scrollTop;
+    // Per-frame, so it must not animate: an eased write here would restart on
+    // every frame and the lerp would never make progress.
+    writeScrollTop(current + (target - current) * 0.06, true);
+  }
+
+  function parseLrcTimestamp(minutes, seconds) {
+    return parseInt(minutes, 10) * 60 + parseFloat(seconds);
+  }
+
+  function parseLRC(lrc, durationSeconds) {
+    const entries = [];
+    const timestampRe = /\[(\d+):(\d{1,2}(?:\.\d+)?)\]/g;
+
+    for (const rawLine of String(lrc || "").replace(/\r/g, "").split("\n")) {
+      const timestamps = [];
+      let match;
+      while ((match = timestampRe.exec(rawLine))) {
+        timestamps.push(parseLrcTimestamp(match[1], match[2]));
+      }
+      timestampRe.lastIndex = 0;
+      if (!timestamps.length) continue;
+
+      const text = rawLine.replace(timestampRe, "").trim();
+      if (!text) continue;
+      for (const start of timestamps) entries.push({ start, text });
+    }
+
+    entries.sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const entry of entries) {
+      const previous = merged[merged.length - 1];
+      if (previous && Math.abs(previous.start - entry.start) < 0.001) {
+        if (previous.text !== entry.text) previous.text += " " + entry.text;
+      } else {
+        merged.push({ start: entry.start, text: entry.text });
+      }
+    }
+
+    return merged.map((entry, index) => {
+      const nextStart = merged[index + 1] ? merged[index + 1].start : 0;
+      const end = nextStart > entry.start
+        ? nextStart
+        : (durationSeconds > entry.start ? durationSeconds : entry.start + 4);
+      return {
+        start: entry.start,
+        end: Math.max(entry.start + 0.05, end),
+        text: entry.text,
+        lineTimed: true,
+        words: [{
+          text: entry.text,
+          start: entry.start,
+          end: Math.max(entry.start + 0.05, end),
+          isPartOfWord: false,
+          disableLetterAnimation: true,
+        }],
+        background: [],
+      };
+    });
+  }
+
+  // Build a parsed-line model from plain (unsynced) LRCLIB text. Each source
+  // line becomes one word with no timing (start = end = 0). The renderer treats
+  // these as NoKaraoke static blocks and, because their time window is empty,
+  // they resolve to the "Sung" (fully-filled) state at every playback position
+  // and the active-line search never matches them, so the panel shows them all
+  // at once with no karaoke sweep and no auto-scroll (AJ, 2026-09-18).
+  function parsePlain(text) {
+    const lines = String(text || "")
+      .replace(/\r/g, "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return lines.map((text) => ({
+      start: 0,
+      end: 0,
+      text,
+      words: [{ text, start: 0, end: 0, timed: false }],
+      background: [],
+      lineTimed: false,
+      timed: false,
+      positioned: false,
+    }));
+  }
+
+  function applyParsedLyrics(parsed) {
+    if (!parsed || !parsed.length) {
+      showLyricsMessage(NO_LYRICS_MESSAGE);
+      return false;
+    }
+    buildRendererLines(toSyllableContent(parsed));
+    lastActiveLine = -1;
+    cachedFirstRealLyricStartMs = modelLines.reduce((first, line) =>
+      line && !line.DotLine ? Math.min(first, line.StartTime) : first,
+      Infinity
+    );
+    cachedLastRealLyricEndMs = modelLines.reduce((last, line) =>
+      line && !line.DotLine ? Math.max(last, line.EndTime) : last,
+      0
+    );
+    return true;
+  }
+
+  function setTTMLExportVisibility() {
+    const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
+    if (!exportActions) return;
+    exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+  }
+
+  function loadTTML(xml, source, provider) {
+    const rawXml = String(xml || "");
+    const parsed = parseTTML(rawXml);
+    if (!parsed.length) {
+      staticLyricsActive = false;
+      currentLyricsIsTTML = false;
+      currentTTMLSource = "none";
+      importedTTMLXml = "";
+      setTTMLExportVisibility();
+      showLyricsMessage("Could not parse that TTML. Try an .ttml export with timed <p> lines.");
+      return false;
+    }
+    currentLyricsIsTTML = true;
+    staticLyricsActive = false;
+    currentSongwriters = extractSongwriters(rawXml);
+    // Consume any credits the caller staged for this load (Spicy Lyrics API
+    // results only). Clearing here means imports, cached TTML and Unison never
+    // inherit a stale uploader from a previous track.
+    if (pendingSpicyCredits) {
+      const attr = pendingSpicyCredits.attribution || null;
+      currentProvider = (attr && attr.provider) || "";
+      currentUploader = (attr && attr.uploader) || null;
+      currentMaker = (attr && attr.maker) || null;
+      if (!currentSongwriters.length && pendingSpicyCredits.songwriters.length) {
+        currentSongwriters = pendingSpicyCredits.songwriters;
+      }
+      pendingSpicyCredits = null;
+    } else if (source === "imported") {
+      // A TTML loaded from a local file (not via the Spicy Lyrics API) has no
+      // provider and no credited people — the attribution rule governs API
+      // responses, not files the user brought. Surface it as a Local Database
+      // credit instead of showing nothing — AJ, 2026-09-26. No url, so
+      // buildPersonRow renders it as plain text (no dead link).
+      currentProvider = "";
+      currentMaker = null;
+      currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
+    } else {
+      // Unison can return TTML too, but it has no Spicy UploadAttribution
+      // object. The caller supplies its provider explicitly so the footer still
+      // says where these lyrics came from.
+      currentProvider = typeof provider === "string" ? provider : "";
+      currentMaker = null;
+      currentUploader = null;
+    }
+    currentTTMLSource = source === "imported" ? "imported" : "external";
+    importedTTMLXml = currentTTMLSource === "imported" ? rawXml : "";
+    const applied = applyParsedLyrics(parsed);
+    setTTMLExportVisibility();
+    return applied;
+  }
+
+  function loadLRCLyrics(data, durationMs, provider = "LRCLIB") {
+    currentLyricsIsTTML = false;
+    currentTTMLSource = "none";
+    importedTTMLXml = "";
+    currentSongwriters = [];
+    currentUploader = null;
+    currentMaker = null;
+    currentProvider = typeof provider === "string" ? provider : "LRCLIB";
+    autoScrollUserPaused = false;
+    // An LRCLIB result may carry plain lyrics without synced timestamps. Load
+    // those as a static, already-filled set instead of reporting "no lyrics".
+    // Synced lyrics always win when both are present (AJ, 2026-09-18).
+    if (data && data.syncedLyrics) {
+      staticLyricsActive = false;
+      const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
+      const applied = applyParsedLyrics(parsed);
+      setTTMLExportVisibility();
+      return applied;
+    }
+    if (data && data.plainLyrics) {
+      staticLyricsActive = true;
+      const parsed = parsePlain(data.plainLyrics);
+      const applied = applyParsedLyrics(parsed);
+      setTTMLExportVisibility();
+      return applied;
+    }
+    staticLyricsActive = false;
+    showLyricsMessage(NO_LYRICS_MESSAGE);
+    setTTMLExportVisibility();
+    return false;
+  }
+
+  function unwrapUnisonResult(data) {
+    if (!data) return null;
+    if (data.success && data.data) return data.data;
+    return data.lyrics ? data : null;
+  }
+
+  function normalizeUnisonLyrics(data) {
+    const result = unwrapUnisonResult(data);
+    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
+    const format = String(result.format || "").toLowerCase();
+    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics };
+    if (format === "ttml") return { format: "ttml", lyrics: result.lyrics };
+    // Plain lyrics are deliberately not considered a synced hit. The next
+    // provider (LRCLIB) gets the chance to return timed lyrics instead.
+    if (format === "plain") return null;
+    // Be conservative with servers omitting format: accept only timestamped LRC.
+    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
+      ? { format: "lrc", lyrics: result.lyrics }
+      : null;
+  }
+
+  async function fetchUnisonLyrics(track, key, controller) {
+    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
+    const params = new URLSearchParams();
+    if (track.videoId) params.set("v", track.videoId);
+    else {
+      params.set("song", track.title);
+      if (track.artist) params.set("artist", track.artist);
+      if (track.album) params.set("album", track.album);
+      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+        params.set("duration", String(Math.round(track.durationMs / 1000)));
+      }
+    }
+    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (!response.ok || !response.data) return null;
+    return normalizeUnisonLyrics(response.data);
+  }
+
+  function normalizeLookupText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  }
+
+  function selectLRCLIBResult(results, track) {
+    const candidates = Array.isArray(results)
+      ? results.filter((result) => result && result.syncedLyrics)
+      : [];
+    if (!candidates.length) return null;
+
+    const wantedTitle = normalizeLookupText(track.title);
+    const wantedArtist = normalizeLookupText(track.artist);
+    const wantedDuration = Number(track.durationMs) / 1000;
+
+    return candidates
+      .map((result) => {
+        const title = normalizeLookupText(result.trackName);
+        const artist = normalizeLookupText(result.artistName);
+        let score = 0;
+        if (title === wantedTitle) score += 8;
+        else if (title.includes(wantedTitle) || wantedTitle.includes(title)) score += 3;
+        if (wantedArtist && artist === wantedArtist) score += 6;
+        else if (wantedArtist && (artist.includes(wantedArtist) || wantedArtist.includes(artist))) score += 2;
+        if (Number.isFinite(wantedDuration) && Number.isFinite(Number(result.duration))) {
+          score += Math.max(0, 3 - Math.abs(Number(result.duration) - wantedDuration) / 3);
+        }
+        return { result, score };
+      })
+      .sort((a, b) => b.score - a.score)[0].result;
+  }
+
+  // Sibling of selectLRCLIBResult for plain (unsynced) entries. Only used as a
+  // last-resort auto-fetch fallback when no synced result exists, so unsynced
+  // LRCLIB lyrics render automatically instead of reporting "no lyrics"
+  // (AJ, 2026-09-18).
+  function selectLRCLIBPlainResult(results, track) {
+    const candidates = Array.isArray(results)
+      ? results.filter((result) => result && result.plainLyrics && !result.syncedLyrics)
+      : [];
+    if (!candidates.length) return null;
+
+    const wantedTitle = normalizeLookupText(track.title);
+    const wantedArtist = normalizeLookupText(track.artist);
+
+    return candidates
+      .map((result) => {
+        const title = normalizeLookupText(result.trackName);
+        const artist = normalizeLookupText(result.artistName);
+        let score = 0;
+        if (title === wantedTitle) score += 4;
+        else if (title.includes(wantedTitle) || wantedTitle.includes(title)) score += 1;
+        if (wantedArtist && artist === wantedArtist) score += 3;
+        else if (wantedArtist && (artist.includes(wantedArtist) || wantedArtist.includes(artist))) score += 1;
+        return { result, score };
+      })
+      .sort((a, b) => b.score - a.score)[0].result;
+  }
+

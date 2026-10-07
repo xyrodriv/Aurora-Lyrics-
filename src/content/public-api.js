@@ -257,13 +257,18 @@
     },
     seek(ms) {
       const p = $("ytmusic-player");
-      if (p && typeof p.seekTo === "function") { try { return p.seekTo(ms / 1000); } catch (e) {} }
+      if (p && typeof p.seekTo === "function") { try { p.seekTo(ms / 1000); } catch (e) {} }
+      // seekTo() can EXIST yet silently no-op on some YTM builds — when that
+      // happened the fullscreen thumb snapped back to the pre-drag position
+      // because the media never actually moved (AJ, 2026-10-03). Verify the
+      // seek landed on the media element itself and fall back to a direct
+      // currentTime write when it did not (1.5s tolerance for quantisation).
       const media = findPlaybackMedia();
-      if (media) {
-        try {
-          media.currentTime = ms / 1000;
-          return media.currentTime;
-        } catch (e) {}
+      if (media && Number.isFinite(media.currentTime)) {
+        if (Math.abs(media.currentTime * 1000 - ms) > 1500) {
+          try { media.currentTime = ms / 1000; } catch (e) {}
+        }
+        return media.currentTime;
       }
       return null;
     },
@@ -665,6 +670,8 @@
     getSpicyCache: () => cmd("getSpicyCache"),
     setSpicyCache: (cache) => cmd("setSpicyCache", [cache]),
     clearSpicyCache: () => cmd("clearSpicyCache"),
+    getArtCache: () => cmd("getArtCache"),
+    setArtCache: (cache) => cmd("setArtCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>

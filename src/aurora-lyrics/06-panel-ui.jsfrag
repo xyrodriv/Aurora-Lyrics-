@@ -1,0 +1,448 @@
+  function findTabBar() {
+    return (
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
+      document.querySelector("tp-yt-paper-tabs")
+    );
+  }
+
+  /* ---- tab watcher -------------------------------------------------------
+     YTM re-renders the watch page on track and route changes, which destroys the
+     injected SYNCED tab, so a MutationObserver watches for its disappearance.
+
+     Observing `ytmusic-app` with `subtree: true` means the callback fires on
+     EVERY mutation anywhere in the app, and during playback YTM mutates
+     constantly (progress bar, elapsed time, recommendations, queue). The old
+     callback ran `findTabBar()` — up to four document-wide querySelectors — on
+     every one of those, so its cost scaled with both YTM's mutation rate and its
+     growing DOM. That is a genuine contributor to "FPS falls the longer the
+     session runs", and unlike the animation-loop fix it is not bounded per song.
+
+     Narrowing the observed root is NOT safe here: the re-render that removes the
+     tab is exactly the one we must not miss. So the coverage stays identical and
+     the callback is made cheap instead:
+       1. Fast path — if our tab is still a direct child of the bar we mounted it
+          into, nothing changed. One property read instead of four querySelectors.
+          This is the overwhelmingly common case, so the steady-state cost is
+          effectively zero.
+       2. Coalesce — bursts of mutations collapse into a single check per frame. */
+  let tabWatchRaf = 0;
+  function tabWatcherNeedsMount() {
+    // Steady state: our Lyrics tab is still mounted where we found it.
+    if (tabEl && tabMountParent &&
+      tabEl.parentElement === tabMountParent && tabMountParent.isConnected) {
+      return false;
+    }
+    // Otherwise re-mount (initial mount, or YTM re-rendered the bar away). The
+    // Lyrics tab is YTM's OWN now, so there is no marker class to look for.
+    return true;
+  }
+  function runTabWatcher() {
+    tabWatchRaf = 0;
+    if (tabWatcherNeedsMount()) scheduleMountTab();
+  }
+  function onWatchMutations() {
+    if (tabWatchRaf) return;
+    tabWatchRaf = requestAnimationFrame(runTabWatcher);
+  }
+
+  /* ---- draggable overlay panel ---- */
+  // Pointer events (not mouse events) so a drag works with touch as well, and
+  // setPointerCapture on the panel so a fast drag that outruns the cursor still
+  // tracks instead of dropping the panel mid-move. The first drag converts the
+  // CSS anchor (top/right) into explicit left/top, so the panel continues from
+  // wherever it currently sits rather than jumping to the pointer.
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    handle.addEventListener("pointerdown", (event) => {
+      // Let the close button and any real control inside the header behave
+      // normally instead of starting a drag.
+      if (event.target.closest("button, input, select, textarea, a")) return;
+      const rect = panel.getBoundingClientRect();
+      dragging = true;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      panel.style.left = startLeft + "px";
+      panel.style.top = startTop + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      try { panel.setPointerCapture(pointerId); } catch (_) {}
+      event.preventDefault();
+    });
+
+    panel.addEventListener("pointermove", (event) => {
+      if (!dragging || event.pointerId !== pointerId) return;
+      panel.style.left = (startLeft + event.clientX - startX) + "px";
+      panel.style.top = (startTop + event.clientY - startY) + "px";
+    });
+
+    const endDrag = (event) => {
+      if (!dragging || (event && event.pointerId !== pointerId)) return;
+      dragging = false;
+      if (pointerId != null) {
+        try { panel.releasePointerCapture(pointerId); } catch (_) {}
+      }
+      pointerId = null;
+    };
+    panel.addEventListener("pointerup", endDrag);
+    panel.addEventListener("pointercancel", endDrag);
+  }
+
+  function buildUI() {
+    // On extension reload Chrome re-injects the content script but does NOT remove
+    // DOM we created earlier, so a stale (possibly open) panel/style from the previous
+    // injection can linger. Clear any orphaned UI first so we always start clean and closed.
+    const stalePanel = document.getElementById("ym-sl-panel");
+    if (stalePanel) stalePanel.remove();
+    const staleStyle = document.getElementById("ym-sl-style");
+    if (staleStyle) staleStyle.remove();
+    const staleFonts = document.getElementById("ym-sl-fonts");
+    if (staleFonts) staleFonts.remove();
+    // The options overlay is a <body> child, so it survives a panel rebuild and
+    // would otherwise stack up as duplicates on every extension reload.
+    const staleOptions = document.querySelector(".ym-sl-options-overlay");
+    if (staleOptions) staleOptions.remove();
+    // A rebuild (e.g. extension reload) orphaned the old panel; drop the stale
+    // search popover reference and any in-flight request so we recreate cleanly.
+    if (searchAbortController) {
+      searchAbortController.abort();
+      searchAbortController = null;
+    }
+    searchPanelEl = null;
+
+    const style = document.createElement("style");
+    style.id = "ym-sl-style";
+    style.textContent = CSS;
+    document.head.appendChild(style);
+    fontLinkEl = document.createElement("link");
+    fontLinkEl.id = "ym-sl-fonts";
+    fontLinkEl.rel = "stylesheet";
+    fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
+    document.head.appendChild(fontLinkEl);
+    panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
+    const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
+    const importButton = h("button", {
+      class: "ym-sl-import",
+      type: "button",
+      title: "Import TTML lyrics",
+      "aria-label": "Import TTML lyrics",
+      text: "Upload",
+    });
+    const importMode = h("select", {
+      class: "ym-sl-import-mode",
+      title: "Choose how long this TTML should be used",
+      "aria-label": "TTML import duration",
+    });
+    importMode.append(
+      h("option", { value: "temporary", text: "Temporary" }),
+      h("option", { value: "permanent", text: "Permanent", selected: true })
+    );
+    jumpButton = h("button", {
+      class: "ym-sl-jump hidden",
+      type: "button",
+      title: "Jump to the currently playing lyric",
+      "aria-label": "Jump to the currently playing lyric",
+      text: "Jump to current",
+    });
+    jumpButton.addEventListener("click", onJumpButtonClick);
+    const fileInput = h("input", {
+      id: "ym-sl-file",
+      type: "file",
+      accept: ".ttml,.xml,application/ttml+xml",
+      style: "display:none",
+    });
+    importButton.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) readFile(file, importMode.value);
+      event.target.value = "";
+    });
+
+    const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
+    const videoOffsetLabel = h("span", { text: "Offset" });
+    const offsetScope = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
+    offsetScope.append(
+      h("option", { value: "video", text: "Video" }),
+      h("option", { value: "song", text: "Song" })
+    );
+    offsetScope.value = editingOffsetMode;
+    const videoOffsetRange = h("input", {
+      type: "range",
+      min: "-30000",
+      max: "30000",
+      step: "100",
+      value: "0",
+      "aria-label": "Lyric offset",
+    });
+    const videoOffsetNumber = h("input", {
+      type: "number",
+      class: "ym-sl-offset-number",
+      step: "0.1",
+      min: "-30",
+      max: "30",
+      value: "0",
+      title: "Offset in seconds (typed)",
+      "aria-label": "Lyric offset in seconds",
+    });
+    const videoOffsetValue = h("span", { class: "ym-sl-video-offset-value", text: "0.0s" });
+    const offsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
+    videoOffsetWrap.append(videoOffsetLabel, offsetScope, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
+    videoOffsetRange.addEventListener("input", () => {
+      setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
+    });
+    videoOffsetNumber.addEventListener("input", () => {
+      const seconds = parseFloat(videoOffsetNumber.value);
+      if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
+    });
+    offsetScope.addEventListener("change", () => {
+      editingOffsetMode = offsetScope.value;
+      refreshVideoOffsetControl();
+    });
+
+    const optionsButton = h("button", {
+      class: "ym-sl-import ym-sl-options-button",
+      type: "button",
+      title: "Lyrics options — offset, import, and more",
+      "aria-label": "Open lyrics options",
+      text: "Options",
+    });
+    // NOTE: the panel's own "Fullscreen" button was removed here (AJ, 2026-10-02):
+    // new users reach for YouTube Music's native fullscreen button, and that
+    // button is wired to OUR fullscreen, so the panel duplicate only added a
+    // second way in. enterFullscreenMode() is still reachable via the YTM path.
+    const toolsScroll = h("div", { class: "ym-sl-tools-scroll" }, optionsButton);
+    const tools = h("div", { class: "ym-sl-tools" }, toolsScroll);
+
+    // The remaining controls (track, offset, import mode, upload) moved out of
+    // the toolbar into a draggable overlay. The overlay is a child of <body> on
+    // purpose: .ym-sl-panel sets container-type: size, which makes the panel a
+    // containing block for fixed-position descendants and would trap + clip a
+    // nested overlay (the panel also has overflow: hidden).
+    const optionsOverlay = h("div", { class: "ym-sl-options-overlay hidden" });
+    const optionsHeader = h("div", { class: "ym-sl-options-header" });
+    const optionsTitle = h("span", { class: "ym-sl-options-title", text: "Options" });
+    const optionsClose = h("button", {
+      class: "ym-sl-options-close",
+      type: "button",
+      text: "\u00d7",
+      title: "Close options",
+      "aria-label": "Close options",
+    });
+    optionsHeader.append(optionsTitle, optionsClose);
+    const optionsTop = h("div", { class: "ym-sl-options-section" });
+    optionsTop.append(trackEl, videoOffsetWrap);
+    const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
+    const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
+    const optionsBottom = h("div", { class: "ym-sl-options-section" });
+    const exportButton = h("button", {
+      class: "ym-sl-import ym-sl-export-button",
+      type: "button",
+      title: "Download the imported TTML without applying the current offset",
+      "aria-label": "Export imported TTML",
+      text: "Export",
+    });
+    const exportSyncButton = h("button", {
+      class: "ym-sl-import ym-sl-export-sync-button",
+      type: "button",
+      title: "Download the imported TTML with the current offset applied",
+      "aria-label": "Export imported TTML with sync",
+      text: "Export + sync",
+    });
+    const exportActions = h("div", { class: "ym-sl-export-actions hidden" }, exportButton, exportSyncButton);
+    exportButton.addEventListener("click", () => exportImportedTTML(false));
+    exportSyncButton.addEventListener("click", () => exportImportedTTML(true));
+    deletePermanentButton = h("button", {
+      class: "ym-sl-import ym-sl-delete-permanent-button hidden",
+      type: "button",
+      title: "Delete the permanently-saved TTML for this track",
+      "aria-label": "Delete permanently saved TTML",
+      text: "Delete saved",
+    });
+    deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
+    optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
+    /* ---- MV pause re-sync section -------------------------------------------
+       Sits between the Offset controls and the TTML controls: it is a timing
+       control, so it belongs next to the other one rather than under file tools. */
+    const pauseDivider = h("hr", { class: "ym-sl-options-divider" });
+    const pauseTitle = h("div", { class: "ym-sl-options-section-title", text: "Pause sync" });
+    const pauseSection = h("div", { class: "ym-sl-options-section ym-sl-pause-section" });
+    const pausePick = h("button", {
+      class: "ym-sl-import ym-sl-pause-pick",
+      type: "button",
+      "aria-label": "Set pause sync point",
+      text: "Set pause point",
+    });
+    pausePick.addEventListener("click", () => enterPausePickMode());
+    const pauseEditor = h("div", { class: "ym-sl-pause-editor hidden" });
+    const pauseLineLabel = h("div", { class: "ym-sl-pause-line" });
+    const pauseRange = h("input", {
+      type: "range",
+      class: "ym-sl-pause-range",
+      min: String(PAUSE_SYNC_MIN),
+      max: String(PAUSE_SYNC_MAX),
+      step: String(PAUSE_SYNC_STEP),
+      value: "0",
+      "aria-label": "Pause sync offset",
+    });
+    const pauseNumber = h("input", {
+      type: "number",
+      class: "ym-sl-pause-number",
+      step: "0.1",
+      value: "0",
+      "aria-label": "Pause sync offset in seconds",
+    });
+    const pauseValue = h("span", { class: "ym-sl-pause-value", text: "+0.0s" });
+    const pauseClear = h("button", {
+      class: "ym-sl-import ym-sl-pause-clear",
+      type: "button",
+      "aria-label": "Clear pause sync point",
+      text: "Clear",
+    });
+    pauseClear.addEventListener("click", () => clearPauseSync());
+    pauseRange.addEventListener("input", () => setPauseSyncOffset(pauseRange.value, false));
+    pauseRange.addEventListener("change", () => setPauseSyncOffset(pauseRange.value, true));
+    pauseNumber.addEventListener("input", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, false));
+    pauseNumber.addEventListener("change", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, true));
+    const pauseRow1 = h("div", { class: "ym-sl-pause-row" }, pauseRange);
+    const pauseRow2 = h("div", { class: "ym-sl-pause-row" }, pauseNumber, pauseValue, pauseClear);
+    pauseEditor.append(pauseLineLabel, pauseRow1, pauseRow2);
+    pauseSection.append(pausePick, pauseEditor);
+    pauseUi = {
+      root: pauseSection,
+      pick: pausePick,
+      editor: pauseEditor,
+      line: pauseLineLabel,
+      range: pauseRange,
+      number: pauseNumber,
+      value: pauseValue,
+    };
+
+    // Banner shown on the lyrics panel while a line is being picked.
+    pauseBanner = h("div", { class: "ym-sl-pause-banner hidden" });
+    pauseBannerText = h("span", { class: "ym-sl-pause-banner-text" });
+    const pauseBannerCancel = h("button", {
+      class: "ym-sl-pause-cancel",
+      type: "button",
+      text: "Cancel",
+      "aria-label": "Cancel pause sync selection",
+    });
+    pauseBannerCancel.addEventListener("click", () => exitPausePickMode());
+    pauseBanner.append(pauseBannerText, pauseBannerCancel);
+
+    // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
+    // exposes an explicit purge so a stale or wrong match can be cleared without
+    // nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored Lyrics
+    // Cache" row.
+    const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
+    const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
+    const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 3 days." });
+    const cacheClear = h("button", {
+      class: "ym-sl-import ym-sl-cache-clear",
+      type: "button",
+      "aria-label": "Clear Spicy Lyrics cache",
+      text: "Clear cache",
+    });
+    cacheClear.addEventListener("click", async () => {
+      if (cacheClear.disabled) return;
+      cacheClear.disabled = true;
+      try {
+        const count = await spicyCacheEntryCount();
+        await clearSpicyLyricsCache();
+        cacheStatus.textContent = count
+          ? `Cleared ${count} cached ${count === 1 ? "song" : "songs"}.`
+          : "Nothing to clear — the cache was already empty.";
+      } catch (error) {
+        cacheStatus.textContent = "Could not clear the cache.";
+        console.warn("[SpicyLyrics] clear cache failed:", error);
+      }
+      cacheClear.disabled = false;
+    });
+    cacheSection.append(cacheStatus, cacheClear);
+
+    const optionsBody = h("div", { class: "ym-sl-options-body" });
+    optionsBody.append(
+      optionsTop,
+      pauseDivider, pauseTitle, pauseSection,
+      optionsDivider, optionsTtmlTitle, optionsBottom,
+      cacheDivider, cacheTitle, cacheSection
+    );
+    optionsOverlay.append(optionsHeader, optionsBody);
+    optionsButton.addEventListener("click", () => {
+      const opening = optionsOverlay.classList.contains("hidden");
+      optionsOverlay.classList.toggle("hidden");
+      if (opening) refreshPermanentDeleteState();
+    });
+    optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
+    optionsOverlay._exportActions = exportActions;
+    makeDraggable(optionsOverlay, optionsHeader);
+    document.body.appendChild(optionsOverlay);
+    const lyricsContainer = h("div", { class: "LyricsContainer" });
+    const content = h("div", { class: "LyricsContent offline" });
+    const scrollContainer = h("div", {
+      class: "SpicyLyricsScrollContainer",
+      "data-lyrics-type": "Syllable",
+    });
+    linesRoot = h("div", { class: "VirtualLyricsContainer" });
+    linesRoot.appendChild(h("div", {
+      class: "ym-sl-empty",
+      text: "Drop a .ttml file here, or use Upload to load synced lyrics.",
+    }));
+    scrollContainer.appendChild(linesRoot);
+    content.appendChild(scrollContainer);
+    lyricsContainer.appendChild(content);
+    panelEl.append(tools, fileInput, lyricsContainer, jumpButton, pauseBanner);
+    panelEl.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      panelEl.classList.add("drag");
+    });
+    panelEl.addEventListener("dragleave", () => panelEl.classList.remove("drag"));
+    panelEl.addEventListener("drop", (event) => {
+      event.preventDefault();
+      panelEl.classList.remove("drag");
+      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) readFile(file, importMode.value);
+    });
+
+    lineScrollEl = content;
+    lineScrollEl.addEventListener("wheel", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("touchstart", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("keydown", handleManualScrollKey);
+    applySettings(currentSettings);
+    document.body.appendChild(panelEl);
+    refreshTrack();
+    mountTab();
+    startTick();
+
+    const watchRoot = document.querySelector("ytmusic-app") ||
+      document.querySelector("ytmusic-player-page");
+    if (watchRoot) {
+      wpObserver = new MutationObserver(onWatchMutations);
+      wpObserver.observe(watchRoot, { childList: true, subtree: true });
+    }
+  }
+
+  function mountPanel(bar) {
+    // Inject INTO YTM's own tab content node (#tab-renderer), like the Better
+    // Lyrics extension, so the lyrics sit truly inside the native Lyrics tab
+    // rather than in a sibling panel. Falls back to the tab bar's parent.
+    const renderer = document.querySelector("#tab-renderer");
+    const host = renderer || (bar && bar.parentElement);
+    // Never yank the panel back into the YTM tab while fullscreen is active —
+    // it currently lives inside the fullscreen overlay.
+    if (!host || !panelEl || fsActive) return;
+    panelHost = host;
+    if (panelEl.parentElement !== host) host.appendChild(panelEl);
+  }
+

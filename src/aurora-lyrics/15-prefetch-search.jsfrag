@@ -1,0 +1,291 @@
+  /* ===================== next-track prefetch ===================== */
+  // Warm the lyric cache for the upcoming track so the song change has no
+  // blank flash. Best-effort only: any failure is swallowed and never touches
+  // the current track's UI. Uses its own prefetchSeq + AbortController so it
+  // cannot abort or race the active track's request.
+  async function prefetchNextTrackLyrics() {
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getNextTrack !== "function") return;
+    let next;
+    try { next = player.getNextTrack(); } catch (e) { return; }
+    if (!next || !next.title) return;
+    const key = getTrackKey(next);
+    if (!key || key === currentTrackKey) return;
+    // Already cached (memory or persistent file)? Nothing to do.
+    if (lrclibCache.has(key) || getLyricsPersistent(key)) return;
+
+    const controller = new AbortController();
+    const reqId = ++prefetchSeq;
+    try {
+      let data = null;
+      // Mirror the LRCLIB path of fetchLRCLyrics, but cache instead of rendering.
+      if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return;
+      const params = new URLSearchParams();
+      params.set("track_name", next.title);
+      if (next.artist) params.set("artist_name", next.artist);
+      if (Number.isFinite(Number(next.durationMs)) && Number(next.durationMs) > 0) {
+        params.set("duration", String(Math.round(Number(next.durationMs) / 1000)));
+      }
+      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_API}?${params.toString()}`);
+      if (reqId !== prefetchSeq) return;
+      if (response && response.ok && response.data && response.data.syncedLyrics) {
+        data = response.data;
+      } else if (!response || !response.ok || response.status === 404) {
+        const searchParams = new URLSearchParams({
+          q: [next.title, next.artist].filter(Boolean).join(" "),
+        });
+        const searchResponse = await window.YTMod.fetchLRCLIB(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        );
+        if (reqId !== prefetchSeq) return;
+        if (searchResponse && searchResponse.ok) {
+          data = selectLRCLIBResult(searchResponse.data, next);
+        }
+      }
+      if (reqId !== prefetchSeq) return;
+      if (!data || !data.syncedLyrics) return;
+      cacheLRCLyrics(key, data);
+      cacheLyricsPersistent(key, data);
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      // Non-fatal: lyrics simply load normally when the track starts.
+    }
+  }
+
+  /* ===================== manual lyric search ===================== */
+  // In-place LRCLIB search. Opens a popover, queries the search endpoint, and
+  // applies the chosen match through the same loader the auto-sync uses, so a
+  // manual pick behaves identically to an auto-synced line set. All DOM is built
+  // with h() — no innerHTML — to satisfy YouTube Music's Trusted-Types policy.
+  // A chosen match can also be persisted for the current track (cached in the
+  // same layer fetchLRCLyrics reads from), so it survives reloads.
+
+  let searchPanelEl = null;
+  let searchAbortController = null;
+  let searchRequestSeq = 0;
+
+  function ensureSearchPanel() {
+    if (searchPanelEl) return searchPanelEl;
+    const panel = h("div", {
+      class: "ym-sl-search hidden",
+      role: "dialog",
+      "aria-label": "Search lyrics",
+    });
+    const head = h("div", { class: "ym-sl-search-head" });
+    const title = h("span", { class: "ym-sl-search-title", text: "Search lyrics" });
+    const closeBtn = h("button", {
+      class: "ym-sl-search-close",
+      type: "button",
+      "aria-label": "Close search",
+      text: "✕",
+    });
+    head.append(title, closeBtn);
+
+    const form = h("form", { class: "ym-sl-search-form" });
+    const input = h("input", {
+      class: "ym-sl-search-input",
+      type: "search",
+      placeholder: "Song title — artist",
+      "aria-label": "Lyric search query",
+      autocomplete: "off",
+    });
+    const submit = h("button", { class: "ym-sl-import", type: "submit", text: "Search" });
+    form.append(input, submit);
+
+    const rememberRow = h("label", { class: "ym-sl-search-remember" });
+    const remember = h("input", { type: "checkbox", class: "ym-sl-search-remember-box" });
+    rememberRow.append(remember, h("span", { text: "Remember for this track" }));
+
+    const status = h("div", { class: "ym-sl-search-status", role: "status" });
+    const results = h("div", {
+      class: "ym-sl-search-results",
+      role: "listbox",
+      "aria-label": "Search results",
+    });
+
+    panel.append(head, form, rememberRow, status, results);
+    panel._input = input;
+    panel._remember = remember;
+    panel._status = status;
+    panel._results = results;
+
+    closeBtn.addEventListener("click", () => toggleSearchPanel(false));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runLyricSearch();
+    });
+
+    searchPanelEl = panel;
+    panelEl.appendChild(panel);
+    return panel;
+  }
+
+  function toggleSearchPanel(force) {
+    const panel = ensureSearchPanel();
+    const show = force == null ? panel.classList.contains("hidden") : !!force;
+    if (show) {
+      const track = getCurrentTrack();
+      panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
+      panel._results.replaceChildren();
+      panel._status.textContent = "";
+      panel.classList.remove("hidden");
+      panel._input.focus();
+      panel._input.select();
+    } else {
+      panel.classList.add("hidden");
+      if (searchAbortController) {
+        searchAbortController.abort();
+        searchAbortController = null;
+      }
+    }
+  }
+
+  async function runLyricSearch() {
+    const panel = ensureSearchPanel();
+    const query = (panel._input.value || "").trim();
+    if (!query) {
+      panel._status.textContent = "Type a song title or artist first.";
+      return;
+    }
+    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
+      panel._status.textContent = "Search unavailable. Reload Aurora Lyrics and try again.";
+      return;
+    }
+    const requestId = ++searchRequestSeq;
+    if (searchAbortController) searchAbortController.abort();
+    const controller = new AbortController();
+    searchAbortController = controller;
+    panel._status.textContent = "Searching…";
+    panel._results.replaceChildren();
+
+    const params = new URLSearchParams({ q: query });
+    try {
+      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_SEARCH_API}?${params.toString()}`);
+      if (controller.signal.aborted || requestId !== searchRequestSeq) return;
+      searchAbortController = null;
+      if (!response.ok) throw new Error("LRCLIB search returned HTTP " + response.status);
+      const list = Array.isArray(response.data) ? response.data : [];
+      if (!list.length) {
+        panel._status.textContent = "No results found.";
+        return;
+      }
+      panel._status.textContent = `${list.length} result${list.length === 1 ? "" : "s"} — pick one to load.`;
+      list.slice(0, 25).forEach((item) => {
+        panel._results.appendChild(makeSearchResultRow(item, panel._remember.checked, panel._status));
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      if (requestId !== searchRequestSeq) return;
+      searchAbortController = null;
+      panel._status.textContent = "Search failed. Try again.";
+      console.warn("[SpicyLyrics] manual lyric search failed:", error);
+    }
+  }
+
+  function makeSearchResultRow(item, remember, status) {
+    const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
+    const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
+    const hasSync = !!item.syncedLyrics;
+    const hasPlain = !!item.plainLyrics;
+    const metaBits = [item.artistName, item.albumName].filter(Boolean);
+    if (!hasSync && hasPlain) metaBits.push("unsynced");
+    const meta = h("span", { class: "ym-sl-search-meta", text: metaBits.join(" · ") });
+    row.append(name, meta);
+    if (hasSync || hasPlain) {
+      // Both synced and plain matches are now loadable. Plain ones render as a
+      // static, already-filled set with no karaoke sweep (AJ, 2026-09-18).
+      if (!hasSync) {
+        row.classList.add("no-sync-available");
+        row.title = "Load unsynced lyrics (no timestamps)";
+      }
+      row.addEventListener("click", () => applySearchResult(item, remember, status));
+    } else {
+      row.classList.add("no-sync");
+      row.disabled = true;
+      row.title = "No lyrics for this match";
+    }
+    return row;
+  }
+
+  function applySearchResult(item, remember, status) {
+    const track = getCurrentTrack();
+    const durationMs = track ? Number(track.durationMs) : 0;
+    const key = track ? getTrackKey(track) : "";
+    loadLRCLyrics(item, durationMs);
+    cacheLRCLyrics(key, item);
+    if (remember && key) cacheLyricsPersistent(key, item);
+    const isUnsynced = !item.syncedLyrics && item.plainLyrics;
+    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (remembered for this track)" : ""}.`;
+    toggleSearchPanel(false);
+  }
+
+  async function syncTrackLyrics() {
+    const track = getCurrentTrack();
+    const key = getTrackKey(track);
+    if (!key) return;
+
+    const positionMs = window.YTMod && window.YTMod.player
+      ? window.YTMod.player.getPositionMs()
+      : null;
+    const durationMs = Number(track.durationMs);
+    const restartedTemporaryTrack =
+      manualLyricsTrackKey === key &&
+      lastObservedTrackKey === key &&
+      Number.isFinite(positionMs) &&
+      Number.isFinite(lastObservedPositionMs) &&
+      Number.isFinite(durationMs) &&
+      durationMs > 0 &&
+      lastObservedPositionMs >= durationMs * 0.9 &&
+      positionMs < 5000;
+
+    lastObservedTrackKey = key;
+    lastObservedPositionMs = positionMs;
+
+    // A *temporary* manual upload should fall back to the API-synced lyrics when
+    // the same track is replayed. A *permanent* upload must survive the restart,
+    // so we leave currentTrackKey alone and let the existing TTML DOM persist.
+    if (restartedTemporaryTrack && !manualLyricsIsPermanent) {
+      manualLyricsTrackKey = "";
+      currentTrackKey = "";
+    }
+    if (key === currentTrackKey) return;
+
+    currentTrackKey = key;
+    prefetchNextTrackLyrics();
+    loadVideoOffsetForTrack(track);
+    refreshTrack();
+    if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {
+      manualLyricsTrackKey = "";
+    }
+    if (manualLyricsTrackKey === key) return;
+
+    if (activeTrackAbort) {
+      activeTrackAbort.abort();
+      activeTrackAbort = null;
+    }
+    const requestId = ++trackRequestSeq;
+    showLyricsSkeleton();
+
+    let savedTTML = null;
+    try {
+      savedTTML = await getPermanentTTML(key);
+    } catch (error) {
+      console.warn("[SpicyLyrics] Could not read permanent TTML:", error);
+    }
+    if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
+
+    if (savedTTML) {
+      if (loadTTML(savedTTML, "external")) return;
+      try {
+        await removePermanentTTML(key);
+      } catch (error) {
+        console.warn("[SpicyLyrics] Could not remove invalid permanent TTML:", error);
+      }
+      if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
+    }
+
+    manualLyricsIsPermanent = false;
+    refreshPermanentDeleteState();
+    fetchLRCLyrics(track, key);
+  }
+

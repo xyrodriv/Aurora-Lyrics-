@@ -1,0 +1,761 @@
+  const FS_SPINNER_DELAY_MS = 2000;
+  let fsSpinnerEl = null;
+  let fsSpinnerTimer = 0;
+
+  function ensureFsSpinner() {
+    if (fsSpinnerEl) return fsSpinnerEl;
+    if (!fsOverlay) return null;
+    fsSpinnerEl = h("div", { class: "ym-sl-fs-spinner", "aria-hidden": "true" });
+    const svg = fsSvgIcon(FS_ICON_SPINNER, "0 0 24 24");
+    // fsSvgIcon stamps the chrome's icon class, which is not what this is.
+    svg.setAttribute("class", "ym-sl-fs-spinner-icon");
+    fsSpinnerEl.appendChild(svg);
+    // The PARENT is decided at SHOW time by placeFsSpinner(fsSpinnerTargetHost())
+    // — it depends on which element is still loading, which is only known once
+    // the spinner is about to become visible. It is appended there and not here
+    // so a reparent can never happen while it is on screen.
+    return fsSpinnerEl;
+  }
+
+  // Where the spinner belongs. It is armed by the lyrics skeleton, so while it
+  // is showing the LYRICS are still loading, and the rule (AJ 2026-09-28) puts
+  // it with the lyrics then — covering both "lyrics not loaded" and "both not
+  // loaded". It only sits over the video pane when the VIDEO is the sole thing
+  // still buffering (lyrics already landed). A track with no MV has nothing
+  // pending on the media side, so it always goes with the lyrics.
+  function fsSpinnerTargetHost() {
+    const videoPending =
+      hasFsVideo() && fsSavedVideo && fsSavedVideo.node && fsSavedVideo.node.videoWidth === 0;
+    if (videoPending && !lyricsSkeletonShown) return fsMediaHost || fsOverlay;
+    return fsLyricsHost || fsMediaHost || fsOverlay;
+  }
+
+  // Move the spinner into its host. Only ever called while it is HIDDEN
+  // (opacity 0), so the move is invisible — that is why a plain appendChild is
+  // safe here and needs no fade dance.
+  function placeFsSpinner(host) {
+    if (!fsSpinnerEl || !host) return;
+    if (fsSpinnerEl.parentElement !== host) host.appendChild(fsSpinnerEl);
+  }
+
+  function showFsSpinnerSoon() {
+    if (!fsActive) return;
+    if (fsSpinnerTimer) window.clearTimeout(fsSpinnerTimer);
+    fsSpinnerTimer = window.setTimeout(() => {
+      fsSpinnerTimer = 0;
+      if (!fsActive) return;
+      const el = ensureFsSpinner();
+      if (!el) return;
+      placeFsSpinner(fsSpinnerTargetHost());
+      // Force a style flush between the (possible) first insertion and the
+      // class add, so the browser sees opacity 0 first and actually fades the
+      // spinner IN rather than snapping it on. On later shows it is already in
+      // the DOM, so this is a no-op reflow.
+      void el.offsetWidth;
+      el.classList.add("visible");
+    }, FS_SPINNER_DELAY_MS);
+  }
+
+  function hideFsSpinner() {
+    if (fsSpinnerTimer) { window.clearTimeout(fsSpinnerTimer); fsSpinnerTimer = 0; }
+    if (fsSpinnerEl) fsSpinnerEl.classList.remove("visible");
+  }
+
+  function refreshFullscreenPlayerState() {
+    if (!fsPlayerPlayButton) return;
+    syncFullscreenSeekControl();
+    if (!fsPlayerPlayButton) return;
+    syncFullscreenVolumeControl();
+    if (!fsPlayerPlayButton) return;
+    const paused = window.YTMod && window.YTMod.player && window.YTMod.player.isPaused
+      ? window.YTMod.player.isPaused()
+      : null;
+    // Only rebuild the glyph when the transport state actually flips. This
+    // runs on a 500ms interval, so an unconditional replaceChildren would
+    // recreate the SVG node twice a second for the whole session.
+    const playState = paused === true ? "play" : (paused === false ? "pause" : "");
+    if (playState && fsPlayerPlayButton.dataset.playState !== playState) {
+      fsPlayerPlayButton.dataset.playState = playState;
+      fsPlayerPlayButton.replaceChildren(
+        playState === "play"
+          ? fsSvgIcon(FS_ICON_PLAY, "0 0 18 20")
+          : fsSvgIcon(FS_ICON_PAUSE, "0 0 15 20")
+      );
+      fsPlayerPlayButton.setAttribute("aria-label", playState === "play" ? "Play" : "Pause");
+    }
+    syncFullscreenModeButtons();
+  }
+
+  /* ---- shuffle / repeat mirroring -----------------------------------------
+     Both are TOGGLES, so the chip has to reflect YTM's real state or the buttons
+     lie about it. YTM exposes that state differently per control:
+       Repeat  -> aria-label "Repeat off" | "Repeat all" | "Repeat one"
+       Shuffle -> aria-label STAYS "Shuffle" in both states; only the icon
+                  brightens (grey -> white). So readPlayerToggle() falls back to
+                  the live icon colour for shuffle.
+     Read from the real control, not our own toggle state, so the buttons can
+     never lie about the real YTM mode. */
+  function readPlayerToggle(kind) {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return null;
+    const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
+    const button = buttons.find((candidate) => {
+      const text = [candidate.getAttribute("aria-label"), candidate.getAttribute("title"), candidate.id]
+        .filter(Boolean).join(" ");
+      return new RegExp("^" + kind, "i").test(text);
+    });
+    if (!button) return null;
+    const label = (button.getAttribute("aria-label") || "").toLowerCase().trim();
+    if (kind === "repeat") {
+      if (/\boff\b/.test(label)) return "off";
+      if (/\bone\b/.test(label)) return "one";
+      return "all";
+    }
+    // Shuffle: YTM keeps the aria-label as "Shuffle" in BOTH states and only
+    // brightens the icon (grey -> white), so the label-suffix trick does not
+    // work here. Detect via the live icon colour. Older YTM builds that expose
+    // aria-pressed, or append an "on" suffix, are handled first as fallbacks.
+    const pressed = button.getAttribute("aria-pressed");
+    if (pressed === "true") return "on";
+    if (pressed === "false") return "off";
+    if (label.replace(/^shuffle\b/, "").trim()) return "on";
+    const colour = (window.getComputedStyle(button).color || "");
+    const m = /rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(colour);
+    if (m) {
+      // off grey ~ rgb(144,144,144) (sum ~432); on white ~ rgb(255,255,255) (765).
+      return (Number(m[1]) + Number(m[2]) + Number(m[3])) > 600 ? "on" : "off";
+    }
+    return "off";
+  }
+
+  function syncFullscreenModeButtons() {
+    if (fsPlayerShuffleButton) {
+      const on = readPlayerToggle("shuffle") === "on";
+      fsPlayerShuffleButton.classList.toggle("active", on);
+      fsPlayerShuffleButton.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (!fsPlayerRepeatButton) return;
+    const mode = readPlayerToggle("repeat") || "off";
+    fsPlayerRepeatButton.classList.toggle("active", mode !== "off");
+    fsPlayerRepeatButton.setAttribute("aria-pressed", mode !== "off" ? "true" : "false");
+    fsPlayerRepeatButton.dataset.repeatMode = mode;
+    fsPlayerRepeatButton.setAttribute(
+      "title",
+      mode === "off" ? "Repeat off" : mode === "one" ? "Repeat one" : "Repeat all"
+    );
+    // Swap the glyph only when the mode actually CHANGES. This runs on a 500ms
+    // interval, so an unconditional replaceChildren would rebuild the SVG twice a
+    // second for the whole session — the same reason the play button caches its
+    // state rather than rewriting it.
+    const wantOne = mode === "one";
+    if (fsPlayerRepeatButton.dataset.repeatOne !== String(wantOne)) {
+      fsPlayerRepeatButton.dataset.repeatOne = String(wantOne);
+      fsPlayerRepeatButton.replaceChildren(
+        fsSvgIcon(wantOne ? FS_ICON_REPEAT_ONE : FS_ICON_REPEAT, "0 0 24 24")
+      );
+    }
+  }
+
+  /* ---- fullscreen icon-pill chrome ----------------------------------------
+     Spicy Lyrics' own icon set, ported over from
+     src/components/Styling/Icons.ts so the no-video fullscreen row visually
+     matches Ableton-parity chrome and the transport buttons match the upstream
+     pill. Each icon is an array of {tag, attrs} parts so the builder can mix
+     rects and paths without any innerHTML / DOMParser (Trusted-Types-safe).
+     content.js svgIcon() lives in the isolated world and is NOT reachable
+     from this page-world add-on, so the builder is duplicated here to keep
+     the add-on self-contained. fill / stroke attrs are honoured per-part so
+     outline icons (NoFill) and solid icons (PrevTrack/Play/Pause) both work.
+     NO BACKTICKS IN THIS COMMENT BLOCK - it sits inside a template literal. */
+  const FS_ICON_EXIT = [
+    { tag: "path", attrs: { d: "M18 6 6 18", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    { tag: "path", attrs: { d: "m6 6 12 12", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+  ];
+  // LyricsManager from Spicy: rect with a vertical bar (the lyrics column)
+  // and a folding diagonal that suggests a music note - visually reads as
+  // "lyrics panel" without competing with the close / layout icons.
+  const FS_ICON_LYRICS = [
+    { tag: "rect", attrs: { x: "3", y: "3", width: "7", height: "18", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+    { tag: "path", attrs: { d: "M6.5 3v18", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "path", attrs: { d: "M14.5 3.7 13 4.3a1 1 0 0 0-.56 1.3l5.4 14.1a1 1 0 0 0 1.3.56l1.5-.6a1 1 0 0 0 .56-1.3L15.8 4.26a1 1 0 0 0-1.3-.56Z", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+  ];
+  // EnableCompactModeIcon reads as "cycle through layouts" - top row spans,
+  // two rows of cells below, exactly the kind of grid the cycle button is
+  // claiming it can rearrange.
+  const FS_ICON_LAYOUT = [
+    { tag: "rect", attrs: { x: "3", y: "3", width: "18", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+    { tag: "rect", attrs: { x: "3", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+    { tag: "rect", attrs: { x: "14", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+  ];
+  // Solid-fill Spicy icons for the transport chip (Prev / Play / Pause /
+  // Next). The path data is byte-for-byte from Icons.ts; only the wrapping
+  // <svg> viewBox is normalised so the chip's square buttons can render it
+  // without distorting the aspect ratio.
+  const FS_ICON_PREV = [
+    { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  const FS_ICON_NEXT = [
+    { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  const FS_ICON_PLAY = [
+    { tag: "path", attrs: { d: "M 1.558 20 C 2.006 20 2.381 19.838 2.874 19.561 L 16.622 11.572 C 17.527 11.053 17.894 10.65 17.894 9.997 C 17.894 9.35 17.527 8.948 16.622 8.419 L 2.874 0.439 C 2.381 0.153 2.006 0 1.558 0 C 0.706 0 0.106 0.654 0.106 1.694 L 0.106 18.298 C 0.106 19.346 0.706 20 1.558 20 L 1.558 20 Z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  // Pause is two vertical bars in one path; keep them as a single d so the
+  // builder sees exactly one part (the same way Spicy's Icons.ts does).
+  const FS_ICON_PAUSE = [
+    { tag: "path", attrs: { d: "M 4.427 19.963 C 5.513 19.963 6.06 19.416 6.06 18.33 L 6.06 1.66 C 6.06 0.545 5.513 0.037 4.427 0.037 L 1.633 0.037 C 0.548 0.037 0 0.575 0 1.66 L 0 18.331 C -0.009 19.416 0.538 19.963 1.633 19.963 L 4.427 19.963 Z M 13.377 19.963 C 14.462 19.963 15 19.416 15 18.33 L 15 1.66 C 15 0.545 14.462 0.037 13.376 0.037 L 10.573 0.037 C 9.487 0.037 8.949 0.575 8.949 1.66 L 8.949 18.331 C 8.949 19.416 9.487 19.963 10.573 19.963 L 13.376 19.963 L 13.377 19.963 Z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  // Shuffle / Repeat / Repeat-one for the transport chip. These are NOT from
+  // Icons.ts — Spicy's transport set has no equivalent — so they are plain 24x24
+  // solid paths, square like the chip's own buttons, and Repeat-one carries its
+  // state in the glyph rather than needing a second badge.
+  const FS_ICON_SHUFFLE = [
+    { tag: "path", attrs: { d: "M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  const FS_ICON_REPEAT = [
+    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  const FS_ICON_REPEAT_ONE = [
+    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z", fill: "currentColor", "fill-rule": "nonzero" } },
+  ];
+  // Spicy Lyrics' Volume SVG, namespaced so it does not collide with the
+  // upstream extension if both happen to load. All four sub-paths ship at once
+  // and CSS toggles their visibility based on .ym-sl-fs-volume-{muted,low,high}
+  // on the button - the level decides the glyph exactly the way Spicy's
+  // .VolumeControl does (one markup, three states, no re-render on volume
+  // change).
+  // Spicy Lyrics' Spinner icon (Icons.ts), byte-for-byte: eight round-capped
+  // spokes on a 24x24 grid. Spun by their SL_spin keyframes - 0.8s linear,
+  // infinite - which is the animation their own loading UI uses.
+  const FS_ICON_SPINNER = [
+    { tag: "path", attrs: { d: "M12 3v3" } },
+    { tag: "path", attrs: { d: "M12 18v3" } },
+    { tag: "path", attrs: { d: "M21 12h-3" } },
+    { tag: "path", attrs: { d: "M6 12H3" } },
+    { tag: "path", attrs: { d: "m18.36 5.64-2.12 2.12" } },
+    { tag: "path", attrs: { d: "m7.76 16.24-2.12 2.12" } },
+    { tag: "path", attrs: { d: "m18.36 18.36-2.12-2.12" } },
+    { tag: "path", attrs: { d: "m7.76 7.76-2.12-2.12" } },
+  ].map((part) => ({
+    tag: part.tag,
+    attrs: Object.assign({
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    }, part.attrs),
+  }));
+
+  function fsSvgIcon(parts, viewBox) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", viewBox || "0 0 24 24");
+    // Carries the icon class so the no-video variant can show the glyph and the
+    // music-video variant can show the text label instead.
+    svg.setAttribute("class", "ym-sl-fs-btn-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const el = document.createElementNS(NS, part.tag);
+      const attrs = part.attrs || {};
+      for (const k in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, k)) {
+          el.setAttribute(k, attrs[k]);
+        }
+      }
+      svg.appendChild(el);
+    }
+    return svg;
+  }
+
+  function buildFullscreenControls() {
+    if (!fsOverlay || fsControls) return;
+    const exit = h(
+      "button",
+      {
+        type: "button",
+        class: "ym-sl-fs-icon-btn",
+        title: "Exit fullscreen",
+        "aria-label": "Exit fullscreen",
+      },
+      h("span", { class: "ym-sl-fs-btn-label", text: "Exit fullscreen" }),
+      fsSvgIcon(FS_ICON_EXIT),
+    );
+    // Layout is a cycle button rather than a <select>: a native select cannot
+    // be an icon, and the pill row has no space for its text. The tooltip
+    // carries the current mode AND the next one so the order stays discoverable
+    // without opening anything. applyFullscreenLayout() syncs the label.
+    fsLayoutSelect = h(
+      "button",
+      {
+        type: "button",
+        class: "ym-sl-fs-icon-btn ym-sl-fs-layout-btn",
+        title: "Fullscreen layout",
+        "aria-label": "Fullscreen layout",
+      },
+      h("span", { class: "ym-sl-fs-btn-label", text: "Layout" }),
+      fsSvgIcon(FS_ICON_LAYOUT),
+    );
+    const offsetWrap = h("div", { class: "ym-sl-fs-control-offset" });
+    const offsetLabelFs = h("span", { text: "Offset" });
+    const offsetScopeFs = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
+    offsetScopeFs.append(
+      h("option", { value: "video", text: "Video" }),
+      h("option", { value: "song", text: "Song" })
+    );
+    offsetScopeFs.value = editingOffsetMode;
+    fsOffsetRange = h("input", {
+      type: "range", min: "-30000", max: "30000", step: "100",
+      value: "0", "aria-label": "Lyric offset",
+    });
+    const fsOffsetNumber = h("input", {
+      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-30", max: "30",
+      value: "0", "aria-label": "Lyric offset in seconds", title: "Offset in seconds (typed)",
+    });
+    fsOffsetValue = h("span", { class: "ym-sl-fs-control-offset-value", text: "0.0s" });
+    const fsOffsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
+    offsetWrap.append(offsetLabelFs, offsetScopeFs, fsOffsetRange, fsOffsetNumber, fsOffsetValue, fsOffsetApplied);
+    offsetScopeFs.addEventListener("change", () => {
+      editingOffsetMode = offsetScopeFs.value;
+      refreshVideoOffsetControl();
+    });
+    fsLyricsToggle = h(
+      "button",
+      {
+        type: "button",
+        class: "ym-sl-fs-icon-btn ym-sl-fs-lyrics-toggle",
+        title: "Show or hide lyrics",
+        "aria-label": "Hide lyrics",
+      },
+      h("span", { class: "ym-sl-fs-btn-label", text: "Hide lyrics" }),
+      fsSvgIcon(FS_ICON_LYRICS),
+    );
+    // Options gear removed (AJ 2026-09-27). The offset rail stays reachable
+    // from the normal panel; fullscreen chrome is now just Exit / Layout cycle
+    // / Hide lyrics. offsetWrap (built above) is now a local unused variable -
+    // left in place to keep this diff focused.
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLayoutSelect, fsLyricsToggle);
+    // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
+    // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
+    // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
+    const prevIcon = fsSvgIcon(FS_ICON_PREV, "0 0 35 20");
+    prevIcon.style.transform = "rotate(180deg)";
+    const previousButton = h("button", { class: "ym-sl-fs-player-prev", type: "button", title: "Previous song", "aria-label": "Previous song" }, prevIcon);
+    const playButton = h("button", { class: "ym-sl-fs-player-play", type: "button", title: "Play or pause", "aria-label": "Play or pause" }, fsSvgIcon(FS_ICON_PAUSE, "0 0 15 20"));
+    const nextButton = h("button", { class: "ym-sl-fs-player-next", type: "button", title: "Next song", "aria-label": "Next song" }, fsSvgIcon(FS_ICON_NEXT, "0 0 35 20"));
+    // Shuffle and Repeat FLANK the transport, the way every other player does it.
+    // Both are TOGGLES, so refreshFullscreenPlayerState() mirrors YTM's own state
+    // onto them on the 500ms tick — see syncFullscreenModeButtons().
+    const shuffleButton = h("button", { class: "ym-sl-fs-player-shuffle", type: "button", title: "Shuffle", "aria-label": "Shuffle", "aria-pressed": "false" }, fsSvgIcon(FS_ICON_SHUFFLE, "0 0 24 24"));
+    const repeatButton = h("button", { class: "ym-sl-fs-player-repeat", type: "button", title: "Repeat", "aria-label": "Repeat", "aria-pressed": "false" }, fsSvgIcon(FS_ICON_REPEAT, "0 0 24 24"));
+    fsPlayerShuffleButton = shuffleButton;
+    fsPlayerRepeatButton = repeatButton;
+    playButton.dataset.playState = "pause";
+    fsPlayerSeekRange = h("input", {
+      class: "ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "1", step: "100", value: "0",
+      title: "Song progress", "aria-label": "Song progress",
+    });
+    // Custom <div>-based volume slider. A native <input type=range> cannot animate
+    // its width smoothly (width is never GPU-composited, so it snaps on software
+    // compositors), and CSS transform:scaleX on a native range renders broken in
+    // Chrome (shadow-DOM track/thumb desync). Plain divs composite transform
+    // reliably, so the hover-expand glides on every machine and the layout never
+    // reflows.
+    fsPlayerVolumeRange = h("div", {
+      class: "ym-sl-fs-player-volume",
+      role: "slider",
+      tabindex: "0",
+      title: "Volume",
+      "aria-label": "Volume",
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(fsPlayerVolumeValue),
+    });
+    const fsVolumeFill = h("div", { class: "ym-sl-fs-volume-fill" });
+    const fsVolumeKnob = h("div", { class: "ym-sl-fs-volume-knob" });
+    fsPlayerVolumeRange.append(fsVolumeFill, fsVolumeKnob);
+    // Only the slider remains (the mute button was removed); the wrapper keeps
+    // the border-left divider and spacing beside the chip.
+    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, fsPlayerVolumeRange);
+    // Transport wrapped in its own group so the side layout can centre the
+    // TRANSPORT on the title. The wrapper is a plain 14px flex row, so every other
+    // layout is unchanged: the chip's own gap used to space these buttons, and now
+    // this gap does.
+    const transportGroup = h("div", { class: "ym-sl-fs-transport" }, shuffleButton, previousButton, playButton, nextButton, repeatButton);
+    const playChip = h("div", { class: "ym-sl-fs-play-chip" }, transportGroup);
+    fsTimeCurrent = h("span", { class: "ym-sl-fs-time", "data-time": "current", text: "0:00" });
+    fsTimeTotal = h("span", { class: "ym-sl-fs-time", "data-time": "total", text: "0:00" });
+    // The volume lives on the SCRUBBER row, not the transport row (AJ, 2026-10-01):
+    // it sits after the total time, and the seek range is the flex child that gives
+    // up the room. The row's box is still exactly the media pane, so bar + volume
+    // together span the video — which is the point of putting it here.
+    const scrubber = h("div", { class: "ym-sl-fs-scrubber" }, fsTimeCurrent, fsPlayerSeekRange, fsTimeTotal, volumeGroup);
+    fsPlayerPlayButton = playButton;
+    fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
+    fsOverlay.append(fsControls, fsPlayerControls);
+    refreshFullscreenPlayerState();
+    fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
+    exit.addEventListener("click", exitFullscreenMode);
+    previousButton.addEventListener("click", () => clickPlayerButton("previous"));
+    playButton.addEventListener("click", () => clickPlayerButton("play"));
+    nextButton.addEventListener("click", () => clickPlayerButton("next"));
+    shuffleButton.addEventListener("click", () => clickPlayerButton("shuffle"));
+    repeatButton.addEventListener("click", () => clickPlayerButton("repeat"));
+    // Single source of truth for the custom slider: writes the fill (via
+    // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
+    function applyFullscreenVolume(v) {
+      v = clamp(Math.round(v), 0, 100);
+      fsPlayerVolumeValue = v;
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
+      setPlayerVolume(v);
+    }
+    // ---- drag affordances (AJ's "for tmr" note, 2026-10-03) ----------------
+    // While a slider is dragged: hide the cursor (an accident AJ liked), and
+    // on the seek bar show a time bubble above the thumb. The counter lets the
+    // two sliders nest without one drag's pointerup un-hiding the other's.
+    let fsDragCount = 0;
+    function setDragCursor(on) {
+      fsDragCount = Math.max(0, fsDragCount + (on ? 1 : -1));
+      if (fsOverlay) fsOverlay.classList.toggle("ym-sl-fs-dragging", fsDragCount > 0);
+    }
+    function ensureScrubTip() {
+      if (fsScrubTip && fsScrubTip.isConnected) return fsScrubTip;
+      fsScrubTip = h("div", { class: "ym-sl-fs-scrub-tip", "aria-hidden": "true" }, "0:00");
+      fsPlayerControls.appendChild(fsScrubTip);
+      return fsScrubTip;
+    }
+    // The bubble is positioned against fsPlayerControls (inset:0 over the
+    // overlay), from the seek input's live viewport rect, so it is correct in
+    // every layout without knowing which mode is active.
+    function updateScrubTip() {
+      if (!fsScrubTip || !fsPlayerSeekRange || !fsPlayerControls) return;
+      const duration = Number(window.YTMod && window.YTMod.player && window.YTMod.player.getDurationMs());
+      const position = Number(fsPlayerSeekRange.value);
+      if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position)) return;
+      fsScrubTip.textContent = formatClock(position);
+      const seekRect = fsPlayerSeekRange.getBoundingClientRect();
+      const hostRect = fsPlayerControls.getBoundingClientRect();
+      const ratio = clamp(position / duration, 0, 1);
+      fsScrubTip.style.left = (seekRect.left - hostRect.left + ratio * seekRect.width) + "px";
+      fsScrubTip.style.top = (seekRect.top - hostRect.top - 34) + "px";
+    }
+    function showScrubTip() {
+      ensureScrubTip();
+      updateScrubTip();
+      if (fsScrubTip) fsScrubTip.classList.add("ym-sl-fs-scrub-tip-on");
+    }
+    function hideScrubTip() {
+      if (fsScrubTip) fsScrubTip.classList.remove("ym-sl-fs-scrub-tip-on");
+    }
+    // Map a pointer X to 0-100 against the VISUAL (post-transform) rect so the
+    // value tracks exactly where the user grabs the scaled bar.
+    function volumeFromPointer(clientX) {
+      const rect = fsPlayerVolumeRange.getBoundingClientRect();
+      const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+      return Math.round(ratio * 100);
+    }
+    fsPlayerVolumeRange.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      fsPlayerVolumeRange.focus();
+      fsPlayerVolumeRange.setPointerCapture(e.pointerId);
+      setDragCursor(true);
+      applyFullscreenVolume(volumeFromPointer(e.clientX));
+      const onMove = (ev) => applyFullscreenVolume(volumeFromPointer(ev.clientX));
+      const onUp = (ev) => {
+        try { fsPlayerVolumeRange.releasePointerCapture(ev.pointerId); } catch (_) {}
+        fsPlayerVolumeRange.removeEventListener("pointermove", onMove);
+        fsPlayerVolumeRange.removeEventListener("pointerup", onUp);
+        fsPlayerVolumeRange.removeEventListener("pointercancel", onUp);
+        setDragCursor(false);
+      };
+      fsPlayerVolumeRange.addEventListener("pointermove", onMove);
+      fsPlayerVolumeRange.addEventListener("pointerup", onUp);
+      fsPlayerVolumeRange.addEventListener("pointercancel", onUp);
+    });
+    fsPlayerVolumeRange.addEventListener("keydown", (e) => {
+      let v = fsPlayerVolumeValue;
+      const step = e.shiftKey ? 10 : 5;
+      switch (e.key) {
+        case "ArrowRight": case "ArrowUp": v += step; break;
+        case "ArrowLeft": case "ArrowDown": v -= step; break;
+        case "Home": v = 0; break;
+        case "End": v = 100; break;
+        case "PageUp": v += 10; break;
+        case "PageDown": v -= 10; break;
+        default: return;
+      }
+      e.preventDefault();
+      applyFullscreenVolume(v);
+    });
+    // Initialise the fill from the stored value; YTM supplies the real volume on
+    // the first refresh. Keep the mute/icon in sync.
+    fsPlayerVolumeRange.style.setProperty("--vol-fill", clamp(fsPlayerVolumeValue, 0, 100) + "%");
+    fsPlayerSeekRange.addEventListener("pointerdown", () => {
+      fsSeekUserAt = performance.now();
+      setDragCursor(true);
+      showScrubTip();
+    });
+    const endSeekDrag = () => { setDragCursor(false); hideScrubTip(); };
+    fsPlayerSeekRange.addEventListener("pointerup", endSeekDrag);
+    fsPlayerSeekRange.addEventListener("pointercancel", endSeekDrag);
+    // Belt for a pointerup the browser never delivers (release outside the
+    // window mid-drag): losing capture ends the drag regardless.
+    fsPlayerSeekRange.addEventListener("lostpointercapture", endSeekDrag);
+    fsPlayerSeekRange.addEventListener("input", () => {
+      // Marks the seek bar as user-driven so the 500ms sync leaves the thumb
+      // alone until the grace window lapses (see FS_SEEK_USER_GRACE_MS).
+      fsSeekUserAt = performance.now();
+      const duration = Number(window.YTMod && window.YTMod.player && window.YTMod.player.getDurationMs());
+      const position = Number(fsPlayerSeekRange.value);
+      if (Number.isFinite(duration) && duration > 0 && Number.isFinite(position)) {
+        fsPlayerSeekRange.style.setProperty("--slider-fill", clamp(position / duration * 100, 0, 100) + "%");
+      }
+      // The bubble tracks the thumb live through the whole drag (input also
+      // fires for keyboard arrows, which is the desired behaviour there too).
+      updateScrubTip();
+    });
+    fsPlayerSeekRange.addEventListener("change", () => {
+      const position = Number(fsPlayerSeekRange.value);
+      if (Number.isFinite(position) && window.YTMod && window.YTMod.player) {
+        window.YTMod.player.seek(position);
+      }
+    });
+    fsLayoutSelect.addEventListener("click", () => {
+      applyFullscreenLayout(nextFsLayoutMode(fsLayoutMode));
+    });
+    fsLyricsToggle.addEventListener("click", () => {
+      fsLyricsHidden = !fsLyricsHidden;
+      if (fsOverlay) {
+        fsOverlay.classList.toggle("ym-sl-fs-lyrics-hidden", fsLyricsHidden);
+        if (fsLyricsHidden) {
+      setFullscreenLyricsShadeTarget(0);
+      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", "0");
+    }
+      }
+      // Update the LABEL span only. Writing textContent straight onto the
+      // button would wipe the icon SVG that now also lives inside it.
+      const lyrLabel = fsLyricsToggle.querySelector(".ym-sl-fs-btn-label");
+      if (lyrLabel) lyrLabel.textContent = fsLyricsHidden ? "Show lyrics" : "Hide lyrics";
+      fsLyricsToggle.setAttribute("aria-label", fsLyricsHidden ? "Show lyrics" : "Hide lyrics");
+    });
+    fsOffsetRange.addEventListener("input", () => {
+      setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
+    });
+    let savedMode = "side";
+    try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
+    const hasVideo = !!findPlayerVideo();
+    // The layout used to be a <select> with a Background option that had to be
+    // hidden and disabled when the track had no video. It is a cycle button now,
+    // so there is no `backgroundOption` to touch - and referencing the stale
+    // name threw a ReferenceError at the very END of this function.
+    // That is why it mattered far more than it looks: the throw aborted
+    // enterFullscreenMode() before it could attach the keydown and
+    // fullscreenchange listeners (so Escape left the overlay stranded on the
+    // page), start the 2s refresh interval (media reconcile, band anchor,
+    // Kawarp art sync) and start idle tracking (so the chrome never hid).
+    // All three are fixed by deleting the two dead lines.
+    if (!hasVideo && savedMode === "background") savedMode = "side";
+    applyFullscreenLayout(savedMode);
+    fsLyricsHidden = false;
+    fsOverlay.classList.remove("ym-sl-fs-lyrics-hidden");
+    fsLyricsToggle.textContent = "Hide lyrics";
+    fsLyricsToggle.setAttribute("aria-label", "Hide lyrics");
+    offsetWrap.classList.toggle("visible", true);
+    offsetWrap.classList.toggle("force-visible", !hasVideo);
+    recomputeActiveOffsetMode(true);
+    refreshVideoOffsetControl();
+  }
+
+  /* ---- idle "fill ring" cursor indicator --------------------------------
+     When the pointer stops moving in fullscreen, a hollow white ring appears
+     at the cursor and DRAWS ITSELF (a stroke-dashoffset tween on an SVG
+     circle — a ring filling up, NOT a solid disc) over the idle delay. As the
+     chrome auto-hides, the ring fades out and shrinks. Purely an affordance
+     that the cursor is about to vanish (AJ, 2026-09-28). Any input hides it
+     and restarts the countdown. */
+  // Movement must pause this long before the ring appears. Raised 260 -> 700
+  // (AJ, 2026-09-28): at 260ms it fired constantly during ordinary mouse use,
+  // which read as noise. 700ms only triggers on a genuine stop.
+  const FS_IDLE_RING_DELAY_MS = 700;
+  const FS_IDLE_RING_FILL_MS = Math.max(400, FS_IDLE_HIDE_MS - FS_IDLE_RING_DELAY_MS);
+  const FS_IDLE_RING_R = 15; // SVG radius inside a 36x36 viewBox
+  const FS_IDLE_RING_CIRC = (2 * Math.PI * FS_IDLE_RING_R).toFixed(2);
+  let fsIdleRing = null;
+  let fsIdleRingShowTimer = 0;
+  let fsIdleRingLeaveTimer = 0;
+  let fsHavePointer = false;
+  let fsLastPointerX = 0;
+  let fsLastPointerY = 0;
+
+  function ensureFsIdleRing() {
+    if (fsIdleRing || !fsOverlay) return fsIdleRing;
+    const wrap = h("div", { class: "ym-sl-fs-idle-ring", "aria-hidden": "true" });
+    wrap.style.setProperty("--ym-sl-fs-idle-ring-circ", FS_IDLE_RING_CIRC);
+    wrap.style.setProperty("--ym-sl-fs-idle-ring-fill-ms", FS_IDLE_RING_FILL_MS + "ms");
+    const svg = fsSvgIcon([
+      { tag: "circle", attrs: { class: "ym-sl-fs-idle-ring-track", cx: "18", cy: "18", r: String(FS_IDLE_RING_R) } },
+      { tag: "circle", attrs: { class: "ym-sl-fs-idle-ring-fill", cx: "18", cy: "18", r: String(FS_IDLE_RING_R) } },
+    ], "0 0 36 36");
+    // fsSvgIcon stamps the chrome's icon class, which is not what this is.
+    svg.setAttribute("class", "ym-sl-fs-idle-ring-svg");
+    wrap.appendChild(svg);
+    fsIdleRing = wrap;
+    fsOverlay.appendChild(wrap);
+    return fsIdleRing;
+  }
+
+  function placeFsIdleRing() {
+    if (!fsIdleRing) return;
+    fsIdleRing.style.setProperty("--ym-sl-fs-idle-ring-x", fsLastPointerX + "px");
+    fsIdleRing.style.setProperty("--ym-sl-fs-idle-ring-y", fsLastPointerY + "px");
+  }
+
+  function hideFsIdleRing() {
+    if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
+    if (fsIdleRingLeaveTimer) { window.clearTimeout(fsIdleRingLeaveTimer); fsIdleRingLeaveTimer = 0; }
+    if (fsIdleRing) fsIdleRing.classList.remove("visible", "leaving");
+  }
+
+  // Any activity: hide the ring while the pointer is moving, then re-arm it to
+  // appear (and re-fill from empty) once movement pauses.
+  function resetFsIdleRing() {
+    if (!fsActive || !fsHavePointer) return;
+    hideFsIdleRing();
+    fsIdleRingShowTimer = window.setTimeout(() => {
+      fsIdleRingShowTimer = 0;
+      if (!fsActive) return;
+      const el = ensureFsIdleRing();
+      if (!el) return;
+      placeFsIdleRing();
+      el.classList.remove("visible", "leaving");
+      // Reflow so the fill animation restarts from empty every time.
+      void el.offsetWidth;
+      el.classList.add("visible");
+    }, FS_IDLE_RING_DELAY_MS);
+  }
+
+  // The chrome actually hid: the ring is full, so fade it out and shrink it.
+  function leaveFsIdleRing() {
+    if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
+    if (!fsIdleRing) return;
+    fsIdleRing.classList.remove("visible");
+    fsIdleRing.classList.add("leaving");
+    if (fsIdleRingLeaveTimer) window.clearTimeout(fsIdleRingLeaveTimer);
+    fsIdleRingLeaveTimer = window.setTimeout(() => {
+      fsIdleRingLeaveTimer = 0;
+      if (fsIdleRing) fsIdleRing.classList.remove("leaving");
+    }, 320);
+  }
+
+  /* ---- idle pointer / control auto-hide ----------------------------------
+     Native-player behavior: after FS_IDLE_HIDE_MS without input, drop the
+     pointer and the hover controls. Any movement, click, wheel, or key press
+     brings both straight back and restarts the countdown. */
+  function hideFsChrome() {
+    fsIdleTimer = 0;
+    if (!fsActive || !fsOverlay) return;
+    // Only block while a button is physically held (mid-drag on the offset
+    // slider). Focus must NOT block this: changing the layout leaves the
+    // <select> focused, and gating on focus meant the chrome never hid until
+    // you clicked somewhere else first. Retry on a timer instead of giving up,
+    // so a mouseup that lands outside the window can't strand it permanently.
+    if (fsPointerDown) {
+      fsIdleTimer = setTimeout(hideFsChrome, FS_IDLE_HIDE_MS);
+      return;
+    }
+    fsOverlay.classList.add("ym-sl-fs-idle");
+    fsIdleHidden = true;
+    // Cursor is going away: the fill ring is complete, so fade + shrink it.
+    leaveFsIdleRing();
+  }
+
+  function showFsChrome() {
+    if (fsIdleTimer) {
+      clearTimeout(fsIdleTimer);
+      fsIdleTimer = 0;
+    }
+    if (fsIdleHidden) {
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-idle");
+      fsIdleHidden = false;
+    }
+    fsIdleTimer = setTimeout(hideFsChrome, FS_IDLE_HIDE_MS);
+    resetFsIdleRing();
+  }
+
+  function handleFsActivity() {
+    if (!fsActive) return;
+    showFsChrome();
+  }
+
+  function handleFsMouseMove(event) {
+    // Recover from a mouseup that landed outside the window: if no button is
+    // held, the pointer is definitively not dragging anything.
+    if (fsPointerDown && event && event.buttons === 0) fsPointerDown = false;
+    if (event && typeof event.clientX === "number" && typeof event.clientY === "number") {
+      fsHavePointer = true;
+      fsLastPointerX = event.clientX;
+      fsLastPointerY = event.clientY;
+    }
+    handleFsActivity();
+  }
+
+  function handleFsPointerDown() {
+    fsPointerDown = true;
+    handleFsActivity();
+  }
+
+  function handleFsPointerUp() {
+    fsPointerDown = false;
+    handleFsActivity();
+  }
+
+  function handleFsPointerLeave() {
+    // A drag that ends on another monitor never delivers its mouseup here, which
+    // left fsPointerDown stuck true and made hideFsChrome reschedule itself
+    // forever instead of hiding the chrome. The pointer has left the window, so
+    // no button it is holding can matter to us any more — drop the flag and let
+    // the idle countdown run.
+    if (fsPointerDown) {
+      fsPointerDown = false;
+      handleFsActivity();
+    }
+  }
+
+  function startFsIdleTracking() {
+    stopFsIdleTracking();
+    document.addEventListener("mousemove", handleFsMouseMove, { passive: true });
+    document.addEventListener("mousedown", handleFsPointerDown, { passive: true });
+    document.addEventListener("mouseup", handleFsPointerUp, { passive: true });
+    document.addEventListener("mouseleave", handleFsPointerLeave, { passive: true });
+    document.addEventListener("wheel", handleFsActivity, { passive: true });
+    document.addEventListener("keydown", handleFsActivity, true);
+    showFsChrome();
+  }
+
+  function stopFsIdleTracking() {
+    if (fsIdleTimer) {
+      clearTimeout(fsIdleTimer);
+      fsIdleTimer = 0;
+    }
+    fsPointerDown = false;
+    fsHavePointer = false;
+    hideFsIdleRing();
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-idle");
+    fsIdleHidden = false;
+    document.removeEventListener("mousemove", handleFsMouseMove, { passive: true });
+    document.removeEventListener("mousedown", handleFsPointerDown, { passive: true });
+    document.removeEventListener("mouseup", handleFsPointerUp, { passive: true });
+    document.removeEventListener("mouseleave", handleFsPointerLeave, { passive: true });
+    document.removeEventListener("wheel", handleFsActivity, { passive: true });
+    document.removeEventListener("keydown", handleFsActivity, true);
+  }
+
+  // ===== Kawarp backdrop for song fullscreen =====
+  // Songs have no live video, so instead of a blurred still cover we can run the
+  // same Kawarp WebGL fluid backdrop the Dynamic add-on uses page-wide. It is
+  // gated on that add-on being active (its page-world handshake is present) and
+  // it suspends the page Kawarp while open, so only one ever animates at a time.

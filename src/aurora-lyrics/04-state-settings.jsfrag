@@ -1,0 +1,550 @@
+  /* ===================== renderer state ===================== */
+
+  let modelLines = [];
+  let lineElements = [];
+  let lastRendererContent = null;
+  const pendingAnimationLines = new Set();
+  let tabEl = null;
+  // The node the SYNCED tab was inserted into, captured at mount time. Comparing
+  // against this is an O(1) liveness check that stays correct even if YTM nests
+  // its tabs one level deeper than the element `findTabBar()` returns.
+  let tabMountParent = null;
+  let tabBar = null;
+  let panelEl = null;
+  let panelHost = null;
+  let fontLinkEl = null;
+  let panelVisible = false;
+  let nativeTabAtOpen = null;
+  let lyricsTabObserver = null;
+  /* ---- fullscreen (video left, lyrics right) ----
+     Deliberately minimal: only one flag plus the DOM restore points needed to
+     put YTM's real <video> and our live lyrics panel back where they came from. */
+  let fsActive = false;
+  // Tab-driven panel state, parked while fullscreen owns the panel. Fullscreen
+  // forces panelVisible on (the render loop gates on it) but must put the tab
+  // state back on exit, or leaving fullscreen while another tab is active
+  // strands the panel on screen. null = nothing parked.
+  let fsSavedPanelVisible = null;
+  let fsOverlay = null;
+  let fsMediaHost = null;
+  let fsLyricsHost = null;
+  let fsSavedVideo = null; // { node, parent, next }
+  let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
+  let fsSavedPanel = null; // { parent, next }
+  let fsLayoutMode = "side";
+  let fsControls = null;
+  let fsLayoutSelect = null;
+  let fsOffsetRange = null;
+  let fsOffsetValue = null;
+  let fsLyricsToggle = null;
+  let fsLyricsHidden = false;
+  let fsLyricsGapDimmed = false;
+  let fsLyricsIntroDimmed = false;
+  let fsLyricsFinalDimmed = false;
+  let fsPlayerControls = null;
+  let fsPlayerPlayButton = null;
+  // Shuffle / Repeat chip buttons. They are TOGGLES and hold no state of their
+  // own — refreshFullscreenPlayerState() reads YTM's real buttons each tick and
+  // mirrors the result onto these.
+  let fsPlayerShuffleButton = null;
+  let fsPlayerRepeatButton = null;
+  let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
+  let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
+  let fsPlayerSeekRange = null;
+  let fsTimeCurrent = null;
+  let fsTimeTotal = null;
+  let fsScrubTip = null; // time bubble above the seek thumb while dragging
+  let fsPlayerStateTimer = 0;
+  let fsBgImg = null; // cover-art layer used when fullscreen has no live video
+  let fsArtImg = null; // sharp cover-art card in fsMediaHost (no-video tracks)
+  let fsArtVideo = null;        // animated Apple Music cover <video> (m8tec HLS stream)
+  let fsArtWarmHost = null;     // off-screen host that keeps the stream warm out of fullscreen
+  let fsArtNoAlbumKey = "";     // rough track key for the "album not settled yet" retry
+  let fsArtNoAlbumTries = 0;
+  let fsArtVideoHls = null;     // hls.js instance bound to fsArtVideo
+  let fsArtVideoKey = "";       // track key whose animated art the video currently shows
+  let fsArtVideoLoadingKey = ""; // track key currently being fetched
+  const fsArtVideoFail = new Set();  // track keys with no animated art (skip re-fetch)
+  const fsArtVideoCache = new Map(); // track key -> m3u8 url | false
+  // ---- persisted animated-art cache (30-day TTL) ---------------------------
+  // The Map above is the in-memory mirror; this is the chrome.storage copy, so a
+  // URL survives reloads and a replayed track shows its cover with NO API call.
+  // Only POSITIVE results persist — "this album has no animated art" can change
+  // (a later upload), so a miss stays session-only (AJ, 2026-10-03).
+  const ART_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const ART_CACHE_VERSION = 1;
+  const ART_CACHE_LIMIT = 200;
+  let artCache = null;
+  let artCacheLoad = null;
+  let artCacheDirty = false;
+  let artCacheFlushTimer = 0;
+  let fsBgRefresh = null; // interval id for tracking track changes during fs
+  // Kawarp WebGL backdrop for song fullscreen (handed off from the Dynamic add-on).
+  let fsKawarpCanvas = null;
+  let fsKawarp = null;
+  let fsKawarpModulePromise = null;
+  let fsKawarpArtUrl = ""; // artwork currently loaded into the Kawarp instance
+  let fsKawarpSeq = 0; // guards async module/loadImage races
+  let fsKawarpActive = false;
+  let fsKawarpResizeObserver = null;
+  let fsLyricsShade = null; // adaptive readability gradient in video-background mode
+  let fsLyricsShadeTimer = 0;
+  let fsLyricsShadeLevel = 0;
+  let fsLyricsShadeTarget = 0;
+  let fsLyricsShadeLastSampleAt = 0;
+  let fsLyricsShadeCanvas = null;
+  let fsLyricsShadeCtx = null;
+  let fsLyricsShadeCanvasTainted = false;
+  let fsLyricsShadeStream = null;
+  let fsLyricsShadeTrack = null;
+  let fsLyricsShadeCapture = null;
+  let fsLyricsShadeReader = null;
+  let fsLyricsShadeSampleInFlight = false;
+  // Bright-video controls scrim (AJ, 2026-09-28 QoL). The fullscreen controls
+  // are deliberately surface-less, so over a bright / near-white music video
+  // (especially once the lyrics — and their readability shade — are hidden)
+  // they wash out completely. This flag drives a dark scrim behind the chrome
+  // only while the sampled video brightness is high. Hysteresis lives in
+  // setFullscreenBrightVideo() so a video hovering at the threshold cannot
+  // strobe it.
+  let fsBrightVideo = false;
+  // "Artist Track" overlay title. Rendered in BOTH fullscreen variants; the
+  // no-video variant gets it larger (see the CSS and refreshFsTitle()).
+  let fsTitleEl = null;
+  // Fullscreen "Next up" list (bottom-left). Its OWN element, separate from the
+  // next-up add-on's pill (which hides in fullscreen).
+  let fsNextUp = null;
+  // Long-title marquee state (2026-09-28). fsTitleInner is the nowrap wrapper
+  // that gets the translateX animation; the shift is passed in via the
+  // --ym-sl-fs-title-shift CSS variable on the inner. fsTitleRO watches
+  // fsTitleEl for resize and re-measures (text width or container width
+  // can change with layout, font size, or track info).
+  let fsTitleInner = null;
+  let fsTitleRO = null;
+  // Cover-card crossfade state. fsArtImgSeq invalidates stale onload handlers
+  // when src changes mid-decode — without it a slow second load could land
+  // AFTER a third src swap and "reveal" the wrong src.
+  let fsArtImgSeq = 0;
+  // Blurred ambient backdrop: a low-res duplicate of the live video, scaled
+  // up and CSS-blurred to fill the overlay behind the sharp video. Drawn at
+  // the video's own paint cadence so it never competes with the lyrics loop.
+  let fsBgCanvas = null;
+  let fsBgCtx = null;
+  let fsBgRaf = null;
+  let fsBgLastDrawAt = 0;
+  // The ambient layer is blurred beyond recognition, so 24fps and a very small
+  // backing store are visually close to 60fps while costing a fraction of the
+  // draw + upload work. AJ asked for 60fps anyway (2026-09-27) - the canvas is
+  // only ever created for music videos, so this raises the MV backdrop refresh
+  // rate without touching cover-art tracks (they use the static blurred image
+  // or Kawarp, not this loop). The loop is driven by requestVideoFrameCallback,
+  // so it draws once per real video frame and cannot outrun the source.
+  const FS_BG_RENDER_FPS = 60;
+  const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
+  // Gap between the bottom of the centred MV pane and the top of the title.
+  // Used by publishFsBandVars() to compute --ym-sl-fs-band-top.
+  const FS_BAND_GAP = 18;
+  const FS_LYRICS_SHADE_SAMPLE_MS = 240;
+  // Shade sampling geometry. The sample covers the FULL lyric band: from the
+  // left edge of the shade/lyric region, bottom to top, through to the right
+  // edge. .ym-sl-fs-lyrics-shade is `left: 53%; right: 0; top: 0; bottom: 0`,
+  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 53% is
+  // the true start of the area that gets darkened.
+  const FS_SHADE_SAMPLE_W = 48;
+  const FS_SHADE_SAMPLE_H = 32;
+  const FS_SHADE_REGION_LEFT = 0.53; // matches the shade element's left: 53%
+  // Fallback band used only when the video/overlay geometry is unavailable.
+  const FS_SHADE_SAMPLE_X = Math.floor(FS_SHADE_SAMPLE_W * FS_SHADE_REGION_LEFT);
+  const FS_SHADE_SAMPLE_SW = FS_SHADE_SAMPLE_W - FS_SHADE_SAMPLE_X;
+  const FS_IDLE_HIDE_MS = 2000; // no input for this long -> hide cursor + controls
+  const FS_LYRICS_GAP_DIM_MS = 3000; // only dim genuinely long lyric gaps
+  const FS_LYRICS_RESTORE_LEAD_MS = 850; // restore shortly before the next line
+  const FS_FINAL_LYRICS_HIDE_MS = 6000; // stale final lyric -> hide after 6s
+  let fsIdleTimer = 0; // setTimeout id for the idle countdown
+  let fsIdleHidden = false; // is the overlay currently in the idle state?
+  let fsPointerDown = false; // is a button held (i.e. actively dragging)?
+  let mountTabTimer = 0;
+  let raf = 0;
+  // Auto-scroll state. The spring glide's own state (the Spring instance, its
+  // goal, the frame timestamps) lives with the glide in 13-loading-scroll.
+  // `lastScrollTargetLine` is the line we are currently gliding toward, which is
+  // NOT always `lastActiveLine` — see the early-scroll block in animate().
+  let lastScrollTargetLine = -1;
+  // Set by any structural change that invalidates the scroll position: a new
+  // track, entering or leaving fullscreen, or switching the fullscreen layout.
+  // While set, the next placement snaps instead of gliding. See
+  // recentreActiveLine().
+  let pendingInstantScroll = false;
+  // While `performance.now() < recentreUntilMs`, animate() pins the camera to the
+  // active line EVERY frame, instantly. A one-shot placement is not enough for
+  // the fullscreen layout switch: that resizes the lyrics column with a CSS
+  // transition, so the geometry keeps moving for a few hundred ms and a single
+  // placement would be correct only for the first frame of it.
+  let recentreUntilMs = 0;
+  const RECENTRE_WINDOW_MS = 600;
+  let lastFrameTime = performance.now();
+  let lastActiveLine = -1;
+  let manualScrollActive = false;
+  // After the user scrolls/keys away to browse lyrics, automatically return to
+  // the active line if they stop interacting this long.
+  const FS_JUMP_RETURN_MS = 8000;
+  let manualScrollReturnTimer = 0;
+  let jumpButton = null;
+  // MUST be module scope, not a `const` inside buildUI(). refreshPermanentDeleteState()
+  // and deletePermanentTTMLForCurrentTrack() both live out here and read it, so
+  // declaring it inside buildUI made every call throw ReferenceError — which,
+  // because both callers are `async`, surfaced only as an unhandled rejection in
+  // the console while silently breaking the whole "Delete saved" button.
+  let deletePermanentButton = null;
+  let wpObserver = null;
+  let lineScrollEl = null;
+  let linesRoot = null;
+  // QOL #1 (2026-09-28): end-of-track credits reveal. When a SYNCHRONISED track
+  // reaches its final ~1.5s, glide the panel to the bottom so the .ym-sl-credits
+  // block (provider / uploaded-by / made-by) scrolls into view. Static (unsynced)
+  // lyrics already reach the bottom on their own via driveStaticAutoScroll, so
+  // this only engages for synced lyrics.
+  let creditsFooterEl = null;        // the footer element, or null when there are no credits
+  let creditsRevealEngaged = false;  // we are in the end zone and have taken over the scroll
+  let creditsRevealActive = false;   // owns the scroll target on the current frame
+  let creditsRevealDismissed = false;// the user manually scrolled away -> stay out until next track
+  const CREDITS_REVEAL_MS = 1500;    // reveal during the final 1.5s of the track
+  let scrollCandidateIndices = [];
+  // Loading-skeleton plumbing. `lyricsSkeletonToken` is bumped by every panel
+  // reset, which invalidates a skeleton paint still queued on rAF/`setTimeout`.
+  // Without it the placeholder can land AFTER the lyrics it stood in for: the
+  // paint is deferred on purpose (see showLyricsSkeleton), so a fast fetch wins
+  // the race and then gets clobbered a frame later.
+  let lyricsSkeletonToken = 0;
+  let lyricsSkeletonShown = false;
+  let currentTrackKey = "";
+  // Separate sequence for prefetch so an in-flight next-track lookup can never
+  // collide with or abort the current track's lyric request (which uses
+  // trackRequestSeq / activeTrackAbort).
+  let prefetchSeq = 0;
+  // Per-track offset slots: one for music-video playback, one for the regular
+  // (audio) song. See setVideoOffsetMs / loadVideoOffsetForTrack.
+  let offsetVideoMs = 0;
+  let offsetSongMs = 0;
+  let activeOffsetMode = "video";   // which slot is applied to playback (auto by hasMusicVideo)
+  let editingOffsetMode = "video";  // which slot the on-screen control edits / displays
+  let lastOffsetModeCheckAt = 0;
+
+  /* ---- MV pause re-sync state ------------------------------------------------
+     A music video can stop the MUSIC while the video keeps playing, so after the
+     pause every lyric line is early by the pause length. ONE sync point per track:
+     { line: <original startTime ms of the chosen line>, offset: ms }.
+     Lines from `line` onward use `offset`; lines before it keep the normal
+     per-track offset. The offset is set by hand with a slider — nothing is derived
+     from the video position. See getOffsetForPosition(). */
+  let pauseSync = null;
+  // True while the user is picking a line. Suspends auto-scroll and makes line
+  // clicks select instead of seek.
+  let pausePickMode = false;
+  // DOM refs for the options-overlay PAUSE SYNC section and the in-panel banner.
+  let pauseUi = null;
+  let pauseBanner = null;
+  let pauseBannerText = null;
+  let manualLyricsTrackKey = "";
+  let manualLyricsIsPermanent = false;
+  let currentLyricsIsTTML = false;
+  // Raw TTML is retained only for user-imported lyrics so export can preserve
+  // the original file. Auto-fetched lyrics never populate this value.
+  let importedTTMLXml = "";
+  let currentTTMLSource = "none";
+  // True when the currently displayed lyrics are plain (unsynced) text loaded
+  // from an LRCLIB result that had no synced lyrics. Static lines render fully
+  // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
+  let staticLyricsActive = false;
+  // For static (unsynced) lyrics: when the user manually scrolls, auto-scroll is
+  // paused and a "Auto scroll" popup is shown to resume it (AJ, 2026-09-18).
+  let autoScrollUserPaused = false;
+  let lastObservedTrackKey = "";
+  let lastObservedPositionMs = null;
+  let currentSongwriters = [];
+  // Attribution for the currently loaded lyrics. `currentProvider` is a display
+  // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
+  // `currentUploader` / `currentMaker` are the credited people and are only ever
+  // non-null for a community sync (source === "spicy_lyrics"). Shape mirrors the
+  // API's Body.UploadAttribution.{Uploader,Maker}:
+  //   { id, username, avatar, hasProfileBanner, url }
+  let currentUploader = null;
+  let currentMaker = null;
+  let currentProvider = "";
+  // Credits carried by the *next* loadTTML call. Set immediately before an
+  // external load so loadTTML (which is also used for imports and cached TTML)
+  // can attach them without changing its signature for every caller.
+  let pendingSpicyCredits = null;
+  let cachedFirstRealLyricStartMs = Infinity;
+  let cachedLastRealLyricEndMs = 0;
+  let trackRequestSeq = 0;
+  let activeTrackAbort = null;
+  const lrclibCache = new Map();
+  let adaptiveLayoutLastAt = 0;
+  // Defaults track the Synced Lyrics settings popup so a fresh install (and the
+  // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
+  // pushed up, full-strength background vocals, adaptive spacing + romanization
+  // on. The popup schema in src/content/content.js mirrors these values; if you
+  // change one, change both.
+  //
+  // These three intensity sliders multiply together and then scale a curve that
+  // is already upstream-shaped, so they are a pure amplitude boost. See
+  // blendSyllableAnimation. Current defaults (AJ, 2026-09-26) are 1.0 / 1.0 /
+  // 1.25, i.e. scale+glow are at EXACT upstream parity (1.0 x 1.0) while the
+  // vertical rise is x1.25 — deliberately, that is the one place he wants more
+  // travel than Spicy Lyrics. All three at 1.0 is full parity.
+  const DEFAULT_SETTINGS = {
+    // 1.30 (AJ, 2026-10-07). Was 1.45 (2026-09-28); that read too big, so it is
+    // back to the original 130% look. The slider ceiling stays at 600%.
+    size: 1.30,
+    offset: -80,
+    // Scales the background line's dim and active paint values together.
+    // Keep the ceiling at 1 so old over-range settings cannot flatten its
+    // dim-to-bright distinction.
+    bgOpacity: 1.0,
+    animation: 1.0,
+    syllableAnimation: 1.0,
+    verticalAnimation: 1.25,
+    adaptiveSpacing: true,
+    romanizationEnabled: true,
+    legibilityBackdrop: false,
+    // Animated Apple Music cover art (m8tec HLS) — the player view's cover AND the
+    // fullscreen pane. OFF by default (AJ, 2026-10-07): it is a network-backed
+    // extra, so it is opt-in rather than something every fresh install starts
+    // fetching. The toggle turns it on.
+    animatedArt: false,
+    // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
+    // prefers the eased glide into the active line. (It was flipped OFF on
+    // 2026-09-28 to match an older screenshot; that is reverted.) Ignored
+    // entirely while simpleLyrics is ON, which forces its own spring scroll.
+    smoothScrolling: true,
+    scrollLeadEnabled: false,
+    scrollLeadMs: 250,
+    // MV ambient backdrop brightness. Drives the baked ctx.filter in
+    // drawBgFrame() — the blurred live-video canvas behind the MV in
+    // fullscreen. The SLIDER lives in the Aurora Bloom add-on (ytmod-dynamic),
+    // NOT here (AJ, 2026-09-28): music videos don't use Kawarp, so this is a
+    // separate control from Bloom's "Brightness" (which drives Kawarp). This
+    // value is the fallback used until Aurora Bloom's setting arrives — see
+    // handleHostMessage(), which accepts ytmod-dynamic settings and picks out
+    // just this key. Kept in sync with the catalog default (1.15).
+    backdropBrightness: 1.15,
+    // Force the Kawarp backdrop for EVERY music video instead of the
+    // duplicated blurred-video backdrop. The toggle lives in Aurora Bloom
+    // (cross-add-on); this is the fallback. Off = only still uploads
+    // (Official Audio / Lyric Video) use Kawarp — see FS_STATIC_VIDEO_RE.
+    // AJ, 2026-09-28.
+    preferKawarpAlways: false,
+    // Extend the adaptive lyric readability shade (the black gradient behind
+    // the lyrics) to the SIDE layout for music videos, where the lyrics sit
+    // over the blurred video backdrop — not just Video Background. ON by
+    // default (AJ, 2026-09-28: "i would default it to on").
+    mvLyricsShade: true,
+    // Apple-Music-style rendering (schema row lives in content.js). OFF by default
+    // so the existing karaoke look is unchanged until the user opts in. When ON,
+    // the gradient sweep is driven by a CSS animation on a registered custom
+    // property instead of per-frame JS writes — see the Simple lyrics CSS block.
+    simpleLyrics: false,
+  };
+  let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
+
+  function applySettings(next) {
+    const prevRomanization = currentSettings.romanizationEnabled;
+    const prevSize = currentSettings.size;
+    const prevSimpleLyrics = currentSettings.simpleLyrics;
+    const prevAnimatedArt = currentSettings.animatedArt;
+    // Only merge a plain object. `Object.assign` will happily spread a string or
+    // an array by index, so a corrupted stored value would inject junk keys
+    // ("0", "1", ...) into the settings object and leave it permanently out of
+    // shape. Spicy Lyrics shipped a release where a bad settings entry made the
+    // extension unusable until storage was cleared by hand; the clamps below
+    // cover bad VALUES, this covers a bad SHAPE.
+    const incoming = next && typeof next === "object" && !Array.isArray(next) ? next : {};
+    currentSettings = Object.assign({}, currentSettings, incoming);
+    const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+    const booleanValue = (value, fallback) => {
+      if (value == null) return fallback;
+      if (typeof value === "string") return !/^(false|0|off|no)$/i.test(value.trim());
+      return Boolean(value);
+    };
+    currentSettings.size = clamp(finite(currentSettings.size, DEFAULT_SETTINGS.size), 0.75, 6.0);
+    // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
+    // is gone and the panel simply sits at the default -80px. PINNED rather than
+    // merely defaulted, because a value stored back when the slider existed would
+    // otherwise keep shifting the lyrics with no UI left to move it back.
+    currentSettings.offset = DEFAULT_SETTINGS.offset;
+    // The CSS scales each background-line paint state by this value. An older
+    // stored value above 1 must still land at the intended default brightness.
+    currentSettings.bgOpacity = clamp(finite(currentSettings.bgOpacity, DEFAULT_SETTINGS.bgOpacity), 0.15, 1.0);
+    currentSettings.animation = clamp(finite(currentSettings.animation, DEFAULT_SETTINGS.animation), 0, 1.25);
+    currentSettings.syllableAnimation = clamp(
+      finite(currentSettings.syllableAnimation, DEFAULT_SETTINGS.syllableAnimation),
+      0,
+      1.5
+    );
+    currentSettings.verticalAnimation = clamp(
+      finite(currentSettings.verticalAnimation, DEFAULT_SETTINGS.verticalAnimation),
+      0,
+      3
+    );
+    currentSettings.adaptiveSpacing = booleanValue(
+      currentSettings.adaptiveSpacing,
+      DEFAULT_SETTINGS.adaptiveSpacing
+    );
+    currentSettings.romanizationEnabled = booleanValue(
+      currentSettings.romanizationEnabled,
+      DEFAULT_SETTINGS.romanizationEnabled
+    );
+    currentSettings.legibilityBackdrop = booleanValue(
+      currentSettings.legibilityBackdrop,
+      DEFAULT_SETTINGS.legibilityBackdrop
+    );
+    currentSettings.smoothScrolling = booleanValue(
+      currentSettings.smoothScrolling,
+      DEFAULT_SETTINGS.smoothScrolling
+    );
+    currentSettings.scrollLeadEnabled = booleanValue(
+      currentSettings.scrollLeadEnabled,
+      DEFAULT_SETTINGS.scrollLeadEnabled
+    );
+    currentSettings.scrollLeadMs = clamp(
+      finite(currentSettings.scrollLeadMs, DEFAULT_SETTINGS.scrollLeadMs),
+      0,
+      800
+    );
+    // MV ambient backdrop brightness. The slider lives in Aurora Bloom; the
+    // value arrives via handleHostMessage. Read live by drawBgFrame() every
+    // frame, so no extra wiring is needed for the slider to take effect.
+    currentSettings.backdropBrightness = clamp(
+      finite(currentSettings.backdropBrightness, DEFAULT_SETTINGS.backdropBrightness),
+      0,
+      2.0
+    );
+    // Also from Aurora Bloom: force Kawarp for every MV. Boolean coercion
+    // (handles a stored "false" string from the marketplace form).
+    currentSettings.preferKawarpAlways = booleanValue(
+      currentSettings.preferKawarpAlways,
+      DEFAULT_SETTINGS.preferKawarpAlways
+    );
+    currentSettings.mvLyricsShade = booleanValue(
+      currentSettings.mvLyricsShade,
+      DEFAULT_SETTINGS.mvLyricsShade
+    );
+    currentSettings.simpleLyrics = booleanValue(
+      currentSettings.simpleLyrics,
+      DEFAULT_SETTINGS.simpleLyrics
+    );
+    currentSettings.animatedArt = booleanValue(
+      currentSettings.animatedArt,
+      DEFAULT_SETTINGS.animatedArt
+    );
+    // Simple lyrics is MOSTLY a curve swap: the letter-scale and Y-offset splines
+    // get gentler, non-bouncing variants. Re-point them on every settings pass so
+    // the toggle lands without a reload.
+    applySimpleLyricsSplines();
+    // The published kit holds a SNAPSHOT of the spline objects, and
+    // applySimpleLyricsSplines REPLACES them — so a consumer (the PiP) would keep
+    // the NORMAL-mode curves, which is why its Apple Music style motion kept
+    // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
+    // re-publish would be a silent no-op (AJ, 2026-10-07).
+    try { publishRendererKit(true); } catch (e) {}
+    // Reflect the MV-shade option on the overlay (no-op before fullscreen).
+    syncFsMvShadeClass();
+    // Animated cover art toggle, applied LIVE (AJ, 2026-10-03). OFF tears the
+    // stream down immediately; ON re-runs the lookup for the current track.
+    if (currentSettings.animatedArt === false) {
+      if (prevAnimatedArt !== false) destroyAnimatedArt();
+    } else if (prevAnimatedArt === false) {
+      refreshAnimatedArt(getCurrentTrack());
+    }
+    document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // Simple lyrics is a RENDER MODE, not a per-element tweak, so it is a BODY
+    // class — the same shape as the legibility backdrop above. A body class also
+    // covers the fullscreen overlay, which reparents the panel but leaves body
+    // alone, so the mode follows the lyrics into fullscreen for free.
+    document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
+    // Turning Smooth Scrolling off mid-glide hands the move off to the instant
+    // path (upstream does the same — their $smoothScrolling listener calls
+    // _handOffSmoothScroll). Stopping here means the glide cannot keep steering
+    // the list after the setting that owns it is gone.
+    if (!currentSettings.smoothScrolling) stopScrollGlide();
+    // Publish the live scroll/motion settings so a consumer (the PiP) follows a
+    // toggle IMMEDIATELY instead of waiting for the next lyrics payload. The
+    // payload only re-emits on a track/lyrics change, which is exactly why
+    // turning Smooth Scrolling off — or Simple Lyrics on — did nothing in the PiP
+    // until the next song (AJ, 2026-10-07).
+    try {
+      if (window.YTMod && window.YTMod.bus) {
+        window.YTMod.bus.emit("lyrics:settings", {
+          smoothScrolling: currentSettings.smoothScrolling !== false,
+          simpleLyrics: currentSettings.simpleLyrics === true,
+          scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
+          scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
+        });
+      }
+    } catch (e) {}
+    adaptiveLayoutLastAt = 0;
+    if (!currentSettings.adaptiveSpacing) resetAdaptiveSpacing();
+    if (lineScrollEl) {
+      lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
+      lineScrollEl.style.setProperty("--ym-sl-lyrics-offset", `${currentSettings.offset}px`);
+      lineScrollEl.style.setProperty("--ym-sl-bg-vocal-scale", String(currentSettings.bgOpacity));
+    }
+    // A size change reflows EVERY line, so the scroll offset that was correct for
+    // the old line heights no longer points at the active line — the same "camera
+    // drifted off the line" complaint as a track change or a fullscreen toggle,
+    // with a fifth trigger. Re-centre after the write. recentreActiveLine() holds
+    // a window open and re-pins each frame, which is what covers the reflow
+    // actually landing a frame after the custom property is set.
+    if (prevSize !== currentSettings.size) recentreActiveLine();
+    // Romanization is computed at build time, so toggling it means rebuilding the
+    // current lines. No lines yet (e.g. first init) -> nothing to do.
+    if (prevRomanization !== currentSettings.romanizationEnabled && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+    // Simple lyrics changes how the gradient is DRIVEN, and existing words hold
+    // their old inline --gradient-position. The CSS redirect is !important so it
+    // beats those, but an already-Sung word would then fall back to the registered
+    // property's -50% default and read as un-sung until it next changed state. A
+    // rebuild puts every word back through the animator under the new mode.
+    if (prevSimpleLyrics !== currentSettings.simpleLyrics && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+  }
+
+  // NOTE: these three settings MULTIPLY, and they are applied on top of a curve
+  // that is already the same shape as upstream's. So the net amplitude is
+  //   scale & glow  : animation * syllableAnimation                      (max 1.5)
+  //   y-offset      : animation * syllableAnimation * verticalAnimation  (max 3.0)
+  // At the current defaults (1.25 / 0.9 / 1.55) that is x1.125 for scale+glow and
+  // x1.744 for the vertical rise — i.e. noticeably MORE motion than upstream, not
+  // less. All three at 1.0 is exact upstream parity.
+  // This matters because the defaults were originally tuned AGAINST the old
+  // Catmull-Rom curve, whose vertical dip was 2.23x too shallow; the spline fix
+  // (2026-09-20) corrected the curve, so the slider boost now stacks on a
+  // correct curve instead of compensating for a broken one.
+  // resolver-worker/test-animation-parity.mjs guard D prints the live numbers.
+  function blendAnimation(resting, target) {
+    return resting + (target - resting) * currentSettings.animation;
+  }
+
+  function blendSyllableAnimation(resting, target) {
+    const intensity = clamp(
+      currentSettings.animation * currentSettings.syllableAnimation,
+      0,
+      1.5
+    );
+    return resting + (target - resting) * intensity;
+  }
+
+  function blendVerticalAnimation(resting, target) {
+    const intensity = clamp(
+      currentSettings.animation *
+        currentSettings.syllableAnimation *
+        currentSettings.verticalAnimation,
+      0,
+      3
+    );
+    return resting + (target - resting) * intensity;
+  }
+

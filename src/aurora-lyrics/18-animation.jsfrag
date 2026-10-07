@@ -1,0 +1,161 @@
+  /* ===================== animation ===================== */
+
+  // Returns true when at least one letter actually moved this frame.
+  //
+  // TTML is where the frame budget goes. A long word becomes one span per
+  // character, each with its own three springs and five animated custom
+  // properties. A ten-word line with four letter-capable words is ~40 letter
+  // spans, and the original loop stepped every one of them and rebuilt its
+  // style strings on every frame even when the word was long since sung and
+  // every letter was sound asleep. That is roughly 200 style writes and 200
+  // throwaway strings per frame — over 12,000 a second — which is exactly why
+  // imported TTML runs at 30-40 FPS while line-synced LRCLIB lyrics hold ~110:
+  // LRCLIB lines produce a single LineTimed word with no letter spans at all.
+  //
+  // A letter only needs work when its own state changed or its springs are
+  // still settling. Everything else is skipped outright — no stepping, no
+  // template strings, no style writes. This is visually identical, because a
+  // resting letter was already producing byte-identical values every frame.
+  function animateLetters(word, wordState, lineState, positionMs, deltaTime) {
+    if (!word.Letters) return false;
+    let activeIndex = -1;
+    let activeProgress = 0;
+    if (wordState === "Active") {
+      for (let i = 0; i < word.Letters.length; i++) {
+        const letter = word.Letters[i];
+        if (getState(positionMs, letter.StartTime, letter.EndTime) === "Active") {
+          activeIndex = i;
+          activeProgress = getProgress(positionMs, letter.StartTime, letter.EndTime);
+          break;
+        }
+      }
+    }
+
+    let anyAwake = false;
+    const letters = word.Letters;
+    for (let index = 0; index < letters.length; index++) {
+      const letter = letters[index];
+      if (!letter.AnimatorStore) {
+        letter.AnimatorStore = createLetterSprings();
+        letter.AnimatorStore.Scale.SetGoal(LetterScaleSpline.at(0), true);
+        letter.AnimatorStore.YOffset.SetGoal(LetterYOffsetSpline.at(0), true);
+        letter.AnimatorStore.Glow.SetGoal(GlowSpline.at(0), true);
+      }
+
+      const letterState = getState(positionMs, letter.StartTime, letter.EndTime);
+      const restingScale = LetterScaleSpline.at(0);
+      const restingYOffset = LetterYOffsetSpline.at(0);
+      const restingGlow = GlowSpline.at(0);
+      let targetScale = restingScale;
+      let targetYOffset = restingYOffset;
+      let targetGlow = restingGlow;
+      let targetGradient = letterState === "Sung" ? 100 : -20;
+
+      // PROXIMITY PASS. Upstream runs this over EVERY letter of an active word
+      // first (LyricsAnimator.ts:1043-1090), then overrides two cases below.
+      // Neighbours ride the ACTIVE LETTER's phase rather than the word's broader
+      // progress, so they stay locked to the glyph being sung.
+      if (activeIndex >= 0) {
+        const baseScale = LetterScaleSpline.at(activeProgress);
+        const baseYOffset = LetterYOffsetSpline.at(activeProgress);
+        const baseGlow = GlowSpline.at(activeProgress);
+        const distance = Math.abs(index - activeIndex);
+        const scaleFalloff = 1 / (1 + Math.pow(distance, 2.8));
+        const glowFalloff = 1 / (1 + distance * 0.9);
+        targetScale = restingScale + (baseScale - restingScale) * scaleFalloff;
+        targetYOffset = restingYOffset + (baseYOffset - restingYOffset) * scaleFalloff;
+        targetGlow = restingGlow + (baseGlow - restingGlow) * glowFalloff;
+        if (letterState === "Active" && index === activeIndex) {
+          targetGradient = -20 + 120 * easeSinOut(activeProgress);
+        }
+      }
+
+      // OVERRIDE PASS — upstream LyricsAnimator.ts:1092-1102, applied AFTER the
+      // proximity pass and in this exact order:
+      //
+      //   if (letterState === "NotSung" && !simpleLyricsMode) { all three -> at(0) }
+      //   else if (letterState === "Sung" && activeLetterIndex === -1) { glow -> at(0.2) }
+      //
+      // The NotSung clause is the one that matters, and omitting it was a real
+      // bug here: the proximity pass has no direction, so it lit up the letters
+      // the playhead had NOT REACHED YET exactly as hard as the ones it had just
+      // left. At distance 1 the glow falloff is 1/(1+0.9) = 0.526 and the natural
+      // spline peaks at 1.433, so an unsung neighbour sat at 0.754 -> (x1.125)
+      // 0.848 -> a FULL-opacity 14.2px halo, and distance 2 still reached 10.9px
+      // at full opacity (the 185% multiplier saturates opacity above glow 0.54).
+      // Upstream pins those letters to 4px / 0% instead, so its glow TRAILS the
+      // karaoke point while ours bled ~2 letters ahead of it and the word read
+      // as a broad smear rather than a travelling pulse. Same for scale: ours
+      // pre-bulged unsung letters to 1.072 vs upstream's flat 0.95.
+      //
+      // `$simpleLyricsMode` is false by default upstream (stores.ts:57), so this
+      // clause is live in the default configuration — it is not an edge case.
+      if (letterState === "NotSung") {
+        targetScale = restingScale;
+        targetYOffset = restingYOffset;
+        targetGlow = restingGlow;
+      } else if (letterState === "Sung" && activeIndex === -1) {
+        targetScale = LetterScaleSpline.at(1);
+        targetYOffset = LetterYOffsetSpline.at(1);
+        // DELIBERATE DIVERGENCE FROM UPSTREAM (AJ, 2026-09-20).
+        //
+        // Upstream uses targetGlow = GlowSpline.at(SungLetterGlow /* 0.2 */) for
+        // a sung letter in an active word where no letter is currently active
+        // (i.e. the playhead sits in a gap between letters). That LOOKS like a
+        // small dim value, but the natural spline OVERSHOOTS on its 0 -> 1 rise,
+        // so at(0.2) actually evaluates to 1.20988 — i.e. an 18.5px blur at 224%
+        // opacity via the letter multipliers (12 / 185). That is essentially the
+        // same 20px white halo previously fixed here, which fused with the .85
+        // gradient glyph and made whole words read fuzzy and dim next to crisp
+        // neighbours. Before the spline fix this read 1.07165 / 16.86px, so the
+        // corrected curve makes the upstream behaviour MORE extreme, not less.
+        //
+        // We keep the fix (settle to GlowSpline.at(1) = 0) rather than copying
+        // upstream, because matching a known-bad artifact is not parity worth
+        // having. Swapping this line to `GlowSpline.at(SungLetterGlow)` restores
+        // exact upstream behaviour if it is ever wanted for A/B comparison.
+        //
+        // NOTE this branch is normally UNREACHABLE, because a TTML word's letter
+        // spans abut: exactly one letter is Active for the whole word, so
+        // activeIndex is only -1 before the first letter starts (where every
+        // letter is NotSung and the clause above wins) or after the last one ends
+        // (where word.EndTime == last.EndTime, so the word is no longer Active).
+        targetGlow = GlowSpline.at(1);
+      }
+
+      letter.AnimatorStore.Scale.SetGoal(blendSyllableAnimation(restingScale, targetScale));
+      letter.AnimatorStore.YOffset.SetGoal(blendVerticalAnimation(restingYOffset, targetYOffset));
+      letter.AnimatorStore.Glow.SetGoal(blendSyllableAnimation(restingGlow, targetGlow));
+
+      // Goals are current. If this letter's state did not change and its springs
+      // are already asleep, stepping it would reproduce exactly the values that
+      // are already on the element — so skip the stepping and all five writes.
+      const letterStateChanged = letter.LastState !== letterState;
+      letter.LastState = letterState;
+      if (!letterStateChanged && !storeNeedsAnimation(letter.AnimatorStore)) continue;
+      anyAwake = true;
+
+      const scale = letter.AnimatorStore.Scale.Step(deltaTime);
+      const yOffset = letter.AnimatorStore.YOffset.Step(deltaTime);
+      const glow = letter.AnimatorStore.Glow.Step(deltaTime);
+
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "transform",
+        `translate3d(0, calc(var(--DefaultLyricsSize) * ${yOffset * 2}), 0)`,
+        0.001,
+        yOffset * 2
+      );
+      setStyleIfChanged(letter.HTMLElement, "--ym-sl-base-scale", String(scale), 0.001);
+      setStyleIfChanged(letter.HTMLElement, "--gradient-position", `${targetGradient}%`, 0.1);
+      // Fill, colour and background-image are intentionally NOT written here.
+      // Letters follow the same stylesheet rules as regular words, so a
+      // letter-group word always matches its neighbours. Upstream Spicy Lyrics
+      // only animates --gradient-position, scale/transform and the glow
+      // variables on a letter; everything else is CSS.
+      setStyleIfChanged(letter.HTMLElement, "--text-shadow-blur-radius", `${4 + 12 * glow}px`, 0.5);
+      setStyleIfChanged(letter.HTMLElement, "--text-shadow-opacity", `${glow * 185}%`, 1);
+    }
+    return anyAwake;
+  }
+

@@ -1,0 +1,4146 @@
+  const CSS = `
+    .ym-sl-panel {
+      position: relative !important;
+      inset: auto !important;
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 0;
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      overflow: hidden;
+      background: transparent !important;
+      color: #fff;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      container-type: size;
+      isolation: isolate;
+    }
+    /* Page-wide background styling moved to the Dynamic theme. */
+    /*
+    .ym-sl-page-bg-root {
+      isolation: isolate !important;
+      background: transparent !important;
+      --ytmusic-app-background: transparent !important;
+      --ytmusic-player-page-background: transparent !important;
+      --ytmusic-player-bar-background: transparent !important;
+      --ytmusic-nav-bar-background: transparent !important;
+      --ytmusic-general-background-a: transparent !important;
+      --ytmusic-general-background-b: transparent !important;
+      --ytmusic-general-background-c: transparent !important;
+      --ytmusic-general-background-d: transparent !important;
+    }
+    html.ym-sl-page-bg-active,
+    body.ym-sl-page-bg-active {
+      background: transparent !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-page-bg-needs-position {
+      position: relative !important;
+    }
+    .ym-sl-page-bg-host {
+      position: fixed !important;
+      inset: 0 !important;
+      z-index: 0 !important;
+      display: block;
+      overflow: hidden;
+      pointer-events: none;
+      background: #0f0f0f;
+    }
+    .ym-sl-page-bg-host .ym-sl-kawarp-bg {
+      transform: none;
+      -webkit-mask-image: none;
+      mask-image: none;
+      filter: saturate(1.7) brightness(.78);
+    }
+    .ym-sl-page-bg-host .ym-sl-kawarp-bg.ready { opacity: .88; }
+    .ym-sl-page-bg-host .ym-sl-kawarp-shade {
+      background:
+        linear-gradient(
+          180deg,
+          rgba(5,5,8,.28),
+          rgba(5,5,8,.1) 28%,
+          rgba(5,5,8,.1) 72%,
+          rgba(5,5,8,.32)
+        );
+    }
+    .ym-sl-page-divider {
+      position: absolute;
+      top: 84px;
+      bottom: 72px;
+      left: 68%;
+      width: 1px;
+      z-index: 2;
+      background: linear-gradient(
+        180deg,
+        transparent,
+        rgba(255,255,255,.38) 12%,
+        rgba(255,255,255,.38) 88%,
+        transparent
+      );
+      box-shadow: 0 0 8px rgba(255,255,255,.1);
+      opacity: .56;
+    }
+    .ym-sl-page-bg-root ytmusic-app-layout,
+    .ym-sl-page-bg-root ytmusic-nav-bar,
+    .ym-sl-page-bg-root ytmusic-player-page,
+    .ym-sl-page-bg-root ytmusic-watch-page,
+    .ym-sl-page-bg-root ytmusic-player-bar,
+    .ym-sl-page-bg-root ytmusic-guide-renderer,
+    .ym-sl-page-bg-root ytmusic-left-nav-bar,
+    .ym-sl-page-bg-root #layout,
+    .ym-sl-page-bg-root #nav-bar,
+    .ym-sl-page-bg-root #nav-bar-background,
+    .ym-sl-page-bg-root #guide,
+    .ym-sl-page-bg-root #guide-spacer,
+    .ym-sl-page-bg-root #mini-guide,
+    .ym-sl-page-bg-root #mini-guide-background,
+    .ym-sl-page-bg-root #guide-wrapper,
+    .ym-sl-page-bg-root #left-content,
+    .ym-sl-page-bg-root #player-bar {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root #player-bar-background {
+      background: rgba(6,6,10,.22) !important;
+      background-color: rgba(6,6,10,.22) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      border-top: 1px solid rgba(255,255,255,.1);
+      box-shadow: 0 -10px 30px rgba(0,0,0,.12);
+    }
+    .ym-sl-page-bg-root.ym-sl-topbar-scrolled #nav-bar-background {
+      background: rgba(6,6,10,.22) !important;
+      background-color: rgba(6,6,10,.22) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      box-shadow: 0 10px 30px rgba(0,0,0,.12);
+    }
+    .ym-sl-page-bg-root ytmusic-nav-bar::before,
+    .ym-sl-page-bg-root ytmusic-nav-bar::after,
+    .ym-sl-page-bg-root ytmusic-guide-renderer::before,
+    .ym-sl-page-bg-root ytmusic-guide-renderer::after,
+    .ym-sl-page-bg-root ytmusic-player-bar::before,
+    .ym-sl-page-bg-root ytmusic-player-bar::after {
+      background: transparent !important;
+    }
+    .ym-sl-page-bg-root ytmusic-player-page .html5-video-container,
+    .ym-sl-page-bg-root ytmusic-player-page video.html5-main-video {
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 2px;
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,.28),
+        0 18px 42px rgba(0,0,0,.38);
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode {
+      --ym-sl-left-rail-width: 245px;
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode
+      :is(ytmusic-guide-renderer, ytmusic-left-nav-bar, #guide-wrapper, #guide, #left-content) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(ytmusic-guide-renderer, ytmusic-left-nav-bar, #guide-wrapper, #guide, #left-content) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-browse-page,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer,
+        ytmusic-grid-renderer,
+        #page-manager,
+        #main-panel,
+        #content,
+        #content-page,
+        #browse-page,
+        #home-page,
+        #contents
+      ) {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(ytmusic-fullbleed-thumbnail-renderer, ytmusic-fullbleed-thumbnail-renderer img) {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-browse-response > *,
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-section-list-renderer > #contents,
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-section-list-renderer > #contents > * {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer
+      )::before,
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      :is(
+        ytmusic-browse-response,
+        ytmusic-homepage,
+        ytmusic-section-list-renderer,
+        ytmusic-carousel-shelf-renderer,
+        ytmusic-shelf-renderer,
+        ytmusic-music-shelf-renderer
+      )::after {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode .ym-sl-kawarp-shade {
+      background: rgba(5,5,8,.16);
+    }
+    .ym-sl-page-bg-root:not(.ym-sl-song-mode) .ym-sl-page-divider {
+      display: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      ytmusic-search-page > ytmusic-tabbed-search-results-renderer > ytmusic-tabs {
+      background: rgba(6,6,10,.18) !important;
+      background-color: rgba(6,6,10,.18) !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: blur(24px) saturate(1.35);
+      backdrop-filter: blur(24px) saturate(1.35);
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode
+      ytmusic-search-page > ytmusic-tabbed-search-results-renderer > ytmusic-tabs > #tabs {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-song-mode ytmusic-player-bar {
+      left: var(--ym-sl-left-rail-width) !important;
+      right: 0 !important;
+      width: auto !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    .ym-sl-page-bg-root.ym-sl-home-mode ytmusic-player-bar {
+      left: 0 !important;
+      right: 0 !important;
+      width: auto !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+    }
+    */
+    .ym-sl-native-hidden { display: none !important; }
+    /* When Aurora's panel owns the Lyrics tab: hide EVERY native child of
+       #tab-renderer — including ones YTM adds LATER, like the "Lyrics not
+       available" message (ytmusic-message-renderer) — and drop the host's
+       always-on scrollbar (overflow-y:scroll), which is redundant with the
+       panel's own internal scroll. */
+    #tab-renderer.ym-sl-panel-active > :not(.ym-sl-panel) {
+      display: none !important;
+    }
+    #tab-renderer.ym-sl-panel-active {
+      overflow: hidden !important;
+    }
+    .ym-sl-panel.hidden { display: none !important; }
+    .ym-sl-panel.drag { outline: 2px dashed rgba(255,255,255,.6); outline-offset: -4px; }
+    /*
+    .ym-sl-kawarp-bg {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      pointer-events: none;
+      transform: scaleX(1.08);
+      transform-origin: center center;
+      filter: saturate(1.7) brightness(.72);
+      -webkit-mask-image: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.5) 3%,
+        #000 9%,
+        #000 91%,
+        rgba(0,0,0,.5) 97%,
+        transparent 100%
+      );
+      mask-image: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.5) 3%,
+        #000 9%,
+        #000 91%,
+        rgba(0,0,0,.5) 97%,
+        transparent 100%
+      );
+      transition: opacity .65s ease;
+    }
+    .ym-sl-kawarp-bg.ready { opacity: .98; }
+    .ym-sl-kawarp-shade {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      background:
+        linear-gradient(
+          90deg,
+          rgba(5,5,8,.26) 0%,
+          rgba(5,5,8,.07) 9%,
+          rgba(5,5,8,.07) 91%,
+          rgba(5,5,8,.26) 100%
+        ),
+        linear-gradient(
+          180deg,
+          rgba(5,5,8,.14),
+          transparent 26%,
+          transparent 72%,
+          rgba(5,5,8,.24)
+        );
+      pointer-events: none;
+    }
+    */
+    .ym-sl-tools {
+      position: absolute;
+      top: 2px;
+      right: 14px;
+      left: 14px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 8px 0;
+      pointer-events: auto;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    .ym-sl-tools:hover,
+    .ym-sl-tools:focus-within { opacity: 1; }
+    /* At short widths the action row behaves like YT Music's tab strip:
+       controls stay in one horizontal rail and the arrows move the rail
+       left/right instead of clipping Fullscreen or Offset off-screen. */
+    .ym-sl-tools-scroll {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+    }
+    .ym-sl-tools-scroll::-webkit-scrollbar { display: none; }
+    .ym-sl-tools-arrow {
+      display: none;
+      flex: 0 0 26px;
+      width: 26px;
+      min-height: 30px;
+      padding: 0;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .ym-sl-tools-arrow:hover { background: rgba(255,255,255,.16); }
+    /* Consolidated options overlay. Holds track / offset / import so the toolbar
+       is just [Options] [Fullscreen]. Lives on <body> (see buildUI). The fullscreen
+       options overlay reuses the same chrome but with a higher z-index so it
+       floats above the fullscreen overlay. */
+    .ym-sl-options-overlay,
+    .ym-sl-fs-options-overlay {
+      position: fixed;
+      top: 96px;
+      right: 28px;
+      z-index: 2147483000;
+      width: 340px;
+      max-width: calc(100vw - 32px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,.12);
+      /* SOLID, like the marketplace panel. The old translucent + blurred shell
+         read as a different surface sitting next to it (AJ, 2026-10-01). The
+         inner top highlight is the same one the marketplace card uses. */
+      background: #0f1116;
+      box-shadow: 0 40px 120px -40px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15);
+      color: #fff;
+      /* The panel is appended to body, so inheriting gave it YTM's Roboto rather
+         than the panel face. Same stack the marketplace uses. */
+      font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
+    }
+    /* Fullscreen variant: sit above the fullscreen overlay (also 2147483000)
+       and anchor to the top-right where the controls normally live. */
+    .ym-sl-fs-options-overlay {
+      z-index: 2147483100;
+      top: 64px;
+      right: 24px;
+      width: 360px;
+    }
+    .ym-sl-options-overlay.hidden,
+    .ym-sl-fs-options-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(-8px) scale(.97);
+    }
+    .ym-sl-options-overlay,
+    .ym-sl-fs-options-overlay {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0) scale(1);
+      transition:
+        opacity .2s ease,
+        transform .28s cubic-bezier(.22,.61,.36,1),
+        visibility 0s linear 0s;
+    }
+    .ym-sl-options-overlay.hidden,
+    .ym-sl-fs-options-overlay.hidden {
+      transition:
+        opacity .16s ease,
+        transform .22s cubic-bezier(.4,0,1,1),
+        visibility 0s linear .22s;
+    }
+    .ym-sl-options-header,
+    .ym-sl-fs-options-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 14px 16px;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+      background: transparent;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    .ym-sl-options-header:active,
+    .ym-sl-fs-options-header:active { cursor: grabbing; }
+    .ym-sl-options-title,
+    .ym-sl-fs-options-title {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -.01em;
+      color: #f4f1ee;
+    }
+    .ym-sl-options-close,
+    .ym-sl-fs-options-close {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      padding: 0 4px;
+      font: inherit;
+      font-size: 20px;
+      line-height: 1;
+      color: rgba(255,255,255,.7);
+      cursor: pointer;
+    }
+    .ym-sl-options-close:hover,
+    .ym-sl-fs-options-close:hover { color: #fff; }
+    .ym-sl-options-body,
+    .ym-sl-fs-options-body {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 16px;
+      padding: 18px;
+    }
+    .ym-sl-options-section,
+    .ym-sl-options-body .ym-sl-options-section {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .ym-sl-options-body .ym-sl-video-offset {
+      margin-top: 2px;
+      padding-top: 4px;
+      border-top: 1px solid rgba(255,255,255,.07);
+    }
+    /* Divider + section title separate the lyrics controls (track, offset)
+       from the TTML import controls (mode, upload). */
+    .ym-sl-options-divider {
+      appearance: none;
+      height: 1px;
+      width: calc(100% + 36px);
+      margin: 2px -18px 0;
+      border: 0;
+      background: rgba(255,255,255,.1);
+    }
+    .ym-sl-options-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: rgba(244,241,238,.6);
+      padding: 4px 2px 0;
+    }
+    .ym-sl-options-body .ym-sl-track { width: 100%; }
+    /* The offset row is a wide horizontal rail; let it wrap and give the slider
+       its own line so nothing overflows the 340px panel. */
+    .ym-sl-options-body .ym-sl-video-offset { flex-wrap: wrap; row-gap: 8px; }
+    .ym-sl-options-body .ym-sl-video-offset input[type="range"] { width: 100%; min-width: 0; }
+    .ym-sl-options-button { white-space: nowrap; }
+    /* Cache section: a short status line above the purge button. */
+    .ym-sl-cache-section { gap: 10px; }
+    .ym-sl-cache-status {
+      font-size: 12px;
+      line-height: 1.4;
+      color: rgba(255,255,255,.6);
+      padding: 0 2px;
+    }
+    .ym-sl-options-body .ym-sl-cache-clear {
+      align-self: flex-start;
+    }
+    .ym-sl-export-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding-top: 2px;
+    }
+    .ym-sl-export-actions.hidden {
+      display: none;
+    }
+    .ym-sl-export-actions .ym-sl-import {
+      flex: 1 1 140px;
+      min-width: 0;
+    }
+    /* Fullscreen overlay is always block; media + lyrics are absolute so
+       layout changes (side / background / lyrics-only) animate via CSS
+       transitions instead of snapping. */
+    /* Registered so the band anchor can ANIMATE. publishFsBandVars() measures
+       the media pane and writes --ym-sl-fs-band-top / --ym-sl-fs-title-h; the
+       title, chip and scrubber are positioned with calc() off them. When a new
+       music video changes the pane's aspect ratio, the whole stack has to glide
+       to the new anchor — but an UNREGISTERED custom property flips instantly.
+       That is why the first reposition looked smooth (the pane's own width
+       transition carried it) and every later one snapped (AJ, 2026-09-28).
+       Registering them as <length> makes the transition below work; if a browser
+       lacks @property the values simply flip as before. */
+    @property --ym-sl-fs-band-top {
+      syntax: "<length>";
+      inherits: true;
+      initial-value: 828px;
+    }
+    @property --ym-sl-fs-title-h {
+      syntax: "<length>";
+      inherits: true;
+      initial-value: 26px;
+    }
+    .ym-sl-fs-overlay {
+      transition:
+        --ym-sl-fs-band-top .35s cubic-bezier(.22,.61,.36,1),
+        --ym-sl-fs-title-h .35s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: block;
+      padding: 0;
+      box-sizing: border-box;
+      background: #0a0a0c;
+      color: #fff;
+      overflow: hidden;
+    }
+    /* Media and lyrics are ALWAYS absolute and animate their geometry. The
+       transition list covers every property that changes between layouts.
+       Media gets a 3% padding in background mode; the video's inline 100%
+       sizing fills the padding box, producing the rounded-card look without
+       a per-layout video rule, and animating the padding smoothly resizes
+       the video inside. */
+    .ym-sl-fs-media,
+    .ym-sl-fs-lyrics {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      overflow: hidden;
+      transition:
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease,
+        padding .45s cubic-bezier(.22, .61, .36, 1);
+      will-change: left, width, transform, opacity, padding;
+    }
+    .ym-sl-fs-media { z-index: 2; }
+    .ym-sl-fs-lyrics { z-index: 3; }
+
+    /* Legibility backdrop (Synced Lyrics setting "Legibility backdrop"): a very
+       dark, slightly transparent panel with a light frost behind the lyrics so
+       they stay readable over bright artwork / video. Body-level class so it
+       survives renderer rebuilds. */
+    .ym-sl-legibility-backdrop .LyricsContainer {
+      background: rgba(0, 0, 0, 0.55);
+      -webkit-backdrop-filter: blur(8px) saturate(1.1);
+      backdrop-filter: blur(8px) saturate(1.1);
+      border-radius: 12px;
+    }
+    .ym-sl-legibility-backdrop .ym-sl-fs-lyrics {
+      background: rgba(0, 0, 0, 0.45);
+      -webkit-backdrop-filter: blur(10px) saturate(1.1);
+      backdrop-filter: blur(10px) saturate(1.1);
+    }
+
+    /* Default "side" layout: video left, lyrics right. No padding on the media
+       host — padding here would push the element's padding-box past the lyrics
+       panel's left edge and create a dark sliver that reads as "video under the
+       lyrics". Clean position + clean width keeps the video fully inside its
+       own column. */
+    .ym-sl-fs-overlay .ym-sl-fs-media {
+      left: 2%;
+      width: 50%;
+    }
+    .ym-sl-fs-overlay .ym-sl-fs-lyrics {
+      left: 57.4%;
+      width: 42.6%;
+      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px);
+      box-sizing: border-box;
+    }
+    /* "Background" layout: media fills the overlay (3% padding = card inset
+       via the video's inline padding-box sizing); lyrics float on the right
+       with a backdrop blur and a left-edge fade. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media {
+      left: 0;
+      width: 100%;
+      padding: 0;
+      box-sizing: border-box;
+      z-index: 1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media > video:not(.ym-sl-fs-art-video) {
+      border-radius: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics {
+      left: 61%;
+      width: 39%;
+      min-width: 320px;
+      /* Asymmetric padding so lyric text starts past the left-edge fade. */
+      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px) clamp(28px, 6vh, 84px) clamp(80px, 6vw, 120px);
+      box-sizing: border-box;
+      /* No permanent black surface: the shade layer below activates only when
+         the sampled video behind the lyrics is genuinely near-white. */
+      background: transparent;
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
+      mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      --ym-sl-fs-lyrics-shade-opacity: 0;
+      transition:
+        opacity 1.1s ease,
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        padding .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-lyrics-shade {
+      display: none;
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 53%;
+      z-index: 2;
+      pointer-events: none;
+      opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+      background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(0,0,0,.16) 14%,
+        rgba(0,0,0,.62) 52%,
+        rgba(0,0,0,.9) 100%
+      );
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      transition: opacity .22s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics-shade {
+      display: block;
+      opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+    }
+    /* Opt-in: the SAME adaptive readability shade, but for a music video in
+       the SIDE layout, where the lyrics column sits over the blurred video
+       backdrop. Driven by the "Shade lyrics over bright music video" setting
+       (-> .ym-sl-fs-mv-shade on the overlay, see syncFsMvShadeClass). No video
+       means no shade, so Lyrics Only and cover-art tracks are untouched. */
+    .ym-sl-fs-overlay.ym-sl-fs-mv-shade.ym-sl-fs-has-video .ym-sl-fs-lyrics-shade {
+      display: block;
+      opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
+      position: relative;
+      z-index: 3;
+    }
+    /* The readability shade is adaptive: it is transparent unless the video
+       under the lyric column contains enough near-white pixels. */
+    /* During a long intro or instrumental gap, dim rather than remove the
+       lyrics so the video remains the visual focus. The hidden-toggle rule
+       below still wins when the user explicitly hides lyrics. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-gap-dim .ym-sl-fs-lyrics {
+      opacity: 0;
+    }
+    /* Let the user preview the hidden lyric area without fully bringing it
+       back. Opacity 0 still participates in hit testing, so hovering the
+       lyric panel can reveal it at a quiet 60% while the gap continues. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-gap-dim .ym-sl-fs-lyrics:hover {
+      opacity: .6;
+    }
+    /* Intro lyrics stay completely hidden until the first real line begins,
+       including on hover. Later instrumental gaps retain the 60% hover preview. */
+    /* TTML credits stay visible while the lyrics auto-hide (AJ, 2026-10-01).
+       The panel is no longer faded out WHOLESALE, because the credits footer lives
+       INSIDE it, after the last line — fading the panel took the attribution with
+       it. Instead only the LINE elements are hidden, so the credits survive.
+       - visibility, not display: the renderer measures line boxes for scrolling,
+         and display:none would collapse them all to zero.
+       - the credits are stuck to the bottom of the scrollport, because their
+         natural position is below the fold while the lines still occupy space. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .ym-sl-fs-lyrics,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .ym-sl-fs-lyrics:hover,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .ym-sl-fs-lyrics,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .ym-sl-fs-lyrics:hover {
+      opacity: 1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .VirtualLyricsContainer > *:not(.ym-sl-credits),
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .VirtualLyricsContainer > *:not(.ym-sl-credits) {
+      visibility: hidden;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-intro-dim .ym-sl-credits,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-final-dim .ym-sl-credits {
+      position: sticky;
+      bottom: 0;
+    }
+    /* Background-mode toggle state: the live lyrics stay mounted so timing
+       continues, but the whole lyric surface fades away smoothly. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-lyrics-hidden .ym-sl-fs-lyrics {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(18px);
+    }
+    /* "Lyrics only" layout: media fades out (kept in the tree so the
+       transition has a source geometry), lyrics center and widen. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-media {
+      left: 0;
+      width: 100%;
+      padding: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics {
+      left: 50%;
+      width: min(980px, calc(100% - 2 * 120px));
+      transform: translateX(-50%);
+      /* Bigger top padding reserves a band for the top caption title (see the
+         lyrics-only .ym-sl-fs-title rule) so the two never overlap (AJ 2026-09-28). */
+      padding: clamp(84px, 12vh, 140px) clamp(28px, 7vw, 120px);
+      box-sizing: border-box;
+      background: transparent;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    /* Reserve a bottom-safe band for the centered playback row and the
+       fullscreen bar. On compact screens the lyric viewport becomes slightly
+       shorter instead of allowing the controls to sit over the active line. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+      padding-bottom: clamp(148px, 18vh, 220px);
+      box-sizing: border-box;
+    }
+    /* Backdrop layers (full-overlay absolutes). Visibility unchanged. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-img {
+      display: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-canvas {
+      display: block !important;
+      z-index: 0;
+      /* The sharp video is the focus; this canvas is a very low-res duplicate
+         of it, scaled up to fill the entire overlay as an ambient backdrop.
+         The blur, saturation and brightness are baked into the canvas with
+         ctx.filter in drawBgFrame() — a CSS filter here was being silently
+         dropped on <canvas>, so the layer rendered crisp. Keep this set to
+         none so the effect is not applied twice. */
+      filter: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-tint {
+      display: block !important;
+      z-index: 1;
+      background: rgba(0,0,0,.18);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .LyricsContent {
+      --ym-sl-lyrics-scale: 1.16;
+    }
+    /* The fullscreen pane deliberately has NO --DefaultLyricsSize override any
+       more. It used to carry a fixed 3.5rem base, which is the same value the
+       shared .LyricsContent clamp already lands on at that width -- so it was
+       redundant on a big monitor and actively wrong on a small one, where a
+       fixed base refused to shrink. One rule, one source of truth. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .SpicyLyricsScrollContainer {
+      width: 100%;
+      max-width: 980px;
+      margin: 0 auto;
+    }
+    /* Fullscreen playback controls use the same chrome as the layout controls,
+       but their placement follows the selected layout. */
+    /* ===== fullscreen playback chrome: floating play chip + bottom scrubber =====
+       The container is a full-overlay layer (inset: 0) and the chip and
+       scrubber are positioned absolutely inside it. It MUST be full size, not
+       a zero-height anchor pinned to the bottom: an absolutely-positioned
+       child resolves top against its containing block, so with the old
+       inset: auto 0 0 0 anchor a top of 775px put the chip at y=1855, off
+       the bottom of the screen (AJ: "i dont see the controls at all", 2026-09-28).
+       Full size also keeps every existing bottom value resolving to the same
+       pixel, since the container's bottom edge was already the overlay's.
+       pointer-events stays none so the layer never blocks the lyrics; the chip
+       and scrubber re-enable it for themselves. */
+    .ym-sl-fs-player-controls {
+      position: absolute;
+      inset: 0;
+      z-index: 21;
+      pointer-events: none;
+      /* Fades with the media pane on a video <-> cover-art swap; see
+         .ym-sl-fs-swapping at the end of this block. */
+      transition: opacity .3s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-player-controls {
+      opacity: 1;
+      pointer-events: none;
+    }
+    /* Floating play chip (prev / play / next + volume), centered just above the
+       scrubber.
+       NO SURFACE AT ALL (AJ 2026-09-27, then 2026-09-28 x3): the border was
+       removed, then the inset shadows, then the fill was cut from 7% to 2.5%
+       (measured: the 7% fill read as a hard 49 -> 66 step, and
+       0.93*49 + 0.07*255 = 63.6 pinned it exactly on the fill). At 2.5% the
+       step is still ~8/255 against a bright backdrop, which is still visible,
+       because ANY fill over a backdrop IS an edge - there is no alpha that
+       shows a surface without also showing its boundary. So the fill, the
+       backdrop filter and the drop shadow are all gone. The transport buttons
+       keep their own circles, so the group still reads as controls; only the
+       container outline disappears.
+       If a surface is ever wanted back, the two options that do not draw a
+       line are a radial-gradient fill that fades to zero AT the box edge
+       (radial-gradient(closest-side, ...)) or a dark scrim - not a flat tint. */
+    .ym-sl-fs-play-chip {
+      position: absolute;
+      left: 50%;
+      bottom: 46px;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: none;
+      border: 0;
+      box-shadow: none;
+      opacity: 0;
+      pointer-events: auto;
+      transition: opacity .22s ease, background-color .3s ease,
+        transform .35s cubic-bezier(.22,.61,.36,1),
+        top .35s cubic-bezier(.22,.61,.36,1),
+        bottom .35s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-play-chip,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-play-chip {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-idle .ym-sl-fs-play-chip {
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* The three transport buttons as one group. Spaced 14px to match the chip's
+       own gap, so wrapping them changed nothing visually — it exists so the side
+       layout can centre THIS group on the title (AJ, 2026-10-01). */
+    .ym-sl-fs-transport {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    /* Transient "no lyrics" notice — fullscreen Video Background only. The lyrics
+       panel there stays hidden until the first line actually plays, so a track
+       with no lyrics used to fail completely silently (AJ, 2026-10-01). Sits dead
+       centre, non-interactive, and self-dismissing, so it can never block the
+       video it is reporting on. */
+    .ym-sl-fs-notice {
+      position: absolute;
+      /* Right-hand side, aligned with the lyrics column's own right padding so it
+         reads as part of that surface rather than a floating banner, and keeps
+         the middle of the video clear (AJ, 2026-10-01). */
+      top: 50%;
+      right: clamp(24px, 4vw, 72px);
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 13px 20px;
+      border-radius: 14px;
+      background: rgba(10, 11, 14, .74);
+      -webkit-backdrop-filter: blur(14px) saturate(120%);
+      backdrop-filter: blur(14px) saturate(120%);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .01em;
+      /* The load-failure line is far longer than "No lyrics found.", so wrap
+         instead of running off the screen. */
+      max-width: min(560px, 80vw);
+      line-height: 1.4;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-50%) scale(.97);
+      transition: opacity .3s ease, transform .3s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-notice.show {
+      opacity: 1;
+      transform: translateY(-50%) scale(1);
+    }
+    /* Dismissal countdown. Tabular figures so the pill does not twitch as the
+       digit's width changes. */
+    .ym-sl-fs-notice-count {
+      flex: 0 0 auto;
+      min-width: 1.1em;
+      text-align: right;
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255, 255, 255, .6);
+      font-variant-numeric: tabular-nums;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-fs-notice,
+      .ym-sl-fs-notice.show {
+        transform: translateY(-50%);
+        transition: opacity .3s ease;
+      }
+    }
+    .ym-sl-fs-options-button {
+      white-space: nowrap;
+    }
+    /* Volume: a thin bar beside the chip (the mute button was removed) */
+    .ym-sl-fs-volume-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 6px;
+      padding-right: 0; /* the chip's own 16px right padding absorbs the hover grow */
+      margin-left: 4px;
+      border-left: 1px solid rgba(255,255,255,.16);
+      /* No reserved width on the chip: the custom <div> slider expands via a
+         composited transform, which never reflows the chip and leaves no gap. */
+      flex: 0 0 auto;
+    }
+    /* Bottom scrubber: a full-width thin line pinned to the bottom edge. It is
+       hidden by default and only appears while the overlay is hovered/focused,
+       so the video stays clean when the pointer is away. */
+    .ym-sl-fs-scrubber {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      pointer-events: auto;
+      opacity: 0;
+      transition: opacity .25s ease, background-color .3s ease,
+        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-scrubber,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-scrubber {
+      opacity: 1;
+    }
+    .ym-sl-fs-time {
+      flex: 0 0 auto;
+      min-width: 38px;
+      color: rgba(255,255,255,.82);
+      /* SpicyLyrics, same family the credit and the lyrics themselves use, so the
+         progress readouts are part of the composition rather than browser chrome
+         (AJ, 2026-10-03). Written as longhands instead of the font shorthand:
+         the shorthand RESETS font-variant-numeric, which would drop the
+         tabular-nums below and make the clock twitch as the digits change.
+         600 maps to the bundled LyricsSemibold face. */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-weight: 600;
+      font-size: 11px;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .02em;
+      user-select: none;
+      /* NO shadow (AJ, 2026-10-03): the times sit in the dark band under the
+         media, so they never need one - and it read as a smudge behind the
+         numerals. Spelled out as none rather than deleting the line, because
+         text-shadow INHERITS and an ancestor could reintroduce it. */
+      text-shadow: none;
+    }
+    .ym-sl-fs-time[data-time="total"] { text-align: right; }
+    /* thin range track for the seek bar (volume is a custom <div> slider) */
+    .ym-sl-fs-scrubber input[type="range"] {
+      appearance: none;
+      -webkit-appearance: none;
+      height: 3px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      outline: none;
+      cursor: pointer;
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-scrubber .ym-sl-fs-player-seek { flex: 1 1 auto; min-width: 0; }
+    /* seek fill driven by --slider-fill (percent) and --ym-sl-fs-accent. The
+       accent defaults to soft white; an artwork-derived color can override it
+       by setting --ym-sl-fs-accent on the overlay. */
+    .ym-sl-fs-player-seek {
+      --slider-fill: 0%;
+      --seek-played: var(--ym-sl-fs-accent, rgba(255,255,255,.92));
+      --seek-unplayed: rgba(255,255,255,.18);
+    }
+    .ym-sl-fs-player-seek::-webkit-slider-runnable-track {
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(to right,
+        var(--seek-played) 0%, var(--seek-played) var(--slider-fill),
+        var(--seek-unplayed) var(--slider-fill), var(--seek-unplayed) 100%);
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-player-seek::-moz-range-track { height: 3px; border-radius: 999px; background: var(--seek-unplayed); }
+    .ym-sl-fs-player-seek::-moz-range-progress { height: 3px; border-radius: 999px; background: var(--seek-played); }
+    .ym-sl-fs-player-seek::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 12px; height: 12px; margin-top: -4.5px;
+      border: 0; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.5);
+      opacity: 0; transition: opacity .2s ease;
+    }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb,
+    .ym-sl-fs-player-seek:focus::-webkit-slider-thumb { opacity: 1; }
+    .ym-sl-fs-player-seek::-moz-range-thumb {
+      width: 12px; height: 12px; border: 0; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 5px rgba(0,0,0,.5); opacity: 0;
+    }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-thumb,
+    .ym-sl-fs-player-seek:focus::-moz-range-thumb { opacity: 1; }
+    /* Progress bar grows a little thicker while hovered for easier seeking. */
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-runnable-track { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-track { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-progress { height: 9px; }
+    .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb { margin-top: -1.5px; }
+    /* Slider drag state (AJ's "for tmr" note, 2026-10-03): while a slider is
+       being dragged the cursor hides — an accident AJ found and liked. Scoped
+       to the overlay so the rest of the page keeps its normal cursor. */
+    .ym-sl-fs-overlay.ym-sl-fs-dragging,
+    .ym-sl-fs-overlay.ym-sl-fs-dragging * {
+      cursor: none !important;
+    }
+    /* Scrub time bubble: while dragging the seek bar, a small readout floats
+       above the thumb showing the timestamp at that position. Absolutely
+       positioned against .ym-sl-fs-player-controls (inset:0 over the overlay),
+       with JS writing left/top from the live thumb ratio. */
+    .ym-sl-fs-scrub-tip {
+      position: absolute;
+      transform: translateX(-50%);
+      background: rgba(18, 18, 20, .92);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 7px 10px;
+      border-radius: 8px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .15s ease;
+      z-index: 23;
+    }
+    .ym-sl-fs-scrub-tip.ym-sl-fs-scrub-tip-on { opacity: 1; }
+    /* Custom <div> volume slider. The track is the hit area; the unplayed line is
+       drawn with ::before, the white fill with .ym-sl-fs-volume-fill, the knob with
+       .ym-sl-fs-volume-knob. On hover the track GROWS IN THICKNESS (3px -> 9px),
+       the same way the seek bar does, so the two bars read as one family. The knob
+       stays round and simply appears on hover/focus (no counter-scale needed). */
+    .ym-sl-fs-player-volume {
+      --vol-fill: 100%;
+      position: relative;
+      width: 150px;            /* long at rest; hover grows to 159px (stays short of pill edge) */
+      height: 14px;            /* generous hit area */
+      border-radius: 999px;
+      cursor: pointer;
+      touch-action: none;
+      transform-origin: left center;
+      transition: transform .28s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-player-volume::before {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 50%; transform: translateY(-50%);
+      height: 3px; border-radius: 999px;
+      background: rgba(255,255,255,.18);
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-volume-fill {
+      position: absolute;
+      left: 0; top: 50%; transform: translateY(-50%);
+      height: 3px; width: var(--vol-fill, 100%);
+      border-radius: 999px;
+      background: #fff;
+      box-shadow:
+        inset 0 0 0 1px rgba(255,255,255,.16),
+        inset 0 1px 0 rgba(255,255,255,.22);
+      pointer-events: none;
+      transition: height .18s ease;
+    }
+    .ym-sl-fs-volume-knob {
+      position: absolute;
+      top: 50%; left: var(--vol-fill, 100%);
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.5);
+      transform: translate(-50%, -50%);
+      transform-origin: center;
+      opacity: 0;
+      transition: opacity .2s ease;
+      pointer-events: none;
+    }
+    /* Grow the volume track in thickness on hover, matching the seek bar (3px -> 9px).
+       The knob shows on hover and for KEYBOARD focus only (:focus-visible) — the
+       plain :focus trigger is gone: pointerdown calls .focus(), which used to fade
+       the knob in right as the drag hid the cursor, reading as a random circle
+       animation (AJ, 2026-10-03). While a slider is being dragged the knob is
+       suppressed outright: the moving fill edge is the indicator, and with the
+       cursor hidden a fading-in circle reads as a glitch. */
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume::before,
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-fill { height: 9px; }
+    .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-knob,
+    .ym-sl-fs-player-volume:focus-visible .ym-sl-fs-volume-knob { opacity: 1; }
+    .ym-sl-fs-overlay.ym-sl-fs-dragging .ym-sl-fs-volume-knob { opacity: 0 !important; }
+    .ym-sl-fs-player-volume:focus-visible { outline: none; }
+    .ym-sl-fs-player-volume:focus-visible::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 50%; transform: translateY(-50%);
+      height: 14px; border-radius: 999px;
+      box-shadow: 0 0 0 2px rgba(255,255,255,.55);
+    }
+    /* NO SURFACE (AJ 2026-10-03): the transport buttons float on the backdrop
+       without a background, border or shadow. The translucent fill was the
+       last layer of chrome - removed so they read as icons, not as buttons
+       with skins. The hit target keeps its circular min-width/min-height.
+       Bumped up a size (34->40, play 50->56) so they sit comfortably as the
+       only thing in the row. */
+    .ym-sl-fs-player-controls button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      position: relative;
+      background: none;
+      color: rgba(255, 255, 255, .88);
+      font: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: none;
+      transition: transform .22s cubic-bezier(.34,1.56,.64,1),
+        color .22s ease;
+    }
+    .ym-sl-fs-player-controls button:hover {
+      transform: scale(1.08);
+      background: none;
+      color: #fff;
+      box-shadow: none;
+    }
+    .ym-sl-fs-player-controls button:active { transform: scale(.92); }
+    /* Prev / Next flank the play button and AJ wants them BIGGER than the
+       40px shuffle/repeat pair, but still smaller than play. Play/pause is the
+       primary control so it stays the largest. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next {
+      width: 48px;
+      height: 48px;
+      min-width: 48px;
+      min-height: 48px;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play {
+      width: 64px;
+      height: 64px;
+      min-width: 64px;
+      min-height: 64px;
+      font-size: 22px;
+      background: none;
+    }
+    /* Spicy transport glyphs. Prev / Next use a 35x20 viewBox (a wide double
+       triangle) and Play / Pause a narrow one, so each is sized on its own
+       instead of inheriting a single font-size. pointer-events:none keeps the
+       button itself the only hit target. Sizes bumped to match the larger
+       hit targets. */
+    .ym-sl-fs-player-controls button svg {
+      width: 22px;
+      height: 22px;
+      display: block;
+      pointer-events: none;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next svg {
+      width: 26px;
+      height: 26px;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play svg {
+      width: 32px;
+      height: 32px;
+    }
+    /* Active shuffle/repeat: no fill (the buttons float), so the engaged signal
+       is the full-white icon + the dot under it (see ::after below). Do NOT put
+       a permanent scale here - it would make the button look hovered forever and
+       swallow the click/press animation (the scale is a hover/press thing only,
+       on the generic :hover / :active rules). */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active {
+      background: none;
+      color: #fff;
+      box-shadow: none;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active:hover {
+      background: none;
+    }
+    /* YTM-style "engaged" dot under the icon. With no fill on the buttons now,
+       the active state was only a faint whitening of the glyph (.88 -> #fff),
+       which reads as "no change". This dot is the unambiguous ON signal for
+       shuffle and for repeat-all (repeat-one already carries the "1" in its
+       glyph, so it needs no extra cue). The dot is always present but
+       opacity-gated so it fades in/out instead of popping. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle::after,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat::after {
+      content: "";
+      position: absolute;
+      bottom: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #fff;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active::after,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active::after {
+      opacity: 1;
+    }
+    /* offset rail (inside the options overlay) — keep the original look */
+    .ym-sl-fs-control-offset input[type="range"] {
+      appearance: none;
+      -webkit-appearance: none;
+      height: 6px;
+      width: 104px;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255,255,255,.96) 0 var(--slider-fill, 50%), rgba(255,255,255,.18) var(--slider-fill, 50%) 100%);
+      outline: none;
+      accent-color: #fff;
+      cursor: pointer;
+      transition: none;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-fs-control-offset input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -4px;
+      border: 2px solid rgba(255,255,255,.94);
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0,0,0,.45);
+    }
+    .ym-sl-fs-control-offset input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      transform: translateY(-1px);
+      border: 2px solid rgba(255,255,255,.94);
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0,0,0,.45);
+    }
+    .ym-sl-fs-controls {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      left: auto;
+      bottom: auto;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      /* No surface at all - same defect as the play chip, same fix. */
+      border: 0;
+      border-radius: 10px;
+      background: none;
+      box-shadow: none;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px);
+      transition: opacity .18s ease, background-color .3s ease,
+        transform .35s cubic-bezier(.22,.61,.36,1),
+        left .35s cubic-bezier(.22,.61,.36,1), right .35s cubic-bezier(.22,.61,.36,1),
+        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+    .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+    /* Idle state: after a couple of seconds without input, hide the pointer in
+       EVERY layout, and hide the hover controls in EVERY layout too (AJ,
+       2026-10-02 — he originally wanted Side / Lyrics Only to keep the chrome,
+       but the EXIT + LAYOUT buttons need to clear on idle there as well; they
+       were the only chrome that stayed). The play chip and scrubber still stay
+       put in those layouts (see the end-of-sheet block). Placed AFTER the
+       :hover rule above so it wins on equal specificity. Any input clears it. */
+    .ym-sl-fs-overlay.ym-sl-fs-idle,
+    .ym-sl-fs-overlay.ym-sl-fs-idle * {
+      cursor: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-controls {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px);
+    }
+    /* Bright-video controls scrim (AJ, 2026-09-28 QoL). The chrome is
+       surface-less by design, so over a bright / near-white music video it
+       washes out completely — worst once the lyrics (and their readability
+       shade) are hidden. In Video Background only, a high sampled video
+       brightness adds a soft dark fill so the transport stays legible. Toggled
+       from setFullscreenBrightVideo() with hysteresis; the fill is transitioned
+       so crossing the threshold is not a hard pop. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-bright-video .ym-sl-fs-controls,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-bright-video .ym-sl-fs-play-chip,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-bright-video .ym-sl-fs-scrubber {
+      background: rgba(0,0,0,.45);
+    }
+    /* ===== idle "fill ring" cursor indicator ==============================
+       Shown in fullscreen once the pointer STOPS moving: a hollow white ring
+       at the cursor that draws itself over the idle delay (a stroke-dashoffset
+       tween on an SVG circle, so it reads as a ring filling — NOT a solid
+       disc), then fades out and shrinks as the chrome auto-hides. An
+       affordance that the cursor is about to vanish (AJ, 2026-09-28). Driven
+       by resetFsIdleRing() / leaveFsIdleRing(); position via CSS vars. */
+    .ym-sl-fs-idle-ring {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 30;
+      width: 36px;
+      height: 36px;
+      margin: -18px 0 0 -18px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(var(--ym-sl-fs-idle-ring-x, 0px), var(--ym-sl-fs-idle-ring-y, 0px)) scale(1);
+      transition: opacity .3s ease, transform .3s ease;
+    }
+    .ym-sl-fs-idle-ring.visible { opacity: 1; }
+    .ym-sl-fs-idle-ring.leaving {
+      opacity: 0;
+      transform: translate(var(--ym-sl-fs-idle-ring-x, 0px), var(--ym-sl-fs-idle-ring-y, 0px)) scale(.55);
+    }
+    .ym-sl-fs-idle-ring-svg { display: block; width: 36px; height: 36px; }
+    .ym-sl-fs-idle-ring-track {
+      fill: none;
+      stroke: rgba(255,255,255,.25);
+      stroke-width: 2.5;
+    }
+    .ym-sl-fs-idle-ring-fill {
+      fill: none;
+      stroke: #fff;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-dasharray: var(--ym-sl-fs-idle-ring-circ, 94.25);
+      stroke-dashoffset: var(--ym-sl-fs-idle-ring-circ, 94.25);
+      transform-box: fill-box;
+      transform-origin: center;
+      transform: rotate(-90deg);
+    }
+    .ym-sl-fs-idle-ring.visible .ym-sl-fs-idle-ring-fill {
+      animation: ym-sl-fs-idle-ring-fill var(--ym-sl-fs-idle-ring-fill-ms, 1740ms) linear forwards;
+    }
+    @keyframes ym-sl-fs-idle-ring-fill {
+      from { stroke-dashoffset: var(--ym-sl-fs-idle-ring-circ, 94.25); }
+      to   { stroke-dashoffset: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      /* Keep the indicator (it is informative) but drop the shrink travel. */
+      .ym-sl-fs-idle-ring, .ym-sl-fs-idle-ring.leaving { transition: opacity .2s ease; }
+      .ym-sl-fs-idle-ring.leaving {
+        transform: translate(var(--ym-sl-fs-idle-ring-x, 0px), var(--ym-sl-fs-idle-ring-y, 0px)) scale(1);
+      }
+    }
+    .ym-sl-fs-controls button,
+    .ym-sl-fs-controls select {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      /* Borderless (AJ 2026-09-27). */
+      border: 0;
+      border-radius: 7px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .ym-sl-fs-controls button { padding: 0 10px; }
+    .ym-sl-fs-controls select {
+      padding: 0 24px 0 8px;
+      /* Tell Chrome to paint the native dropdown popup in dark mode; without
+         this it falls back to a white panel and the option text becomes
+         white-on-white / unreadable. */
+      color-scheme: dark;
+    }
+    .ym-sl-fs-controls select option {
+      /* Explicit fallback for browsers that ignore color-scheme on <option>. */
+      background: #1a1a1a;
+      color: #fff;
+    }
+    .ym-sl-fs-controls button:hover,
+    .ym-sl-fs-controls select:hover { background: rgba(255,255,255,.15); }
+    /* The generic fullscreen button rule has higher specificity than a plain
+       class selector, so keep the hidden state equally specific. */
+    /* The Hide lyrics button is always in the flex row, but collapses to zero
+       width outside Video Background. This makes appearance/disappearance
+       interpolate instead of snapping between display:none and inline-flex. */
+    .ym-sl-fs-controls button.ym-sl-fs-lyrics-toggle {
+      display: inline-flex !important;
+      overflow: hidden;
+      max-width: 0;
+      min-width: 0;
+      width: 0;
+      padding-left: 0 !important;
+      padding-right: 0 !important;
+      border-left-width: 0;
+      border-right-width: 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: scale(.88) translateY(4px);
+      transition:
+        max-width .32s cubic-bezier(.22,.61,.36,1),
+        width .32s cubic-bezier(.22,.61,.36,1),
+        padding .32s cubic-bezier(.22,.61,.36,1),
+        border-width .32s cubic-bezier(.22,.61,.36,1),
+        opacity .22s ease, visibility 0s linear .32s,
+        transform .32s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video.ym-sl-fs-mode-background .ym-sl-fs-lyrics-toggle {
+      max-width: 120px;
+      width: auto;
+      padding-left: 10px !important;
+      padding-right: 10px !important;
+      border-left-width: 1px;
+      border-right-width: 1px;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: scale(1) translateY(0);
+      transition-delay: 0s;
+    }
+    /* Keep the reverse transition symmetric. The hidden state waits only for
+       opacity/geometry to finish before becoming non-interactive, instead of
+       instantly removing the button from layout. */
+    .ym-sl-fs-controls button.ym-sl-fs-lyrics-toggle:not(:hover) {
+      transition-delay: 0s;
+    }
+    /* ===== no-video fullscreen: icon-pill chrome =====
+       Audio-only tracks get the Ableton-parity look: a pill control row of
+       circular icon buttons plus a pill progress bar. Music videos keep their
+       original text buttons and thin hover-only scrubber; per spec they gain
+       the title and nothing else. So every control carries BOTH a text label
+       and a glyph, and the variant decides which one is visible. */
+    .ym-sl-fs-controls .ym-sl-fs-btn-icon { display: none; }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls .ym-sl-fs-btn-label {
+      display: none;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls .ym-sl-fs-btn-icon {
+      display: block;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls button.ym-sl-fs-icon-btn {
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      max-width: 36px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: rgba(255,255,255,.85);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      cursor: pointer;
+      transition: background .18s ease, color .18s ease, transform .18s ease;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls button.ym-sl-fs-icon-btn svg {
+      width: 18px;
+      height: 18px;
+      display: block;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls button.ym-sl-fs-icon-btn:hover {
+      background: rgba(255,255,255,.14);
+      color: #fff;
+      transform: scale(1.06);
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls button.ym-sl-fs-icon-btn:focus-visible {
+      outline: 2px solid rgba(255,255,255,.7);
+      outline-offset: 1px;
+    }
+    /* Hide-lyrics only expands in Video Background mode, which requires a live
+       video. With no video it stays collapsed, sized for the round icon
+       button; the music-video variant keeps its original text collapse above.
+       NO BACKTICKS IN THIS COMMENT BLOCK - it sits inside a template literal. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video)
+      .ym-sl-fs-controls button.ym-sl-fs-icon-btn.ym-sl-fs-lyrics-toggle {
+      width: 0;
+      min-width: 0;
+      max-width: 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: scale(.88);
+      /* Cancel the flex gap a zero-width child still contributes. */
+      margin-left: -8px;
+      transition:
+        width .32s cubic-bezier(.22,.61,.36,1),
+        max-width .32s cubic-bezier(.22,.61,.36,1),
+        margin-left .32s cubic-bezier(.22,.61,.36,1),
+        opacity .22s ease, visibility 0s linear .32s,
+        transform .32s cubic-bezier(.22,.61,.36,1);
+    }
+    /* Pill surface for the control row, no-video only. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-controls {
+      border-radius: 999px;
+      padding: 6px 8px;
+      gap: 2px;
+    }
+    /* Pill progress bar, no-video only: always visible and substantial,
+       replacing the thin hover-only line the music-video variant keeps.
+       Sits at the very bottom of the stack, under the transport chip. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-scrubber {
+      bottom: 24px;
+      left: 50%;
+      right: auto;
+      width: min(620px, calc(100% - 48px));
+      transform: translateX(-50%);
+      opacity: 1;
+      gap: 10px;
+      padding: 10px 16px;
+      /* No surface at all - see the long note on .ym-sl-fs-play-chip: any fill
+         is an edge. */
+      border: 0;
+      border-radius: 999px;
+      background: none;
+      box-shadow: none;
+    }
+    /* Idle auto-hide is scoped to Video Background only (AJ, 2026-09-28): the
+       transport chrome stays put in Side and Lyrics Only. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background:not(.ym-sl-fs-has-video).ym-sl-fs-idle .ym-sl-fs-scrubber {
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* The MUSIC-VIDEO counterpart of the rule above (AJ, 2026-10-01). Without it
+       the playbar stayed up on idle whenever the track HAS a video: the rule above
+       is scoped to :not(.ym-sl-fs-has-video), and with the pointer still sitting
+       inside the window the overlay's own :hover rule kept re-asserting opacity 1.
+       So the transport chip faded out on the idle timer and the scrubber did not.
+       Leaving the window already hid it — that drops :hover — which is why the bug
+       only showed up when the mouse was parked inside the browser. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-has-video.ym-sl-fs-idle .ym-sl-fs-scrubber {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-scrubber input[type="range"] {
+      height: 4px;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-scrubber:hover input[type="range"] {
+      height: 6px;
+    }
+    /* Lyrics-only: the playbar has to leave with the transport chip, not
+       linger until the 2s idle timer. It inherited the no-video "always
+       visible" rule above, so un-hover left it on screen while the controls
+       vanished - the mismatch AJ reported (2026-09-28). Reuse the chip's
+       hover/focus reveal and a matching .22s fade so they disappear together.
+       Specificity ties the no-video base rule; this block is later in source
+       so it wins, and the higher-specificity idle rule keeps hiding it once
+       idle actually fires. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-scrubber {
+      opacity: 0;
+      transition: opacity .22s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only:hover .ym-sl-fs-scrubber,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only:focus-within .ym-sl-fs-scrubber {
+      opacity: 1;
+    }
+
+    /* ===== fullscreen overlay title =====
+       Both variants get a title, and in both it sits DIRECTLY UNDER the media
+       (cover art / video), with the playback chrome under it. The media host
+       is inset at the bottom by the mode rules further down so this band is
+       always clear - the title never overlaps the artwork. */
+    .ym-sl-fs-title {
+      position: absolute;
+      left: 50%;
+      z-index: 22;
+      pointer-events: none;
+      display: block;
+      text-align: center;
+      max-width: 92%;
+      color: #fff;
+      /* Same family the lyrics themselves use, so the title reads as part of
+         the same composition rather than as browser chrome. */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      /* NO shadow (AJ, 2026-10-03). The credit sits in the dark band UNDER the
+         media - over the overlay's own backdrop, never over the video itself -
+         so it does not need one, and even the tight 3px version read as a smudge
+         behind the text. It had already been cut down once, from an 18px blurred
+         layer that read as a dark BACKDROP on bright art (AJ's friend, 2026-09-28). */
+      text-shadow: none;
+      opacity: 0;
+      transform: translateX(-50%) translateY(6px);
+      animation: ym-sl-fs-title-in .34s cubic-bezier(.22,.61,.36,1) .08s forwards;
+      /* Crossfade on a track change - see .ym-sl-fs-title-leaving below.
+         bottom/top are transitioned so the title glides when the media band
+         moves (a different MV aspect ratio changes --ym-sl-fs-band-top) instead
+         of snapping (AJ, 2026-09-28). */
+      transition: opacity .24s ease, transform .24s ease,
+        font-size .35s cubic-bezier(.22,.61,.36,1),
+        bottom .35s cubic-bezier(.22,.61,.36,1), top .35s cubic-bezier(.22,.61,.36,1),
+        filter .3s ease;
+    }
+    .ym-sl-fs-title-artist { font-weight: 800; }
+    .ym-sl-fs-title-track { font-weight: 400; opacity: .82; }
+    /* Rendered empty when there is no track yet: take up no space at all. */
+    .ym-sl-fs-title:empty { display: none; }
+    /* Fullscreen "Next up" list, bottom-left. Native queue-row look (rounded
+       thumb + bold track + dimmer artist) in the Spicy Lyrics family. */
+    .ym-sl-fs-nextup {
+      position: absolute;
+      left: 22px;
+      top: 22px;
+      z-index: 22;
+      display: flex;
+      flex-direction: column;
+      max-width: min(340px, 42vw);
+      color: #fff;
+      /* Hoverable: the extra tracks reveal on hover (AJ, 2026-10-03). */
+      pointer-events: auto;
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity .3s cubic-bezier(.22,.61,.36,1),
+        transform .3s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-nextup.ym-sl-fs-nextup-in {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    /* Frost panel behind the list, on HOVER only (AJ, 2026-10-03). At rest the
+       list is one row and clears the artwork; unfurling it to four rows makes it
+       overlap the cover art on smaller monitors, and white text over bright art
+       is unreadable. So the surface appears with the unfurl.
+       A PSEUDO-ELEMENT, not a background + padding on the list itself: padding
+       would reflow the rows the moment the class flips, so the unfurl would jump
+       before it animated. Bleeding outward (-14px / -16px) also gives the text
+       real breathing room instead of hugging the panel edge.
+       z-index: -1 sits behind the rows; .ym-sl-fs-nextup carries z-index 22 so it
+       is its own stacking context and the -1 cannot escape behind the artwork. */
+    .ym-sl-fs-nextup::before {
+      content: "";
+      position: absolute;
+      inset: -14px -16px;
+      z-index: -1;
+      border-radius: 16px;
+      background: rgba(10, 11, 14, .55);
+      border: 1px solid rgba(255, 255, 255, .09);
+      -webkit-backdrop-filter: blur(18px) saturate(130%);
+      backdrop-filter: blur(18px) saturate(130%);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .3s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-nextup:hover::before {
+      opacity: 1;
+    }
+    /* Hide with the cursor (AJ, 2026-10-03). The overlay drops into
+       .ym-sl-fs-idle after FS_IDLE_HIDE_MS (2s) without input - the same state
+       that hides the cursor - so the list goes with it and the corner is clean.
+       It rides back up to its entry offset (-8px) so leaving mirrors arriving.
+       pointer-events: none matters as much as opacity: without it the list stays
+       hoverable while invisible, and a pointer left resting on it would pop the
+       frost back in on an empty corner. (0,3,0) beats the (0,2,0) -in rule. */
+    .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-nextup {
+      opacity: 0;
+      transform: translateY(-8px);
+      pointer-events: none;
+    }
+    /* Next-up rows are display-only (click-to-jump abandoned 2026-10-03): strip
+       any UA chrome so they keep the box the old rows had. margin is deliberately
+       NOT reset - the row rule below supplies margin-top: 10px. */
+    .ym-sl-fs-nextup-row {
+      -webkit-appearance: none;
+      appearance: none;
+      background: none;
+      border: 0;
+      padding: 0;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      width: 100%;
+    }
+
+    /* "See all" queue-panel CSS removed 2026-10-03 with the panel itself
+       (click-to-jump was abandoned). The Next up list above is display-only. */
+    .ym-sl-fs-nextup-head {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, .55);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+      margin-bottom: 10px;
+    }
+    .ym-sl-fs-nextup-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      margin-top: 10px;
+    }
+    .ym-sl-fs-nextup-thumb {
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      border-radius: 6px;
+      object-fit: cover;
+      background: rgba(255, 255, 255, .08);
+      box-shadow: 0 1px 6px rgba(0, 0, 0, .4);
+    }
+    .ym-sl-fs-nextup-meta { min-width: 0; display: flex; flex-direction: column; }
+    .ym-sl-fs-nextup-title {
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1.25;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+    }
+    .ym-sl-fs-nextup-artist {
+      font-size: 13px;
+      font-weight: 400;
+      line-height: 1.3;
+      color: rgba(255, 255, 255, .72);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+    }
+    /* Every row AFTER the first is folded away at rest; hovering the list
+       unfurls them, staggered, so only ONE track shows by default. */
+    .ym-sl-fs-nextup-row ~ .ym-sl-fs-nextup-row {
+      max-height: 0;
+      margin-top: 0;
+      opacity: 0;
+      overflow: hidden;
+      transform: translateY(-10px) scale(.96);
+      transform-origin: top left;
+      transition: max-height .34s cubic-bezier(.22,.61,.36,1),
+        margin-top .34s cubic-bezier(.22,.61,.36,1),
+        opacity .26s ease,
+        transform .34s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-row ~ .ym-sl-fs-nextup-row {
+      max-height: 64px;
+      margin-top: 10px;
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-row ~ .ym-sl-fs-nextup-row:nth-of-type(3) {
+      transition-delay: .05s;
+    }
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-row ~ .ym-sl-fs-nextup-row:nth-of-type(4) {
+      transition-delay: .10s;
+    }
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-row ~ .ym-sl-fs-nextup-row:nth-of-type(5) {
+      transition-delay: .15s;
+    }
+    /* ===== cover-art fullscreen: Apple Music-style stack ===================
+       Title, then progress + time, then transport, then volume — one
+       left-aligned column under the artwork, spanning its width. Scoped to
+       NO-VIDEO side mode; music videos keep their own layout (AJ, 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
+      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      max-width: none;
+      text-align: left;
+      /* Explicit, viewport-relative size so it scales on smaller monitors. */
+      font-size: clamp(20px, 2.9vh, 36px);
+      transform: translateY(6px);
+      /* MUST override the base keyframe: ym-sl-fs-title-in bakes in
+         translateX(-50%), which dragged the left-aligned title off-screen. */
+      animation-name: ym-sl-fs-title-in-l;
+    }
+    /* COVER ART ONLY: pull the lyrics column in beside the artwork. The base rule
+       keeps MVs at 57.4% (AJ, 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      left: 44%;
+      width: 54%;
+    }
+    /* Stacked credit: track on top (bold), artist under it (dimmer). The inner is
+       authored artist-then-track, so column-REVERSE puts the track on top. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-inner {
+      display: flex;
+      flex-direction: column-reverse;
+      align-items: flex-start;
+      white-space: normal;
+      padding-inline: 0;
+      gap: 1px;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-track {
+      font-weight: 800;
+      opacity: 1;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-artist {
+      font-weight: 500;
+      opacity: .55;
+      font-size: .82em;
+    }
+    /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
+       upward and the new one rises up into its place, so the track + artist read
+       as rolling over rather than dissolving (AJ, 2026-10-03). 22px (was 6px) so
+       the direction actually reads at the cover-art font size. */
+    @keyframes ym-sl-fs-title-in-l {
+      from { opacity: 0; transform: translateY(22px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    /* The leaving state for cover art. It MUST carry the full :not() chain PLUS
+       the leaving class (0,6,0): the cover rule above sets animation-name at
+       (0,5,0), so a plain .ym-sl-fs-title.ym-sl-fs-title-leaving (0,2,0) loses
+       to it. That is exactly why MVs animated on a track change and cover art
+       did not - MV has no cover rule to outrank (AJ, 2026-10-03).
+       Ease-IN on the way out: the credit accelerates away, so the new one
+       rising from below reads as one continuous roll. Duration matches
+       FS_TITLE_SWAP_MS (240ms). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+      animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
+    }
+    @keyframes ym-sl-fs-title-out-l {
+      from { opacity: 1; transform: translateY(0); }
+      to   { opacity: 0; transform: translateY(-22px); }
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+      /* 18px below the title, matching FS_BAND_GAP: this offset IS the gap
+         between the title/artist block and the progress bar, and AJ asked for
+         it to match the cover-art -> title gap above (2026-10-03). */
+      top: calc(var(--ym-sl-fs-band-top, 0px) + var(--ym-sl-fs-title-h, 0px) + 18px);
+      bottom: auto;
+      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
+      right: auto;
+      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      height: auto;
+    }
+    /* order: progress+times, then the transport chip, then the volume. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      order: 1;
+      position: static;
+      width: auto;
+      transform: none;
+      /* GRID, not a column: the seek spans row 1 and the two time labels sit
+         left/right on row 2 (a column stacked them, which read wrong). */
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 6px 10px;
+      padding: 0;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-player-seek {
+      grid-row: 1;
+      grid-column: 1 / -1;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time {
+      grid-row: 2;
+      line-height: 1;
+      font-size: clamp(12px, 1.5vh, 18px);
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(1) {
+      grid-column: 1;
+      justify-self: start;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(2) {
+      grid-column: 2;
+      justify-self: end;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      order: 2;
+      position: static;
+      width: auto;
+      transform: none;
+      display: flex;
+      justify-content: center;
+      padding: 0;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+      order: 3;
+      margin: 0;
+      padding-left: 0;
+      border-left: 0;
+      width: 100%;
+      pointer-events: auto;
+    }
+    /* No hover grow on the volume bar here (AJ, 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-volume {
+      transform: none !important;
+    }
+    /* Transport spans the row: shuffle hard left, repeat hard right. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport {
+      width: 100%;
+    }
+    /* Only SHUFFLE (first) and REPEAT (last) go to the edges; the skip buttons stay
+       grouped around play (AJ, 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport > :first-child {
+      margin-right: auto;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport > :last-child {
+      margin-left: auto;
+    }
+    /* The volume slider must FILL the row rather than keep its 150px default. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-volume {
+      flex: 1 1 auto;
+      width: auto;
+      min-width: 0;
+    }
+    @keyframes ym-sl-fs-title-in {
+      from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+    /* Track change: the old credit lifts and fades out, refreshFsTitle() swaps
+       the text, then dropping this class re-arms the entrance animation above,
+       which fades the new credit back in from opacity 0 with a small rise.
+       The fade-out runs as its OWN animation instead of animation:none plus a
+       transition. The entrance animation ends with a forwards fill that keeps
+       forcing opacity:1, and releasing that fill in the SAME style recalc as a
+       class change did NOT reliably start the opacity transition in Chrome, so
+       the old credit just snapped away instead of fading (AJ: "the title
+       doesn't fade out at the end of a song"). A dedicated ym-sl-fs-title-out
+       animation overrides the entrance animation outright, so the fade-out
+       always runs; its forwards fill holds opacity 0 until paint() drops the
+       class and re-arms the entrance. */
+    .ym-sl-fs-title.ym-sl-fs-title-leaving {
+      animation: ym-sl-fs-title-out .24s ease forwards;
+    }
+    @keyframes ym-sl-fs-title-out {
+      from { opacity: 1; transform: translateX(-50%) translateY(0); }
+      to   { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+    }
+    /* Long-title marquee + edge fade (2026-09-28). Long artist + title
+       strings used to wrap to two lines (AJ). The inner wrapper is forced
+       to one line with white-space:nowrap; the container clips and
+       edge-fades when overflow is detected. The marquee is a ping-pong
+       with two 3s pauses: pause at the LEFT, scroll to show the END at
+       the RIGHT, pause there, scroll back to LEFT, repeat. Shift =
+       -(textWidth - containerWidth) puts the END of the text right at
+       the container's right edge so the right fade can take it out
+       smoothly. Duration stays a flat 12s so the scroll speed scales
+       naturally with how much the title overflows; AJ preferred a
+       constant-pause feel (2026-09-28) over a constant-speed scroll. */
+    .ym-sl-fs-title {
+      overflow: hidden;
+    }
+    .ym-sl-fs-title.ym-sl-fs-title-overflow {
+      -webkit-mask-image: linear-gradient(
+        to right,
+        transparent 0,
+        black 32px,
+        black calc(100% - 32px),
+        transparent 100%
+      );
+      mask-image: linear-gradient(
+        to right,
+        transparent 0,
+        black 32px,
+        black calc(100% - 32px),
+        transparent 100%
+      );
+    }
+    .ym-sl-fs-title-inner {
+      display: inline-block;
+      white-space: nowrap;
+      padding-inline: .35em;
+      will-change: transform;
+    }
+    .ym-sl-fs-title-inner.ym-sl-fs-title-marquee {
+      animation: ym-sl-fs-title-marquee 12s linear infinite;
+    }
+    @keyframes ym-sl-fs-title-marquee {
+      0%, 25%   { transform: translateX(0); }
+      50%, 75%  { transform: translateX(var(--ym-sl-fs-title-shift, 0px)); }
+      100%      { transform: translateX(0); }
+    }
+    /* ===== fullscreen loading spinner =====================================
+       Only appears when a track change runs past FS_SPINNER_DELAY_MS (2s).
+       It stretches over whichever host it was placed in at show time (see
+       fsSpinnerTargetHost()): the lyrics column when the lyrics are the thing
+       loading, or the media pane when the VIDEO is the sole thing still
+       buffering. inset: 0 fills that host, so it follows the host's geometry
+       (layout mode + video aspect ratio) with no extra math. Icon is Spicy
+       Lyrics' own; the spin is slowed to 1.4s from their 0.8s per AJ.
+       Fades in and out via the opacity transition below. Deliberately no
+       backdrop: any fill is an edge (see the play chip note), so legibility
+       comes from a drop shadow instead. */
+    .ym-sl-fs-spinner {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255,255,255,.92);
+      opacity: 0;
+      pointer-events: none;
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,.7));
+      transition: opacity .4s ease-in-out;
+    }
+    .ym-sl-fs-spinner.visible {
+      opacity: 1;
+    }
+    .ym-sl-fs-spinner-icon {
+      display: block;
+      width: 46px;
+      height: 46px;
+    }
+    /* Only animated while visible, so a hidden spinner costs nothing. */
+    .ym-sl-fs-spinner.visible .ym-sl-fs-spinner-icon {
+      animation: ym-sl-fs-spin 1.4s linear infinite;
+    }
+    @keyframes ym-sl-fs-spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+    /* ===== Video Background: the title rides the chrome's reveal ==========
+       In this layout the media is the full-bleed backdrop, so the title has
+       nothing to sit under and used to stay on screen permanently over the
+       video (found by AJ's friend, 2026-09-28). It now follows exactly the
+       pattern .ym-sl-fs-controls uses: hidden at rest, fades in on
+       hover/focus-within, and hides again on idle - so the hover rule comes
+       first and the idle rule after it, since they carry equal specificity.
+       animation:none is REQUIRED, not cosmetic: the entrance animation ends
+       with a forwards fill that keeps forcing opacity 1, and an animation-origin
+       value outranks a normal declaration, so without it the title would never
+       hide. Side and Lyrics Only are untouched - there the title is part of the
+       composition. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-title {
+      animation: none;
+      opacity: 0;
+      transform: translateX(-50%) translateY(-4px);
+      transition: opacity .24s ease, transform .24s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background:hover .ym-sl-fs-title,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background:focus-within .ym-sl-fs-title {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-idle .ym-sl-fs-title {
+      opacity: 0;
+      transform: translateX(-50%) translateY(-4px);
+    }
+    /* ===== bottom stack: title -> transport chip -> scrubber pill =========
+       BOTH variants put the title under the media and the chrome under the
+       title, and BOTH align horizontally to the media pane instead of the
+       overlay centre. AJ reported the group sitting in the middle of the screen
+       while the cover art was off to the left (2026-09-27) - the earlier pass
+       only applied the pane alignment to the music-video branch, which is why
+       the no-video case stayed centred.
+       Video Background is excluded: there the media is the full-bleed backdrop
+       and a centred title is correct. The title keeps its translateX(-50%)
+       centring, so only the left value changes.
+       The title anchors to the pane's MIDPOINT, NOT a hard 29%. 29% was the
+       midpoint of the OLD pane (left: 4% + 50% / 2); the pane has since moved to
+       left: 2%, and the stale anchor left the title ~2% (38px at 1920) to the
+       RIGHT of the video - and of the transport, which IS centred on the pane
+       (AJ, 2026-10-03: "the title is not directly under the video"). Deriving it
+       from the published pane box keeps it centred for any pane width.
+       The chip is deliberately NOT listed here: it anchors to the pane's own
+       left/width further down (.ym-sl-fs-play-chip), which already outranked
+       this rule. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      left: calc(var(--ym-sl-fs-pane-left, 2%) + var(--ym-sl-fs-pane-width, 50%) / 2);
+      max-width: 50%;
+    }
+    /* No-video: hero title, cover art sits directly above it. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
+      bottom: 160px;
+      font-size: 42px;
+      line-height: 1.1;
+      letter-spacing: -.015em;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
+      bottom: 74px;
+    }
+    /* Music video: smaller caption under the video pane. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
+      bottom: 150px;
+      font-size: 22px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
+      bottom: 72px;
+    }
+    @media (max-height: 700px) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
+        bottom: 136px;
+        font-size: 32px;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
+        bottom: 64px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
+        bottom: 128px;
+        font-size: 18px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
+        bottom: 62px;
+      }
+    }
+    /* Lyrics-only has no media under the title, so the "hero title at the
+       bottom" rules above (bottom: 160px / 150px) collide with the lyrics and
+       the control band. Float it as a top caption instead. This MUST sit after
+       those rules (and the max-height media query) or they win on source order.
+       The lyrics' bigger top padding (see the lyrics-only .ym-sl-fs-lyrics
+       rule) reserves this band, so the two never overlap (AJ 2026-09-28). */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-title {
+      bottom: auto;
+      top: clamp(20px, 3.5vh, 44px);
+      font-size: clamp(17px, 2.2vh, 25px);
+      line-height: 1.15;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-fs-title { animation: none; opacity: 1; transition: none; }
+      /* Keep the track-change swap, but make it an instant cut. */
+      .ym-sl-fs-title.ym-sl-fs-title-leaving { animation: none; opacity: 0; }
+      /* SAME specificity as the cover-art leaving rule (0,6,0) - without this
+         that rule beats this whole media block and animates anyway. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+        animation: none;
+        opacity: 0;
+      }
+    }
+
+    .ym-sl-fs-control-offset {
+      display: none;
+      align-items: center;
+      gap: 5px;
+      color: rgba(255,255,255,.72);
+      white-space: nowrap;
+    }
+    .ym-sl-fs-control-offset.visible { display: inline-flex; }
+    .ym-sl-fs-control-offset input[type="range"] {
+      width: 104px;
+      accent-color: #fff;
+      cursor: pointer;
+      transition: none;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-fs-options-body .ym-sl-fs-control-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-fs-control-offset-value { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+    .ym-sl-fs-control-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-number {
+      width: 52px; font-size: 11px; color: #fff; background: rgba(255,255,255,.12);
+      border: 0; border-radius: 6px; padding: 2px 4px;
+      -moz-appearance: textfield;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-fs-control-offset .ym-sl-offset-number::-webkit-outer-spin-button,
+    .ym-sl-fs-control-offset .ym-sl-offset-number::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ym-sl-fs-control-offset .ym-sl-offset-applied {
+      font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: rgba(255,255,255,.5);
+    }
+    /* The range is useful on any track: on cover-art tracks it remains a
+       harmless manual lyric timing nudge, while music videos use the same
+       persisted per-track offset as the normal panel. */
+    .ym-sl-fs-control-offset.force-visible { display: inline-flex; }
+    .ym-sl-video-offset {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      color: rgba(255,255,255,.78);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .ym-sl-video-offset.visible { display: inline-flex; }
+    .ym-sl-video-offset input[type="range"] {
+      width: 92px;
+      accent-color: #fff;
+      cursor: pointer;
+    }
+    .ym-sl-video-offset-value {
+      min-width: 48px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: rgba(255,255,255,.66);
+    }
+    .ym-sl-video-offset .ym-sl-offset-scope {
+      background: rgba(255,255,255,.1); color: #fff; border: 0; border-radius: 6px;
+      font-size: 10px; padding: 2px 4px; cursor: pointer;
+    }
+    .ym-sl-video-offset .ym-sl-offset-number {
+      width: 52px; font-size: 11px; color: #fff; background: rgba(255,255,255,.1);
+      border: 0; border-radius: 6px; padding: 2px 4px;
+      -moz-appearance: textfield;
+    }
+    .ym-sl-video-offset .ym-sl-offset-number::-webkit-outer-spin-button,
+    .ym-sl-video-offset .ym-sl-offset-number::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ym-sl-video-offset .ym-sl-offset-applied {
+      font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: rgba(255,255,255,.45);
+    }
+    /* Fullscreen view: YTM's real <video> on the left, the live lyrics panel on
+       the right. Nothing is re-created — both are the existing live elements, so
+       playback, timing and scroll state all keep working. No artwork fetching,
+       no blurred backdrop, and no extension controls in this view. */
+    /* Geometry comes from the mode rules (.ym-sl-fs-mode-* / default "side")
+       higher up; only the visual treatment and overflow are pinned here. */
+    .ym-sl-fs-media {
+      position: absolute;
+      display: block;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: transparent !important;
+    }
+    /* NOTE: the animated cover-art <video> (ym-sl-fs-art-video) is EXCLUDED via
+       :not() — this rule's !important width/height/inset fill would otherwise
+       beat the cover-card sizing rules no matter their specificity, and the
+       animated cover rendered at the full pane size (960x862, AJ, 2026-10-03). */
+    .ym-sl-fs-media > video:not(.ym-sl-fs-art-video) {
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      margin: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      /* Fill the media pane edge-to-edge so the 16:9 video never leaves the
+         two horizontal black bars AJ reported (2026-09-27). The video is
+         cropped instead of letterboxed - matches what Ableton / Spicy do for
+         their fullscreen MV pane, and the host already has rounded corners
+         so the cropped edges look intentional rather than truncated. */
+      object-fit: cover !important;
+      border-radius: 14px;
+      background: transparent;
+      /* No drop shadow: .ym-sl-fs-media has overflow:hidden and the pane's
+         bottom edge IS the video's bottom edge, so the shadow was cut off dead
+         straight under the media (AJ, 2026-09-28). The blurred ambient backdrop
+         already separates the frame from its surroundings. */
+      box-shadow: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > video {
+      /* Restore the pre-letterbox presentation. */
+      background: transparent;
+    }
+    /* Music videos: rounding only; column geometry comes from the layout mode. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media {
+      border-radius: 14px;
+    }
+    /* Smooth fade when the backdrop swaps between cover-art and the live video
+       mid-fullscreen. syncFsVideoMode toggles fsMediaHost opacity around the
+       swap so the transition (cover art fading out / new backdrop fading in)
+       replaces the snap AJ reported (2026-09-16). */
+    .ym-sl-fs-media {
+      transition: opacity .25s ease;
+    }
+    /* Music videos: the hero on the left is the unblurred live video (the
+       clone behind supplies the blurred light). Remove any softening filter
+       so the left video stays crisp. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > video {
+      filter: none;
+    }
+    /* Music videos: give the left column more room so the unblurred hero is
+       visually prominent instead of feeling offset inside a narrow slice.
+       (Dead code now that the overlay is display:block — left here as a
+       no-op anchor in case we ever reintroduce a grid track for side mode.)
+       Grid-template-columns rule removed. */
+    /* Cover art: a centered square card sized off the viewport height so it
+       never dwarfs the lyrics column. The blurred backdrop fills the space
+       around it, so there are no black bars. Reduced 70vh -> 50vh: the cover
+       read too large beside the lyrics (AJ, 2026-10-03). Music videos are a
+       <video>, and this <img> is only created for cover-art tracks, so MVs are
+       untouched by this rule. */
+    .ym-sl-fs-media > img,
+    .ym-sl-fs-media > video.ym-sl-fs-art-video {
+      display: block;
+      width: min(100%, 54vh);
+      height: auto;
+      max-width: 100%;
+      max-height: 54vh;
+      aspect-ratio: 1 / 1;
+      /* Nudge the centred cover very slightly DOWN: the pane it centres in stops
+         short of the overlay bottom (the 218px title/controls band), so pure
+         centring reads a touch high (AJ, 2026-10-03). */
+      transform: translateY(4vh);
+      object-fit: cover;
+      border-radius: 16px;
+      background: #000;
+      /* No drop shadow, same reason as the video: the pane has overflow:hidden
+         and the cover is bottom-aligned in it, so the shadow was sliced off
+         immediately below the artwork (AJ, 2026-09-28). */
+      box-shadow: none;
+    }
+    /* In side mode, center the square cover in the media column without
+       stretching it to the full column height. The old height:100% override
+       made the square's contain box span the entire screen, creating huge
+       black bars above and below the artwork. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+      /* MORE specific than the base .ym-sl-fs-media > img rule, so in side mode
+         THIS is what actually sizes the cover art — keep it in step with the
+         base (AJ, 2026-10-03). */
+      width: min(100%, 54vh);
+      max-height: 54vh;
+      flex: 0 1 auto;
+    }
+    /* Animated cover only: INTEGER-pixel sizing. A fractional box (54vh =
+       583.2px -> 583.188 after layout) makes the video's composited layer snap
+       short of the element's far edges, so the #000 background peeked out as a
+       thin line along the bottom + right only (origin-anchored top/left never
+       show it; static <img> paints its own box and is immune). Rounding the
+       box down to whole pixels removes the gap. Must sit AFTER the side-mode
+       sizing rule above and match its specificity to win (AJ, 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+      width: round(down, min(100%, 54vh), 1px);
+    }
+    /* ===== bottom band: reserve room for the title + playback chrome ======
+       AJ's spec (2026-09-27): everything lives UNDER the media, so the media
+       pane stops short of the overlay bottom and the title/controls occupy
+       the band that is left. Scoped to side mode only - in Video Background
+       the video IS the backdrop and must stay full-bleed, and Lyrics Only has
+       no media at all. The media host transition does not list bottom, so
+       this inset snaps between layouts rather than animating; that is
+       deliberate (animating a host that carries JS-measured media is what
+       produced the stale-size black bars noted in the project memory). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      bottom: 218px;
+    }
+    /* Music video: size the pane to the video's OWN aspect ratio, and centre it
+       on the viewport's vertical middle.
+       ASPECT: the pane used to be 50% wide but nearly full height (AR ~1.2)
+       while the video is 1.78, so object-fit: cover cropped the sides and
+       contain left letterbox bars - AJ hit both, one round apart. Matching the
+       ratios makes cover a no-op: full frame AND filled pane. The var comes
+       from the real videoWidth/videoHeight in drawBgFrame(); 16/9 is the
+       fallback for the frames before metadata arrives.
+       POSITION: centred on 50% - the pane's height is width/AR, so a 16:9 video
+       in a 50%-wide column is only 540px tall. Bottom-pinning it left a 340px
+       void above (AJ: "too low"); centring on the band midpoint instead put it
+       100px above the screen's middle (AJ: "a little too high"). Dead centre
+       is what he wants. Measured clearance: the title's top edge sits at
+       y=904, and a 16:9 pane centred at 540 ends at 810, so there is 94px of
+       air; a 4:3 pane ends at 900 and just clears it.
+       max-height keeps a very tall / vertical video from covering the whole
+       screen and the band; it is a no-op for anything wider than ~1.09.
+       Nothing else writes transform on this host (only opacity does), so the
+       translateY cannot collide with the layout-switch animation. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      top: 50%;
+      bottom: auto;
+      height: auto;
+      transform: translateY(-50%);
+      aspect-ratio: var(--ym-sl-fs-video-ar, 16 / 9);
+      max-height: calc(100% - 200px);
+    }
+    /* Cover art must shrink into the shortened pane instead of overflowing
+       the band. aspect-ratio keeps it square; max-height:100% clamps it. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+      max-height: 100%;
+    }
+    /* CENTRE the cover inside the shortened pane. It used to be bottom-aligned so
+       the title sat directly under it; now that the art is smaller, centring it
+       reads better, and the title / controls follow the ART's own bottom edge
+       instead of the pane's (see publishFsBandVars, AJ 2026-10-03). */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      align-items: center;
+    }
+    /* Both variants: the scrubber spans the MEDIA PANE, not the overlay centre,
+       so it sits exactly under the cover art / video. --ym-sl-fs-pane-left and
+       --ym-sl-fs-pane-width are measured off the pane's own rect by
+       publishFsBandVars(); a percentage CANNOT work here, because the pane's
+       width comes from the video's aspect ratio against the available height
+       (AJ, 2026-10-01). box-sizing MUST be border-box: this rule is content-box
+       by default, so the base padding of 0 18px used to ADD 36px and push the
+       bar 36px past the video's right edge — which is why it never lined up.
+       transform must be reset because the no-video pill base centres itself
+       with translateX(-50%), which would drag a pane-anchored bar off the pane. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      left: var(--ym-sl-fs-pane-left, 4%);
+      right: auto;
+      width: var(--ym-sl-fs-pane-width, 50%);
+      box-sizing: border-box;
+      transform: none;
+      bottom: 24px;
+    }
+    /* The SEPARATOR sits dead under the title (AJ, 2026-10-01). The chip spans the
+       pane and lays out as 1fr / auto / 1fr: the transport is pushed to the END of
+       the left column and the volume to the START of the right one, so whatever
+       either side weighs, the middle column — the divider — lands on the chip's
+       midpoint, which is the pane's midpoint, which is the title's.
+       The divider is the chip's own ::after rather than the volume group's
+       border-left, because it has to be its own grid item to hold that column.
+       Equal 14px gutters keep it centred IN the gap instead of hugging either side.
+       minmax(0, 1fr) not plain 1fr: a plain 1fr keeps an auto minimum, so a wide
+       volume would widen its own column and drag the divider off centre. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      left: var(--ym-sl-fs-pane-left, 4%);
+      width: var(--ym-sl-fs-pane-width, 50%);
+      max-width: none;
+      transform: none;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      align-items: center;
+      gap: 0;
+      padding: 10px 0;
+    }
+    /* TRANSPORT CENTRED ON THE PANE, VOLUME ON THE SCRUBBER ROW (AJ, 2026-10-01).
+       Shuffle and Repeat made the transport five buttons wide — wide enough that
+       centring the chip AS A UNIT left the transport visibly left of the title. So
+       the middle column carries the transport, and the volume left the chip
+       entirely: it now sits on the scrubber row, after the total time. The seek
+       range is the flex child that gives up the room, so bar + volume still span
+       the media pane together — which is exactly what AJ asked for.
+       Every item is pinned to grid-row 1 EXPLICITLY: auto-placement walks items in
+       SOURCE order with a cursor that only moves forward, so an item whose column
+       sits BEHIND the cursor gets pushed onto the next row. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport {
+      grid-row: 1;
+      grid-column: 2;
+      justify-self: center;
+    }
+    /* A plain flex child of .ym-sl-fs-scrubber now, so it needs no grid placement —
+       only the divider separating it from the total time beside it. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+      margin-left: 0;
+      padding-left: 14px;
+      /* The 1px divider is removed too (AJ 2026-10-03) so the volume sits flush
+         against the scrubber row without a line of chrome between them. */
+      border-left: 0;
+    }
+
+    /* Self-contained blurred backdrop. We render our own (rather than
+       reparenting dynamic.js's Kawarp node) because dynamic.js's rootObserver
+       actively yanks pageBgHost back to pageBgRoot, stealing it from the overlay
+       within a frame. For music videos, a muted clone of the live video plays
+       blurred in the background AND the original plays unblurred on the left,
+       so the music video actually lights up the background with live motion. */
+    .ym-sl-fs-bg-img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scale(1.06);
+      will-change: transform, filter;
+      z-index: 0;
+    }
+    /* Cover art: brighter than before so the blurred album art reads as a
+       proper background, not a near-black veil. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-bg-img {
+      filter: blur(30px) saturate(1.75) brightness(.78);
+    }
+    /* Music videos: hide the static artwork backdrop because the live video
+       itself fills the fullscreen media layer. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-bg-img {
+      display: none;
+    }
+    /* Kawarp WebGL backdrop for song fullscreen. Sits behind everything at
+       z-index 0; when it owns the backdrop the static blurred cover is hidden.
+       The .ready class fades it in once the module + image have loaded. */
+    .ym-sl-fs-kawarp {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(1.06);
+      transition: opacity .6s ease;
+    }
+    .ym-sl-fs-kawarp.ready { opacity: 1; }
+    .ym-sl-fs-overlay.ym-sl-fs-has-kawarp .ym-sl-fs-bg-img { display: none; }
+    /* Music videos normally use the blurred-video canvas, but a still upload
+       (Official Audio / Lyric Video) hands the backdrop to Kawarp instead. The
+       canvas has to be hidden too: both sit at z-index 0 and the canvas comes
+       LATER in DOM order, so it would paint straight over Kawarp. Keeping the
+       element (rather than removing it) means the draw loop keeps running,
+       which is what publishes --ym-sl-fs-video-ar, and it gives a free fallback
+       - if Kawarp fails it drops the class and the canvas is visible again. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-kawarp .ym-sl-fs-bg-canvas { display: none; }
+    /* Music-video backdrop: a <canvas> holding a very low-res copy of the live
+       <video>. The heavy blur is applied by CSS (see the background-mode rule)
+       to a static layer, so the browser never re-blurs the live video per
+       frame. Overscan is larger than before because a 64px blur would
+       otherwise fade out at the element edges. */
+    .ym-sl-fs-bg-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      /* Decorative ambient backdrop only. It covers the whole overlay, so it
+         must never intercept clicks meant for the lyrics (the sibling
+         .ym-sl-fs-bg-tint already sets this; the canvas was missing it). */
+      pointer-events: none;
+      /* Larger overscan than the old 1.06: ctx.filter's blur fades toward the
+         canvas edges, and this scales the faded border outside the viewport. */
+      transform: scale(1.3);
+      transform-origin: center center;
+      will-change: transform;
+      z-index: 0;
+    }
+    .ym-sl-fs-bg-tint {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, .2);
+      z-index: 1;
+      pointer-events: none;
+    }
+    /* Cover-card crossfade (2026-09-28). Without the loading class the sharp
+       cover card painted the OLD decoded image during the window between the
+       fullscreen track-refresh tick setting a new src and the browser
+       finishing the new decode — meanwhile Kawarp had already loaded the
+       new art and was rendering it, so the pane briefly showed two different
+       covers at once. Adding the .ym-sl-fs-art-loading class on every src
+       swap (set by setFsArtSrc) drops the card to opacity 0 for the decode,
+       and removing it on the img's load event fades it back to opacity 1 —
+       by which point Kawarp also has the new art, so the two reveal
+       together. */
+    .ym-sl-fs-art {
+      opacity: 1;
+      transition: opacity .28s ease;
+    }
+    .ym-sl-fs-art.ym-sl-fs-art-loading {
+      opacity: 0;
+    }
+    /* Animated Apple Music cover (m8tec HLS stream, played via hls.js). It
+       shares the cover-card box with the static <img> and only ONE shows at a
+       time: while the stream loads the static card stays put (its own
+       crossfade handles the track-swap), and once the video can play we fade
+       it in and hide the card. The video is muted + loops + autoplays inline,
+       so it behaves like a living album cover with no chrome of its own. */
+    .ym-sl-fs-art-video {
+      opacity: 0;
+      transition: opacity .5s ease;
+      pointer-events: none;
+      object-fit: cover;
+      background: #000;
+    }
+    .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
+    /* .ym-sl-fs-media / .ym-sl-fs-lyrics base position + z-index are set by
+       the animated rules higher up. */
+    .ym-sl-fs-lyrics {
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      display: flex;
+      overflow: hidden;
+    }
+    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
+    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
+    .ym-sl-track { 
+      min-width: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(255,255,255,.66);
+      pointer-events: none;
+    }
+    .ym-sl-import {
+      flex: 0 0 auto;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.82);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+      transition: background .15s ease, transform .12s ease;
+    }
+    .ym-sl-import:hover { background: rgba(255,255,255,.14); }
+    .ym-sl-import:active { transform: scale(.97); }
+    /* Inside the OPTIONS panel, match the selects they sit beside: same radius,
+       slightly larger type. Scoped, so the panel's own toolbar buttons keep their
+       compact sizing (AJ, 2026-10-01). */
+    .ym-sl-options-overlay .ym-sl-import,
+    .ym-sl-fs-options-overlay .ym-sl-import {
+      min-height: 32px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .ym-sl-import.active {
+      background: rgba(96,165,250,.28);
+      border-color: rgba(96,165,250,.6);
+      color: #eaf2ff;
+    }
+    .ym-sl-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding: 28px 12px;
+      text-align: center;
+    }
+    .ym-sl-empty-msg { color: rgba(255,255,255,.72); }
+    .ym-sl-empty-search { min-height: 34px; padding: 0 16px; font-size: 12px; }
+    /* Loading skeleton. Sized off --DefaultLyricsSize so it tracks the size
+       slider: a real .line rule is font-size: var(--DefaultLyricsSize) at
+       line-height 1.4 plus .12em block padding, i.e. ~1.64x, so a 0.6x bar with
+       a 0.95x gap puts the placeholder rows on roughly the same pitch as real
+       lyrics and the panel does not jump when they arrive.
+       Only transform/opacity animate. A background-position shimmer would
+       repaint the whole block every frame — the exact cost the skeleton exists
+       to hide. */
+    .ym-sl-skeleton {
+      display: flex;
+      flex-direction: column;
+      gap: calc(var(--DefaultLyricsSize) * .95);
+      padding: calc(var(--DefaultLyricsSize) * .5) 2px;
+    }
+    .ym-sl-skeleton-row {
+      position: relative;
+      flex: 0 0 auto;
+      height: calc(var(--DefaultLyricsSize) * .6);
+      border-radius: 6px;
+      background: rgba(255,255,255,.075);
+      overflow: hidden;
+    }
+    .ym-sl-skeleton-row::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
+      animation: ym-sl-skeleton-sweep 1.15s ease-in-out infinite;
+    }
+    @keyframes ym-sl-skeleton-sweep {
+      from { transform: translateX(-100%); }
+      to   { transform: translateX(100%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-skeleton-row::after { display: none; }
+    }
+    .ym-sl-search {
+      position: absolute;
+      top: 48px;
+      left: 14px;
+      right: 14px;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 12px;
+      background: rgba(16,18,24,.96);
+      box-shadow: 0 12px 30px rgba(0,0,0,.5);
+      pointer-events: auto;
+    }
+    .ym-sl-search.hidden { display: none !important; }
+    .ym-sl-search-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .ym-sl-search-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-search-close {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 6px;
+      background: rgba(255,255,255,.1);
+      color: rgba(255,255,255,.85);
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .ym-sl-search-close:hover { background: rgba(255,255,255,.18); }
+    .ym-sl-search-form { display: flex; gap: 6px; }
+    .ym-sl-search-input {
+      flex: 1 1 auto;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 7px;
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.92);
+      font: inherit;
+      font-size: 12px;
+    }
+    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.45); }
+    .ym-sl-search-remember {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: rgba(255,255,255,.7);
+      cursor: pointer;
+      user-select: none;
+    }
+    .ym-sl-search-status {
+      min-height: 14px;
+      font-size: 11px;
+      color: rgba(255,255,255,.6);
+    }
+    .ym-sl-search-results {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 240px;
+      overflow-y: auto;
+      margin: 0;
+      padding: 0;
+    }
+    .ym-sl-search-result {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 1px;
+      text-align: left;
+      padding: 7px 9px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      background: rgba(255,255,255,.05);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      cursor: pointer;
+      transition: background .12s ease;
+    }
+    .ym-sl-search-result:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-result.no-sync {
+      opacity: .42;
+      cursor: not-allowed;
+      background: rgba(255,255,255,.03);
+    }
+    .ym-sl-search-result.no-sync:hover { background: rgba(255,255,255,.03); }
+    .ym-sl-search-result.no-sync-available {
+      opacity: .62;
+      cursor: pointer;
+      background: rgba(255,255,255,.04);
+    }
+    .ym-sl-search-result.no-sync-available:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-name { font-size: 12px; font-weight: 600; }
+    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.6); }
+    .ym-sl-jump {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 25;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 8px;
+      background: rgba(0,0,0,.88);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+      opacity: 1;
+      transform: translateY(0);
+      transition:
+        opacity .18s ease,
+        background .15s ease,
+        transform .18s ease;
+    }
+    .ym-sl-jump:hover { background: rgba(0,0,0,.98); }
+    .ym-sl-jump:active { transform: scale(.97); }
+    .ym-sl-jump.hidden {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(6px);
+    }
+    /* ---- MV pause re-sync ---------------------------------------------------
+       Pick mode: hovering a primary line shows the existing .line::before box in a
+       stronger form plus a floating "Sync from here" label (.line::after is unused
+       on lines, only .word/.letterGroup use ::after for spacing). The label is
+       absolutely positioned, so it is not treated as a flex item of the .line. */
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line)::after {
+      content: "Sync from here";
+      position: absolute;
+      right: -4px;
+      top: -11px;
+      z-index: 3;
+      padding: 1px 6px;
+      border-radius: 6px;
+      background: rgba(0,0,0,.86);
+      color: rgba(255,255,255,.88);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      line-height: 1.5;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .15s ease;
+    }
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line):hover::after { opacity: 1; }
+    .ym-sl-pause-mode .line:not(.bg-line):not(.musical-line):hover::before {
+      opacity: 1;
+      transform: scale(1);
+      border-color: rgba(255,255,255,.55);
+      background: rgba(255,255,255,.10);
+    }
+    .ym-sl-pause-mode .line.bg-line,
+    .ym-sl-pause-mode .line.musical-line { cursor: default; }
+    /* Persistently mark the chosen sync point even outside pick mode. */
+    .line.ym-sl-pause-mark::before {
+      opacity: 1;
+      transform: scale(1);
+      border-color: rgba(255,255,255,.45);
+      background: rgba(255,255,255,.05);
+    }
+    .ym-sl-pause-banner {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 58px;
+      z-index: 26;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 8px;
+      background: rgba(0,0,0,.9);
+      color: rgba(255,255,255,.92);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .ym-sl-pause-banner.hidden { display: none; }
+    .ym-sl-pause-banner-text { flex: 1 1 auto; min-width: 0; }
+    .ym-sl-pause-cancel {
+      flex: 0 0 auto;
+      min-height: 24px;
+      padding: 0 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 6px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .ym-sl-pause-section { display: flex; flex-direction: column; gap: 6px; }
+    .ym-sl-pause-editor { display: flex; flex-direction: column; gap: 6px; }
+    .ym-sl-pause-editor.hidden { display: none; }
+    .ym-sl-pause-line {
+      font-size: 11px;
+      color: rgba(255,255,255,.62);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-pause-row { display: flex; align-items: center; gap: 8px; }
+    .ym-sl-pause-range { flex: 1 1 auto; min-width: 0; accent-color: #fff; }
+    .ym-sl-pause-number {
+      flex: 0 0 auto;
+      width: 58px;
+      min-height: 26px;
+      padding: 0 6px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 6px;
+      background: rgba(0,0,0,.35);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 11px;
+    }
+    .ym-sl-pause-value { font-size: 11px; color: rgba(255,255,255,.72); }
+    .ym-sl-pause-clear { flex: 0 0 auto; min-height: 26px; padding: 0 10px; }
+    .ym-sl-pause-pick.hidden { display: none; }
+    .ym-sl-pause-pick:disabled { opacity: .45; cursor: not-allowed; }
+    .ym-sl-import-mode {
+      flex: 0 0 auto;
+      min-height: 30px;
+      padding: 0 24px 0 8px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.82);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .ym-sl-import-mode option {
+      background: #202020;
+      color: #000;
+    }
+    /* The OPTIONS panel's selects are dark, matching its buttons and the rest of
+       the panel. color-scheme: dark (not light) so Chrome also draws the native
+       arrow and the open dropdown dark — the white select was the single most
+       jarring thing in the panel (AJ, 2026-10-01). */
+    .ym-sl-options-overlay select,
+    .ym-sl-fs-options-overlay select {
+      color-scheme: dark;
+      box-sizing: border-box;
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 8px;
+      background-color: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.9);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color .2s ease, border-color .2s ease;
+    }
+    .ym-sl-options-overlay select option,
+    .ym-sl-fs-options-overlay select option {
+      background: #14161b;
+      color: #f1f1f1;
+    }
+    .ym-sl-options-overlay select:hover,
+    .ym-sl-options-overlay select:focus,
+    .ym-sl-fs-options-overlay select:hover,
+    .ym-sl-fs-options-overlay select:focus {
+      background-color: rgba(255,255,255,.12);
+      border-color: rgba(255,255,255,.3);
+      outline: none;
+    }
+    /* The fullscreen layout picker keeps its light treatment — it floats over
+       video, where a dark pill disappears. */
+    .ym-sl-fs-controls select {
+      color-scheme: light;
+      background-color: #fff;
+      color: #000;
+      transition: background-color .2s ease, color .2s ease, border-color .2s ease;
+    }
+    .ym-sl-fs-controls select option {
+      background: #fff;
+      color: #000;
+    }
+    .ym-sl-fs-controls select:hover,
+    .ym-sl-fs-controls select:focus {
+      background-color: #f2f2f2;
+      border-color: rgba(0,0,0,.35);
+      color: #000;
+      outline: none;
+    }
+
+/* Fullscreen controls must stay reachable on short/lower-resolution screens.
+       They remain over the overlay but have a safe-area clamp so the native
+       fullscreen browser chrome and YTM player bar cannot cover them. */
+    .ym-sl-fs-controls {
+      top: max(18px, env(safe-area-inset-top, 0px));
+      right: max(18px, env(safe-area-inset-right, 0px));
+    }
+    @media (max-height: 700px) {
+      .ym-sl-fs-controls {
+        top: max(8px, env(safe-area-inset-top, 0px));
+        right: max(8px, env(safe-area-inset-right, 0px));
+        transform: translateY(-8px) scale(.92);
+        transform-origin: top right;
+      }
+      .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+      .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+        transform: translateY(0) scale(.92);
+      }
+    }
+    @media (max-height: 560px) {
+      .ym-sl-fs-controls {
+        gap: 4px;
+        padding: 5px 6px;
+        top: max(4px, env(safe-area-inset-top, 0px));
+        right: max(4px, env(safe-area-inset-right, 0px));
+        transform: translateY(-4px) scale(.82);
+      }
+      .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
+      .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
+        transform: translateY(0) scale(.82);
+      }
+    }
+    /* YT Music-style arrows are only needed below 1920x1080. At or above
+       that resolution the complete options row stays clean and arrow-free. */
+    @media (max-width: 1919px), (max-height: 1079px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        display: block;
+      }
+    }
+    /* Lower-resolution YTM pages can have a short viewport where the native
+       tab row is clipped by the player/header stack. Keep the existing panel
+       mount, but reserve a compact top-safe position for the tab controls. */
+    @media (max-height: 700px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
+        top: 0;
+        right: 8px;
+        left: 8px;
+        min-height: 26px;
+        padding: 4px 0;
+        gap: 4px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 6px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        flex-basis: 24px;
+        width: 24px;
+        min-height: 26px;
+        font-size: 16px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-import,
+      #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
+      #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
+        min-height: 26px;
+        font-size: 10px;
+      }
+    }
+    @media (max-height: 560px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
+        min-height: 22px;
+        padding: 2px 0;
+        gap: 3px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 4px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
+        flex-basis: 21px;
+        width: 21px;
+        min-height: 22px;
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-import,
+      #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
+      #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
+        min-height: 22px;
+        font-size: 9px;
+      }
+    }
+
+    #ym-sl-panel.SpicyRenderer .LyricsContainer {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      flex-direction: column;
+      justify-content: center;
+      overflow: hidden;
+      z-index: 4;
+    }
+    #ym-sl-panel.SpicyRenderer .LyricsContent {
+      --TextGlowDef: rgba(255,255,255,.15) 0 0 6px;
+      --ActiveTextGlowDef: rgba(255,255,255,.4) 0 0 14px;
+      --StrongTextGlowDef: rgba(255,255,255,.68) 0 0 16.4px;
+      --ym-sl-lyrics-scale: 1;
+      --ym-sl-lyrics-offset: 0px;
+      /* The glide's sub-pixel remainder (see setScrollFraction). Written by JS as
+         a NEGATIVE px value and folded into the transform below, so it needs no
+         element of its own. */
+      --ym-sl-scroll-frac: 0px;
+      /* Background-vocal opacity as a MULTIPLE of a lead line's, so 1 = the
+         same dimming a normal line gets (see the .line.bg-line block). Named
+         "-scale" and not "-opacity" because it is not used as an opacity value
+         directly: calling it --ym-sl-bg-vocal-opacity and then feeding it
+         straight to the opacity property is what broke background vocals in
+         the first place. applySettings() overwrites this with the user's
+         setting.
+         NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK — this CSS lives inside a
+         JS template literal, so a stray backtick terminates it early. */
+      --ym-sl-bg-vocal-scale: 1;
+      /* Container-relative base, RESTORED 2026-09-26. A fixed rem base was tried
+         for a week to hold the size constant across monitors, but AJ called it
+         out: the pane gets narrower and the type does not, so the lyrics crowd
+         the panel. The 7cqw term tracks the pane instead.
+
+         Which pane: the query container is .ym-sl-panel (container-type: size,
+         above), NOT this element -- a container cannot query itself, so cqw in a
+         declaration here resolves against the nearest ANCESTOR container.
+         Measured live: panel content box 522px => 7cqw = 36.5px, already past
+         the 3.5rem ceiling. So on a normal-size pane this sits AT the ceiling
+         (35px) and only starts shrinking once the pane drops below ~500px. That
+         is exactly the wanted behaviour.
+
+         The fullscreen pane needs no override of its own: it is much wider, so
+         its 7cqw is even further past the same ceiling and the two agree.
+
+         The user's size setting still multiplies via --ym-sl-lyrics-scale.
+         NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK -- this CSS lives inside a
+         JS template literal, so a stray backtick terminates it early. */
+      --DefaultLyricsSize: calc(clamp(1.7rem, calc(1cqw * 7), 3.5rem) * var(--ym-sl-lyrics-scale));
+      --amll-lyric-player-font-size: var(--DefaultLyricsSize);
+      --vertical-gap: 0px;
+      width: 100%;
+      height: 100%;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      /* Eases the NON-spring scroll path. "Smooth scrolling off" means the user
+         did not ask for our spring; it does not mean the panel should teleport,
+         which is what it used to do while "smooth scrolling off" was folded into
+         "immediate". Every per-frame writer passes an explicit behavior of
+         "instant" so this never fights the spring — see writeScrollTop().
+         NO BACKTICKS IN THIS COMMENT BLOCK — it lives inside a template literal. */
+      scroll-behavior: smooth;
+      font-size: var(--DefaultLyricsSize) !important;
+      font-weight: 700;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif !important;
+      font-kerning: normal;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+      container-type: size;
+      opacity: 1;
+      /* The lyric offset AND the glide's sub-pixel remainder share ONE transform.
+         scrollTop is integer-only, so the glide writes whole pixels there and
+         carries the fraction here (--ym-sl-scroll-frac, written by
+         setScrollFraction) — the same trick upstream uses on their virtual
+         container, without needing an extra wrapper element. */
+      transform: translateY(calc(var(--ym-sl-lyrics-offset) + var(--ym-sl-scroll-frac, 0px)));
+      transform-origin: center center;
+      -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      transition: opacity .25s ease;
+    }
+    /* Honour a reduced-motion request: the native ease above is a scroll
+       animation like any other. The spring path is already off for these users
+       (see applySettings), so this only has to cover the fallback. */
+    @media (prefers-reduced-motion: reduce) {
+      #ym-sl-panel.SpicyRenderer .LyricsContent { scroll-behavior: auto; }
+    }
+    #ym-sl-panel.SpicyRenderer .LyricsContent.offline {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* Music-video off-sync notice (see syncMvSyncNotice). A pill at the top of
+       the panel with a shrinking timer bar: no pointer events, no layout shift,
+       fades and removes itself after the 5s countdown. */
+    .ym-sl-mv-sync-chip {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 5;
+      padding: 5px 12px 8px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, .55);
+      color: rgba(255, 255, 255, .8);
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity .45s ease;
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+    }
+    .ym-sl-mv-sync-chip.ym-sl-fading {
+      opacity: 0;
+    }
+    .ym-sl-mv-sync-chip-timer {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 4px;
+      height: 2px;
+      border-radius: 1px;
+      background: rgba(255, 255, 255, .35);
+      transform-origin: left center;
+      animation: ym-sl-mv-sync-timer 5s linear forwards;
+    }
+    @keyframes ym-sl-mv-sync-timer {
+      from { transform: scaleX(1); }
+      to   { transform: scaleX(0); }
+    }
+    #ym-sl-panel.SpicyRenderer .SpicyLyricsScrollContainer {
+      width: 100%;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      margin-top: 25cqh;
+      margin-bottom: 45cqh;
+    }
+    #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer {
+      position: relative;
+      width: 100%;
+      box-sizing: border-box;
+      /* Clip-safe horizontal inset. .LyricsContent has overflow-x: hidden, so
+         lyric glyphs (and the hover highlight box, which bleeds .35em past the
+         line) get cut at the panel edge. Widening the inner padding keeps the
+         text layout/formatting identical and just reserves a safe band, so the
+         right edge clips inside the tab boundary instead of on the glyphs. */
+      padding: 0 28px;
+      container-type: inline-size;
+    }
+    #ym-sl-panel.SpicyRenderer .line {
+      --font-size: var(--DefaultLyricsSize);
+      --BlurAmount: 0px;
+      --DefaultLyricsScale: .95;
+      --DefaultEmphasisLyricsScale: .95;
+      --DefaultLineScale: 1;
+      --Vocal-NotSung-opacity: .51;
+      --Vocal-Active-opacity: 1;
+      --Vocal-Sung-opacity: .497;
+      --Vocal-Hover-opacity: 1;
+      --ym-sl-line-alpha: var(--Vocal-NotSung-opacity);
+      --ym-sl-entry-shadow-alpha: .4;
+      --gradient-position: -20%;
+      --gradient-color: 255;
+      --gradient-alpha: .85;
+      --gradient-alpha-end: .5;
+      --gradient-degrees: 90deg;
+      --gradient-offset: 0%;
+      display: flex;
+      position: relative;
+      flex-wrap: wrap;
+      align-items: baseline;
+      margin: 1cqw 0;
+      opacity: 1;
+      /* Fade the gradient paint. Group opacity briefly blanks clipped glyphs
+         while their per-word sweep repaints at the line's onset. */
+      transition:
+        --ym-sl-line-alpha .2s cubic-bezier(.61,1,.88,1),
+        --ym-sl-entry-shadow-alpha .2s cubic-bezier(.61,1,.88,1);
+      font-size: var(--font-size) !important;
+      /* SF Pro's descenders need a little more line-box room than the
+         original SpicyLyrics font, especially while the glyphs are lifted. */
+      line-height: 1.4 !important;
+      letter-spacing: 0;
+      direction: ltr;
+      cursor: pointer;
+      transform-origin: left center;
+      isolation: isolate;
+      overflow: visible;
+      padding-block: .12em;
+    }
+    /* Static (unsynced) lines: paint at full alpha / opacity and use tighter
+       spacing, mirroring Spicy Lyrics' data-lyrics-type="Static" look so an
+       unkaraoked LRCLIB result reads like real lyrics rather than dim ghosts.
+       Scoped to .line.static only — synced lyrics keep their own rhythm
+       (AJ, 2026-09-18). */
+    #ym-sl-panel.SpicyRenderer .line.static {
+      opacity: 1 !important;
+      --ym-sl-line-alpha: 1 !important;
+      --gradient-alpha: 1 !important;
+      --gradient-alpha-end: 1 !important;
+      margin: .12cqw 0;
+      --font-size: calc(var(--DefaultLyricsSize) * .9);
+      padding-block: .04em;
+      line-height: 1.2 !important;
+      cursor: default;
+      transition: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.static .word,
+    #ym-sl-panel.SpicyRenderer .line.static .letter {
+      --gradient-alpha: 1 !important;
+      --gradient-alpha-end: 1 !important;
+      --gradient-position: 100% !important;
+      --text-shadow-blur-radius: 4px;
+      --text-shadow-opacity: 0%;
+      transform: none;
+      --ym-sl-base-scale: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line::before {
+      content: "";
+      position: absolute;
+      inset: -.08em -.35em;
+      z-index: 0;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 10px;
+      background: rgba(255,255,255,.055);
+      opacity: 0;
+      transform: scale(.985);
+      pointer-events: none;
+      transition:
+        opacity .18s ease,
+        transform .22s cubic-bezier(.22,.61,.36,1);
+    }
+    #ym-sl-panel.SpicyRenderer .line > * {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line .romaji {
+      flex-basis: 100%;
+      width: 100%;
+      order: 99;
+      font-size: .52em;
+      line-height: 1.25;
+      font-weight: 500;
+      letter-spacing: .04em;
+      text-transform: none;
+      margin-top: .28em;
+      color: rgba(255,255,255,.62);
+      text-shadow: 0 1px 3px rgba(0,0,0,.45);
+      opacity: var(--ym-sl-line-alpha);
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .romaji {
+      opacity: calc(.85 * var(--ym-sl-line-alpha));
+    }
+    #ym-sl-panel.SpicyRenderer .line:hover {
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .line:hover::before {
+      opacity: var(--ym-sl-line-alpha);
+      transform: scale(1);
+    }
+    /* Static (unsynced) lines can't be clicked to seek (no time mapping), so the
+       hover highlight box is misleading — suppress it for them (AJ, 2026-09-18). */
+    #ym-sl-panel.SpicyRenderer .line.static:hover::before {
+      opacity: 0;
+      transform: scale(.985);
+    }
+    #ym-sl-panel.SpicyRenderer .line.static:hover {
+      z-index: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .line.OppositeAligned:not(.rtl) {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl.OppositeAligned {
+      transform-origin: left center !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed {
+      transition:
+        --ym-sl-line-alpha .2s cubic-bezier(.61,1,.88,1),
+        --ym-sl-entry-shadow-alpha .2s cubic-bezier(.61,1,.88,1),
+        scale .28s cubic-bezier(.22,.61,.36,1);
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed.Active {
+      scale: 1.05;
+    }
+    #ym-sl-panel.SpicyRenderer
+      .SpicyLyricsScrollContainer.HasDuetLines
+      .line:not(.OppositeAligned, .rtl) {
+      width: 100%;
+      box-sizing: border-box;
+      padding-right: 14cqw;
+    }
+    #ym-sl-panel.SpicyRenderer
+      .SpicyLyricsScrollContainer.HasDuetLines
+      .line.OppositeAligned:not(.rtl) {
+      width: 100%;
+      box-sizing: border-box;
+      justify-content: flex-end;
+      padding-left: 14cqw;
+      text-align: right;
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word,
+    #ym-sl-panel.SpicyRenderer .line .letter,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup {
+      position: relative;
+      display: inline-block;
+      font-weight: 700 !important;
+      transform-origin: center center;
+      --gradient-position: -20%;
+      --gradient-color: 255;
+      --gradient-alpha: .85;
+      --gradient-alpha-end: .5;
+      --gradient-degrees: 90deg;
+      --gradient-offset: 0%;
+      --text-shadow-blur-radius: 4px;
+      --text-shadow-opacity: 0%;
+      --ym-sl-base-scale: 1;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+      overflow: visible;
+    }
+    #ym-sl-panel.SpicyRenderer .line .letterGroup {
+      display: inline-flex;
+    }
+    /* A letter that is just whitespace collapses to a 0px inline-block, which
+       glues multi-word syllables together. Keep the space rendered and give it
+       a floor. Mirrors upstream Spicy Lyrics Emphasize.ts / Mixed.css. */
+    #ym-sl-panel.SpicyRenderer .line .letter.SpaceLetter {
+      white-space: pre;
+      min-width: 0.3ch;
+    }
+    /* Register --gradient-position so a bad write can never blank the fill.
+       As an UNREGISTERED custom property it accepts ANY token, so a bad value
+       stores without complaint and then makes
+       calc(var(--gradient-position) + 20% + var(--gradient-offset)) invalid -
+       which invalidates the whole background-image declaration and paints the
+       glyph transparent for a frame (the black flicker). Registered as a
+       percentage, an out-of-syntax value resolves to the initial value instead
+       of poisoning the gradient. The JS guards its own writes too (see tick());
+       this is the second line of defence.
+       Upstream was developing exactly this: default_backup.css:383. */
+    @property --gradient-position {
+      syntax: "<percentage>";
+      inherits: true;
+      initial-value: -20%;
+    }
+    @property --gradient-alpha {
+      syntax: "<number>";
+      inherits: true;
+      initial-value: 1;
+    }
+    @property --ym-sl-line-alpha {
+      syntax: "<number>";
+      inherits: true;
+      initial-value: 1;
+    }
+    @property --ym-sl-entry-shadow-alpha {
+      syntax: "<number>";
+      inherits: true;
+      initial-value: 0;
+    }
+    /* The scroll glide's sub-pixel remainder. REGISTERED, and inherits:false is the
+       whole point: an UNREGISTERED custom property inherits, so writing it on the
+       scroller every frame invalidated the computed style of EVERY descendant
+       (70 lines + 571 words) — the glide ran but the panel crawled (AJ, 2026-10-07).
+       Non-inheriting means only the scroller's own transform is invalidated.
+       NO BACKTICKS IN THIS COMMENT — it lives inside a template literal. */
+    @property --ym-sl-scroll-frac {
+      syntax: "<length>";
+      inherits: false;
+      initial-value: 0px;
+    }
+    /* Simple lyrics (Apple Music style): the spring factories are stubbed and the
+       splines are swapped in JS (see createWordSprings and
+       applySimpleLyricsSplines), and the LINE-TRANSITION feel below is ported from
+       AMLL. The gradient sweep is deliberately still the normal karaoke one — an
+       earlier attempt redirected --gradient-position at a registered custom
+       property and it broke the active-line highlight and the scroll. */
+    /* NOT(.line-timed):NOT(.static) — Simple lyrics is a WORD-SYNCED feature.
+       Line-synced (LRC-style, LineTimed) and unsynced lyrics fill as whole lines,
+       so the per-line AMLL motion would just blur and dim them for no benefit.
+       AJ, 2026-10-01: dont make it target line by line lyrics only ttml word by word. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line) {
+      transition:
+        transform .5s cubic-bezier(.22, .61, .36, 1),
+        filter .4s ease,
+        --ym-sl-line-alpha .4s cubic-bezier(.61, 1, .88, 1),
+        --ym-sl-entry-shadow-alpha .4s cubic-bezier(.61, 1, .88, 1);
+    }
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Active {
+      transform: translateY(0);
+      filter: blur(0);
+    }
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Sung {
+      transform: translateY(-.05em);
+      filter: blur(1px);
+    }
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).NotSung {
+      transform: translateY(.06em);
+      filter: blur(1.2px);
+    }
+    /* Only the leaf text elements (.word/.letter) carry the gradient clip.
+       Putting background-clip:text on the .letterGroup wrapper clips its child
+       letters to the (empty) wrapper box and makes them vanish once the active
+       gradient is removed — the "long words turn dark after being sung" bug. */
+    /* Lines keep their opacity layer stable; words and letters get a transform
+       hint only while their springs move. Dot opacity also changes per frame. */
+    #ym-sl-panel.SpicyRenderer .line.ym-sl-animating .word,
+    #ym-sl-panel.SpicyRenderer .line.ym-sl-animating .letter {
+      will-change: transform;
+    }
+    #ym-sl-panel.SpicyRenderer .line.ym-sl-animating .dot {
+      will-change: transform, opacity;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word,
+    #ym-sl-panel.SpicyRenderer .line .letter {
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      /* Paint every state with the same gradient-clip technique (only the
+         gradient's brightness differs per state). This keeps stroke weight
+         identical while a line is Active vs Sung/NotSung; swapping to a solid
+         fill on Sung made the glyphs read fuller/bolder (the "thicker after
+         the line ends" bug). */
+      background-image: linear-gradient(
+        var(--gradient-degrees),
+        rgba(255,255,255,calc(var(--gradient-alpha) * var(--ym-sl-line-alpha))) var(--gradient-position),
+        rgba(255,255,255,calc(var(--gradient-alpha-end) * var(--ym-sl-line-alpha)))
+          calc(var(--gradient-position) + 20% + var(--gradient-offset))
+      );
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord
+      + :is(.word.PartOfWord, .letterGroup.PartOfWord),
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord
+      + :is(.word.PartOfWord, .letterGroup.PartOfWord) {
+      transform-origin: center center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word.PartOfWord
+      + :is(.word, .letterGroup),
+    #ym-sl-panel.SpicyRenderer .line .letterGroup.PartOfWord
+      + :is(.word, .letterGroup) {
+      transform-origin: left center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word.PartOfWord,
+    #ym-sl-panel.SpicyRenderer .line.rtl .letterGroup.PartOfWord {
+      transform-origin: left center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word.PartOfWord
+      + :is(.word, .letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.rtl .letterGroup.PartOfWord
+      + :is(.word, .letterGroup) {
+      transform-origin: right center;
+    }
+    #ym-sl-panel.SpicyRenderer .line .word:not(.PartOfWord, .dot, .LastWordInLine)::after,
+    #ym-sl-panel.SpicyRenderer .line .letterGroup:not(.PartOfWord, .dot, .LastWordInLine)::after {
+      content: "";
+      margin-right: .32ch;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .word,
+    #ym-sl-panel.SpicyRenderer .line.Active .letter,
+    #ym-sl-panel.SpicyRenderer .line.Active .letterGroup {
+      /* Carry the unsung halo through the state flip while the word glow grows.
+         Dropping it in one frame made both lead and background text dip before
+         the gradient fade could brighten them. */
+      text-shadow:
+        0 0 var(--BlurAmount) rgba(255,255,255,calc(var(--ym-sl-entry-shadow-alpha) * var(--Vocal-NotSung-opacity))),
+        0 0 var(--text-shadow-blur-radius) rgba(255,255,255,calc(var(--text-shadow-opacity) * var(--ym-sl-line-alpha)));
+    }
+    #ym-sl-panel.SpicyRenderer .line.NotSung {
+      --ym-sl-line-alpha: var(--Vocal-NotSung-opacity);
+      --ym-sl-entry-shadow-alpha: .4;
+      --gradient-position: -20% !important;
+      /* Dim gradient (same clip technique as Active) instead of a solid fill,
+         so the stroke weight never changes between states. */
+      --gradient-alpha: .4;
+      --gradient-alpha-end: .4;
+      text-shadow: 0 0 var(--BlurAmount) rgba(255,255,255,calc(var(--gradient-alpha-end) * var(--ym-sl-line-alpha)));
+    }
+    #ym-sl-panel.SpicyRenderer .line.NotSung .word,
+    #ym-sl-panel.SpicyRenderer .line.NotSung .letter {
+      --gradient-position: -20% !important;
+      --text-shadow-opacity: 0% !important;
+      --text-shadow-blur-radius: 4px !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Sung {
+      --ym-sl-line-alpha: var(--Vocal-Sung-opacity);
+      --ym-sl-entry-shadow-alpha: 0;
+      --gradient-position: 100% !important;
+      /* Dim gradient (same clip technique as Active) instead of a solid fill,
+         so a finished line keeps the exact stroke weight it had while playing.
+         (Earlier theory blamed the line-level text-shadow halo; that rests at 0
+         on Sung and was not the cause — the solid-fill swap was.) */
+      --gradient-alpha: .32;
+      --gradient-alpha-end: .32;
+      --BlurAmount: 0px !important;
+      text-shadow: 0 0 var(--BlurAmount) rgba(255,255,255,calc(var(--gradient-alpha) * var(--ym-sl-line-alpha)));
+    }
+    #ym-sl-panel.SpicyRenderer .line.Sung .word,
+    #ym-sl-panel.SpicyRenderer .line.Sung .letter {
+      --gradient-position: 100% !important;
+    }
+    /* WordSung keeps the gradient-clip from the base rule; no solid-fill
+       override, so weight stays consistent with the active line. */
+    /* WordNotSung keeps the gradient-clip from the base rule; no solid-fill
+       override, so weight stays consistent with the active line. */
+    /* Letter-group words are governed by EXACTLY the same rules as regular
+       words (the .line.Sung/.line.NotSung .word,.letter pairs above plus the
+       WordSung/WordNotSung pairs), so a long "wavy" word matches its
+       neighbours in every state. Do not add letter-specific fill overrides
+       here: an author !important declaration outranks a normal inline style,
+       which silently makes the animateLetters inline fills dead code.
+       Letters must also keep inheriting the line's text-shadow — the
+       .letterGroup wrapper must never set 'text-shadow: none', or the letters
+       lose the glow layer that regular words get and read dimmer. */
+    #ym-sl-panel.SpicyRenderer .line.Active {
+      --ym-sl-line-alpha: var(--Vocal-Active-opacity);
+      --ym-sl-entry-shadow-alpha: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung:not(.letterGroup),
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Active .bg-word.WordNotSung .letter {
+      /* Keep unsung bg words dim and glow-less until they are sung; the sweep
+         itself comes from the BASE .word/.letter gradient rule and already
+         rests at -20%.
+         The gradient-clip must NOT be re-declared here. A state-class rule that
+         declares background-image drags that property into the class-toggle
+         invalidation set, and re-rasterising a clipped gradient at the instant
+         the state class flips is what painted the glyphs black for a frame.
+         (AJ: "when a new word plays the last word gets dimmer" - the bg-word
+         flicker.) Only custom properties are set here: the per-frame sweep
+         already animates those without glitching. */
+      --gradient-position: -20%;
+      --text-shadow-opacity: 0;
+    }
+    /* A rule used to live here that re-declared the gradient-clip for
+       .bg-word.Active and .bg-word.WordSung with !important. It was pure
+       duplication of the base .word/.letter rule - bg words carry BOTH the
+       "word" and "bg-word" classes (see appendWords), so the base rule already
+       paints them - and the duplication WAS the bug: it put background-image
+       into the invalidation set of the Active and WordSung state classes, so
+       every Active-to-Sung flip re-rasterised the clipped gradient and flashed
+       the glyphs black. Removing it leaves the base rule as the single source
+       of the gradient in every state.
+       The :not(.letterGroup) exclusion it needed is no longer required either:
+       the base rule never targets .letterGroup, so a wrapper can only receive a
+       background-image from animateWord()'s inline none, and stays inert. */
+    #ym-sl-panel.SpicyRenderer .line.rtl {
+      direction: rtl !important;
+      transform-origin: right center !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.rtl .word,
+    #ym-sl-panel.SpicyRenderer .line.rtl .letter { --gradient-degrees: -90deg; }
+    #ym-sl-panel.SpicyRenderer .line.line-timed .word,
+    #ym-sl-panel.SpicyRenderer .line.line-timed .letter,
+    #ym-sl-panel.SpicyRenderer .line.line-timed .letterGroup {
+      --gradient-degrees: 180deg;
+    }
+    #ym-sl-panel.SpicyRenderer .word-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      white-space: nowrap;
+      --ym-sl-base-scale: 1;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+      transform-origin: center center;
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line {
+      /* The normal line fade also covers background vocals. Scale all three
+         states together so the background-vocal setting keeps its meaning. */
+      --Vocal-NotSung-opacity: calc(.5 * var(--ym-sl-bg-vocal-scale));
+      --Vocal-Sung-opacity: calc(.5 * var(--ym-sl-bg-vocal-scale));
+      --Vocal-Active-opacity: calc(.95 * var(--ym-sl-bg-vocal-scale));
+      --font-size: calc(var(--DefaultLyricsSize) * 0.75);
+      margin: -1cqw 0 1cqw !important;
+    }
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .word,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letter,
+    #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letterGroup {
+      transition: text-shadow .3s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line {
+      --ym-sl-line-alpha: 1 !important;
+      cursor: default;
+      margin: 0;
+      padding: 0 0.9em;
+      display: grid;
+      grid-template-rows: 0fr;
+      opacity: 0;
+      transition: grid-template-rows .35s ease, opacity .35s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.playing {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line .dotGroup {
+      --dot-gap: clamp(.005rem, 1.7cqw, .18rem);
+      display: flex;
+      flex-direction: row;
+      gap: var(--dot-gap);
+      padding: 0.45em 0.2em;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.playing .dotGroup,
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+      overflow: visible;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+      /* The WHOLE GROUP scales, keeping the dots' spacing -- AJ: "not the
+         individual dots but the group's scale goes down" (2026-10-02). A small
+         bounce-in first, then the group shrinks toward 40% and the line leaves
+         with the scroll. Origin pinned centre so the cluster shrinks toward its
+         own middle instead of an edge. */
+      transform-origin: 50% 50%;
+      animation: ymSlDotExit 420ms cubic-bezier(.45, 0, .55, 1) forwards;
+    }
+    @keyframes ymSlDotExit {
+      0%   { transform: scale(1); }
+      40%  { transform: scale(1.12); }
+      100% { transform: scale(0.4); }
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line .dot {
+      --font-size: calc(var(--DefaultLyricsSize) * 1.3);
+      --opacity-size: .35;
+      display: inline-block;
+      min-width: .35ch;
+      border-radius: 50%;
+      scale: .75;
+      font-size: var(--font-size) !important;
+      line-height: .65;
+      opacity: var(--opacity-size);
+      --gradient-position: 100%;
+      --ym-sl-base-scale: .75;
+      --ym-sl-adaptive-scale: 1;
+      scale: calc(var(--ym-sl-base-scale) * var(--ym-sl-adaptive-scale));
+    }
+    #ym-sl-panel.SpicyRenderer .line.static {
+      cursor: default;
+      --gradient-position: 100%;
+      --gradient-alpha: 1;
+      --gradient-alpha-end: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-empty {
+      width: min(90%, 300px);
+      margin: auto;
+      color: rgba(255,255,255,.55);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits {
+      margin: 48px 4px 22px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255,255,255,.12);
+      opacity: .85;
+      pointer-events: none;
+      user-select: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.5);
+      margin-bottom: 6px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits-names {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.5;
+      color: rgba(255,255,255,.8);
+    }
+    /* "Uploaded by <avatar> <username>" — only present on Spicy Lyrics API
+       results. The parent .ym-sl-credits is pointer-events:none, so the link
+       opts itself back in; without that the click never reaches it. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 22px;
+      font-size: 13px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
+      color: rgba(255,255,255,.5);
+      font-weight: 600;
+      letter-spacing: .02em;
+      /* Keep the label above the pill's glow halo (the halo is a negative-z
+         pseudo that would otherwise wash over this text). */
+      position: relative;
+      z-index: 1;
+    }
+    /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
+       caused the conic to fill the pill interior; reverting to the direct link). */
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
+      pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 3px 9px 3px 4px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.9);
+      text-decoration: none;
+      position: relative;
+      isolation: isolate;
+      transition: background-color .18s ease, color .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link:hover {
+      background: rgba(255,255,255,.14);
+      color: #fff;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link.no-link {
+      pointer-events: none;
+      background: rgba(255,255,255,.05);
+      cursor: default;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-avatar {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: none;
+      background: rgba(255,255,255,.12);
+    }
+    /* Registered so Chrome definitely re-resolves the conic when the JS rAF loop
+       updates the angle on :root (AJ's Chrome would not reliably repaint a conic
+       driven by an UNregistered custom property — the v6 failure). inherits:true
+       so the :root value cascades to every pill's ::before/::after. No CSS
+       animation targets it, so it simply follows the JS-set value. */
+    @property --ym-sl-pfp-spin {
+      syntax: "<angle>";
+      inherits: true;
+      initial-value: 0deg;
+    }
+    /* Attribution glow v9 (AJ, 2026-09-28): two colours as a THIN BAND HUGGING
+       the pill's EDGE. The pill itself stays pill-shaped and STATIC — only the
+       COLOUR SEAM glides around the perimeter (a light travelling round the
+       border), so it reads as "gliding", never a rigid spin.
+
+       Mechanism: a masked pill-shaped ring (XOR mask; padding = ring
+       thickness) painted with a conic-gradient whose 'from' angle is the
+       registered --ym-sl-pfp-spin (inherits). A single CSS animation on the
+       PANEL drives that angle — pure CSS, no JS rAF, no per-frame style
+       invalidation (v8's rAF loop tanked fps to ~20 by setProperty-ing the root
+       every frame; v9 is compositor-friendly). The soft glow is a SECOND masked
+       ring, wider (10px) and blurred (10px), so the halo follows the seam.
+       No fill inside the pill. --ym-sl-pfp-accent-a/-b set on the ROW by
+       buildPersonRow (complementary default pair; sampleAvatarColor() upgrades
+       when the canvas is readable). */
+    /* Glide driver (v10, AJ, 2026-09-28): a JS rAF (startPfpGlowEngine())
+       sets --ym-sl-pfp-spin on EACH .ym-sl-uploader-link every frame — scoped
+       to the pill (NOT :root), so only the pill + its pseudos get invalidated
+       (v8's root-level setProperty tanked fps to ~20 by cascade-invalidating
+       the whole tree). JS-driven because AJ's Chrome reliably repaints the
+       conic on JS setProperty but NOT on CSS @keyframes animation of the
+       same registered @property (v6/v9 freeze). Crisp ::before ring (z:-1)
+       sits on top; soft glow ::after (z:-2) paints behind it.
+       prefers-reduced-motion is handled in the JS engine. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::before {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: inherit;
+      padding: 2px;
+      background: conic-gradient(
+        from var(--ym-sl-pfp-spin, 0deg),
+        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
+        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
+      );
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+      pointer-events: none;
+      z-index: -1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::after {
+      content: "";
+      position: absolute;
+      inset: -8px;
+      border-radius: inherit;
+      background: conic-gradient(
+        from var(--ym-sl-pfp-spin, 0deg),
+        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
+        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
+      );
+      filter: blur(6px);
+      opacity: .35;
+      pointer-events: none;
+      z-index: -2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
+      font-weight: 600;
+      line-height: 1;
+    }
+    /* "Lyrics provided by <provider>" — shown for EVERY API source, because
+       developers.spicylyrics.org/md/attribution makes displaying the provider a
+       binding condition (ToS section 6), not a nicety. Plain text: the provider
+       carries no url of its own. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 22px;
+      font-size: 13px;
+      color: rgba(255,255,255,.5);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
+      color: rgba(255,255,255,.85);
+      font-weight: 600;
+    }
+    /* Tighter leading when the provider is followed by a person row, and when
+       two person rows stack (uploader then maker) — otherwise the three
+       attribution lines float apart. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider + .ym-sl-uploader,
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader + .ym-sl-uploader {
+      margin-top: 6px;
+    }
+    tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
+    tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
+    /* YTM disables the native Lyrics tab (pointer-events:none, disabled, tabindex
+       -1, and a 0.3-alpha label) when the track has no lyrics on YTM. Aurora
+       re-enables it so its own lyrics live in the REAL tab. */
+    tp-yt-paper-tab.ym-sl-lyrics-tab {
+      pointer-events: auto !important;
+      cursor: pointer !important;
+      color: rgba(255, 255, 255, .7) !important;
+    }
+    tp-yt-paper-tab.ym-sl-lyrics-tab .tab-content {
+      pointer-events: auto !important;
+      color: rgba(255, 255, 255, .7) !important;
+    }
+    tp-yt-paper-tab.ym-sl-lyrics-tab[aria-selected="true"],
+    tp-yt-paper-tab.ym-sl-lyrics-tab[aria-selected="true"] .tab-content {
+      color: #fff !important;
+    }
+    /* The SYNCED tab is a clone of the selected LYRICS tab, so its label
+       inherited the selected tab's styling. Force the same label colour and
+       opacity as the other (unselected) tabs. */
+    /* Colour-only dimming with opacity pinned to 1: our cloned tab nests a
+       SECOND .tab-content, so an opacity here stacked with itself (0.8 x 0.8 =
+       0.64) and made SYNCED read darker than the native tabs (AJ, 2026-09-28,
+       verified with the browser bridge). The native unselected label is
+       rgba(255,255,255,.7) at opacity .8, i.e. an effective 0.56 white — bake
+       that into the colour and leave opacity alone so it cannot stack. */
+    tp-yt-paper-tab.ym-sl-tab .tab-content {
+      color: rgba(255,255,255,.56) !important;
+      opacity: 1 !important;
+    }
+    /* Selected-state parity (AJ, 2026-09-28). Verified live with the browser
+       bridge: YTM marks the selected tab with the class iron-selected and its
+       label renders rgb(255,255,255) / opacity 1, while unselected labels are
+       rgba(255,255,255,.7) / .8. Clicking SYNCED does NOT move that native
+       selection (our tab is not part of YTM's iron-pages), so the previously
+       selected tab stayed bright and SYNCED stayed dim. While our tab is the
+       active one (.ym-sl-custom-active on the bar) brighten SYNCED and dim the
+       native selected tab, so the highlight follows the visible panel.
+       NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK — it lives inside the CSS
+       template literal, so one stray backtick terminates the whole stylesheet
+       (and node --check does NOT catch it). */
+    tp-yt-paper-tab.ym-sl-tab.ym-sl-active .tab-content {
+      color: #fff !important;
+      opacity: 1 !important;
+    }
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab) .tab-content {
+      color: rgba(255,255,255,.7) !important;
+      opacity: .8 !important;
+    }
+    /* Crossfade the label colours with the panel swap instead of snapping. */
+    tp-yt-paper-tab.ym-sl-tab .tab-content,
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab) .tab-content {
+      transition: color .18s ease, opacity .18s ease;
+    }
+    /* The bar ships with NO CSS transition of its own (verified live: computed
+       transition-duration 0s, animation-name none — YTM drives it in JS), so a
+       transform WE set would snap while the native tabs glide. Give it one so
+       the SYNCED underline animates the same way (AJ, 2026-09-28). This cannot
+       disturb the native tabs: YTM's own animation takes precedence over a CSS
+       transition. */
+    tp-yt-paper-tabs #selectionBar {
+      transition: transform .25s ease;
+    }
+    /* The tab underline is YTM's OWN #selectionBar — a full-width element whose
+       1px white border-bottom is moved + resized onto the selected tab via
+       transform: translateX(%) scaleX(fraction) (verified live with the browser
+       bridge). We used to hide it and draw a per-tab ::after instead, but that
+       animated as a centre-out scaleX "zoom" (AJ, 2026-09-28). We now keep the
+       real bar and drive it from JS (syncSelectionBar), so the underline moves
+       exactly like a native tab switch — same element, same transition. */
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab)::after,
+    tp-yt-paper-tabs.ym-sl-custom-active
+      tp-yt-paper-tab.iron-selected:not(.ym-sl-tab) .tab-content::after {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+
+    /* Final fullscreen geometry rules. These intentionally come after the
+       short-viewport media queries above: the mode selectors carry higher
+       specificity, so switching to Lyrics Only animates the control bars to
+       their new locations instead of the media-query transform winning and
+       making them snap. */
+    /* The redesigned fullscreen controls are layout-agnostic: the chrome lives
+       top-right (see .ym-sl-fs-controls at the top of this block) and the play
+       chip + scrubber sit inside the full-size .ym-sl-fs-player-controls layer
+       (see .ym-sl-fs-player-controls above). In the side layouts they are
+       anchored to the media pane's bottom edge instead of the overlay's, via
+       --ym-sl-fs-band-top (see the MV side layout block at the end).
+       The legacy per-layout repositioning that used to live here pushed the
+       chrome to bottom-center and shrank the player-controls anchor to content
+       width, which squeezed the play chip into the bottom-left corner on the
+       side and video-background layouts. It is removed; only the lyrics scroll
+       clearance that genuinely still applies is kept. */
+    @media (max-height: 720px) {
+      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+        padding-bottom: 142px;
+      }
+    }
+    @media (max-height: 560px) {
+      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
+        padding-bottom: 112px;
+      }
+    }
+
+    /* ===== MV side layout: hang the band off the video, not the screen =====
+       The pane is centred and sized to the video's aspect ratio, so its bottom
+       edge moves with the video. Anchoring the title + chrome to the overlay
+       bottom left a 94px hole under a 16:9 video (AJ: "it has too much space"),
+       and made the spacing depend on the video's shape. --ym-sl-fs-band-top is
+       published in px by publishFsBandVars(); these rules stack the title, the
+       transport chip and the scrubber directly beneath it, 18px under the
+       video and 12px apart. Fallbacks are the 16:9 / 1080p values so the first
+       paint before the video reports its size is still sensible.
+       The chip is a fixed 70px tall (50px play button + 2 x 10px padding).
+       These selectors carry the full :not() chain (specificity 0,5,0) so they
+       beat the per-variant bottom rules and the short-viewport media queries,
+       which is why bottom is reset to auto here. */
+    /* Cover-art side layout: the SAME top-anchored stack as the music-video case
+       below, so the title / chip / scrubber change ONE property (top) between
+       the two modes and can therefore TRANSITION. The old rules anchored them
+       with bottom: 160 / 74 / 24px, and bottom(auto) <-> top(length) is not
+       animatable — that is why the whole stack snapped on every MV <-> cover
+       swap (AJ, 2026-09-28). The values land within a few px of the old ones,
+       because the cover pane's bottom (100% - 218px) is what feeds
+       --ym-sl-fs-band-top. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      top: var(--ym-sl-fs-band-top, 828px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      top: var(--ym-sl-fs-band-top, 828px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
+      bottom: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
+      bottom: auto;
+    }
+
+    /* ===== side + lyrics-only: transport chip + scrubber never hide ========
+       AJ wants the transport chip and the scrubber permanently visible in the
+       video-left / lyrics-right (side) layout instead of fading in on hover
+       (2026-09-28), and extended that to Lyrics Only (2026-09-28). The EXIT +
+       LAYOUT controls DO hide on idle in every layout now (2026-10-02 — see the
+       .ym-sl-fs-idle controls rule above). The MOUSE still hides on idle in
+       EVERY layout (see the .ym-sl-fs-idle cursor rule above). Placed last in
+       the block so it also wins over the .ym-sl-fs-idle rules, which carry the
+       same specificity for the scrubber. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
+      opacity: 1;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background).ym-sl-fs-idle .ym-sl-fs-play-chip,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background).ym-sl-fs-idle .ym-sl-fs-scrubber {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* ===== media-mode swap crossfade =====================================
+       syncFsVideoMode() hides the media pane while it swaps a music video for
+       cover art (or back). The CHROME changes geometry in the same beat - the
+       title re-anchors and the transport / scrubber / volume restructure - and
+       none of that is interpolatable: auto <-> length widths, centred <-> left
+       alignment, static <-> absolute, grid <-> flex internals. So the chrome
+       cannot glide to its new home; it has to fade with the pane, exactly like
+       the pane already does. This class is the chrome half of that crossfade;
+       the pane half is the inline opacity syncFsVideoMode() sets.
+       The title fades via FILTER, not opacity: its entrance animation ends on
+       a forwards fill that outranks a plain opacity declaration, so an opacity
+       fade would simply never run (the same reason .ym-sl-fs-title-leaving
+       swaps in a whole animation). filter is not touched by those keyframes. */
+    /* ASYMMETRIC on purpose: the fade-OUT is .12s, the fade-IN stays .3s.
+       The downward move is driven by --ym-sl-fs-band-top, which the overlay
+       transitions over .35s, so at .3s the controls were still a good fraction
+       opaque while already travelling - it read as "move down, sit there, then
+       fade" (AJ, 2026-10-03). They now vanish before the travel is perceptible.
+       A transition declared HERE is the AFTER-CHANGE style for the class add, so
+       it governs the OUT direction only; removing the class falls back to the
+       slower base transition, which is what the reveal uses. */
+    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-title {
+      filter: opacity(0);
+      transition: filter .12s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-player-controls {
+      opacity: 0;
+      transition: opacity .12s ease;
+    }
+  `;
+

@@ -1,0 +1,123 @@
+  /* ===================== lifecycle ===================== */
+
+  // Named so it can be detached. Every enable injects a NEW <script>, which runs
+  // this whole IIFE again; without detaching, each disabled instance keeps a live
+  // window listener forever, so repeated toggles stack up closures that all react
+  // to every ytmod-ext message.
+  let messageListenerAttached = false;
+  function handleHostMessage(event) {
+    const data = event.data;
+    if (!data) return;
+    // Aurora Bloom (ytmod-dynamic) owns a couple of settings that actually
+    // drive things drawn HERE — the MV blurred-backdrop brightness slider and
+    // the "prefer Kawarp for music videos" toggle. So accept Bloom's settings
+    // payload too and pull out just those keys; everything else in it belongs
+    // to the page-wide Kawarp, not to us. applySettings() re-clamps for free.
+    if (data.type === "ytmod-settings" && data.id === "ytmod-dynamic") {
+      const s = data.settings || {};
+      const patch = {};
+      if (s.backdropBrightness != null) patch.backdropBrightness = s.backdropBrightness;
+      if (s.preferKawarpAlways != null) patch.preferKawarpAlways = s.preferKawarpAlways;
+      if (Object.keys(patch).length) {
+        applySettings(patch);
+        // The Kawarp-vs-canvas choice can change live, so re-decide the
+        // backdrop now instead of waiting for the 2s refresh tick.
+        if (patch.preferKawarpAlways != null) applyStaticVideoBackdrop();
+      }
+      return;
+    }
+    if (data.id !== EXT_ID) return;
+    if (data.type === "ytmod-settings") {
+      applySettings(data.settings);
+      return;
+    }
+    if (data.type !== "ytmod-ext") return;
+    if (data.action === "disable") teardown();
+  }
+
+  function attachMessageListener() {
+    if (messageListenerAttached) return;
+    window.addEventListener("message", handleHostMessage);
+    messageListenerAttached = true;
+  }
+  function detachMessageListener() {
+    if (!messageListenerAttached) return;
+    window.removeEventListener("message", handleHostMessage);
+    messageListenerAttached = false;
+  }
+  attachMessageListener();
+
+  function teardown() {
+    exitFullscreenMode();
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    stopHousekeeping();
+    stopScrollGlide();
+    if (mountTabTimer) clearTimeout(mountTabTimer);
+    mountTabTimer = 0;
+    if (wpObserver) wpObserver.disconnect();
+    wpObserver = null;
+    if (tabWatchRaf) cancelAnimationFrame(tabWatchRaf);
+    tabWatchRaf = 0;
+    if (activeTrackAbort) activeTrackAbort.abort();
+    activeTrackAbort = null;
+    cachedFirstRealLyricStartMs = Infinity;
+    cachedLastRealLyricEndMs = 0;
+    pendingAnimationLines.clear();
+    teardownOnboarding();
+    syncNativePanel(false);
+    cleanupTabBar(tabBar);
+    if (panelEl) panelEl.remove();
+    const optsOverlay = document.querySelector(".ym-sl-options-overlay");
+    if (optsOverlay) optsOverlay.remove();
+    const style = document.getElementById("ym-sl-style");
+    if (style) style.remove();
+    if (fontLinkEl) fontLinkEl.remove();
+    fontLinkEl = null;
+    modelLines = [];
+    lineElements = [];
+    scrollCandidateIndices = [];
+    lrclibCache.clear();
+    // The Spicy Lyrics cache lives in chrome.storage, so it outlives teardown.
+    // Only the in-memory mirror and its pending writes are page-lifetime state:
+    // flush anything queued, then drop the mirror so the next enable re-reads.
+    flushSpicyCache();
+    if (spicyCacheFlushTimer) {
+      clearTimeout(spicyCacheFlushTimer);
+      spicyCacheFlushTimer = 0;
+    }
+    spicyCache = null;
+    spicyCacheLoad = null;
+    spicyCacheDirty = false;
+    // Track-identity state must be cleared as well. Re-enabling injects a fresh
+    // <script>, so normally this starts clean anyway — but if any of it survived
+    // into the next run, syncTrackLyrics would bail at the `key === currentTrackKey`
+    // check and the panel would sit empty until the user changed songs. Clearing
+    // here guarantees disable -> re-enable reloads lyrics for the current track.
+    currentTrackKey = "";
+    manualLyricsTrackKey = "";
+    manualLyricsIsPermanent = false;
+    currentLyricsIsTTML = false;
+    lastObservedTrackKey = "";
+    lastObservedPositionMs = null;
+    lastActiveLine = -1;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    currentSongwriters = [];
+    panelVisible = false;
+    panelHost = null;
+    tabBar = null;
+    pauseSync = null;
+    pausePickMode = false;
+    pauseUi = null;
+    pauseBanner = null;
+    pauseBannerText = null;
+    panelEl = null;
+    tabEl = null;
+    tabMountParent = null;
+    jumpButton = null;
+    detachMessageListener();
+  }
+

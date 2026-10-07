@@ -39,8 +39,6 @@
   // Clearance kept between the pill's box and the player bar. Covers the glow:
   // ::after is inset -8px with a 6px blur, so it reaches ~14px past the pill.
   const BAR_CLEARANCE_PX = 16;
-  // Inset from the fullscreen overlay's corner when pinned there.
-  const FS_PAD_PX = 28;
 
   const DEFAULT_SETTINGS = {
     showArt: true,
@@ -52,7 +50,7 @@
   };
 
   // Registered so Chrome definitely re-resolves the conic when the JS rAF updates
-  // the angle. Copied from the panel's credit-pill glow (spicy-lyrics.js:4628):
+  // the angle. Copied from the panel's credit-pill glow (aurora-lyrics.js:4628):
   // an UNregistered custom property driving a conic would not reliably repaint on
   // AJ's Chrome. inherits:true so the pill's own value reaches its ::before/::after.
   const CSS = `
@@ -142,7 +140,7 @@
   opacity: 0;
   transform: translateY(-5px);
 }
-/* Two-colour edge glow, copied from the credit pills (spicy-lyrics.js:4657). A
+/* Two-colour edge glow, copied from the credit pills (aurora-lyrics.js:4657). A
    MASKED pill-shaped ring painted with a conic-gradient whose 'from' angle is the
    registered --ym-nu-spin. The pill's SHAPE stays static — only the colour seam
    glides, which reads as travelling light rather than a rigid spin. ::before is
@@ -228,7 +226,7 @@
   }
 
   /* ---- two-colour sampling -------------------------------------------------
-     Copied from the credit pills (spicy-lyrics.js:10889). The sampler averages
+     Copied from the credit pills (aurora-lyrics.js:10889). The sampler averages
      the LEFT and RIGHT halves of a 24x24 downscale to get two colours; when they
      are too alike to read as motion it pushes the second round the hue wheel and
      lifts its saturation. Here the source is the NEXT TRACK'S THUMBNAIL — which
@@ -620,11 +618,15 @@
   // stays ABOVE the overlay instead of being trapped behind it). Re-parents only
   // when the target changes; runs every tick so a YTM re-render that wipes the
   // player page silently re-attaches it.
-  function ensureParent(fs) {
+  // The pill's ONLY home: YTM's player page, so it is nested in the real DOM and
+  // moves with the layout ("actually in the website", AJ 2026-09-29). It is no
+  // longer re-parented into the fullscreen overlay — tick() hides it there instead
+  // (AJ, 2026-10-01) — but it is STILL parked here while hidden, because the
+  // overlay is removed wholesale on exit and would take a nested pill with it.
+  // The body fallback covers the moment YTM has no player page.
+  function ensureParent() {
     if (!pill) return;
-    const target = fs
-      ? document.querySelector(".ym-sl-fs-overlay")
-      : document.querySelector("ytmusic-player-page");
+    const target = document.querySelector("ytmusic-player-page") || document.body;
     if (target && pill.parentElement !== target) {
       target.appendChild(pill);
       // A fresh parent resets the layout: the next position write must land
@@ -638,26 +640,12 @@
   function positionPill(box) {
     if (!pill) return;
     const h = pill.offsetHeight || 48;
-    const fs = inAuroraFullscreen();
     // The pill is ABSOLUTE inside its parent, so its top/left/right are relative to
-    // that parent's box. Normal view → player page; FS → overlay (both are
-    // position:fixed, so the conversion is just the parent's offset).
-    const parent = fs
-      ? document.querySelector(".ym-sl-fs-overlay")
-      : document.querySelector("ytmusic-player-page");
-    const pr = parent ? parent.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
-    if (fs) {
-      // Pinned to the overlay's TOP-LEFT corner (AJ, 2026-09-28). The top-RIGHT is
-      // taken by Aurora's exit + layout buttons, so `alignRight` is intentionally
-      // IGNORED in fullscreen: forcing right would overlap those controls and trap
-      // the pill there (only ESC clears it). The overlay sits at viewport 0,0, so
-      // these are already parent-relative. No player bar up there, so the gutter
-      // clamp below does not apply.
-      pill.style.top = FS_PAD_PX + "px";
-      pill.style.left = FS_PAD_PX + "px";
-      pill.style.right = "auto";
-      return;
-    }
+    // that parent's box. That parent is ALWAYS the player page now — the fullscreen
+    // overlay branch is gone, because tick() hides the pill in fullscreen rather
+    // than re-parenting it into the overlay (AJ, 2026-10-01).
+    const parent = document.querySelector("ytmusic-player-page") || document.body;
+    const pr = parent.getBoundingClientRect();
     if (!box) return;
     // AJ (2026-09-29): sit in the BOTTOM corner, just ABOVE the progress bar /
     // player bar — NOT hugging the video's bottom edge. Horizontal anchor
@@ -692,20 +680,23 @@
 
   function tick() {
     if (!pill) return;
-    // Fullscreen: the overlay reparents the media, so the media anchor is
-    // meaningless — the pill pins to the overlay's corner instead, and its
-    // z-index has to rise because the overlay itself sits at 2147483000.
+    // Aurora's fullscreen overlay owns the whole viewport, and the pill has no
+    // sensible anchor inside it. It used to RE-PARENT into the overlay and pin to
+    // its top-left corner, which just cluttered the view (AJ, 2026-10-01). Hide it
+    // outright instead.
     const fs = inAuroraFullscreen();
     pill.classList.toggle("ym-nu-fs", fs);
-    // Seat the pill in the right surface BEFORE measuring/positioning — and
-    // before the early return, so it stays correctly nested even when hidden.
-    ensureParent(fs);
+    // Seat the pill in its surface BEFORE the early return. ensureParent(false) is
+    // NOT optional here: the overlay is removed wholesale when fullscreen exits, so
+    // a pill left nested inside it would be destroyed with it and never come back.
+    // Parking it in the player page keeps it alive behind the overlay.
+    ensureParent();
     // Record the mount surface so the bridge (which has no JS-eval) can verify
-    // nesting: "player-page" = nested in YTM's DOM (normal view), "fs-overlay"
-    // = re-parented above Aurora's fullscreen overlay. Harmless debug signal.
-    pill.setAttribute("data-host", fs ? "fs-overlay" : "player-page");
-    const box = fs ? null : mediaBox();
-    if (!fs && !box) { hidePill(); return; }
+    // nesting. Harmless debug signal.
+    pill.setAttribute("data-host", "player-page");
+    if (fs) { hidePill(); return; }
+    const box = mediaBox();
+    if (!box) { hidePill(); return; }
     const next = readNext();
     if (!next) { hidePill(); return; }
     // Keyed so the DOM is only touched when the track actually changes.

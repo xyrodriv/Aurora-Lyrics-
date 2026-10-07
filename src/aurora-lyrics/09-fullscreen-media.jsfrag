@@ -1,0 +1,1120 @@
+  function getKawarpConstructor() {
+    if (!KAWARP_CORE_URL) return Promise.reject(new Error("Kawarp module URL unavailable."));
+    if (!fsKawarpModulePromise) {
+      fsKawarpModulePromise = import(KAWARP_CORE_URL).then((module) => {
+        const Kawarp = module.default || module.Kawarp;
+        if (typeof Kawarp !== "function") throw new Error("Kawarp module did not export a constructor.");
+        return Kawarp;
+      });
+    }
+    return fsKawarpModulePromise;
+  }
+
+  function sizeFullscreenKawarp() {
+    if (!fsKawarpCanvas || !fsOverlay) return;
+    const rect = fsOverlay.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
+    if (fsKawarpCanvas.width === width && fsKawarpCanvas.height === height) return;
+    fsKawarpCanvas.width = width;
+    fsKawarpCanvas.height = height;
+    if (fsKawarp) fsKawarp.resize();
+  }
+
+  function stopFullscreenKawarp() {
+    fsKawarpActive = false;
+    ++fsKawarpSeq;
+    if (fsKawarpResizeObserver) { try { fsKawarpResizeObserver.disconnect(); } catch (_) {} }
+    fsKawarpResizeObserver = null;
+    if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
+    fsKawarp = null;
+    if (fsKawarpCanvas && fsKawarpCanvas.parentElement) {
+      fsKawarpCanvas.parentElement.removeChild(fsKawarpCanvas);
+    }
+    fsKawarpCanvas = null;
+    fsKawarpArtUrl = "";
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
+  }
+
+  async function startFullscreenKawarp(artUrl) {
+    if (!fsOverlay) return;
+    // Gate on the Dynamic add-on: its handshake object is our signal that the
+    // page-wide Kawarp exists, and we take the backdrop over from it.
+    const dyn = window.__ymAuroraDynamic;
+    if (!dyn || typeof dyn.suspend !== "function") return;
+    // Defensive: never stack a second canvas. Every canvas is inserted as
+    // fsOverlay.firstChild, so a restart that left the old one in place put the
+    // stale canvas LATER in document order - where it painted over the new art.
+    if (fsKawarpCanvas || fsKawarp) stopFullscreenKawarp();
+    fsKawarpActive = true;
+    const seq = ++fsKawarpSeq;
+    fsKawarpCanvas = h("canvas", { class: "ym-sl-fs-kawarp", "aria-hidden": "true" });
+    fsOverlay.insertBefore(fsKawarpCanvas, fsOverlay.firstChild);
+    fsOverlay.classList.add("ym-sl-fs-has-kawarp");
+    if (typeof ResizeObserver === "function") {
+      fsKawarpResizeObserver = new ResizeObserver(() => sizeFullscreenKawarp());
+      fsKawarpResizeObserver.observe(fsOverlay);
+    }
+    try {
+      const Kawarp = await getKawarpConstructor();
+      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return;
+      sizeFullscreenKawarp();
+      fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
+      if (artUrl) {
+        await fsKawarp.loadImage(artUrl);
+        fsKawarpArtUrl = artUrl;
+      }
+      if (seq !== fsKawarpSeq) return;
+      fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
+      fsKawarp.start();
+      fsKawarpCanvas.classList.add("ready");
+    } catch (error) {
+      // Any failure (module load, WebGL context, image) falls back to the
+      // static blurred cover by dropping the canvas and the hiding class.
+      console.warn("[Aurora Lyrics] Kawarp backdrop failed:", error);
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
+      if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
+      fsKawarp = null;
+      if (fsKawarpCanvas && fsKawarpCanvas.parentElement) {
+        fsKawarpCanvas.parentElement.removeChild(fsKawarpCanvas);
+      }
+      fsKawarpCanvas = null;
+      fsKawarpActive = false;
+    }
+  }
+
+  function syncFullscreenKawarpArt(artUrl) {
+    if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
+    fsKawarpArtUrl = artUrl;
+    try { fsKawarp.loadImage(artUrl); } catch (_) {}
+  }
+
+  /* ---- static-upload music videos -> Kawarp backdrop ---------------------
+     A music video whose title says it is a still upload has nothing moving in
+     the frame, so the blurred-video backdrop is just a frozen blur of the same
+     picture. Those get Kawarp instead - the same animated cover-art backdrop
+     that cover-art tracks already use. */
+  const FS_STATIC_VIDEO_RE =
+    /\(\s*(?:official\s+audio|lyric\s+video|audio|visuali[sz]er|static\s+video|audio\s+only)\s*\)/i;
+
+  // YTM's parsed track title strips the "(Official Audio)" / "(Lyric Video)"
+  // suffix, so the raw YouTube title is the only place it survives. The player
+  // chrome's title link holds it; the page title is the second choice and the
+  // parsed title the last, which degrades to "never static" rather than
+  // guessing wrong.
+  function getRawVideoTitle() {
+    const selectors = ["#movie_player .ytp-title-link", "ytmusic-player-bar .title"];
+    for (let i = 0; i < selectors.length; i++) {
+      const el = document.querySelector(selectors[i]);
+      const text = el && el.textContent ? el.textContent.trim() : "";
+      if (text) return text;
+    }
+    const track = getCurrentTrack();
+    if (track && track.title) return track.title;
+    return document.title || "";
+  }
+
+  // Keyed on the raw title so this is idempotent (safe to call on every 2s
+  // tick) and so a failed Kawarp attempt is not retried in a loop.
+  let fsStaticVideoKey = "";
+
+  function applyStaticVideoBackdrop() {
+    if (!fsActive || !fsOverlay || !fsSavedVideo) return;
+    const raw = getRawVideoTitle();
+    // "Prefer Kawarp for music videos" (Aurora Bloom, cross-add-on) forces
+    // Kawarp for EVERY MV; otherwise only still uploads (Official Audio /
+    // Lyric Video) hand the backdrop over to Kawarp. The choice is part of the
+    // key, so flipping the setting re-runs the swap on the next call.
+    const wantKawarp = !!currentSettings.preferKawarpAlways || FS_STATIC_VIDEO_RE.test(raw);
+    const key = (wantKawarp ? "kawarp|" : "canvas|") + raw;
+    if (key === fsStaticVideoKey) return;
+    fsStaticVideoKey = key;
+    if (wantKawarp) {
+      const track = getCurrentTrack();
+      const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
+      if (fsKawarpActive) {
+        // Already running: swap the IMAGE only. Restarting would build a second
+        // canvas, and startFullscreenKawarp does not remove the old one - each
+        // new canvas is inserted as firstChild, so the OLD one ends up LATER in
+        // document order and paints straight over the new art (both are
+        // z-index 0). That is why the Kawarp backdrop stopped changing on a
+        // track change (AJ, 2026-09-28).
+        if (artUrl) syncFullscreenKawarpArt(hiResArt(artUrl));
+      } else {
+        startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+      }
+    } else if (fsKawarpActive) {
+      stopFullscreenKawarp();
+    }
+  }
+
+  function suspendPageKawarp() {
+    const dyn = window.__ymAuroraDynamic;
+    if (dyn && typeof dyn.suspend === "function") {
+      try { dyn.suspend(); } catch (_) {}
+    }
+  }
+
+  function resumePageKawarp() {
+    const dyn = window.__ymAuroraDynamic;
+    if (dyn && typeof dyn.resume === "function") {
+      try { dyn.resume(); } catch (_) {}
+    }
+  }
+
+  // Swap the fullscreen backdrop between music-video mode and cover-art mode
+  // when the track changes mid-fullscreen (no-MV -> MV or vice versa).
+  // enterFullscreenMode() decides once at entry; this catches the transitions.
+  // The swap is wrapped in a fade: fsMediaHost opacity goes to 0 (the .25s
+  // CSS transition on .ym-sl-fs-media handles the animation), the DOM swap
+  // runs, then opacity clears so it transitions back to 1 — replaces the
+  // snap AJ reported (2026-09-16). A guard timer prevents re-entry while a
+  // swap is already in flight.
+  function syncFsVideoMode() {
+    if (!fsActive || !fsMediaHost) return;
+    if (fsVideoModeSwapTimer) return; // a swap is already in flight
+    const liveVideo = findPlayerVideo();
+    const hasAttached = !!fsSavedVideo;
+    if (liveVideo && hasAttached) return;
+    if (!liveVideo && !hasAttached) return;
+
+    fsMediaHost.style.opacity = "0";
+    // Fade the chrome in lockstep (see .ym-sl-fs-swapping). The pane fades out
+    // here and back in via revealFsMediaPaneNow(); the chrome has no such
+    // inline mechanism, so the class carries it through the same window.
+    fsOverlay.classList.add("ym-sl-fs-swapping");
+    // Timestamp for the settle gate that decides when the pane may come back.
+    fsMediaSwapAt = performance.now();
+    fsVideoModeSwapTimer = setTimeout(() => {
+      fsVideoModeSwapTimer = 0;
+      // Guard each separately: touching fsMediaHost.style when fsMediaHost is
+      // null would throw (fullscreen can exit mid-swap).
+      if (!fsMediaHost) return;
+      // revealFsMediaPaneNow() (not a bare opacity reset) so the chrome class
+      // comes off with the pane on these bail-out paths too.
+      if (!fsActive) { revealFsMediaPaneNow(); return; }
+      // Re-read state inside the timer (the interval could have ticked again).
+      const lv = findPlayerVideo();
+      const ha = !!fsSavedVideo;
+      if (lv && ha) { revealFsMediaPaneNow(); return; }
+      if (lv && !ha) {
+        // Attach the live video (mirrors enterFullscreenMode).
+        fsSavedVideo = {
+          node: lv,
+          parent: lv.parentElement,
+          next: lv.nextSibling,
+          cssText: lv.style.cssText,
+        };
+        fsOverlay.classList.add("ym-sl-fs-has-video");
+        // Defensive: drop any stale canvas before creating a new one so a repeated
+        // attach can never leave two ambient backdrops stacked.
+        if (fsBgCanvas && fsBgCanvas.parentElement) {
+          fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+        }
+        fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
+        fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
+        fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
+        fsBgLastDrawAt = 0;
+        requestAnimationFrame(() => {
+          drawBgFrame();
+          startBgDrawLoop();
+        });
+        fsMediaHost.appendChild(lv);
+        lv.style.setProperty("position", "absolute", "important");
+        lv.style.setProperty("top", "0", "important");
+        lv.style.setProperty("left", "0", "important");
+        lv.style.setProperty("right", "0", "important");
+        lv.style.setProperty("bottom", "0", "important");
+        lv.style.setProperty("width", "100%", "important");
+        lv.style.setProperty("height", "100%", "important");
+        lv.style.setProperty("max-width", "none", "important");
+        lv.style.setProperty("max-height", "none", "important");
+        lv.style.setProperty("object-fit", "cover", "important");
+        lv.style.setProperty("background", "transparent", "important");
+        try { lv.play().catch(() => {}); } catch (_) {}
+        if (fsArtImg && fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
+        fsArtImg = null;
+        // An MV owns the pane now, so the animated HLS cover must go ENTIRELY.
+        // It is a flex child of the same pane, and left in place it kept its
+        // 583px of flow space beside the video — the pane's geometry (and the
+        // band anchored to it) stayed on the cover-art layout. destroyAnimatedArt
+        // was previously reached only from fullscreen teardown, so the animated
+        // cover survived every MV for the whole track (AJ, 2026-10-03).
+        destroyAnimatedArt();
+        stopFullscreenKawarp();
+        // Hide the whole PANE, not just the video. The pane still carries the
+        // cover-art geometry and animates to the video's aspect ratio, so
+        // revealing it here showed a SQUARE card with the old art's shape
+        // (AJ, 2026-09-28). awaitFsVideoReady() reveals the pane and the video
+        // together, once frames are actually advancing.
+        lv.style.setProperty("opacity", "0", "important");
+        lv.style.setProperty("transition", "opacity .35s ease", "important");
+        awaitFsVideoReady(lv);
+        return;
+      } else if (!lv && ha) {
+        // Detach the stale video and fall back to cover art.
+        const saved = fsSavedVideo;
+        // Stop the draw loop FIRST, while fsSavedVideo is still set:
+        // stopBgDrawLoop() picks its cancel method from that video
+        // (cancelVideoFrameCallback vs cancelAnimationFrame), and
+        // cancelAnimationFrame CANNOT cancel a requestVideoFrameCallback
+        // handle — clearing fsSavedVideo first left the video-frame loop
+        // running forever on a detached video (AJ's 1 fps symptom).
+        stopBgDrawLoop();
+        // Restore the video to the slot it came from so YTM keeps ownership
+        // and can reuse it for the next music video. Orphaning it here is
+        // what broke MV loading after a skip (AJ-confirmed).
+        if (saved && saved.node && saved.parent) {
+          if (saved.next && saved.next.parentNode === saved.parent) {
+            saved.parent.insertBefore(saved.node, saved.next);
+          } else {
+            saved.parent.appendChild(saved.node);
+          }
+          if (Object.prototype.hasOwnProperty.call(saved, "cssText")) {
+            saved.node.style.cssText = saved.cssText;
+          }
+        } else if (saved && saved.node && saved.node.parentElement === fsMediaHost) {
+          fsMediaHost.removeChild(saved.node);
+        }
+        fsSavedVideo = null;
+        fsOverlay.classList.remove("ym-sl-fs-has-video");
+        // Drop the video's aspect ratio too — it is stale the instant the video
+        // goes, and leaving it behind kept the pane on the MV's shape (it still
+        // read 1920/1080 at the cover reveal).
+        fsOverlay.style.removeProperty("--ym-sl-fs-video-ar");
+        // The video is gone, so any pending "waiting for it to be ready" is moot
+        // — drop it, or its spinner could appear over the cover art that is
+        // about to load (AJ, 2026-09-28).
+        cancelFsVideoReady();
+        // If we were in Video Background, it has nothing to blur now - drop
+        // back to Video + Lyrics so a non-MV skip can't strand a broken
+        // backdrop (AJ 2026-09-28). Guard with the call: applyFullscreenLayout
+        // itself also refuses "background" without a video.
+        if (fsLayoutMode === "background") applyFullscreenLayout("side");
+        if (fsBgCanvas && fsBgCanvas.parentElement) {
+          fsBgCanvas.parentElement.removeChild(fsBgCanvas);
+        }
+        fsBgCanvas = null;
+        fsBgCtx = null;
+        fsBgLastDrawAt = 0;
+        const t = getCurrentTrack();
+        // Fall back to the player bar's thumbnail: right after a skip the
+        // parsed track can still be the old one.
+        const artUrl = (t && t.artworkUrl) || getDomArtworkUrl();
+        if (artUrl) {
+          // Reuse the card the reconcile tick may already have made — creating a
+          // second one here left the pane showing the cover twice, side by side
+          // (AJ, 2026-09-28).
+          const img = ensureFsArtImg();
+          if (img) setFsArtSrc(img, hiResArt(artUrl));
+        }
+        startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
+        // Re-publish the band NOW. The pane's geometry just changed, and waiting
+        // for the 2s tick left the title on the OLD (video) anchor, so it
+        // overlapped the cover art until the tick moved it down (AJ, 2026-09-28).
+        // Deferred a frame so the new layout is measurable, and the band's own
+        // transition then carries the stack to the right place before the pane
+        // reveal finishes.
+        requestAnimationFrame(publishFsBandVars);
+      }
+      // Fade back in, once the new geometry has settled. (The MV attach path
+      // returns above and reveals the pane itself, once the video is actually
+      // producing frames.)
+      revealFsMediaPane();
+    }, FS_MEDIA_SWAP_MS);
+  }
+
+  // ---- music-video ready gate -------------------------------------------
+  // A skip attaches YTM's ONE recycled <video>, which still reports readyState /
+  // videoWidth / !paused from the PREVIOUS track — so those alone revealed a
+  // stale or poster frame (the "thumbnail" AJ kept seeing, 2026-09-28). The gate
+  // therefore ALSO requires the playback clock to move, the only reliable proof
+  // that the NEW content is rendering.
+  //
+  // The caller leaves the media PANE hidden while it waits — the pane still has
+  // the cover-art geometry, so showing it exposed a square card. This reveals the
+  // pane AND the video together, and shows a DEDICATED spinner (not the shared
+  // lyrics one, so the two lifecycles can never hide each other) once the wait
+  // passes FS_SPINNER_DELAY_MS. FS_VIDEO_READY_MAX_MS is the hard cap so it can
+  // never get stuck.
+  //
+  // FS_MEDIA_SWAP_MS matches the .ym-sl-fs-media opacity transition (.35s), so
+  // the outgoing card finishes fading before the DOM swap removes it.
+  const FS_MEDIA_SWAP_MS = 350;
+  const FS_VIDEO_READY_MAX_MS = 8000;
+  const FS_VIDEO_READY_POLL_MS = 150;
+  let fsVideoReadySeq = 0;
+  let fsVideoSpinnerEl = null;
+
+  // The pane's geometry — its width, plus the aspect ratio the JS publishes via
+  // --ym-sl-fs-video-ar — and the backdrop layers all take a beat to settle after
+  // a media-mode swap, so revealing the pane immediately showed a
+  // half-transitioned box: the cover cropped into the video's 16:9 frame with the
+  // old blurred backdrop still behind it, and the pane still square on the way
+  // into an MV (AJ, 2026-09-28). Every swap now holds the pane hidden for at
+  // least this long.
+  const FS_MEDIA_SETTLE_MS = 800;
+  let fsMediaSwapAt = 0;
+  let fsPaneRevealSeq = 0;
+
+  function revealFsMediaPaneNow() {
+    if (!fsMediaHost) return;
+    fsMediaHost.style.opacity = "";
+    // Drop the chrome half of the swap crossfade with the pane half.
+    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-swapping");
+  }
+
+  // Reveal the pane, but never sooner than FS_MEDIA_SETTLE_MS after the swap
+  // began, so the new geometry and backdrop have landed.
+  function revealFsMediaPane() {
+    const wait = Math.max(0, FS_MEDIA_SETTLE_MS - (performance.now() - fsMediaSwapAt));
+    const seq = ++fsPaneRevealSeq;
+    if (wait <= 0) { revealFsMediaPaneNow(); return; }
+    window.setTimeout(() => {
+      if (seq !== fsPaneRevealSeq) return;
+      revealFsMediaPaneNow();
+    }, wait);
+  }
+
+  // Dedicated to the video-ready wait: same look as the loading spinner but a
+  // separate node, driven by its own lifecycle.
+  function ensureFsVideoSpinner() {
+    if (fsVideoSpinnerEl) return fsVideoSpinnerEl;
+    if (!fsOverlay) return null;
+    fsVideoSpinnerEl = h("div", { class: "ym-sl-fs-spinner", "aria-hidden": "true" });
+    const svg = fsSvgIcon(FS_ICON_SPINNER, "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-spinner-icon");
+    fsVideoSpinnerEl.appendChild(svg);
+    return fsVideoSpinnerEl;
+  }
+
+  function hideFsVideoSpinner() {
+    if (fsVideoSpinnerEl) fsVideoSpinnerEl.classList.remove("visible");
+  }
+
+  // Invalidate a pending wait (video detached, or fullscreen exited) so its
+  // spinner can never linger over a later track.
+  function cancelFsVideoReady() {
+    fsVideoReadySeq++;
+    hideFsVideoSpinner();
+  }
+
+  function awaitFsVideoReady(video) {
+    const seq = ++fsVideoReadySeq;
+    hideFsVideoSpinner();
+    if (!fsActive || !video) { revealFsMediaPane(); return; }
+    let spinnerTimer = 0;
+    let pollTimer = 0;
+    let giveUpTimer = 0;
+    let lastTime = video.currentTime;
+    let progressed = false;
+    let done = false;
+    function cleanup() {
+      done = true;
+      if (spinnerTimer) { window.clearTimeout(spinnerTimer); spinnerTimer = 0; }
+      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
+      if (giveUpTimer) { window.clearTimeout(giveUpTimer); giveUpTimer = 0; }
+      video.removeEventListener("playing", check);
+      video.removeEventListener("timeupdate", check);
+      video.removeEventListener("seeked", check);
+    }
+    function finish() {
+      if (done || seq !== fsVideoReadySeq) return;
+      cleanup();
+      hideFsVideoSpinner();
+      video.style.setProperty("opacity", "1", "important");
+      revealFsMediaPane();
+    }
+    function check() {
+      if (done || seq !== fsVideoReadySeq) return;
+      const t = video.currentTime;
+      if (t > lastTime + 0.02) progressed = true;
+      lastTime = t;
+      if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) finish();
+    }
+    function poll() {
+      if (done || seq !== fsVideoReadySeq) return;
+      check();
+      if (!done && seq === fsVideoReadySeq) {
+        pollTimer = window.setTimeout(poll, FS_VIDEO_READY_POLL_MS);
+      }
+    }
+    video.addEventListener("playing", check);
+    video.addEventListener("timeupdate", check);
+    video.addEventListener("seeked", check);
+    poll(); // timeupdate is throttled, so poll as the backstop
+    spinnerTimer = window.setTimeout(() => {
+      spinnerTimer = 0;
+      if (done || seq !== fsVideoReadySeq || !fsActive) return;
+      // Show the pane so the spinner is visible; by now the aspect-ratio
+      // transition has settled, so this is no longer the old square card.
+      revealFsMediaPane();
+      const el = ensureFsVideoSpinner();
+      if (!el || !fsMediaHost) return;
+      if (el.parentElement !== fsMediaHost) fsMediaHost.appendChild(el);
+      void el.offsetWidth;
+      el.classList.add("visible");
+    }, FS_SPINNER_DELAY_MS);
+    giveUpTimer = window.setTimeout(() => {
+      giveUpTimer = 0;
+      if (done || seq !== fsVideoReadySeq) return;
+      finish();
+    }, FS_VIDEO_READY_MAX_MS);
+  }
+
+  // Artwork fallback straight off the player bar's own thumbnail. It is always
+  // in step with what YTM is playing, whereas getCurrentTrack() can lag a skip
+  // by a beat - and a lagging read is exactly what left the fullscreen pane
+  // empty after a skip (AJ, 2026-09-28).
+  function getDomArtworkUrl() {
+    const img = document.querySelector("ytmusic-player-bar img.image") ||
+      document.querySelector("ytmusic-player-bar .thumbnail img") ||
+      document.querySelector("ytmusic-player-bar img");
+    if (!img) return "";
+    return img.getAttribute("src") || img.currentSrc || "";
+  }
+
+  // Set fsArtImg.src with a cover-card crossfade (2026-09-28). The sharp card
+  // and the Kawarp canvas both load the new art independently, and the
+  // browser keeps painting the OLD decoded bitmap during the decode window
+  // — so for a beat the pane showed the old sharp card alongside the new
+  // Kawarp output (AJ, 2026-09-28). Marking the card as loading drops it
+  // to opacity 0; removing the mark on the img's load event lets it fade
+  // back in, by which point Kawarp also has the new art and the two
+  // reveal together. fsArtImgSeq invalidates stale onloads when src changes
+  // mid-decode; the timeout is the belt that prevents a hung decode from
+  // stranding the card at opacity:0.
+  function setFsArtSrc(img, src) {
+    if (!img || !src) return;
+    if (img.getAttribute("src") === src && !img.classList.contains("ym-sl-fs-art-loading")) return;
+    const seq = ++fsArtImgSeq;
+    img.classList.add("ym-sl-fs-art-loading");
+    const reveal = () => {
+      if (seq !== fsArtImgSeq) return;
+      img.classList.remove("ym-sl-fs-art-loading");
+    };
+    img.onload = () => reveal();
+    img.onerror = () => reveal();
+    img.setAttribute("src", src);
+    // A cached image may already be complete at the moment we set src, in
+    // which case onload fires later but rAF covers the same-frame gap.
+    if (img.complete && img.naturalWidth > 0) {
+      requestAnimationFrame(reveal);
+    }
+    setTimeout(() => {
+      if (seq !== fsArtImgSeq) return;
+      if (img.complete) img.classList.remove("ym-sl-fs-art-loading");
+    }, 1500);
+  }
+
+  // The pane must hold at most ONE sharp cover card. Two code paths can create
+  // it — the 2s reconcile tick and the MV -> cover swap in syncFsVideoMode — and
+  // when both ran for the same skip the second overwrote fsArtImg while the
+  // first stayed in the DOM, so the pane showed the cover TWICE, side by side
+  // (AJ, 2026-09-28). This is now the single create-or-reuse entry point.
+  // A YouTube video thumbnail is NOT cover art — it is the music video's own
+  // hqdefault (letterboxed, low-res) and the real video is about to fill the
+  // pane. Rendering it put that thumbnail in a square card for the ~1s before
+  // the video attached (AJ, 2026-09-28: the reconcile resolved
+  // i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
+  // lives on yt3/lh3.googleusercontent.com, so the /vi/ path is the tell.
+  function isVideoThumbnailUrl(url) {
+    return typeof url === "string" && /^https?:\/\/i\.ytimg\.com\/vi\//.test(url);
+  }
+
+  function ensureFsArtImg() {
+    if (!fsMediaHost) return null;
+    if (fsArtImg && !fsArtImg.isConnected) fsArtImg = null;
+    const cards = fsMediaHost.querySelectorAll(".ym-sl-fs-art");
+    for (let i = 0; i < cards.length; i++) {
+      if (cards[i] !== fsArtImg) cards[i].remove();
+    }
+    if (!fsArtImg) {
+      fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
+      fsMediaHost.appendChild(fsArtImg);
+    }
+    return fsArtImg;
+  }
+
+  // ---- Animated Apple Music cover (artwork.m8tec.top) --------------------
+  // Source: a public Apple Music animated-artwork (HLS .m3u8) lookup keyed by
+  // artist / album / title. Chrome/Comet cannot play HLS natively, so the stream
+  // is attached through the vendored hls.js (loaded into the page world by
+  // content.js as window.Hls) onto a looping, muted <video> that shares the
+  // static cover card's box. AJ chose the "cover card only" placement — the
+  // sharp centre square animates; the blurred backdrop stays the static YTM
+  // cover. The static <img> is ALWAYS the fallback: any lookup / fetch / decode
+  // failure simply leaves the card as-is.
+  const M8TEC_SEARCH = "https://artwork.m8tec.top/api/v1/artwork/search";
+  // The m8tec search REQUIRES the album parameter — a query without it 400s
+  // (verified live: artist/title-only -> 400, artist+album -> valid 200/404).
+  // getTrack() only fills `album` when the player bar contains an /album/
+  // link, and singles / radio tracks often ship without one, which is exactly
+  // the 400s AJ saw in the console (2026-10-03). Parse the bar's byline
+  // ("Artist • Album • Year") as a fallback: the album is the first segment
+  // after the artist that is not a view/listen count and not a bare year.
+  function deriveAlbumFromBar() {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return "";
+    const el = bar.querySelector(".subtitle") || bar.querySelector(".byline");
+    const text = el && el.textContent ? el.textContent.trim() : "";
+    if (!text) return "";
+    const segments = text.split(/\s*[•·]\s*/).map((s) => s.trim()).filter(Boolean);
+    // segments[0] is the artist (cleanArtist in public-api eats the same slot).
+    for (let i = 1; i < segments.length; i++) {
+      const seg = segments[i];
+      if (/^\d{4}$/.test(seg)) continue; // a bare year
+      // Video-style counters: "1,234 views" / "2.3M views" / "10K plays".
+      if (/^\d+(?:[.,]\d+)?\s*(?:[kmb]|million|thousand|billion)?\s*(?:views?|listens?|plays?)\b/i.test(seg)) continue;
+      if (/^(?:\d+\s+)?years?\s+ago$/i.test(seg)) continue;
+      return seg;
+    }
+    return "";
+  }
+
+  // Build the m8tec query for a track, album-derived-from-bar included, and a
+  // stable key from it. The key MUST include the derived album: the race guard
+  // compares keys built the same way, otherwise a bar-derived album would
+  // never match and the fetched stream would silently never attach.
+  function animatedArtQuery(track) {
+    return {
+      artist: (track && track.artist) || "",
+      album: (track && track.album) || deriveAlbumFromBar(),
+      title: (track && track.title) || "",
+    };
+  }
+
+  function animatedArtKey(query) {
+    return [query.artist, query.album, query.title]
+      .map((s) => (s || "").trim().toLowerCase())
+      .filter(Boolean)
+      .join(" :: ");
+  }
+
+  // Off-screen but IN-VIEWPORT host. A video that is offscreen or display:none is
+  // throttled by Chrome and would not actually buffer, so this sits at the
+  // viewport origin at zero opacity with no pointer events (AJ, 2026-10-03).
+  function ensureArtWarmHost() {
+    if (fsArtWarmHost && fsArtWarmHost.isConnected) return fsArtWarmHost;
+    fsArtWarmHost = h("div", { class: "ym-sl-art-warm", "aria-hidden": "true" });
+    // Inline rather than in the CSS template: this host is single-purpose, and it
+    // must never be caught by a fullscreen-scoped rule. In-viewport at opacity:0
+    // (NOT display:none / offscreen) so Chrome still decodes and buffers.
+    fsArtWarmHost.style.cssText =
+      "position:fixed;left:0;top:0;width:583px;height:583px;" +
+      "opacity:0;pointer-events:none;z-index:-1;overflow:hidden;";
+    (document.body || document.documentElement).appendChild(fsArtWarmHost);
+    return fsArtWarmHost;
+  }
+
+  // The player-view cover-art container (NOT fullscreen). Anchoring to the
+  // container with inset:0 makes the layer track its box automatically, so an
+  // expanded left panel (smaller art) needs no re-measure (AJ, 2026-10-03).
+  function artInlineHost() {
+    const host = document.getElementById("song-image");
+    return (host && host.isConnected) ? host : null;
+  }
+
+  // visibility (NOT display) so the container keeps its size and the layout does
+  // not jump when the cover is swapped.
+  function setInlineCoverHidden(hidden) {
+    const img = document.querySelector("#song-image img");
+    if (img) img.style.visibility = hidden ? "hidden" : "";
+  }
+
+  // Park the art video in the right home and give it the matching geometry. ONE
+  // element serves BOTH surfaces: the player's #song-image normally, and the
+  // fullscreen media pane while fullscreen is open (AJ, 2026-10-03).
+  function placeArtVideo() {
+    if (!fsArtVideo) return;
+    const inFs = !!(fsActive && fsMediaHost);
+    const target = inFs ? fsMediaHost : (artInlineHost() || ensureArtWarmHost());
+    if (!target) return;
+    if (fsArtVideo.parentElement !== target) target.appendChild(fsArtVideo);
+    if (inFs) {
+      // The fullscreen stylesheet owns the geometry.
+      fsArtVideo.style.cssText = "background:transparent;";
+    } else {
+      fsArtVideo.style.cssText =
+        "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" +
+        "border-radius:inherit;z-index:1;pointer-events:none;background:transparent;";
+    }
+    // The static YTM cover is hidden ONLY while the animated one is actually up on
+    // the page — never in fullscreen (the overlay covers it) and never before the
+    // stream is ready.
+    setInlineCoverHidden(!inFs && fsArtVideo.classList.contains("ym-sl-fs-art-video-ready"));
+  }
+
+  function ensureFsArtVideo() {
+    // In fullscreen the media pane owns it; otherwise the player's cover-art
+    // container does (the warm host is only a fallback if that is absent).
+    const parent = fsMediaHost || artInlineHost() || ensureArtWarmHost();
+    if (!parent) return null;
+    // NOTE: a YTM re-render can DETACH the video. Do NOT drop it for that — a
+    // detached element keeps playing, and dropping it forced a full re-attach
+    // (engine torn down + video hidden until the new manifest parsed), which
+    // flickered the cover back to YTM's own art (AJ, 2026-10-03). The
+    // placeArtVideo() call below re-homes it instead.
+    if (!fsArtVideo) {
+      fsArtVideo = h("video", {
+        class: "ym-sl-fs-art-video",
+        muted: "muted",
+        loop: "loop",
+        playsinline: "true",
+        "webkit-playsinline": "true",
+        preload: "auto",
+        "aria-hidden": "true",
+      });
+      // hls.js needs the element present in the DOM to attachMedia().
+      parent.appendChild(fsArtVideo);
+      // The muted ATTRIBUTE set by h() does not always reflect to the muted
+      // PROPERTY before play() in Chrome, and a non-muted autoplay is blocked.
+      // Force it directly so the loop can autoplay without a user gesture.
+      fsArtVideo.muted = true;
+      fsArtVideo.defaultMuted = true;
+    }
+    // Home + geometry (this also sets the transparent background, so a frameless
+    // video can never flash black over the cover).
+    placeArtVideo();
+    return fsArtVideo;
+  }
+
+  // Pause + hide the animated video and reveal the static card underneath.
+  // Used transiently (mid-lookup, on failure) — the element is kept for reuse.
+  // display:none is ESSENTIAL, not cosmetic: the video is a flex child of the
+  // media pane, and left merely at opacity:0 it still takes its 583px of flex
+  // space beside the static card — the two-square row overflowed the 960px
+  // pane and shoved the cover art half off-screen to the left
+  // (live-measured img x=-65, AJ, 2026-10-03).
+  function hideAnimatedArt() {
+    if (fsArtVideo) {
+      fsArtVideo.classList.remove("ym-sl-fs-art-video-ready");
+      fsArtVideo.style.display = "none";
+      try { fsArtVideo.pause(); } catch (_) {}
+    }
+    if (fsArtVideoHls) {
+      try { fsArtVideoHls.destroy(); } catch (_) {}
+      fsArtVideoHls = null;
+    }
+    if (fsArtImg) fsArtImg.style.display = "";
+    // The ready class is gone, so this restores the player view's own cover too.
+    placeArtVideo();
+  }
+
+  // Full removal: drop the video element + its hls instance entirely. Used when
+  // a music video owns the pane, where animated cover art must never show.
+  function destroyAnimatedArt() {
+    if (fsArtVideoHls) { try { fsArtVideoHls.destroy(); } catch (_) {} fsArtVideoHls = null; }
+    if (fsArtVideo) {
+      try { fsArtVideo.pause(); } catch (_) {}
+      if (fsArtVideo.parentElement) fsArtVideo.parentElement.removeChild(fsArtVideo);
+      fsArtVideo = null;
+    }
+    fsArtVideoKey = "";
+    fsArtVideoLoadingKey = "";
+    if (fsArtImg) fsArtImg.style.display = "";
+    setInlineCoverHidden(false); // the player view gets its own cover back
+  }
+
+  // A CACHED animated cover is about to load, so do NOT show the static YTM cover
+  // first: hide the card and let the pane keep its blurred backdrop until the
+  // video can actually paint. This is what makes a cached track read as instant
+  // (AJ, 2026-10-03). Every failure path calls hideAnimatedArt(), which restores
+  // the card, so a dead stream still degrades to the static cover.
+  function suppressStaticCardForAnimated() {
+    if (fsArtImg) fsArtImg.style.display = "none";
+  }
+
+  function attachAnimatedArt(m3u8Url) {
+    const video = ensureFsArtVideo();
+    if (!video) return;
+    const Hls = window.Hls;
+    if (!Hls) { hideAnimatedArt(); return; } // native HLS unsupported in Chrome
+    const onReady = () => {
+      // MANIFEST_PARSED fires BEFORE any frame is decoded, and a frameless <video>
+      // paints black — so wait for the first decodable frame (readyState >= 2) and
+      // only then bring it into layout + fade it in. The static card is already
+      // hidden by suppressStaticCardForAnimated(), so the pane shows the blurred
+      // backdrop in the meantime: no black flash and no wrong-cover flash
+      // (AJ, 2026-10-03).
+      const paint = () => {
+        // Back into layout (hideAnimatedArt sets inline display:none) BEFORE the
+        // fade-in, and only then hide the static card — never both at once.
+        video.style.display = "";
+        video.classList.add("ym-sl-fs-art-video-ready");
+        if (fsArtImg) fsArtImg.style.display = "none";
+        // Player view: hide YTM's own cover now that the animated one is up.
+        placeArtVideo();
+        const p = video.play();
+        if (p && p.catch) p.catch(() => {}); // autoplay may be deferred; ignore
+      };
+      let painted = false;
+      const once = () => {
+        if (painted) return;
+        // Superseded by a newer track's attach (the element is REUSED) — painting
+        // now would reveal the previous stream.
+        if (fsArtVideo !== video || !video.isConnected) return;
+        painted = true;
+        paint();
+      };
+      if (video.readyState >= 2) { once(); return; }
+      video.addEventListener("loadeddata", once, { once: true });
+      // Never strand the pane on the backdrop if the frame never arrives. Safe
+      // because the video's own background is transparent (ensureFsArtVideo), so a
+      // still-frameless element reveals the backdrop rather than a black box.
+      setTimeout(once, 1500);
+    };
+    // Tear down any previous stream before loading the new one.
+    if (fsArtVideoHls) { try { fsArtVideoHls.destroy(); } catch (_) {} fsArtVideoHls = null; }
+    // Out of the flex row while the engine loads: a second square beside the
+    // static card overflows the pane and shifts the band (Round 90). onReady
+    // brings it back into layout right before the fade-in.
+    video.style.display = "none";
+    if (Hls.isSupported()) {
+      const engine = new Hls({
+        // enableWorker:false — the worker boot is pure latency before the first
+        // frame, and the manifest parse here is tiny (AJ, 2026-10-03).
+        enableWorker: false,
+        // Start on the LOWEST level so the first segment is the smallest one on
+        // offer; ABR climbs once it is playing. Starting mid/high cost hundreds of
+        // ms before anything appeared.
+        startLevel: 0,
+        maxBufferLength: 12,
+        maxMaxBufferLength: 30,
+        capLevelToPlayerSize: true,
+      });
+      engine.loadSource(m3u8Url);
+      engine.attachMedia(video);
+      engine.on(Hls.Events.MANIFEST_PARSED, onReady);
+      engine.on(Hls.Events.ERROR, (_e, data) => {
+        if (data && data.fatal) {
+          try { engine.destroy(); } catch (_) {}
+          if (fsArtVideoHls === engine) fsArtVideoHls = null;
+          // The cached manifest URL failed (expired or moved), so drop it from
+          // BOTH caches and pin the key for this session — otherwise the 2s tick
+          // would retry the same dead URL for the rest of the 30-day window.
+          artCacheDelete(fsArtVideoKey);
+          fsArtVideoCache.delete(fsArtVideoKey);
+          if (fsArtVideoKey) fsArtVideoFail.add(fsArtVideoKey);
+          hideAnimatedArt();
+        }
+      });
+      fsArtVideoHls = engine;
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Safari / native HLS path.
+      video.src = m3u8Url;
+      video.addEventListener("loadedmetadata", onReady, { once: true });
+      video.addEventListener("error", () => hideAnimatedArt(), { once: true });
+    } else {
+      hideAnimatedArt();
+    }
+  }
+
+  // ---- persisted animated-art cache helpers --------------------------------
+  // Read once per page load, then served from the in-memory mirror, so a lookup
+  // costs no storage round-trip. Writes coalesce into one storage write.
+  async function loadArtCache() {
+    if (artCache) return artCache;
+    if (artCacheLoad) return artCacheLoad;
+    if (!window.YTMod || typeof window.YTMod.getArtCache !== "function") {
+      artCache = {}; // no bridge -> every lookup misses, but nothing breaks
+      return artCache;
+    }
+    artCacheLoad = window.YTMod.getArtCache().then((stored) => {
+      artCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
+      const swept = sweepArtCache(Date.now());
+      // Page-world log so it is visible in the console alongside the lyrics cache
+      // lines (the isolated-world copy of this log is not surfaced).
+      console.log(`[SpicyLyrics] art cache init: ${Object.keys(artCache).length} entries${swept ? " (expired swept)" : ""}.`);
+      return artCache;
+    }).catch(() => { artCache = {}; return artCache; });
+    return artCacheLoad;
+  }
+
+  function flushArtCache() {
+    if (!artCache || !artCacheDirty) return;
+    artCacheDirty = false;
+    if (!window.YTMod || typeof window.YTMod.setArtCache !== "function") return;
+    const snapshot = artCache;
+    Promise.resolve(window.YTMod.setArtCache(snapshot)).catch(() => {});
+  }
+
+  function markArtCacheDirty() {
+    artCacheDirty = true;
+    if (artCacheFlushTimer) return;
+    artCacheFlushTimer = setTimeout(() => {
+      artCacheFlushTimer = 0;
+      flushArtCache();
+    }, 1500);
+  }
+
+  // Expired or malformed entries can never be served, which is what makes the
+  // 30-day window a real guarantee rather than a best-effort one.
+  function sweepArtCache(now) {
+    if (!artCache) return false;
+    let removed = false;
+    for (const [k, entry] of Object.entries(artCache)) {
+      if (!entry || typeof entry !== "object" || entry.v !== ART_CACHE_VERSION ||
+          typeof entry.url !== "string" || !entry.url ||
+          !Number.isFinite(entry.exp) || entry.exp <= now) {
+        delete artCache[k];
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
+  // LRU-ish cap: entries carry `at` so the oldest go first.
+  function trimArtCache() {
+    if (!artCache) return false;
+    const keys = Object.keys(artCache);
+    if (keys.length <= ART_CACHE_LIMIT) return false;
+    keys.sort((a, b) => (artCache[a].at || 0) - (artCache[b].at || 0))
+      .slice(0, keys.length - ART_CACHE_LIMIT)
+      .forEach((k) => { delete artCache[k]; });
+    return true;
+  }
+
+  // Read-through: a live persisted URL for this key, else "".
+  function artCacheGet(key) {
+    if (!artCache || !key) return "";
+    const entry = artCache[key];
+    if (!entry || typeof entry !== "object") return "";
+    if (entry.v !== ART_CACHE_VERSION || !Number.isFinite(entry.exp) || entry.exp <= Date.now()) return "";
+    return typeof entry.url === "string" ? entry.url : "";
+  }
+
+  function artCacheSet(key, url) {
+    if (!artCache || !key || !url) return;
+    const now = Date.now();
+    artCache[key] = { v: ART_CACHE_VERSION, url, at: now, exp: now + ART_CACHE_TTL_MS };
+    trimArtCache();
+    markArtCacheDirty();
+  }
+
+  // Drop one key. Used when an HLS stream fails, so a manifest URL that went
+  // stale inside the 30-day window cannot be replayed forever.
+  function artCacheDelete(key) {
+    if (!artCache || !key || !artCache[key]) return;
+    delete artCache[key];
+    markArtCacheDirty();
+  }
+
+  // Pre-load the animated cover while NOT in fullscreen, so opening fullscreen
+  // shows it with no HLS startup at all: the stream buffers in the warm host and
+  // enterFullscreenMode() moves the video into the media pane (AJ, 2026-10-03).
+  // CACHED urls only — this never adds an m8tec API call, it just starts the
+  // stream early for tracks already known to have animated art.
+  async function warmAnimatedArt() {
+    if (fsActive) return; // the fullscreen reconcile already owns this track
+    if (!window.YTMod || typeof window.YTMod.getArtCache !== "function") return;
+    // FULL lookup (cache THEN API) so a track gets cached the first time it plays
+    // ANYWHERE — not only while fullscreen happens to be open. That is one m8tec
+    // call per unique track, and 30 days of instant replays after it
+    // (AJ, 2026-10-03).
+    const track = getCurrentTrack();
+    if (!track) return;
+    await refreshAnimatedArt(track);
+  }
+
+  // Reconcile the animated cover against the current track. Fire-and-forget: it
+  // reads the same track object reconcileFsMediaArt() just resolved, so the
+  // static card and the video never disagree about WHICH song is playing.
+  async function refreshAnimatedArt(track) {
+    // Fullscreen: the media pane owns the video. Outside: the warm host does — so
+    // this may run in BOTH. Either way the element needs a home.
+    if (fsActive) {
+      if (!fsMediaHost) return;
+    } else if (!ensureArtWarmHost()) {
+      return;
+    }
+    // Feature switch (Aurora Lyrics settings, AJ 2026-10-03). Off -> tear the art
+    // down and stop; the player view and fullscreen both fall back to the cover.
+    if (currentSettings.animatedArt === false) {
+      hideAnimatedArt();
+      return;
+    }
+    // Outside fullscreen, YTM plays a music video in its OWN #song-media-window (a
+    // plain song leaves that element at opacity ~0). Testing THAT rather than
+    // findPlayerVideo() avoids false positives from YTM's recycled <video>, which
+    // was hiding the animated cover on ordinary audio tracks (AJ, 2026-10-03).
+    if (!fsActive) {
+      const mediaWindow = document.getElementById("song-media-window");
+      const mvVisible = mediaWindow &&
+        parseFloat(window.getComputedStyle(mediaWindow).opacity) > 0.5;
+      if (mvVisible) { hideAnimatedArt(); return; }
+    }
+    const query = animatedArtQuery(track);
+    const key = animatedArtKey(query);
+    // No album -> the API would 400. BUT the player-bar byline LAGS a skip, so an
+    // empty album here usually just means "not settled yet" — and the old
+    // hideAnimatedArt() call REVEALED the static card, which is exactly the
+    // ~600ms static-cover flash before the animated one (AJ, 2026-10-03). Hold the
+    // backdrop hidden and retry shortly instead; only give up (and show the cover)
+    // after a few attempts. Still never cached as "no artwork".
+    if (!query.album || !key) {
+      const rough = (query.artist || "") + "::" + (query.title || "");
+      if (fsArtNoAlbumKey !== rough) { fsArtNoAlbumKey = rough; fsArtNoAlbumTries = 0; }
+      if (fsArtNoAlbumTries < 3) {
+        fsArtNoAlbumTries++;
+        console.log(`[SpicyLyrics] animated art: album not settled for "${rough}" (try ${fsArtNoAlbumTries}) — holding the backdrop.`);
+        suppressStaticCardForAnimated();
+        window.setTimeout(() => { try { refreshAnimatedArt(getCurrentTrack()); } catch (_) {} }, 300);
+        return;
+      }
+      console.log(`[SpicyLyrics] animated art: no album for "${rough}" — showing the static cover.`);
+      hideAnimatedArt();
+      return;
+    }
+    // Already HAVE this track's stream — even if the element was momentarily
+    // detached by a YTM re-render. Re-home it; NEVER re-attach. A re-attach tears
+    // the hls engine down and hides the video until the new manifest parses, which
+    // flickered the cover back to YTM's own art every few seconds
+    // (AJ, 2026-10-03).
+    if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.isConnected))) {
+      placeArtVideo();
+      // Re-assert the static card's hide: the MV -> song transition can null
+      // fsArtImg (the player-bar artwork briefly still reads as the MV's own
+      // i.ytimg thumbnail, so reconcile's thumbnail branch drops the card),
+      // and the next cover tick creates a FRESH card that would otherwise sit
+      // beside the playing stream in the flex row, shoving everything left
+      // (live-scanned: video x=-65 + img x=518, AJ, 2026-10-03).
+      if (fsArtImg && fsArtImg.style.display !== "none") fsArtImg.style.display = "none";
+      return;
+    }
+    // Persisted cache (30-day): a hit shows the cover with NO network call at all.
+    await loadArtCache();
+    const storedUrl = artCacheGet(key);
+    if (storedUrl) {
+      console.log(`[SpicyLyrics] animated art from CACHE (no API call): ${key}`);
+      fsArtVideoCache.set(key, storedUrl);
+      fsArtVideoKey = key;
+      suppressStaticCardForAnimated();
+      attachAnimatedArt(storedUrl);
+      return;
+    }
+    // No artwork for this track, or one is mid-flight — keep the static card.
+    if (fsArtVideoFail.has(key) || fsArtVideoLoadingKey === key) {
+      if (fsArtVideoKey !== key) hideAnimatedArt();
+      return;
+    }
+    if (fsArtVideoCache.has(key)) {
+      const cached = fsArtVideoCache.get(key);
+      if (cached) { fsArtVideoKey = key; suppressStaticCardForAnimated(); attachAnimatedArt(cached); }
+      else { fsArtVideoFail.add(key); hideAnimatedArt(); }
+      return;
+    }
+    // First sight of this track: look it up (CORS-open; the content script may
+    // fetch directly). The static card stays visible until we have a stream.
+    fsArtVideoLoadingKey = key;
+    // Tear down any previous stream, then HIDE the static card for the duration of
+    // the lookup: the pane keeps its blurred backdrop rather than flashing the YT
+    // cover and then swapping to the animated one. A definitive miss calls
+    // hideAnimatedArt() in the catch below, which brings the cover back
+    // (AJ, 2026-10-03).
+    hideAnimatedArt();
+    suppressStaticCardForAnimated();
+    try {
+      const params = new URLSearchParams();
+      if (query.artist) params.set("artist", query.artist);
+      if (query.album) params.set("album", query.album);
+      if (query.title) params.set("title", query.title);
+      const res = await fetch(M8TEC_SEARCH + "?" + params.toString(), { credentials: "omit" });
+      if (!res.ok) throw new Error("m8tec " + res.status);
+      const data = await res.json();
+      const url = (data && (data.url || data.url_tall)) || "";
+      if (!url) throw new Error("no m8tec artwork");
+      fsArtVideoCache.set(key, url);
+      artCacheSet(key, url); // persisted: the next play needs no API call at all
+      fsArtVideoLoadingKey = "";
+      // A newer track may have arrived during the await — don't clobber it.
+      // Compare against the same query shape (bar-derived album included).
+      if (animatedArtKey(animatedArtQuery(getCurrentTrack())) === key) {
+        fsArtVideoKey = key;
+        attachAnimatedArt(url);
+      }
+    } catch (err) {
+      // Logged so the console distinguishes "this track has no animated art" from
+      // "the lookup never ran" — the two look identical from the pane.
+      console.log(`[SpicyLyrics] no animated art for ${key} (${(err && err.message) || err}); static cover kept.`);
+      fsArtVideoCache.set(key, false);
+      fsArtVideoFail.add(key);
+      fsArtVideoLoadingKey = "";
+      hideAnimatedArt();
+    }
+  }
+
+  // Reconcile the fullscreen media pane's content against the current track.
+  // CREATE-OR-UPDATE, deliberately: the old code only ever updated an existing
+  // <img>, and fsArtImg was created in exactly two places (entry, and the
+  // MV -> cover detach). So a cover -> cover skip never touched it, and an
+  // MV -> cover skip that landed before the new artwork URL existed left the
+  // pane empty for good. Called from the 2s refresh tick.
+  function reconcileFsMediaArt() {
+    if (!fsActive || !fsMediaHost) return;
+    // Ask the SAME question syncFsVideoMode asks, instead of trusting the
+    // fsSavedVideo flag: YTM recycles the <video> element between tracks, so the
+    // flag can say "a video owns the pane" while the element is already dead.
+    // That mismatch is what left the pane on a stale video instead of loading
+    // the new cover art after an MV -> song skip (AJ, 2026-09-28).
+    // Bail when a video is attached AT ALL. findPlayerVideo() additionally
+    // requires dimensions, so during a skip it reports null while the video is
+    // still sitting in the pane — and creating the card then put a cover image
+    // (clamped to the MV pane's short height, hence cropped and small) beside
+    // the video until the detach (AJ, 2026-09-28; the trace caught
+    // reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
+    if (findPlayerVideo() || fsSavedVideo) {
+      // Symmetric teardown: never leave a cover card sitting on top of a video.
+      // MV -> MV returns early inside syncFsVideoMode, so nothing else clears it.
+      if (fsArtImg) {
+        if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
+        fsArtImg = null;
+      }
+      // ...and tear the animated HLS cover down with it. This guard is the only
+      // teardown that runs every 2s while an MV plays (refreshAnimatedArt is
+      // never reached on the video path), so it is the safety net for any route
+      // that leaves the animated <video> in the pane (AJ, 2026-10-03).
+      destroyAnimatedArt();
+      return;
+    }
+    const track = getCurrentTrack();
+    const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
+    const hi = hiResArt(artUrl);
+    if (!hi) return;
+    if (isVideoThumbnailUrl(hi)) {
+      // The MV's own thumbnail, not cover art: drop any card and keep the pane
+      // hidden until the video attaches and reveals it.
+      if (fsArtImg) {
+        if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
+        fsArtImg = null;
+      }
+      if (fsMediaHost) fsMediaHost.style.opacity = "0";
+      return;
+    }
+    const img = ensureFsArtImg();
+    if (img) setFsArtSrc(img, hi);
+    // Keep the backdrop in step with the track IMMEDIATELY. Only the 2s tick used
+    // to update it, so a skip left the previous track's blurred art up for up to
+    // two seconds — and with the card now hidden during the lookup that lag would
+    // be on screen.
+    if (fsBgImg && hi && fsBgImg.getAttribute("src") !== hi) fsBgImg.setAttribute("src", hi);
+    // Keep the card HIDDEN while the animated lookup runs. AJ's report: skipping to
+    // an animated track showed the YT cover and then swapped. The card is created
+    // (so a miss has something to reveal) but stays hidden until the lookup
+    // definitively misses — the miss paths call hideAnimatedArt(), which restores
+    // it (AJ, 2026-10-03).
+    suppressStaticCardForAnimated();
+    // Kick the animated-cover lookup for this track (cover card only). It reads
+    // the SAME track object, so the static card and the video never disagree
+    // about which song is playing.
+    refreshAnimatedArt(track);
+    // The guard above is a ONE-WAY hide (cover-art mode has no other route back
+    // to visible: syncFsVideoMode early-returns once the swap settles, and
+    // awaitFsVideoReady needs a video). Clear it here now that real cover art is
+    // actually in the pane, so a hide that outlived its video cannot strand the
+    // pane blank. Harmless when the pane is already visible.
+    if (fsMediaHost.style.opacity === "0") revealFsMediaPaneNow();
+  }
+

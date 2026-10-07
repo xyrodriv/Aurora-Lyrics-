@@ -1,0 +1,528 @@
+  /* ===================== original renderer primitives ===================== */
+
+  // Adapted from Fraktality/spr, matching the source project's Spring.ts.
+  class Spring {
+    constructor(startPosition, frequency, dampingRatio, goal) {
+      this.d = dampingRatio;
+      this.f = frequency;
+      this.g = goal == null ? startPosition : goal;
+      this.p = startPosition;
+      this.v = 0;
+    }
+
+    Step(dt) {
+      const d = this.d;
+      const f = this.f * (2 * Math.PI);
+      const g = this.g;
+      let p = this.p;
+      let v = this.v;
+
+      if (d === 1) {
+        const q = Math.exp(-f * dt);
+        const w = dt * q;
+        const c0 = q + w * f;
+        const c2 = q - w * f;
+        const c3 = w * f * f;
+        const o = p - g;
+        p = o * c0 + v * w + g;
+        v = v * c2 - o * c3;
+      } else if (d < 1) {
+        const q = Math.exp(-d * f * dt);
+        const c = Math.sqrt(1 - d * d);
+        const i = Math.cos(dt * f * c);
+        const j = Math.sin(dt * f * c);
+        const z = c > 1e-5
+          ? j / c
+          : dt * f + (((dt * f) ** 2) * (c ** 4) / 20 - c * c) * (dt * f) ** 3 / 6;
+        const y = f * c > 1e-5
+          ? j / (f * c)
+          : dt + (((dt * f * c) ** 2) * (f * f * c * c) / 20 - f * f * c * c) * dt ** 3 / 6;
+        const o = p - g;
+        p = (o * (i + z * d) + v * y) * q + g;
+        v = (v * (i - z * d) - o * (z * f)) * q;
+      } else {
+        const c = Math.sqrt(d * d - 1);
+        const r1 = -f * (d + c);
+        const r2 = -f * (d - c);
+        const ec1 = Math.exp(r1 * dt);
+        const ec2 = Math.exp(r2 * dt);
+        const o = p - g;
+        const co2 = (v - o * r1) / (2 * f * c);
+        const co1 = ec1 * (o - co2);
+        p = co1 + co2 * ec2 + g;
+        v = co1 * r1 + co2 * ec2 * r2;
+      }
+
+      this.p = p;
+      this.v = v;
+      return p;
+    }
+
+    SetGoal(goal, replacePosition) {
+      this.g = goal;
+      if (replacePosition) {
+        this.p = goal;
+        this.v = 0;
+      }
+    }
+
+    CanSleep() {
+      const offset = this.p - this.g;
+      return this.v * this.v <= 1e-4 && offset * offset <= (1 / 3840) ** 2;
+    }
+  }
+
+  // Natural cubic spline — byte-for-byte the interpolation the `cubic-spline`
+  // npm package (v3.0.3, MIT, (c) 2014 Morgan Herlocker) performs, which is what
+  // upstream Spicy Lyrics imports at LyricsAnimator.ts:2. Vendored rather than
+  // bundled so the extension stays a single trusted-types-safe asset with no
+  // runtime dependency loading. Verified against the real package to 0.00e+0
+  // over every upstream range (see .scratch/verify-natural.mjs).
+  //
+  // This REPLACED a Catmull-Rom / finite-difference Hermite implementation that
+  // looked equivalent — same control points, same shape — but is a genuinely
+  // different curve. A natural cubic spline OVERSHOOTS its own control points on
+  // a sharp kink; Catmull-Rom does not. Measured 2026-09-20:
+  //
+  //   range              old Catmull-Rom      new natural         what it changed
+  //   Scale              1.0509 @ t=0.718     1.0536 @ t=0.615    shrink starts 10% sooner
+  //   LetterScale        1.1752 @ t=0.706     1.1940 @ t=0.573    shrink starts 13% sooner
+  //   YOffset           -0.01667 @ t=0.901   -0.03722 @ t=0.600    2.23x deeper rise
+  //   LetterYOffset     -0.01786 @ t=0.901   -0.04000 @ t=0.599    2.24x deeper rise
+  //   Glow               1.1611 @ t=0.356     1.4330 @ t=0.340    1.23x brighter
+  //
+  // The YOffset row is AJ's "it does go up a little but barely": -1/60 is only a
+  // CONTROL POINT, the real curve reaches -0.0372. Equally important, the peak
+  // TIME moves 0.901 -> 0.600, so the old curve held the word flat for 90% of its
+  // life and then twitched at the very end — which is why it read as "just zooms
+  // in". And the Scale row's earlier peak is literally "make it go smaller when
+  // it's close to ending".
+  //
+  // Solve the tangents ONCE in the constructor: at() is called per word per frame.
+  class Spline {
+    constructor(points) {
+      const sorted = points.slice().sort((a, b) => a.Time - b.Time);
+      this.xs = sorted.map((point) => point.Time);
+      this.ys = sorted.map((point) => point.Value);
+      this.ks = this.solveTangents();
+    }
+
+    // Tridiagonal solve for the first derivative (tangent) at every knot, with
+    // natural boundary conditions — second derivative zero at both ends, which in
+    // the tangent formulation is 2*m0 + m1 = 3*slope0 (mirrored at the far end).
+    // NOTE the two end rows are NOT 1/0/0 rows; seeding them as such makes b[0]
+    // zero and the whole solve returns NaN.
+    solveTangents() {
+      const xs = this.xs;
+      const ys = this.ys;
+      const n = xs.length - 1;
+      const a = new Array(n + 1).fill(0);
+      const b = new Array(n + 1).fill(0);
+      const c = new Array(n + 1).fill(0);
+      const r = new Array(n + 1).fill(0);
+
+      for (let i = 1; i < n; i++) {
+        const hPrev = xs[i] - xs[i - 1];
+        const hNext = xs[i + 1] - xs[i];
+        a[i] = 1 / hPrev;
+        b[i] = 2 * (1 / hPrev + 1 / hNext);
+        c[i] = 1 / hNext;
+        r[i] = 3 * ((ys[i] - ys[i - 1]) / (hPrev * hPrev) +
+          (ys[i + 1] - ys[i]) / (hNext * hNext));
+      }
+
+      const firstH = xs[1] - xs[0];
+      a[0] = 1 / firstH;
+      b[0] = 2 / firstH;
+      c[0] = 1 / firstH;
+      r[0] = (3 * (ys[1] - ys[0])) / (firstH * firstH);
+
+      const lastH = xs[n] - xs[n - 1];
+      a[n] = 1 / lastH;
+      b[n] = 2 / lastH;
+      c[n] = 0;
+      r[n] = (3 * (ys[n] - ys[n - 1])) / (lastH * lastH);
+
+      // Thomas algorithm — forward eliminate, then back substitute.
+      for (let i = 1; i <= n; i++) {
+        const m = a[i] / b[i - 1];
+        b[i] -= m * c[i - 1];
+        r[i] -= m * r[i - 1];
+      }
+      const ks = new Array(n + 1).fill(0);
+      ks[n] = r[n] / b[n];
+      for (let i = n - 1; i >= 0; i--) ks[i] = (r[i] - c[i] * ks[i + 1]) / b[i];
+      return ks;
+    }
+
+    // Cubic Hermite, written the way the package writes it: the tangents ARE the
+    // Hermite slopes, so this is the same curve the second-derivative formulation
+    // produces.
+    //
+    // Clamped at both ends. The real package returns NaN past the last knot and
+    // extrapolates below the first, but every upstream call site feeds a value
+    // already clamped to [0,1] by getProgressPercentage(), so clamping is
+    // behaviourally identical in-range and strictly safer outside it.
+    at(value) {
+      const xs = this.xs;
+      const ys = this.ys;
+      const ks = this.ks;
+      if (value <= xs[0]) return ys[0];
+      if (value >= xs[xs.length - 1]) return ys[ys.length - 1];
+
+      let index = 0;
+      while (index < xs.length - 2 && value > xs[index + 1]) index++;
+      const x0 = xs[index];
+      const x1 = xs[index + 1];
+      const width = x1 - x0 || 1;
+      const t = (value - x0) / width;
+      const rise = ys[index + 1] - ys[index];
+      const from = ks[index] * width - rise;
+      const to = -ks[index + 1] * width + rise;
+      return (1 - t) * ys[index] + t * ys[index + 1] +
+        t * (1 - t) * (from * (1 - t) + to * t);
+    }
+  }
+
+  const easeSinOut = (value) => Math.sin(Math.max(0, Math.min(1, value)) * Math.PI / 2);
+  const getSpline = (range) => new Spline(range);
+  const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+  // Spline values are copied verbatim from upstream Spicy Lyrics
+  // (LyricsAnimator.ts, v6.3.20). They are the entire "feel" of the karaoke
+  // motion — the spring tuning only governs how fast a value chases its target,
+  // while these curves define what the target IS. Keep them in lockstep with
+  // upstream or the animation visibly diverges (AJ, 2026-09-20).
+  // Resting scale is IdleLyricsScale = 0.95 upstream.
+  const ScaleSpline = getSpline([
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.0505 }, { Time: 1, Value: 1 },
+  ]);
+  // LetterScale / YOffset / LetterYOffset / DotOpacity each have a SIMPLE-LYRICS
+  // variant upstream, so they are `let` and get re-pointed when the mode changes
+  // (see applySimpleLyricsSplines). Simple mode's whole point is GENTLER CURVES:
+  // the letter scale peaks at 1.07 instead of 1.175, and the line Y offset becomes
+  // a straight drift to -0.033 instead of a dip-and-return. That is what AJ
+  // describes as "smoothly move up a bit" instead of a bounce (2026-10-01).
+  // Our 0 resting value is kept in BOTH variants — it is the twice-confirmed fix
+  // for the "word glitches slightly down as it starts" bug documented below, and
+  // it is independent of which curve set is active.
+  const LETTER_SCALE_RANGE = [
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.175 }, { Time: 1, Value: 1 },
+  ];
+  const SIMPLE_LETTER_SCALE_RANGE = [
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.045 }, { Time: 1, Value: 1 },
+  ];
+  // Resting Y offset is 0, NOT upstream's +1/100. This is a deliberate, twice-
+  // confirmed divergence — do not "restore parity" here a third time.
+  //
+  // WHY the non-zero resting value is a visible BUG and not just a sub-pixel
+  // offset: a word's springs are created LAZILY, the first time it is animated,
+  // with `SetGoal(..., true)` — and `replacePosition: true` SNAPS the spring to
+  // the new value. There is no spring resting at +1/100 beforehand, so the word
+  // is sitting at its natural position (translateY 0) and then JUMPS DOWN by 1%
+  // of the font size (0.48px at 48px) the instant it first animates. That is a
+  // step discontinuity, and it is what AJ reports as "as soon as a word starts,
+  // it kinda glitches and goes very slightly down."
+  //
+  // With Time:0 = 0 the snap is a no-op, so the word simply begins at rest and
+  // rises. That also makes the end pose consistent: both endpoints are 0, so a
+  // fully sung word settles exactly where an unsung one sits.
+  //
+  // COST: none that matters. The dip is actually DEEPER without the offset
+  // (-0.03901 vs upstream's -0.03722) because the natural spline has to travel
+  // from 0 instead of from +0.01. Only the travel measured from the resting pose
+  // is smaller (1.87px vs 2.27px at 48px), and 1.87px is still 2.34x the 0.80px
+  // this whole exercise started from.
+  //
+  // The 0.9 overshoot and the 1.0 settle are byte-identical to upstream; only the
+  // Time:0 control point differs.
+  const Y_OFFSET_RANGE = [
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 60) }, { Time: 1, Value: 0 },
+  ];
+  // Upstream's Simple variant is a TWO-POINT line — it drifts up and STAYS there,
+  // with no return to 0. That absence of a return is most of why it reads as a
+  // smooth glide rather than a bounce. Time:0 is 0 for the reason above.
+  const SIMPLE_Y_OFFSET_RANGE = [
+    { Time: 0, Value: 0 }, { Time: 1, Value: -0.033 },
+  ];
+  const LETTER_Y_OFFSET_RANGE = [
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 56) }, { Time: 1, Value: 0 },
+  ];
+  const SIMPLE_LETTER_Y_OFFSET_RANGE = [
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 85) }, { Time: 1, Value: 0 },
+  ];
+  const DOT_OPACITY_RANGE = [
+    { Time: 0, Value: 0.35 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
+  ];
+  const SIMPLE_DOT_OPACITY_RANGE = [
+    { Time: 0, Value: 0.27 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
+  ];
+
+  let LetterScaleSpline = getSpline(LETTER_SCALE_RANGE);
+  let YOffsetSpline = getSpline(Y_OFFSET_RANGE);
+  let LetterYOffsetSpline = getSpline(LETTER_Y_OFFSET_RANGE);
+  let DotOpacitySpline = getSpline(DOT_OPACITY_RANGE);
+
+  // Re-point the four mode-dependent splines. Called from applySettings on every
+  // settings pass, so a toggle takes effect without a reload. The springs read
+  // these every frame to set their goals, so re-pointing is enough — there is no
+  // spring to rebuild.
+  function applySimpleLyricsSplines() {
+    const simple = !!currentSettings.simpleLyrics;
+    LetterScaleSpline = getSpline(simple ? SIMPLE_LETTER_SCALE_RANGE : LETTER_SCALE_RANGE);
+    YOffsetSpline = getSpline(simple ? SIMPLE_Y_OFFSET_RANGE : Y_OFFSET_RANGE);
+    LetterYOffsetSpline = getSpline(simple ? SIMPLE_LETTER_Y_OFFSET_RANGE : LETTER_Y_OFFSET_RANGE);
+    DotOpacitySpline = getSpline(simple ? SIMPLE_DOT_OPACITY_RANGE : DOT_OPACITY_RANGE);
+  }
+
+  const GlowSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.15, Value: 1 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 0 },
+  ]);
+  const DotScaleSpline = getSpline([
+    { Time: 0, Value: 0.75 }, { Time: 0.7, Value: 1.05 }, { Time: 1, Value: 1 },
+  ]);
+  const DotYOffsetSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -0.12 }, { Time: 1, Value: 0 },
+  ]);
+  const DotGlowSpline = getSpline([
+    { Time: 0, Value: 0 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 1 },
+  ]);
+
+  // Upstream's residual-glow point for a sung letter in a word with no active
+  // letter. NOTE it evaluates to ~1.21 (the natural spline overshoots its own
+  // 0 -> 1 rise), NOT a small dim value — see the letter branch in
+  // animateLetters() for why we deliberately do NOT apply it. Kept here as the
+  // documented upstream value so an A/B can flip the behaviour in one line.
+  // (Was documented as ~1.07 before the 2026-09-20 spline fix; the corrected
+  // curve moves it to 1.21, which is 18.5px blur / 224% opacity, not less.)
+  const SungLetterGlow = 0.2;
+
+  // Simple lyrics (Apple Music style): upstream STUBS the Scale and Glow springs
+  // out in this mode. createWordSprings and createDotSprings both return no-ops
+  // for them and keep only the positional spring. That is exactly what removes the
+  // per-word ZOOM and the wavy GLOW while leaving the smooth rise intact
+  // (AJ, 2026-10-01: "the words still like zoom … they have that wavy glowy
+  // animation too when a word is longer than a second").
+  // The LETTER springs are deliberately NOT stubbed — upstream leaves those alone
+  // and only gives them the gentler Simple splines.
+  // The stubs RETURN THE RESTING VALUE rather than undefined: our animator feeds
+  // the results straight into --ym-sl-base-scale and --text-shadow-opacity, so a
+  // bare no-return would write NaN into both.
+  // The stub must satisfy the FULL spring contract: storeNeedsAnimation() calls
+  // CanSleep() on every channel, and a stub without it threw a TypeError on every
+  // frame — which aborted animate() right after the scroll step. That was the
+  // whole "it scrolls but nothing animates or highlights once the toggle is on"
+  // symptom (AJ, 2026-10-01). CanSleep returns TRUE: a stub is always settled.
+  const simpleSpring = (resting) => ({
+    Step: () => resting,
+    SetGoal: () => {},
+    CanSleep: () => true,
+  });
+
+  function createWordSprings(word) {
+    if (currentSettings.simpleLyrics) {
+      return {
+        // A LINE-TIMED word must rest at scale 1, not the 0.95 word resting
+        // value: its scale goal is a constant 1 (animateWord pins it), and with
+        // a stub holding 0.95 the whole line-span rendered 5% small and its
+        // wrapped rows pulled inward -- AJ's "some rows shifted to the right"
+        // on line-synced tracks (2026-10-02).
+        Scale: simpleSpring(word && word.LineTimed ? 1 : ScaleSpline.at(0)),
+        YOffset: new Spring(YOffsetSpline.at(0), 1.45, 0.4),
+        // A LINE-TIMED word keeps a real Glow spring: its goal tracks the line's
+        // sweep progress, and that glow IS the line-fill highlight AJ expects
+        // ("they dont have glow when simple lyrics are on", 2026-10-02). The
+        // no-glow rule stays for word-synced words, where the glow is the
+        // per-syllable bounce this mode exists to remove.
+        Glow: word && word.LineTimed
+          ? new Spring(GlowSpline.at(0), 1.18, 0.56)
+          : simpleSpring(GlowSpline.at(0)),
+      };
+    }
+    return {
+      Scale: new Spring(ScaleSpline.at(0), 0.88, 0.64),
+      YOffset: new Spring(YOffsetSpline.at(0), 1.45, 0.4),
+      Glow: new Spring(GlowSpline.at(0), 1.18, 0.56),
+    };
+  }
+
+  function createLetterSprings() {
+    // Simple lyrics: the letters KEEP their motion springs (the wavy drift AJ
+    // wants to stay) and already read the gentler SIMPLE splines via
+    // applySimpleLyricsSplines, but the Glow channel is stubbed — the letter glow
+    // is the per-syllable highlight this mode exists to remove. The springs stay
+    // real otherwise, so the progress-driven goals keep the letters awake and
+    // writing (see the selfAwake note in animateWord).
+    if (currentSettings.simpleLyrics) {
+      return {
+        Scale: new Spring(LetterScaleSpline.at(0), 0.88, 0.64),
+        YOffset: new Spring(LetterYOffsetSpline.at(0), 1.45, 0.4),
+        Glow: simpleSpring(GlowSpline.at(0)),
+      };
+    }
+    return {
+      Scale: new Spring(LetterScaleSpline.at(0), 0.88, 0.64),
+      YOffset: new Spring(LetterYOffsetSpline.at(0), 1.45, 0.4),
+      Glow: new Spring(GlowSpline.at(0), 1.18, 0.56),
+    };
+  }
+
+  function createDotSprings() {
+    if (currentSettings.simpleLyrics) {
+      return {
+        // Scale stays REAL in Simple mode: the dots' entrance zoom (0.75 -> 1) is
+        // how they arrive, and stubbing it made them hard-pop in with no
+        // animation at all (AJ, 2026-10-02: "they still snap when the 3 dots come
+        // in"). The bounce this mode removes is the WORD karaoke, not the dots'
+        // arrival. YOffset/Glow stay stubbed -- the dots must not drift.
+        Scale: new Spring(DotScaleSpline.at(0), 0.7, 0.6),
+        YOffset: simpleSpring(DotYOffsetSpline.at(0)),
+        Glow: simpleSpring(DotGlowSpline.at(0)),
+        Opacity: new Spring(DotOpacitySpline.at(0), 1, 0.5),
+      };
+    }
+    return {
+      Scale: new Spring(DotScaleSpline.at(0), 0.7, 0.6),
+      YOffset: new Spring(DotYOffsetSpline.at(0), 1.25, 0.4),
+      Glow: new Spring(DotGlowSpline.at(0), 1, 0.5),
+      Opacity: new Spring(DotOpacitySpline.at(0), 1, 0.5),
+    };
+  }
+
+  function isRtl(text) {
+    if (!text) return false;
+    const rtl = /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB1D-\uFB4F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+    for (const char of String(text)) {
+      if (/[\d\s,.;:?!()[\]{}"'\\/<>@#$%^&*_=+-]/.test(char)) continue;
+      return rtl.test(char);
+    }
+    return false;
+  }
+
+  function isLetterCapable(text, durationMs) {
+    return durationMs >= 1000 && !isRtl(text);
+  }
+
+  // "4.5px" -> { value: 4.5, unit: "px" }. Returns null for anything that is not a
+  // number with an optional trailing unit: colours, var(), calc(), translate3d().
+  //
+  // The unit must match on BOTH sides before a numeric comparison is allowed.
+  // parseFloat alone is not enough: "rgba(255,255,255,.42)" and "rgba(255,255,255,.5)"
+  // both read as 255, so a real colour change would be skipped as "no change".
+  function splitNumericValue(text) {
+    const match = /^(-?\d*\.?\d+)([a-z%]*)$/i.exec(text);
+    return match ? { value: parseFloat(match[1]), unit: match[2].toLowerCase() } : null;
+  }
+
+  // `compareValue` is the number behind a value whose string cannot be parsed —
+  // specifically `translate3d(0, calc(var(--DefaultLyricsSize) * 0.037), 0)`, which
+  // starts with "translate3d(" so parseFloat returns NaN and the write degrades to an
+  // exact string comparison. That string embeds a FULL-PRECISION spring value which
+  // changes every frame, so the transform was rewritten (and a fresh string allocated)
+  // every frame for every awake word and letter, and `epsilon` did nothing at all.
+  // Callers that build such a string pass the underlying number here.
+  // (Upstream Spicy Lyrics fixed the same thing in 6.3.98 the same way.)
+  function setStyleIfChanged(element, property, value, epsilon, compareValue) {
+    const previous = element.__ymSpicyStyleCache || (element.__ymSpicyStyleCache = {});
+    const old = previous[property];
+    const next =
+      compareValue !== undefined && Number.isFinite(compareValue)
+        ? { value: compareValue, unit: "" }
+        : splitNumericValue(value);
+
+    if (old !== undefined) {
+      // Both frames comparable, same unit -> the epsilon applies.
+      if (old !== null && typeof old === "object" && next !== null) {
+        if (old.unit === next.unit && Math.abs(old.value - next.value) <= (epsilon || 0)) {
+          return;
+        }
+      } else if (old === value) {
+        return;
+      }
+    }
+    previous[property] = next === null ? value : next;
+    element.style.setProperty(property, value);
+  }
+
+  function getState(positionMs, startMs, endMs) {
+    if (positionMs < startMs) return "NotSung";
+    if (positionMs >= endMs) return "Sung";
+    return "Active";
+  }
+
+  function getProgress(positionMs, startMs, endMs) {
+    // NaN-safe. Every comparison against NaN is false, so without this guard a
+    // non-finite playhead or span falls straight through to clamp(NaN) = NaN and
+    // gets written into --gradient-position as "NaN%", which invalidates the
+    // whole background-image and blanks the glyph for a frame. See tick().
+    if (
+      !Number.isFinite(positionMs) ||
+      !Number.isFinite(startMs) ||
+      !Number.isFinite(endMs)
+    ) {
+      return 0;
+    }
+    if (positionMs <= startMs) return 0;
+    if (positionMs >= endMs) return 1;
+    return clamp((positionMs - startMs) / (endMs - startMs), 0, 1);
+  }
+
+  function cacheLRCLyrics(key, data) {
+    if (lrclibCache.has(key)) lrclibCache.delete(key);
+    lrclibCache.set(key, data);
+    while (lrclibCache.size > LRCLIB_CACHE_LIMIT) {
+      lrclibCache.delete(lrclibCache.keys().next().value);
+    }
+  }
+
+  // ---- Persistent LRC cache -------------------------------------------------
+  // In-memory lrclibCache (above) is lost on every page reload, so the same
+  // songs get re-fetched. This layer persists the last N songs in localStorage
+  // (origin: music.youtube.com) so playback/reload reuses them. LRU eviction.
+  const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";
+  const LYRICS_CACHE_LIMIT = 15;
+
+  function loadPersistentLyricsCache() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(LYRICS_CACHE_KEY);
+      if (!raw) return new Map();
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return new Map();
+      return new Map(arr);
+    } catch (_) {
+      return new Map();
+    }
+  }
+
+  function persistLyricsCache() {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify([...persistentLyricsCache]));
+    } catch (_) {
+      /* storage unavailable or full — non-fatal */
+    }
+  }
+
+  const persistentLyricsCache = loadPersistentLyricsCache();
+
+  function cacheLyricsPersistent(key, data) {
+    if (!key || !data) return;
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, data);
+    while (persistentLyricsCache.size > LYRICS_CACHE_LIMIT) {
+      persistentLyricsCache.delete(persistentLyricsCache.keys().next().value);
+    }
+    persistLyricsCache();
+  }
+
+  function getLyricsPersistent(key) {
+    if (!key) return null;
+    if (!persistentLyricsCache.has(key)) return null;
+    const data = persistentLyricsCache.get(key);
+    // Refresh LRU position (most-recently-used) and persist the new order.
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, data);
+    persistLyricsCache();
+    return data;
+  }
+

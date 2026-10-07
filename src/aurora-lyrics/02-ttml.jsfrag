@@ -1,0 +1,489 @@
+  /* ===================== TTML adapter ===================== */
+
+  function tsToSec(value) {
+    if (value == null) return 0;
+    const s = String(value).trim();
+    let m = /^([\d.]+)ms$/i.exec(s);
+    if (m) return parseFloat(m[1]) / 1000;
+    m = /^([\d.]+)s$/i.exec(s);
+    if (m) return parseFloat(m[1]);
+    m = /^([\d.]+)m$/i.exec(s);
+    if (m) return parseFloat(m[1]) * 60;
+    m = /^([\d.]+)h$/i.exec(s);
+    if (m) return parseFloat(m[1]) * 3600;
+    m = /^(\d+)f(?:@(\d+))?$/i.exec(s);
+    if (m) return parseInt(m[1], 10) / (m[2] ? parseInt(m[2], 10) : 30);
+
+    // Clock time: seconds, minutes:seconds, or hours:minutes:seconds.
+    // Splitting the fields avoids treating `01:02.345` as one hour.
+    if (!/^\d+(?::\d+){0,2}(?:\.\d+)?$/.test(s)) return 0;
+    const fields = s.split(":");
+    const seconds = parseFloat(fields.pop());
+    if (fields.length === 0) return seconds;
+    if (fields.length === 1) return parseInt(fields[0], 10) * 60 + seconds;
+    return parseInt(fields[0], 10) * 3600 +
+      parseInt(fields[1], 10) * 60 +
+      seconds;
+  }
+
+  function attrsOf(source) {
+    const out = {};
+    const re = /([\w:-]+)\s*=\s*"([^"]*)"/g;
+    let match;
+    while ((match = re.exec(source))) out[match[1].toLowerCase()] = match[2];
+    return out;
+  }
+
+  function decodeEntities(text) {
+    return String(text)
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/gi, "'");
+  }
+
+  function textOf(markup) {
+    return decodeEntities(String(markup).replace(/<[^>]+>/g, ""))
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function parseSpanTree(markup) {
+    const root = { children: [] };
+    const stack = [root];
+    const tokenRe = /<\/?span\b[^>]*>/gi;
+    let token;
+
+    while ((token = tokenRe.exec(markup))) {
+      const source = token[0];
+      if (source[1] === "/") {
+        if (stack.length === 1) continue;
+        const node = stack.pop();
+        node.closeStart = token.index;
+        node.closeEnd = tokenRe.lastIndex;
+        node.inner = markup.slice(node.openEnd, node.closeStart);
+        node.text = textOf(node.inner);
+      } else {
+        const node = {
+          attrs: attrsOf(source),
+          openStart: token.index,
+          openEnd: tokenRe.lastIndex,
+          children: [],
+        };
+        stack[stack.length - 1].children.push(node);
+        stack.push(node);
+      }
+    }
+
+    return root.children.filter((node) => node.closeEnd != null);
+  }
+
+  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd) {
+    const words = nodes
+      .map((node) => {
+        const start = tsToSec(node.attrs.begin || node.attrs["ttm:begin"]) || fallbackStart;
+        const duration = tsToSec(node.attrs.dur || node.attrs["ttm:dur"]);
+        const end =
+          tsToSec(node.attrs.end || node.attrs["ttm:end"]) ||
+          (duration ? start + duration : fallbackEnd);
+        return {
+          text: node.text || textOf(node.inner),
+          start,
+          end,
+          // True only when this span carried real timing. Drives the
+          // no-karaoke decision so partially-synced TTML lines that lack
+          // genuine timing are rendered as a static block (AJ, 2026-09-17).
+          timed: !!(
+            node.attrs.begin ||
+            node.attrs["ttm:begin"] ||
+            node.attrs.end ||
+            node.attrs["ttm:end"] ||
+            node.attrs.dur ||
+            node.attrs["ttm:dur"]
+          ),
+          node,
+          hasSpaceBefore: false,
+          explicitPartOfWord:
+            node.attrs["part-of-word"] ||
+            node.attrs["itunes:part-of-word"] ||
+            node.attrs["ttm:part-of-word"],
+        };
+      })
+      .filter((word) => word.text);
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const next = words[i + 1];
+      const previous = words[i - 1];
+      if (previous) {
+        const between = markup.slice(previous.node.closeEnd, word.node.openStart);
+        word.hasSpaceBefore = /\s/.test(between);
+      }
+      if (word.explicitPartOfWord != null) {
+        word.isPartOfWord = /^(1|true|yes)$/i.test(word.explicitPartOfWord);
+      } else if (next) {
+        const between = markup.slice(word.node.closeEnd, next.node.openStart);
+        word.isPartOfWord = !/\s/.test(between);
+      } else {
+        word.isPartOfWord = false;
+      }
+    }
+    for (const word of words) {
+      delete word.node;
+      delete word.explicitPartOfWord;
+    }
+
+    return words;
+  }
+
+  // Returns the compact TTML form used by the YTMod adapter.
+  function parseTTML(xml) {
+    const parsed = [];
+    const lineRe = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+    // Collect every timed line first so the primary (lead) artist can be chosen
+    // by how many lines they sing, not by whoever happens to open the file. A
+    // duet that begins on the second artist's line would otherwise annotate the
+    // whole file backwards — lead on the right, partner on the left.
+    const rawLines = [];
+    const agentCounts = new Map();
+    let lineMatch;
+    while ((lineMatch = lineRe.exec(xml))) {
+      const lineAttrs = attrsOf(lineMatch[1]);
+      const agent = lineAttrs["ttm:agent"] || lineAttrs.agent || "";
+      rawLines.push({ lineAttrs, body: lineMatch[2], agent });
+      if (agent) agentCounts.set(agent, (agentCounts.get(agent) || 0) + 1);
+    }
+
+    // The primary artist is the one with the most timed lines. Ties keep the
+    // first-seen agent (harmless); the case that matters is a duet opening on the
+    // partner's line, where the majority vote still lands on the real lead.
+    let primaryAgent = "";
+    let primaryCount = -1;
+    for (const [agent, count] of agentCounts) {
+      if (count > primaryCount) {
+        primaryCount = count;
+        primaryAgent = agent;
+      }
+    }
+    if (!primaryAgent) {
+      const firstAgented = rawLines.find((l) => l.agent);
+      primaryAgent = firstAgented ? firstAgented.agent : "";
+    }
+
+    for (const { lineAttrs, body, agent } of rawLines) {
+      let start = tsToSec(lineAttrs.begin || lineAttrs["ttm:begin"]);
+      const lineDuration = tsToSec(lineAttrs.dur || lineAttrs["ttm:dur"]);
+      let end = tsToSec(lineAttrs.end || lineAttrs["ttm:end"]);
+      if (!end && lineDuration) end = start + lineDuration;
+      const topLevelSpans = parseSpanTree(body);
+      const leadNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] !== "x-bg");
+      const backgroundNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] === "x-bg");
+      const words = parseTimedSpanNodes(leadNodes, body, start, end);
+      if (!start && words.length) start = words[0].start;
+      if (!end && words.length) end = words[words.length - 1].end;
+
+      // An x-bg wrapper usually carries NO timing of its own — the times live on
+      // its child spans. Resolving the window wrapper-first and falling back to
+      // the PARENT LINE put the background's window entirely BEFORE it played.
+      // Measured on a real file (glaive "60.000 ISK", L15): the line ran 46.448
+      // to 49.066 while its bg ran 49.176 to 51.876. So the bg line was Active
+      // while every one of its words was still NotSung, and Sung by the time they
+      // were due — the fill never ran and the vocal rendered dead (no fill at
+      // all). Upstream's order is children -> wrapper -> line; ours never
+      // consulted the children.
+      //
+      // NOTE: untimed wrappers are not an exotic input — parseSpicyLyrics BELOW
+      // emits exactly this shape (`<span ttm:role="x-bg">` with the timing only on
+      // the child spans), so our own API round-trip manufactures it. The parser
+      // must therefore never rely on the wrapper's timing.
+      const background = backgroundNodes
+        .map((node) => {
+          const rawBegin = node.attrs.begin || node.attrs["ttm:begin"];
+          const rawEnd = node.attrs.end || node.attrs["ttm:end"];
+          const rawDur = node.attrs.dur || node.attrs["ttm:dur"];
+          // null, NOT 0: tsToSec reports a missing value as 0, and 0 is a legal
+          // timestamp, so a falsy sentinel would be indistinguishable from a real
+          // one — and the Math.min below would then drag the window to t=0.
+          const wrapStart = rawBegin ? tsToSec(rawBegin) : null;
+          const wrapEnd = rawEnd ? tsToSec(rawEnd) : null;
+          const wrapDur = rawDur ? tsToSec(rawDur) : 0;
+
+          const bgWords = parseTimedSpanNodes(
+            node.children,
+            body,
+            wrapStart == null ? start : wrapStart,
+            wrapEnd == null ? end : wrapEnd
+          );
+          if (!bgWords.length) return null;
+
+          const wordStart = bgWords.reduce((a, w) => Math.min(a, w.start), Infinity);
+          const wordEnd = bgWords.reduce((a, w) => Math.max(a, w.end), -Infinity);
+          // children first, then the wrapper — and never narrower than the
+          // children either way. Trusting the wrapper verbatim would clip what it
+          // wraps, which is the whole failure this block exists to avoid.
+          const bgStart = wrapStart == null ? wordStart : Math.min(wrapStart, wordStart);
+          let bgEnd = wrapEnd == null ? wordEnd : Math.max(wrapEnd, wordEnd);
+          if (wrapDur) {
+            bgEnd = Math.max(bgEnd, (wrapStart == null ? wordStart : wrapStart) + wrapDur);
+          }
+          return { start: bgStart, end: bgEnd, words: bgWords };
+        })
+        .filter(Boolean);
+
+      // ⭐ Background vocals can start before, or run past, the lead line, and the
+      // lead's window has to COVER them or they get clipped. Every bg fill rule is
+      // gated on `.line.bg-line.Active`, so a bg that outlives its line would sit
+      // at WordNotSung for the whole of the line's window and Sung afterwards —
+      // never filled. Upstream widens the lead here for exactly this reason.
+      //
+      // ⚠️ This makes the line's window OVERLAP its neighbour's — measured 494 ms
+      // on a real file. The renderer is fine with that (it states each line from
+      // its own times, so a widened line cannot suppress its neighbour), but the
+      // active-line lookup was NOT: it used to be a binary search, which is only
+      // valid on disjoint windows and would return the previous line, or -1
+      // ("no line playing", which dims the whole panel). findLineIndexAt is now a
+      // linear scan for exactly this reason — do NOT reintroduce a binary search
+      // over these windows.
+      for (const bg of background) {
+        if (bg.start < start) start = bg.start;
+        if (bg.end > end) end = bg.end;
+      }
+
+      const plainText = words
+        .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
+        .join("")
+        .trim();
+      if (!plainText && !words.length && !background.length) continue;
+      const pTiming = !!(
+        lineAttrs.begin ||
+        lineAttrs["ttm:begin"] ||
+        lineAttrs.end ||
+        lineAttrs["ttm:end"] ||
+        lineAttrs.dur ||
+        lineAttrs["ttm:dur"]
+      );
+      const hasSpanTiming = words.some((w) => w.timed);
+      parsed.push({
+        start,
+        end,
+        words,
+        background,
+        text: plainText,
+        oppositeAligned: !!agent && !!primaryAgent && agent !== primaryAgent,
+        // True when the line carried at least one genuinely-timed span. Lines
+        // without it are rendered as a static block, not karaoke (AJ, 2026-09-17).
+        timed: hasSpanTiming,
+        // True when the line had any real timing (a <p> begin/end/dur or a timed
+        // span). Lines without it get a synthesized t=0 and would pile at the top
+        // of the panel, burying the synced lines — see the gap-fill pass below.
+        positioned: !!(pTiming || hasSpanTiming),
+      });
+    }
+
+    // Some exports contain no inner spans. Treat each line as one timed word
+    // so the original Syllable renderer still handles the file gracefully.
+    // NOTE: we deliberately do NOT sort here. The gap-fill pass below must see
+    // the lines in their original document order so it can slide each untimed
+    // line into the gap between the timed neighbours it actually sits between
+    // (an untimed line that follows S1 in the file must land between S1 and S2,
+    // not get swept to the top by a t=0 sort). The final time sort happens
+    // after the gap-fill (see just before the return) — AJ, 2026-09-17.
+    for (let i = 0; i < parsed.length; i++) {
+      const line = parsed[i];
+      const nextStart = parsed[i + 1] ? parsed[i + 1].start : 0;
+      if (!line.end || line.end <= line.start) {
+        const lastWordEnd = line.words.length
+          ? line.words[line.words.length - 1].end
+          : 0;
+        line.end = lastWordEnd > line.start
+          ? lastWordEnd
+          : (nextStart > line.start ? nextStart : line.start + 4);
+      }
+      if (!line.words.length && line.text) {
+        line.words.push({ text: line.text, start: line.start, end: line.end, timed: false });
+      }
+      for (const word of line.words) {
+        if (!word.end || word.end <= word.start) word.end = line.end;
+        word.start = Math.max(line.start, word.start);
+        word.end = Math.max(word.start + 0.01, Math.min(line.end, word.end));
+      }
+      for (const bg of line.background || []) {
+        if (!bg.end || bg.end <= bg.start) {
+          bg.end = bg.words.length ? bg.words[bg.words.length - 1].end : line.end;
+        }
+        for (const word of bg.words) {
+          if (!word.end || word.end <= word.start) word.end = bg.end;
+          word.start = Math.max(bg.start, word.start);
+          word.end = Math.max(word.start + 0.01, Math.min(bg.end, word.end));
+        }
+      }
+    }
+
+    // Untimed lines (no <p> begin/end and no span timing) were pinned to t=0 by
+    // the fallback above, so they all pile at the top of the panel and bury the
+    // synced lines underneath. Slide each one into the gap between the nearest
+    // timed line before and after it so it sits roughly where it belongs in the
+    // song (AJ, 2026-09-17).
+    {
+      const timedIdx = [];
+      parsed.forEach((line, idx) => {
+        if (line.positioned) timedIdx.push(idx);
+      });
+      if (timedIdx.length) {
+        for (let t = 0; t <= timedIdx.length; t++) {
+          const prevTimedIdx = t === 0 ? -1 : timedIdx[t - 1];
+          const nextTimedIdx = t === timedIdx.length ? parsed.length : timedIdx[t];
+          const prevEnd = prevTimedIdx >= 0 ? parsed[prevTimedIdx].end : 0;
+          const nextStart = nextTimedIdx < parsed.length ? parsed[nextTimedIdx].start : prevEnd + 4000;
+          const untimed = [];
+          for (let i = (prevTimedIdx >= 0 ? prevTimedIdx + 1 : 0); i < nextTimedIdx; i++) {
+            if (!parsed[i].positioned) untimed.push(i);
+          }
+          if (!untimed.length) continue;
+          const gap = Math.max(1, nextStart - prevEnd);
+          untimed.forEach((lineIdx, k) => {
+            const frac = (k + 1) / (untimed.length + 1);
+            const at = prevEnd + gap * frac;
+            const line = parsed[lineIdx];
+            line.start = at;
+            line.end = at + 1;
+            line.words.forEach((w) => { w.start = at; w.end = at + 1; });
+            if (line.background) line.background.forEach((bg) => {
+              bg.start = at;
+              bg.end = at + 1;
+              bg.words.forEach((w) => { w.start = at; w.end = at + 1; });
+            });
+          });
+        }
+      }
+    }
+
+    // Final time sort. The gap-fill above has now assigned every line its final
+    // start time (untimed lines slid into the gaps between their document-order
+    // timed neighbours), but the array is still in document order. Sort by start
+    // here so untimed lines interleave with the synced lines at their real
+    // position in the song instead of piling on top and burying the synced
+    // words (AJ, 2026-09-17).
+    parsed.sort((a, b) => a.start - b.start);
+
+    return parsed.filter((line) => line.text || line.words.length);
+  }
+
+  // Pulls songwriter credits out of a TTML string. Apple Music exports nest them
+  // in <iTunesMetadata><songwriters><songwriter>NAME</songwriter>…</songwriters></iTunesMetadata>,
+  // which lives outside the timed <p> lines and is skipped by parseTTML. Some AMLT
+  // exports instead expose them as a comma/semicolon list on amll:meta, so we catch
+  // that as a fallback. Returns a de-duplicated array of display names.
+  function extractSongwriters(xml) {
+    const names = [];
+    const pushName = (raw) => {
+      const name = decodeEntities(raw).replace(/\s+/g, " ").trim();
+      if (name && !names.includes(name)) names.push(name);
+    };
+
+    const metaBlock = /<iTunesMetadata\b[^>]*>([\s\S]*?)<\/iTunesMetadata>/i.exec(xml);
+    if (metaBlock) {
+      const swBlock = /<songwriters\b[^>]*>([\s\S]*?)<\/songwriters>/i.exec(metaBlock[1]);
+      const source = swBlock ? swBlock[1] : metaBlock[1];
+      const tagRe = /<songwriter\b[^>]*>([\s\S]*?)<\/songwriter>/gi;
+      let match;
+      while ((match = tagRe.exec(source))) pushName(match[1]);
+    }
+
+    if (!names.length) {
+      const metaRe = /<amll:meta\b[^>]*\bkey="(songwriters|lyricists?)"[^>]*\bvalue="([^"]*)"/gi;
+      let match;
+      while ((match = metaRe.exec(xml))) {
+        match[2]
+          .split(/[,;、]/)
+          .forEach((part) => pushName(part));
+      }
+    }
+    return names;
+  }
+
+  // Adapts parseTTML's line model into the renderer's content shape.
+  //
+  // `LineTimed` IS NOT "THIS LINE IS SYNCED" — that mistake collapses the whole
+  // animation. It means "this line has NO word-level timing", and it feeds
+  // straight into karaoke suppression:
+  //
+  //   makeWord(word, isLast, lineTimed, noKaraoke)
+  //     suppressKaraoke = !!(noKaraoke && !lineTimed)      // lineTimed true => keep? No:
+  //   noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed)
+  //
+  // A true `LineTimed` marks the line `line-timed`, which forces the whole line
+  // to fill as ONE unit instead of sweeping word by word, AND short-circuits the
+  // background-vocal pass. Setting it for a word-by-word body (Spicy
+  // `Body.Type:"Syllable"`, i.e. anything with per-syllable times) turns CRANK's
+  // syllable karaoke into a line fill and makes its `<span ttm:role="x-bg">`
+  // background vocals disappear entirely.
+  //
+  // So derive it from the WORDS, exactly like the LRC producer does (one word,
+  // letter animation disabled). The two producers that must stay `true` are
+  // `parseLRC` (line-synced LRC) and nothing else; a Syllable body has real
+  // per-word timing and must stay `false` to keep its karaoke.
+  //
+  // `positioned` (timing exists somewhere) is NOT a substitute for any of this —
+  // it is true for word-timed lines too. It only distinguishes "has a time
+  // window" from "fully unsynced", which is what `Timed` already covers for the
+  // noKaraoke calculation.
+  function toSyllableContent(sourceLines) {
+    return sourceLines.map((line) => {
+      const syllables = line.words || [];
+      // Word-level timing present? Then this is a karaoke line, not a line-filled
+      // one. Mirrors parseLRC's contract: lineTimed === no word timing.
+      const hasWordTiming = syllables.some((word) => word.timed === true);
+      const explicitLineTimed = line.lineTimed === true;
+      if (explicitLineTimed) {
+        // parseLRC / parsePlain speak this dialect directly — trust it verbatim
+        // so the LRCLIB path keeps behaving exactly as it did.
+        return {
+          Type: "Vocal",
+          LineTimed: true,
+          Timed: true,
+          OppositeAligned: !!line.oppositeAligned,
+          Lead: {
+            StartTime: line.start,
+            EndTime: line.end,
+            Syllables: buildRendererSyllables(syllables),
+          },
+          Background: buildRendererBackground(line.background),
+        };
+      }
+      return {
+        Type: "Vocal",
+        LineTimed: !hasWordTiming,
+        Timed: !!(line.timed || line.positioned),
+        OppositeAligned: !!line.oppositeAligned,
+        Lead: {
+          StartTime: line.start,
+          EndTime: line.end,
+          Syllables: buildRendererSyllables(syllables),
+        },
+        Background: buildRendererBackground(line.background),
+      };
+    });
+  }
+
+  function buildRendererSyllables(words) {
+    return (words || []).map((word) => ({
+      Text: word.text,
+      StartTime: word.start,
+      EndTime: word.end,
+      IsPartOfWord: !!word.isPartOfWord,
+      DisableLetterAnimation: !!word.disableLetterAnimation,
+    }));
+  }
+
+  function buildRendererBackground(background) {
+    return (background || []).map((bg) => ({
+      StartTime: bg.start,
+      EndTime: bg.end,
+      Syllables: buildRendererSyllables(bg.words),
+    }));
+  }
+

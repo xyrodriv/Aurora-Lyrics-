@@ -1,0 +1,181 @@
+  /* ===================== first-run onboarding ===================== */
+  // Persist completion on the YouTube Music origin so the welcome card appears only once,
+  // rather than returning after every extension or tab reload.
+  const ONBOARDING_KEY = "better_lyrics_onboarding_done_v1";
+  let onbHasRun = false;
+
+  function hasCompletedOnboarding() {
+    try { return localStorage.getItem(ONBOARDING_KEY) === "1"; } catch (_) { return false; }
+  }
+
+  function markOnboardingComplete() {
+    try { localStorage.setItem(ONBOARDING_KEY, "1"); } catch (_) {}
+  }
+
+  function closePanelsNow() {
+    // Force-close any open lyrics panel without depending on internal state:
+    // hide our panel directly (incl. orphans from a previous injection) and
+    // collapse the native YTM lyrics panel.
+    try {
+      const p = document.getElementById("ym-sl-panel");
+      if (p) p.classList.add("hidden");
+    } catch (_) {}
+    try { setPanel(false); } catch (_) {}
+    try { syncNativePanel(false); } catch (_) {}
+  }
+
+  function waitForSelector(selector, timeout) {
+    return new Promise(function (resolve) {
+      const start = Date.now();
+      (function check() {
+        const el = document.querySelector(selector);
+        if (el) return resolve(el);
+        if (Date.now() - start > timeout) return resolve(null);
+        setTimeout(check, 150);
+      })();
+    });
+  }
+
+  function showOnbError(err) {
+    try { console.error("[Aurora Lyrics onboarding]", err); } catch (_) {}
+    finishOnboarding();
+  }
+
+  let onbStyleEl = null;
+  let onbRoot = null;
+  let onbHighlighted = null;
+
+  function ensureOnbStyle() {
+    if (onbStyleEl && onbStyleEl.isConnected) return;
+    const css = `
+.ym-onb-root { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; }
+.ym-onb-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.74); pointer-events: auto; }
+.ym-onb-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 440px; width: calc(100% - 48px); padding: 26px 28px 22px; border-radius: 16px; background: #181818; color: #fff; box-shadow: 0 20px 60px rgba(0,0,0,0.55); font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; pointer-events: auto; text-align: center; }
+.ym-onb-card h2 { font-size: 19px; font-weight: 700; margin: 0 0 8px; }
+.ym-onb-card p { margin: 0 0 18px; color: rgba(255,255,255,0.78); font-size: 14px; }
+.ym-onb-btn { appearance: none; cursor: pointer; font: inherit; font-weight: 600; font-size: 14px; padding: 10px 28px; border-radius: 999px; border: 2px solid #1ed760; color: #1ed760; background: rgba(30,215,96,0.12); transition: background .15s ease, color .15s ease, transform .1s ease; }
+.ym-onb-btn:hover { background: #1ed760; color: #0a0a0a; }
+.ym-onb-btn:active { transform: scale(0.97); }
+.ym-onb-highlight { position: relative !important; z-index: 2147483647 !important; outline: 3px solid #1ed760 !important; outline-offset: 5px !important; border-radius: 8px !important; animation: ymOnbPulse 1.5s ease-in-out infinite; background: rgba(30,215,96,.14) !important; }
+@keyframes ymOnbPulse { 0%,100% { outline-color: #1ed760; } 50% { outline-color: rgba(30,215,96,0.45); } }`;
+    onbStyleEl = document.createElement("style");
+    onbStyleEl.id = "ym-onb-style";
+    onbStyleEl.textContent = css;
+    document.head.appendChild(onbStyleEl);
+  }
+
+  function removeOnbOverlay() {
+    if (onbRoot && onbRoot.parentElement) onbRoot.parentElement.removeChild(onbRoot);
+    onbRoot = null;
+    if (onbHighlighted) {
+      try { onbHighlighted.classList.remove("ym-onb-highlight"); } catch (_) {}
+      onbHighlighted = null;
+    }
+  }
+
+  function teardownOnboarding() {
+    removeOnbOverlay();
+    if (onbStyleEl && onbStyleEl.parentElement) onbStyleEl.parentElement.removeChild(onbStyleEl);
+    onbStyleEl = null;
+  }
+
+  function buildOnbCard(title, body, btnLabel, onClick) {
+    const card = document.createElement("div");
+    card.className = "ym-onb-card";
+    const h = document.createElement("h2"); h.textContent = title;
+    const p = document.createElement("p"); p.textContent = body;
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "ym-onb-btn"; btn.textContent = btnLabel;
+    btn.addEventListener("click", onClick);
+    card.appendChild(h); card.appendChild(p); card.appendChild(btn);
+    return card;
+  }
+
+  function showOnbOverlay(card, withBackdrop) {
+    removeOnbOverlay();
+    ensureOnbStyle();
+    onbRoot = document.createElement("div");
+    onbRoot.className = "ym-onb-root";
+    if (withBackdrop) {
+      const bd = document.createElement("div");
+      bd.className = "ym-onb-backdrop";
+      onbRoot.appendChild(bd);
+    }
+    onbRoot.appendChild(card);
+    document.body.appendChild(onbRoot);
+  }
+
+  function finishOnboarding() {
+    markOnboardingComplete();
+    teardownOnboarding();
+  }
+
+  function startMarketplaceStep() {
+    waitForSelector("#ym-nav-btn", 10000).then(function (btn) {
+      if (!btn) {
+        finishOnboarding();
+        return;
+      }
+      onbHighlighted = btn;
+      btn.classList.add("ym-onb-highlight");
+      const card = buildOnbCard(
+        "More than lyrics",
+        "Aurora Lyrics also includes themes and artwork tools. Open the waffle icon in the top-right anytime to explore the rest.",
+        "Got it",
+        finishOnboarding
+      );
+      showOnbOverlay(card, false);
+    }).catch(function (e) { showOnbError(e); });
+  }
+
+  function maybeStartOnboarding() {
+    if (onbHasRun || hasCompletedOnboarding()) return;
+    onbHasRun = true;
+    // Make sure no lyrics panel is left open behind the onboarding overlay.
+    closePanelsNow();
+    try {
+      // The first-run lesson starts with the waffle icon so people know Aurora Lyrics
+      // is a small YT Music toolkit, not only a lyrics panel. The lyrics walkthrough
+      // remains available from the marketplace and the SYNCED tab itself.
+      startMarketplaceStep();
+    } catch (e) {
+      showOnbError(e);
+    }
+  }
+
+  whenYTMod(() => {
+    // Kick off the persisted Spicy Lyrics cache read immediately so it is warm
+    // by the time the first track resolves — otherwise the very first lookup
+    // pays a storage round-trip on the critical path.
+    loadSpicyCache().then(() => sweepSpicyCache(Date.now())).catch(() => {});
+    // Pre-warm the animated-art cache too, so the FIRST fullscreen entry already
+    // holds it in memory and the cached-art check costs no storage round-trip. A
+    // round-trip there meant the static cover could paint for a frame before
+    // suppressStaticCardForAnimated() hid it (AJ, 2026-10-03).
+    loadArtCache().catch(() => {});
+    buildUI();
+    // YTM's own video fullscreen button now opens OUR fullscreen instead, so
+    // the control feels native. Registered after buildUI() because the redirect
+    // needs panelEl, which buildUI() creates.
+    installNativeFullscreenRedirect();
+    window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
+    // Also pull Aurora Bloom's settings so the MV blurred-backdrop brightness
+    // (whose slider lives in that add-on) is right even if its panel is never
+    // opened this session. handleHostMessage() picks out just that key.
+    window.postMessage({ type: "ytmod-settings-request", id: "ytmod-dynamic" }, "*");
+    maybeStartOnboarding();
+  });
+
+  // Independent kickoff so onboarding + panel-close also run even if the YTMod bridge
+  // is slow or unavailable. Guarded by onbHasRun, so it never double-runs.
+  (function kickoffOnboarding() {
+    const run = function () {
+      try { maybeStartOnboarding(); } catch (e) { showOnbError(e); }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run, { once: true });
+    } else {
+      run();
+    }
+  })();
+})();

@@ -1,0 +1,505 @@
+  /* ---- bus publishing -------------------------------------------------------
+     Other add-ons (PiP lyrics, and anything later) must not scrape this panel's
+     DOM — that is what makes cross-add-on work fragile. So publish the parsed
+     data and the active index on YTMod.bus instead. Guarded, so this is a no-op
+     when the host does not expose a bus. Payloads are plain data, times in ms.
+  */
+  /* Publish the animation machinery itself, not just the data. A consumer that
+     re-implements these would drift from the panel the moment a spring or spline
+     is tuned here; handing over the actual objects means the PiP window runs
+     literally the same spring integrator and the same curves. The blend helpers
+     read currentSettings, so the user's animation-intensity settings come along
+     for free. */
+  let rendererKitPublished = false;
+  // `force` exists because the kit holds the SPLINE OBJECTS, and
+  // applySimpleLyricsSplines() REPLACES them — a consumer would otherwise keep the
+  // normal-mode curves for the whole session (the one-shot guard below made the
+  // re-publish a no-op, which is why the PiP's Apple Music mode kept bouncing:
+  // normal Y-offset is 0 -> -1/60 -> 0, i.e. down and BACK, while Simple is a
+  // monotonic 0 -> -0.033). AJ, 2026-10-07.
+  function publishRendererKit(force) {
+    if (rendererKitPublished && !force) return;
+    if (!window.YTMod || !window.YTMod.bus) return;
+    rendererKitPublished = true;
+    window.YTMod.bus.emit("lyrics:renderer", {
+      Spring: Spring,
+      easeSinOut: easeSinOut,
+      clamp: clamp,
+      splines: {
+        ScaleSpline: ScaleSpline,
+        LetterScaleSpline: LetterScaleSpline,
+        YOffsetSpline: YOffsetSpline,
+        LetterYOffsetSpline: LetterYOffsetSpline,
+        GlowSpline: GlowSpline,
+      },
+      createLetterSprings: createLetterSprings,
+      createWordSprings: createWordSprings,
+      // The analytic spr spring itself, so a consumer with its own camera (the
+      // PiP) can run the SAME glide the panel uses instead of its own integrator.
+      Spring: Spring,
+      blendSyllableAnimation: blendSyllableAnimation,
+      blendVerticalAnimation: blendVerticalAnimation,
+      storeNeedsAnimation: storeNeedsAnimation,
+      setStyleIfChanged: setStyleIfChanged,
+      // The compositor hint matters as much as the springs: without it the
+      // consumer animates unpromoted and reads as low frame rate even when it is
+      // stepping at full rate.
+      setAnimatingHint: setAnimatingHint,
+      HINT_ON: HINT_ON,
+      // Player toggles the PiP also needs. These drive YTM's OWN player-bar
+      // buttons (shuffle/repeat have no YTMod API), and they read the LIVE state
+      // rather than any local toggle, so a consumer's buttons can never lie about
+      // the real mode. Exposed instead of duplicated: the shuffle read has a
+      // colour fallback and the label anchoring is subtle.
+      clickPlayerButton: clickPlayerButton,
+      readPlayerToggle: readPlayerToggle,
+    });
+    // Observable diagnostic: a consumer that cannot see this is running without
+    // the springs. Check <html data-ym-lyric-renderer="kit">.
+    try {
+      document.documentElement.dataset.ymLyricRenderer = "kit";
+    } catch (e) {}
+  }
+
+  function publishLyricLines(content) {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    publishRendererKit(); // before the lines, so a consumer has the springs ready
+    let track = null;
+    try { track = typeof getCurrentTrack === "function" ? getCurrentTrack() : null; } catch (e) {}
+
+    // One syllable -> the same shape makeWord()/makeLetterGroup() consume, so a
+    // consumer can reproduce the exact markup: .word vs .letterGroup > .letter,
+    // .PartOfWord, .LastWordInLine, .SpaceLetter.
+    const mapWords = (syllables, lineTimed = false) => {
+      const list = syllables || [];
+      return list.map((w, index) => {
+        const startMs = w.StartTime * 1000;
+        const endMs = Math.max(startMs + 1, w.EndTime * 1000);
+        let letterCapable = false;
+        try {
+          letterCapable =
+            !lineTimed &&
+            !w.DisableLetterAnimation &&
+            !w.disableLetterAnimation &&
+            typeof isLetterCapable === "function" &&
+            isLetterCapable(w.Text, endMs - startMs);
+        } catch (e) {}
+        return {
+          text: w.Text || "",
+          startMs,
+          endMs,
+          letterCapable: !!letterCapable,
+          isPartOfWord: !!w.IsPartOfWord,
+          isLast: index === list.length - 1,
+        };
+      });
+    };
+
+    const lines = [];
+    const mapRomaji = (syllables) => {
+      if (!currentSettings.romanizationEnabled || !syllables || !syllables.length) return "";
+      const plain = syllables.map((word) => word.Text || "").join("");
+      const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
+      if (!kanaOnly.trim()) return "";
+      const rom = romanize(kanaOnly);
+      return rom && rom !== kanaOnly && /[A-Za-z]/.test(rom) ? rom : "";
+    };
+    // A line's PLAIN TEXT, with spaces between words.
+    // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
+    // NEXT syllable" (parseTTML infers it from the absence of whitespace between
+    // spans — see the word-scan above), so a space belongs before every syllable
+    // whose PREDECESSOR is not part of a word. The empty join produced
+    // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+    // then rendered as one giant word on the share card. The panel itself never
+    // showed this because it renders from `words`, not from `text` — but `text`
+    // is a published bus field, so every consumer was getting the broken form.
+    const syllablesToText = (syllables) => {
+      const list = syllables || [];
+      let out = "";
+      for (let i = 0; i < list.length; i++) {
+        const prev = list[i - 1];
+        const prevText = prev ? (prev.Text || "") : "";
+        const curText = list[i].Text || "";
+        // Guard against double spaces if a source ever ships the whitespace
+        // inside the syllable text itself.
+        if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
+          out += " ";
+        }
+        out += curText;
+      }
+      return out;
+    };
+    (content || []).forEach((line) => {
+      const lead = line && line.Lead;
+      if (!lead || !lead.Syllables || !lead.Syllables.length) return;
+      lines.push({
+        text: syllablesToText(lead.Syllables),
+        startMs: lead.StartTime * 1000,
+        endMs: lead.EndTime * 1000,
+        lineTimed: !!line.LineTimed,
+        opposite: !!line.OppositeAligned,
+        romaji: mapRomaji(lead.Syllables),
+        words: mapWords(lead.Syllables, !!line.LineTimed),
+        // Background vocals render as their own .line.bg-line elements right
+        // after the main line, with .bg-word children.
+        background: (line.Background || []).map((bg) => ({
+          startMs: bg.StartTime * 1000,
+          endMs: bg.EndTime * 1000,
+          lineTimed: !!bg.LineTimed,
+          romaji: mapRomaji(bg.Syllables),
+          words: mapWords(bg.Syllables, !!bg.LineTimed),
+        })),
+      });
+    });
+    window.YTMod.bus.emit("lyrics:lines", {
+      trackKey: currentTrackKey || null,
+      videoId: track ? track.videoId : null,
+      title: track ? track.title : null,
+      artist: track ? track.artist : null,
+      lines,
+      staticLyrics: !!staticLyricsActive,
+      romanizationEnabled: currentSettings.romanizationEnabled === true,
+      songwriters: currentSongwriters.slice(),
+      smoothScrolling: currentSettings.smoothScrolling !== false,
+      simpleLyrics: currentSettings.simpleLyrics === true,
+      scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
+      scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
+      attribution: {
+        provider: currentProvider || "",
+        uploader: currentUploader ? {
+          id: currentUploader.id || "",
+          username: currentUploader.username || "",
+          avatar: currentUploader.avatar || "",
+          url: currentUploader.url || "",
+        } : null,
+        maker: currentMaker ? {
+          id: currentMaker.id || "",
+          username: currentMaker.username || "",
+          avatar: currentMaker.avatar || "",
+          url: currentMaker.url || "",
+        } : null,
+      },
+    });
+    // Cheap observable diagnostic: if the bus ever stops publishing, this stays
+    // stale. Inspect <html data-ym-lyric-lines="..."> to check.
+    try {
+      document.documentElement.dataset.ymLyricLines = String(lines.length);
+      let bgRuns = 0;
+      lines.forEach((l) => { bgRuns += (l.background || []).length; });
+      document.documentElement.dataset.ymLyricBg = String(bgRuns);
+    } catch (e) {}
+  }
+
+  function publishActiveLine(index) {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    window.YTMod.bus.emit("lyrics:active", { trackKey: currentTrackKey || null, index });
+  }
+
+  /* The resolved sync state a consumer needs to re-derive the lyric clock itself.
+     The panel shifts the lyric position by getOffsetForPosition(positionMs) every
+     frame (see animate()); a consumer that reads the raw player clock — the PiP
+     window, which cannot see the panel's internal offset vars — must apply the
+     SAME shift or every line and word lands that offset early/late. Published on
+     every change and retained by the bus, so a PiP opened mid-track replays it. */
+  function publishSyncState() {
+    if (!window.YTMod || !window.YTMod.bus) return;
+    window.YTMod.bus.emit("lyrics:sync", {
+      offsetMs: getActiveOffsetMs(),
+      pauseSync: pauseSync ? { line: pauseSync.line, offset: pauseSync.offset } : null,
+    });
+    // Observability: confirm the sync topic is firing and what it carries, without
+    // dumping the console. Inspect <html data-ym-lyric-sync="...">.
+    try {
+      document.documentElement.dataset.ymLyricSync =
+        (pauseSync ? "pause+" : "") + formatOffset(getActiveOffsetMs());
+    } catch (e) {}
+  }
+
+  function buildRendererLines(content) {
+    lastRendererContent = content;
+    publishLyricLines(content);
+    stopScrollGlide();
+    // New song -> the old song's end-of-track credits reveal must not own the
+    // scroll. Its latches survive a rebuild otherwise, and a stale end-of-song
+    // position in the frames around the switch re-arms it, dragging the freshly
+    // recentred panel to the BOTTOM of the new song (AJ, 2026-10-02).
+    cancelCreditsReveal();
+    lastScrollTargetLine = -1;
+    modelLines = [];
+    lineElements = [];
+    cachedFirstRealLyricStartMs = Infinity;
+    cachedLastRealLyricEndMs = 0;
+    pendingAnimationLines.clear();
+    scrollCandidateIndices = [];
+    manualScrollActive = false;
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    setJumpButtonVisible(false);
+    // The skeleton goes away with everything else on the next line; the token
+    // bump inside hideLyricsSkeleton is the part that matters, because a paint
+    // queued on rAF would otherwise land on top of the lyrics we are about to
+    // build — the skeleton showing up AFTER the thing it was standing in for.
+    hideLyricsSkeleton();
+    linesRoot.replaceChildren();
+    const scrollContainer = linesRoot.parentElement;
+    const hasDuetLines = content.some((line) => line.OppositeAligned);
+    if (scrollContainer) {
+      scrollContainer.classList.toggle("HasDuetLines", hasDuetLines);
+    }
+
+    const addLine = (lineModel) => {
+      lineModel.RenderState = null;
+      modelLines.push(lineModel);
+      lineElements.push(lineModel.HTMLElement);
+      if (lineModel.isPrimary || lineModel.DotLine) scrollCandidateIndices.push(modelLines.length - 1);
+      linesRoot.appendChild(lineModel.HTMLElement);
+    };
+
+    const firstStart = content[0] && content[0].Lead ? content[0].Lead.StartTime * 1000 : 0;
+    if (firstStart >= GAP_DOTS_AFTER_SECONDS * 1000) {
+      addLine(makeDotLine(0, firstStart, !!content[0].OppositeAligned));
+    }
+
+    content.forEach((contentLine, index) => {
+      const lead = contentLine.Lead;
+      if (!lead || !lead.Syllables || !lead.Syllables.length) return;
+      cachedFirstRealLyricStartMs = Math.min(cachedFirstRealLyricStartMs, lead.StartTime * 1000);
+      cachedLastRealLyricEndMs = Math.max(cachedLastRealLyricEndMs, lead.EndTime * 1000);
+      // Static (unsynced) lines get the .static class so CSS can paint them at
+      // full opacity / alpha-1 regardless of the per-state Sung/NotSung dim
+      // (AJ, 2026-09-18).
+      const lineElement = h("div", {
+        class: staticLyricsActive ? "line static" : "line",
+      });
+      const lineModel = {
+        HTMLElement: lineElement,
+        StartTime: lead.StartTime * 1000,
+        EndTime: lead.EndTime * 1000,
+        TotalTime: (lead.EndTime - lead.StartTime) * 1000,
+        Syllables: { Lead: [] },
+        isPrimary: true,
+        LineTimed: !!contentLine.LineTimed,
+        AnimatorStore: null,
+      };
+      if (lineModel.LineTimed) {
+        lineElement.classList.add("line-timed");
+      }
+      if (contentLine.OppositeAligned) {
+        lineElement.classList.add("OppositeAligned");
+      }
+      if (isRtl(lead.Syllables.map((word) => word.Text).join(" "))) {
+        lineElement.classList.add("rtl");
+      }
+
+      // A line with neither line-level sync nor real span timing is unsynced:
+      // render it as a static block (no syllable/letter karaoke).
+      const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
+      appendWords(lineElement, lineModel, lead.Syllables, false, noKaraoke);
+      appendRomaji(lineElement, lead.Syllables);
+      lineElement.addEventListener("click", () => {
+        // While picking a pause sync point a click selects, it does not seek.
+        if (pausePickMode) {
+          setPauseSyncLine(lineModel);
+          return;
+        }
+        if (window.YTMod && window.YTMod.player) {
+          window.YTMod.player.seek(Math.max(0, lineModel.StartTime + getOffsetForLine(lineModel.StartTime)));
+        }
+      });
+      addLine(lineModel);
+
+      for (const background of contentLine.Background || []) {
+        if (!background.Syllables || !background.Syllables.length) continue;
+        const backgroundElement = h("div", { class: "line bg-line" });
+        const backgroundModel = {
+          HTMLElement: backgroundElement,
+          StartTime: background.StartTime * 1000,
+          EndTime: background.EndTime * 1000,
+          TotalTime: (background.EndTime - background.StartTime) * 1000,
+          Syllables: { Lead: [] },
+          isPrimary: false,
+          BGLine: true,
+          AnimatorStore: null,
+        };
+        if (isRtl(background.Syllables.map((word) => word.Text).join(" "))) {
+          backgroundElement.classList.add("rtl");
+        }
+        if (contentLine.OppositeAligned) {
+          backgroundElement.classList.add("OppositeAligned");
+        }
+        appendWords(backgroundElement, backgroundModel, background.Syllables, true, noKaraoke);
+        appendRomaji(backgroundElement, background.Syllables);
+        backgroundElement.addEventListener("click", () => {
+          // Background vocals are never valid sync points, so ignore clicks in
+          // pick mode rather than silently picking the wrong line.
+          if (pausePickMode) return;
+          if (window.YTMod && window.YTMod.player) {
+            window.YTMod.player.seek(backgroundModel.StartTime);
+          }
+        });
+        addLine(backgroundModel);
+      }
+
+      const next = content[index + 1] && content[index + 1].Lead;
+      if (next) {
+        const gapStart = lead.EndTime * 1000;
+        const gapEnd = next.StartTime * 1000;
+        if (gapEnd - gapStart >= GAP_DOTS_AFTER_SECONDS * 1000) {
+          addLine(makeDotLine(
+            gapStart,
+            gapEnd,
+            !!content[index + 1].OppositeAligned
+          ));
+        }
+      }
+    });
+
+    // The provider counts on its own: a non-community source (apple_music,
+    // spotify) has no credited people, and the provider must still be shown.
+    // Unobserve the previous track's credits block before it is replaced, then
+    // observe the new one so the profile-glow rAF only paints while it's on-screen.
+    if (pfpGlowObserver && creditsFooterEl) pfpGlowObserver.unobserve(creditsFooterEl);
+    if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
+      creditsFooterEl = buildCreditsFooter(currentSongwriters);
+      linesRoot.appendChild(creditsFooterEl);
+      if (pfpGlowObserver) pfpGlowObserver.observe(creditsFooterEl);
+    } else {
+      creditsFooterEl = null;
+    }
+    // A new track invalidates any in-progress credits reveal: position is about to
+    // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
+    // doing it here avoids a one-frame flash of the previous song parked at bottom.
+    creditsRevealEngaged = false;
+    creditsRevealActive = false;
+    creditsRevealDismissed = false;
+
+    // Re-apply the pause sync marker: the line elements were just rebuilt, so any
+    // class on the old nodes is gone.
+    markPauseSyncLine();
+    lineScrollEl.classList.remove("offline");
+    // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
+    // from here through the song (AJ, 2026-09-18).
+    if (staticLyricsActive && lineScrollEl) {
+      // Instant: a reset, not a scroll the user asked to watch.
+      writeScrollTop(0, true);
+    }
+    // The scroll position is now meaningless: the PREVIOUS song's scrollTop is
+    // still in effect (the reset above is static-only) against completely
+    // different line geometry. Place the camera instantly. Letting the spring
+    // handle it is what made a new song glide all the way up from the last
+    // song's final line.
+    recentreActiveLine();
+  }
+
+  function loadLyrics(xml) {
+    // A freshly imported file invalidates any pause sync point: it was measured
+    // against the previous TTML's line times, so keeping it would silently
+    // mis-sync. Drop it (AJ's call, 2026-09-15).
+    pauseSync = null;
+    pausePickMode = false;
+    return loadTTML(xml, "imported");
+  }
+
+  // Only touches the paused/disabled state of the pick button. Kept separate from
+  // refreshPauseSyncControl() because this runs on the 500ms housekeeping tick and
+  // must not re-walk every line.
+  function refreshPausePickButtonState() {
+    const ui = pauseUi;
+    if (!ui || !ui.pick) return;
+    const paused = isPlaybackPaused();
+    if (ui.pick.disabled === !paused) return;
+    ui.pick.disabled = !paused;
+    ui.pick.title = paused
+      ? "Pick the line that plays after the pause"
+      : "Pause the video first";
+  }
+
+  function escapeDownloadName(value) {
+    return String(value || "lyrics")
+      .replace(/[<>:"/\\|?*\x00-\x1F]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 100) || "lyrics";
+  }
+
+  function parseExportTime(value) {
+    const seconds = Number(value) / 1000;
+    if (!Number.isFinite(seconds)) return "0:00.000";
+    const safe = Math.max(0, seconds);
+    const minutes = Math.floor(safe / 60);
+    const remainder = (safe - minutes * 60).toFixed(3).padStart(6, "0");
+    return `${minutes}:${remainder}`;
+  }
+
+  function shiftTTMLSync(xml, offsetMs) {
+    if (!offsetMs) return xml;
+    return String(xml).replace(/(\b(?:begin|end|itunes:begin|itunes:end)\s*=\s*["'])([^"']+)(["'])/gi,
+      (match, prefix, time, suffix) => {
+        const parts = String(time || "").split(":");
+        if (parts.length < 2) return match;
+        const seconds = Number(parts.pop());
+        const minutes = Number(parts.pop());
+        const hours = parts.length ? Number(parts.pop()) : 0;
+        if (![seconds, minutes, hours].every(Number.isFinite)) return match;
+        const shifted = Math.max(0, (hours * 3600 + minutes * 60 + seconds) * 1000 + offsetMs);
+        return `${prefix}${parseExportTime(shifted)}${suffix}`;
+      });
+  }
+
+  function exportImportedTTML(withSync) {
+    if (currentTTMLSource !== "imported" || !importedTTMLXml) {
+      showLyricsMessage("Export is available only for imported TTML files.");
+      return;
+    }
+    const offset = withSync ? getActiveOffsetMs() : 0;
+    const output = withSync ? shiftTTMLSync(importedTTMLXml, offset) : importedTTMLXml;
+    const track = getCurrentTrack();
+    const title = escapeDownloadName(track && track.title ? track.title : "lyrics");
+    const suffix = withSync && offset ? "-synced" : "";
+    const blob = new Blob([output], { type: "application/ttml+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${title}${suffix}.ttml`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function readFile(file, importMode) {
+    const reader = new FileReader();
+    const mode = importMode === "permanent" ? "permanent" : "temporary";
+    const trackKey = currentTrackKey || getTrackKey(getCurrentTrack());
+    reader.onload = async () => {
+      const xml = String(reader.result || "");
+      if (!loadLyrics(xml)) return;
+      importedTTMLXml = xml;
+      currentTTMLSource = "imported";
+      setTTMLExportVisibility();
+
+      if (activeTrackAbort) {
+        activeTrackAbort.abort();
+        activeTrackAbort = null;
+      }
+      ++trackRequestSeq;
+
+      if (mode === "permanent") {
+        manualLyricsIsPermanent = true;
+        manualLyricsTrackKey = "";
+        try {
+          await savePermanentTTML(trackKey, xml);
+        } catch (error) {
+          manualLyricsIsPermanent = false;
+          manualLyricsTrackKey = trackKey;
+          console.warn("[SpicyLyrics] Could not save permanent TTML:", error);
+        }
+      } else {
+        manualLyricsIsPermanent = false;
+        manualLyricsTrackKey = trackKey;
+      }
+      refreshPermanentDeleteState();
+    };
+    reader.readAsText(file);
+  }
+
