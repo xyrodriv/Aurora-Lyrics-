@@ -29,8 +29,6 @@ smooth motion).
   - PiP Lyrics
   - Sleep Timer
   - Smooth Motion
-- **Support** — an in-app Support panel (Cash App / PayPal). See
-  [Support](#support).
 
 ## Installation
 
@@ -66,7 +64,7 @@ Aurora Lyrics/
 │   ├── content/               # Isolated-world injector + marketplace UI
 │   │   ├── content.js         # Bootstraps the add-on registry + marketplace panel
 │   │   ├── public-api.js      # window.YTMod bridge (player, bus, lyric helpers)
-│   │   └── styles.css         # Marketplace + Support overlay styles
+│   │   └── styles.css         # Marketplace overlay styles
 │   ├── extensions/            # Individual add-ons (web_accessible_resources)
 │   │   ├── aurora-lyrics.js     # GENERATED from src/aurora-lyrics/ — do not edit
 │   │   ├── dynamic.js          # Dynamic theme + Kawarp backdrop
@@ -127,6 +125,3 @@ features or grant anything extra.
 
 - Cash App: https://cash.app/$ajlol101
 - PayPal: https://paypal.me/brandiluvsbts
-
-You can also open the in-app **Support** panel from the top-right of the
-add-ons panel.

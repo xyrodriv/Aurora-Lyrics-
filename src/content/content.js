@@ -841,15 +841,6 @@
   ];
   const findAvail = (id) => AVAILABLE.find((a) => a.id === id);
 
-  /* ---- Support links -------------------------------------------------------
-     AJ pastes his Cash App / PayPal URLs here later. An empty string renders
-     that row as a disabled "Coming soon" placeholder; a real https:// URL
-     becomes a live "Open" link that opens in a new tab. */
-  const SUPPORT_LINKS = {
-    cashapp: "https://cash.app/$ajlol101",
-    paypal: "https://paypal.me/brandiluvsbts",
-  };
-
   /* ---- applied-style cache (for disable/uninstall) ----
      An extension may ship CSS (injected via injectCSS) and/or JS (a page-world
      script loaded from jsUrl / inline js, so it can use window.YTMod). Both are
@@ -1100,7 +1091,6 @@
   let marketplaceCloseTimer = 0;
   let marketplaceCloseHandler = null;
   let marketplaceOpenTimer = 0;
-  let supportOverlayEl = null;
 
   function openMarketplace() {
     if (!overlay) return;
@@ -1128,9 +1118,6 @@
 
   function closeMarketplace() {
     if (!overlay || overlay.classList.contains("hidden") || overlay.classList.contains("ym-leaving")) return;
-    // Hide any open Support modal so closing the marketplace (via × or Escape)
-    // never strands a floating page on top of the main UI.
-    if (supportOverlayEl) supportOverlayEl.classList.add("hidden");
     // Reset the detail sheet instantly (no morph) so reopening starts clean.
     if (sheetOpen) finishCloseDetail();
     if (marketplaceOpenTimer) clearTimeout(marketplaceOpenTimer);
@@ -1471,58 +1458,6 @@
     (document.head || document.documentElement).appendChild(s);
   }
 
-  // Build the Support "page": a centered modal over the marketplace with a
-  // thanks paragraph, a clear disclaimer (no premium features / just a tip),
-  // and Cash App / PayPal links driven by SUPPORT_LINKS.
-  function buildSupportOverlay() {
-    const overlay = h("div", { class: "ym-support-overlay hidden" });
-    const backdrop = h("div", { class: "ym-support-backdrop" });
-    const card = h("div", { class: "ym-support-card" });
-    const head = h("div", { class: "ym-support-head" });
-    head.appendChild(h("h2", { text: "Support Aurora Lyrics" }));
-    const closeBtn = h("button", {
-      class: "ym-support-close",
-      type: "button",
-      title: "Close",
-      "aria-label": "Close support",
-      text: "\u00d7",
-    });
-    closeBtn.addEventListener("click", () => overlay.classList.add("hidden"));
-    head.appendChild(closeBtn);
-    const body = h("div", { class: "ym-support-body" });
-    body.appendChild(h("p", { class: "ym-support-text" },
-      "Thanks for using Aurora Lyrics! If you are enjoying it and want to help keep it free and actively maintained, a small tip goes a long way. It is never required."
-    ));
-    body.appendChild(h("p", { class: "ym-support-disclaimer" },
-      "This is a tip, not a purchase. Supporting does ",
-      h("strong", { text: "not" }),
-      " unlock premium features, remove ads, or grant anything extra. Aurora Lyrics is and always will be completely free."
-    ));
-    function makeSupportLink(kind, label, url) {
-      const ready = typeof url === "string" && url.trim().length > 0;
-      return h("a", {
-        class: "ym-support-link " + kind + (ready ? "" : " disabled"),
-        href: ready ? url : null,
-        target: ready ? "_blank" : null,
-        rel: ready ? "noopener noreferrer" : null,
-        title: ready ? "Open " + label : label + " link coming soon",
-        "aria-label": ready ? "Open " + label : label + " link coming soon",
-      }, label, h("span", { class: "ym-support-tag", text: ready ? "Open" : "Soon" }));
-    }
-    const links = h("div", { class: "ym-support-links" },
-      makeSupportLink("cashapp", "Cash App", SUPPORT_LINKS.cashapp),
-      makeSupportLink("paypal", "PayPal", SUPPORT_LINKS.paypal)
-    );
-    body.appendChild(links);
-    body.appendChild(h("p", { class: "ym-support-foot", text: "Every bit of support is genuinely appreciated. Thank you!" }));
-    card.append(head, body);
-    overlay.append(backdrop, card);
-    backdrop.addEventListener("click", () => overlay.classList.add("hidden"));
-    document.body.appendChild(overlay);
-    supportOverlayEl = overlay;
-    return overlay;
-  }
-
   function buildMarketplace() {
     // Spicy Lyrics font for the whole panel (AJ, 2026-09-28). The stylesheet's
     // relative woff2 URLs resolve against the extension, so a <link> is enough.
@@ -1535,22 +1470,7 @@
         document.head.appendChild(fontLink);
       } catch (_) {}
     }
-    // Yellow Support button sits immediately to the left of the × (via
-    // margin-left:auto in styles.css) and opens the dedicated Support page.
-    const supportBtn = h("button", {
-      class: "ym-support-btn",
-      type: "button",
-      title: "Support Aurora Lyrics",
-      "aria-label": "Support Aurora Lyrics",
-      text: "Support",
-    });
-    const supportOverlay = buildSupportOverlay();
-    supportBtn.addEventListener("click", () => supportOverlay.classList.toggle("hidden"));
-
     const close = makeIconButton(ICON_CLOSE, () => {
-      // Tearing down the marketplace while Support is open would leave a
-      // stranded modal on top of the page; hide Support alongside it.
-      supportOverlay.classList.add("hidden");
       closeMarketplace();
     }, "Close");
     close.id = "ym-close";
@@ -1565,7 +1485,6 @@
     const header = h("div", { class: "ym-head" },
       title,
       h("span", { class: "ym-sub", text: "Add-ons" }),
-      supportBtn,
       close
     );
 
