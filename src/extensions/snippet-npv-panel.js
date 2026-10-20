@@ -1570,6 +1570,9 @@ return Kawarp;
   let artistDescEl = null;
   let artistMoreEl = null;
   let artistCurrentId = "";
+  // True for the whole artist switch (skeleton + cached + fetch render): no
+  // whole-card entrance may play over the shimmer (AJ, 2026-10-20).
+  let artistSkeletonActive = false;
 
   /* ---------- tiny DOM helpers (no innerHTML: Trusted Types safe) ---------- */
 
@@ -3362,6 +3365,14 @@ function syncLyricsDock() {
       return { ok: false, json: null };
     }
   }
+  const artistInfoSig = (info) => [
+    info && info.name,
+    info && info.banner,
+    info && info.monthly,
+    info && info.subs,
+    info && info.desc,
+  ].join("|");
+
   function renderArtistCard(info, browseId, opts) {
     if (!artistCardEl) return;
     if (!info || !info.name) {
@@ -3371,6 +3382,14 @@ function syncLyricsDock() {
       return;
     }
     const animate = !opts || opts.animate !== false;
+    const infoSig = artistInfoSig(info);
+    // A cached render followed by the fetch returning the SAME artist data used
+    // to render twice (two height glides / two entrances). Skip the duplicate.
+    if (
+      artistCardEl.dataset.browseId === browseId &&
+      artistCardEl.dataset.infoSig === infoSig &&
+      artistCardEl.dataset.loading !== "true"
+    ) return;
     // Was a different artist already on screen? If so, play the OUT animation
     // first (fade/blur/slip the old card down), then swap content + replay IN.
     const oldId = artistCardEl.dataset.browseId;
@@ -3400,6 +3419,7 @@ function syncLyricsDock() {
       artistMoreEl.textContent = "SHOW MORE";
       artistCardEl.hidden = false;
       artistCardEl.dataset.browseId = browseId;
+      artistCardEl.dataset.infoSig = infoSig;
       artistCardEl.removeAttribute("data-loading");
       artistCardEl.removeAttribute("data-skel-empty");
       // Glide the card to its real height so the queue below never jumps when
@@ -3423,7 +3443,7 @@ function syncLyricsDock() {
       // entrance animation plays OVER the shimmer, which made the skeleton look
       // broken/flickery on a track switch. The skeleton itself is the transition
       // (AJ, 2026-10-20).
-      if (animate && !isLoading) {
+      if (animate && !isLoading && !artistSkeletonActive) {
         // Restart the rise-in animation by removing the class, forcing reflow, then
         // re-adding it (a no-op re-add won't replay). Drop any leftover OUT class.
         artistCardEl.classList.remove("ym-npv-artist-out");
@@ -3467,21 +3487,26 @@ function syncLyricsDock() {
   function syncArtistCard() {
     const browseId = getArtistBrowseId();
     if (!browseId || browseId === artistCurrentId) return;
-    const hadVisibleCard = !!artistCurrentId && !!artistCardEl && !artistCardEl.hidden;
     artistCurrentId = browseId;
+    // Suppress the whole-card entrance for every render in this switch, not
+    // just the one that removes the skeleton.
+    artistSkeletonActive = true;
     const cached = artistCache.get(browseId);
 
-    // Hold the footprint immediately. With a cache the card renders in the same
-    // frame; without one the skeleton stays until the fetch resolves.
-    if (hadVisibleCard || !cached) showArtistSkeleton();
-    if (cached) renderArtistCard(cached, browseId, { animate: hadVisibleCard });
+    // ALWAYS hold the footprint with the skeleton while the authoritative info
+    // is fetched. Rendering the cache first and then the fetch caused TWO
+    // content swaps / height glides (AJ, 2026-10-20); the skeleton covers the
+    // wait and the card renders exactly once.
+    showArtistSkeleton();
 
-    // Always re-fetch the authoritative artist info (banner, bio, monthly
-    // listeners) so a stale cache is corrected.
     fetchArtistInfo(browseId).then((info) => {
       if (artistCurrentId !== browseId) return;
       if (!info) {
-        // No card for this artist: drop the skeleton and let the queue settle.
+        // Fetch failed: fall back to the cache, or drop the skeleton entirely.
+        if (cached) {
+          renderArtistCard(cached, browseId, { animate: false });
+          return;
+        }
         if (artistCardEl) {
           artistCardEl.removeAttribute("data-loading");
           artistCardEl.removeAttribute("data-skel-empty");
