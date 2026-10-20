@@ -4284,6 +4284,12 @@
       opacity: .85;
       pointer-events: none;
       user-select: none;
+      /* Credits are chrome, not lyrics: keep the bundled face even though the
+         footer sits inside .LyricsContent (which carries the custom lyric
+         font). Covers Written By / Uploaded by / Made by (AJ, 2026-10-20). */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits-label {
       font-size: 12px;

@@ -701,6 +701,9 @@
         // the duplicated blurred-video backdrop. Off = only still uploads
         // (Official Audio / Lyric Video) use Kawarp. Consumed by Aurora Lyrics.
         { key: "preferKawarpAlways", label: "Prefer Aurora Bloom for music videos", type: "toggle", default: false },
+        // Never sample the live video; keep the backdrop on the track's cover
+        // art even for music videos (AJ, 2026-10-20).
+        { key: "kawarpCoverArtOnly", label: "Cover art only (ignore video)", type: "toggle", default: false },
       ],
     },
     {

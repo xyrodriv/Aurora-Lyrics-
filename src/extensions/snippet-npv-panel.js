@@ -3710,7 +3710,17 @@ function syncLyricsDock() {
   function updateKawarpSource(force) {
     if (!bgKawarp) return;
     syncKawarpSettings();
-    const node = heldVideo && heldVideo.isConnected ? heldVideo.querySelector("video") : null;
+    // Dynamic's "Cover art only" toggle applies to the rail's Kawarp too: skip
+    // the held video and fall through to the cover image (AJ, 2026-10-20).
+    let coverOnly = false;
+    try {
+      const dyn = window.__ymAuroraDynamic;
+      const s = dyn && typeof dyn.getSettings === "function" ? dyn.getSettings() : null;
+      coverOnly = !!(s && s.kawarpCoverArtOnly);
+    } catch (e) { /* ignore */ }
+    const node = !coverOnly && heldVideo && heldVideo.isConnected
+      ? heldVideo.querySelector("video")
+      : null;
     if (node && node.readyState >= 2) {
       if (force || bgVideoEl !== node) {
         try {
@@ -4157,13 +4167,43 @@ function syncLyricsDock() {
     }
     return -1;
   }
-  // Play a queue track: prefer an in-place player call, else open the song view.
+  // Play a queue track IN PLACE. YTMod.player has no playVideoById, so the old
+  // fallback always navigated to the song view. The YouTube player instance
+  // (#movie_player) is the API that swaps the video without changing the route.
   function playQueueTrack(id) {
     if (!id) return;
-    const p = window.YTMod && window.YTMod.player;
-    if (p && typeof p.playVideoById === "function") {
-      try { p.playVideoById(id); return; } catch (_) {}
+    const moviePlayer =
+      document.querySelector("ytmusic-player #movie_player") ||
+      document.querySelector("#song-video #movie_player") ||
+      document.querySelector("#movie_player");
+    if (moviePlayer && typeof moviePlayer.loadVideoById === "function") {
+      try { moviePlayer.loadVideoById(id); return; } catch (_) {}
     }
+    // Some builds hang the API off ytmusic-player instead.
+    const ytmPlayer = document.querySelector("ytmusic-player");
+    const api = ytmPlayer && (ytmPlayer.playerApi || ytmPlayer.player_ || null);
+    if (api && typeof api.loadVideoById === "function") {
+      try { api.loadVideoById(id); return; } catch (_) {}
+    }
+    if (ytmPlayer && typeof ytmPlayer.playVideoById === "function") {
+      try { ytmPlayer.playVideoById(id); return; } catch (_) {}
+    }
+    // Public bridge, if a future build provides it.
+    const bridge = window.YTMod && window.YTMod.player;
+    if (bridge && typeof bridge.playVideoById === "function") {
+      try { bridge.playVideoById(id); return; } catch (_) {}
+    }
+    // Native queue row: clicking it uses YTM's own in-place handler.
+    const rows = document.querySelectorAll("ytmusic-player-queue-item");
+    for (const row of rows) {
+      const data = row.data || null;
+      const rowId =
+        (data && (data.videoId || (data.playlistPanelVideoRenderer && data.playlistPanelVideoRenderer.videoId))) ||
+        row.getAttribute("video-id") ||
+        "";
+      if (rowId === id) { try { row.click(); return; } catch (_) {} }
+    }
+    // Last resort only: a dead click is worse than the song view.
     location.href = "https://music.youtube.com/watch?v=" + id;
   }
 

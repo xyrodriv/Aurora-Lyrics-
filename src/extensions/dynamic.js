@@ -41,6 +41,9 @@
     saturation: 1.7,
     blurPasses: 6,
     warpIntensity: 1,
+    // Keep the Kawarp backdrop on the cover art even when a music video is
+    // playing (AJ, 2026-10-20).
+    kawarpCoverArtOnly: false,
   };
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -76,6 +79,7 @@
     currentSettings.saturation = Math.min(2.5, Math.max(0.5, Number(currentSettings.saturation) || DEFAULT_SETTINGS.saturation));
     currentSettings.blurPasses = Math.round(Math.min(8, Math.max(2, Number(currentSettings.blurPasses) || DEFAULT_SETTINGS.blurPasses)));
     currentSettings.warpIntensity = Math.min(1, Math.max(0.2, Number(currentSettings.warpIntensity) || DEFAULT_SETTINGS.warpIntensity));
+    currentSettings.kawarpCoverArtOnly = !!currentSettings.kawarpCoverArtOnly;
     KAWARP_OPTIONS.warpIntensity = currentSettings.warpIntensity;
     KAWARP_OPTIONS.blurPasses = currentSettings.blurPasses;
     KAWARP_OPTIONS.saturation = currentSettings.saturation;
@@ -617,7 +621,9 @@
   // back to the artwork the moment it stops (track change, MV -> audio).
   function syncVideoFeed() {
     if (!kawarpInstance || kawarpSuspended) return;
-    const v = findPlayingVideo();
+    // Cover-art-only: never follow the video. If one was being followed, the
+    // block below hands the feed back to the cover art (AJ, 2026-10-20).
+    const v = currentSettings.kawarpCoverArtOnly ? null : findPlayingVideo();
     if (v) {
       if (followingVideo !== v) {
         try {
@@ -666,7 +672,7 @@
       // Music videos: feed the live <video> so the backdrop moves with the
       // picture instead of sitting on a still. Kawarp samples a small colour
       // map, so this stays cheap. Audio tracks fall through to loadImage.
-      const playingVideo = findPlayingVideo();
+      const playingVideo = currentSettings.kawarpCoverArtOnly ? null : findPlayingVideo();
       if (playingVideo) {
         try {
           kawarpInstance.loadVideo(playingVideo, {

@@ -2047,11 +2047,24 @@ ytmusic-player-bar .ym-pb-btn:active,
   padding: 11px 12px; border-radius: 14px;
   background: rgba(255,255,255,.04);
   border: 1px solid rgba(255,255,255,.09);
-  transition: background .2s ease;
+  max-height: 220px;
+  overflow: hidden;
+  /* Default mode collapses the upload/size card instead of hard-hiding it, so
+     switching Default <-> Custom animates (AJ, 2026-10-20). The hidden file
+     input still works from a 0-height parent. */
+  transition: max-height .38s cubic-bezier(.22,.61,.36,1), opacity .26s ease,
+    padding-top .38s cubic-bezier(.22,.61,.36,1),
+    padding-bottom .38s cubic-bezier(.22,.61,.36,1),
+    border-color .3s ease, background .3s ease;
 }
-/* Default mode shows only the switch + status; the upload/size card belongs to
-   Custom. (The hidden file input still works from a display:none parent.) */
-.ym-cfont-controls.is-default { display: none; }
+.ym-cfont-controls.is-default {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-color: transparent;
+  pointer-events: none;
+}
 .ym-cfont-btn {
   appearance: none; cursor: pointer;
   font: inherit; font-size: 12.5px; font-weight: 600;

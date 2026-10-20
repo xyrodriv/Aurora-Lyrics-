@@ -390,7 +390,7 @@
     }
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
-    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider));
+    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
     if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
     if (currentMaker) footer.appendChild(buildPersonRow("Made by", currentMaker));
     return footer;
@@ -437,8 +437,11 @@
     return svg;
   }
 
-  function buildProviderRow(provider) {
-    const warn = !!PROVIDER_WARN[provider];
+  function buildProviderRow(provider, isStatic) {
+    // The red pill/triangle means "these timings are machine-aligned". A static
+    // (unsynced) set has no timings at all, so the warning is meaningless and
+    // reads as a defect — show the normal credit instead (AJ, 2026-10-20).
+    const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
     row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));

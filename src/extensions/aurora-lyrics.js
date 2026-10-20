@@ -6094,6 +6094,12 @@
       opacity: .85;
       pointer-events: none;
       user-select: none;
+      /* Credits are chrome, not lyrics: keep the bundled face even though the
+         footer sits inside .LyricsContent (which carries the custom lyric
+         font). Covers Written By / Uploaded by / Made by (AJ, 2026-10-20). */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits-label {
       font-size: 12px;
@@ -13528,6 +13534,58 @@
     const stale = () =>
       controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey;
 
+    /* One LRCLIB fetch, shared by the lrclib runner and by the lrc.red STATIC
+       fallback. The fallback needs the raw result (not a load) so it can decide
+       whether LRCLIB actually has a SYNCED set; if it only has plain lyrics we
+       keep lrc.red's static set instead of swapping one static for another. */
+    const fetchLrclibData = async () => {
+      const cached = lrclibCache.get(key);
+      if (cached) {
+        lrclibCache.delete(key);
+        lrclibCache.set(key, cached);
+        return cached;
+      }
+      const persisted = getLyricsPersistent(key);
+      if (persisted) {
+        lrclibCache.set(key, persisted);
+        return persisted;
+      }
+      if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return null;
+      const params = new URLSearchParams();
+      params.set("track_name", track.title);
+      if (track.artist) params.set("artist_name", track.artist);
+      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+        params.set("duration", String(Math.round(track.durationMs / 1000)));
+      }
+      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_API}?${params.toString()}`);
+      if (!response.ok && response.status !== 404) {
+        throw new Error("LRCLIB returned HTTP " + response.status);
+      }
+      let data = response.ok ? response.data : null;
+      if (!data || !data.syncedLyrics) {
+        const searchParams = new URLSearchParams({
+          q: [track.title, track.artist].filter(Boolean).join(" "),
+        });
+        if (stale()) return null;
+        const searchResponse = await window.YTMod.fetchLRCLIB(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        );
+        if (!searchResponse.ok) {
+          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+        }
+        // Prefer a synced match; fall back to a plain (unsynced) match so the
+        // panel shows lyrics automatically instead of "No lyrics found"
+        // (AJ, 2026-09-18). Both are scored against the current track on the
+        // same search response — no second request.
+        data = selectLRCLIBResult(searchResponse.data, track)
+          || selectLRCLIBPlainResult(searchResponse.data, track);
+      }
+      if (!data || (!data.syncedLyrics && !data.plainLyrics)) return null;
+      cacheLRCLyrics(key, data);
+      cacheLyricsPersistent(key, data);
+      return data;
+    };
+
     /* Each source is a runner that returns true when it produced lyrics (or
        when the request went stale). The resolver walks them in the order the
        user set in the add-on's settings — "Source order" — instead of a
@@ -13574,35 +13632,62 @@
         try {
           const lrcRed = await fetchLrcRedLyrics(track, controller, key);
           if (stale()) return true;
-          if (lrcRed && lrcRed.ttml) {
-            let ok = false;
-            if (ttmlHasWordTiming(lrcRed.ttml)) {
-              // Word-level TTML -> normal word-by-word karaoke.
-              ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
-              if (ok) console.log("[SpicyLyrics] TTML rendered from lrc.red.");
-            } else {
-              // Line-level-only TTML: no per-word timing. The karaoke/line fill
-              // reads as every line lighting at once, so present it as STATIC
-              // auto-scroll instead (AJ, 2026-10-19).
-              ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
+          if (!lrcRed || (!lrcRed.ttml && !lrcRed.lrc)) return false;
+
+          const hasWordTiming = !!(lrcRed.ttml && ttmlHasWordTiming(lrcRed.ttml));
+          const hasSyncedLRC = !!(lrcRed.lrc && isSyncedLRC(lrcRed.lrc));
+          const isStatic = !hasWordTiming && !hasSyncedLRC;
+
+          // lrc.red only had a STATIC set. Prefer a SYNCED LRCLIB result over
+          // static lyrics; only settle for lrc.red's static set when LRCLIB has
+          // nothing synced (AJ, 2026-10-20).
+          if (isStatic) {
+            let lrclibData = null;
+            try {
+              lrclibData = await fetchLrclibData();
+            } catch (error) {
+              if (error && error.name === "AbortError") return true;
+              console.warn("[SpicyLyrics] LRCLIB fallback for static lrc.red failed:", error);
             }
-            if (ok) {
-              showSourceNotice("lrc.red lyrics may be slightly out of sync");
+            if (stale()) return true;
+            if (lrclibData && lrclibData.syncedLyrics) {
+              loadLRCLyrics(lrclibData, track.durationMs);
               return true;
             }
-            console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
           }
-          if (lrcRed && lrcRed.lrc) {
+
+          let ok = false;
+          let loadedSynced = false;
+          if (hasWordTiming) {
+            // Word-level TTML -> normal word-by-word karaoke.
+            ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
+            if (ok) {
+              loadedSynced = true;
+              console.log("[SpicyLyrics] TTML rendered from lrc.red.");
+            }
+          }
+          if (!ok && hasSyncedLRC) {
+            ok = loadLRCLyrics({ syncedLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
+            if (ok) loadedSynced = true;
+          }
+          if (!ok && lrcRed.ttml) {
+            // Line-level-only TTML: no per-word timing. Present it as STATIC
+            // auto-scroll instead (AJ, 2026-10-19).
+            ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
+          }
+          if (!ok && lrcRed.lrc) {
             // A plain (untimestamped) .lrc piling on one line is the "all fire at
             // once" bug — feed it through the STATIC path, not syncedLyrics.
-            const payload = isSyncedLRC(lrcRed.lrc)
-              ? { syncedLyrics: lrcRed.lrc }
-              : { plainLyrics: lrcRed.lrc };
-            if (loadLRCLyrics(payload, track.durationMs, "lrc.red")) {
-              showSourceNotice("lrc.red lyrics may be slightly out of sync");
-              return true;
-            }
+            ok = loadLRCLyrics({ plainLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
           }
+          if (ok) {
+            // Only warn about accuracy when the set that ACTUALLY loaded is
+            // synced; a static set has no timing to be out of sync
+            // (AJ, 2026-10-20).
+            if (loadedSynced) showSourceNotice("lrc.red lyrics may be slightly out of sync");
+            return true;
+          }
+          console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
         } catch (error) {
           if (error && error.name === "AbortError") return true;
           console.warn("[SpicyLyrics] lrc.red lookup failed; trying the next source:", error);
@@ -13630,62 +13715,10 @@
       },
 
       lrclib: async () => {
-        const cached = lrclibCache.get(key);
-        if (cached) {
-          lrclibCache.delete(key);
-          lrclibCache.set(key, cached);
-          loadLRCLyrics(cached, track.durationMs);
-          return true;
-        }
-        const persisted = getLyricsPersistent(key);
-        if (persisted) {
-          lrclibCache.set(key, persisted);
-          loadLRCLyrics(persisted, track.durationMs);
-          return true;
-        }
-
-        if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return false;
-        const params = new URLSearchParams();
-        params.set("track_name", track.title);
-        if (track.artist) params.set("artist_name", track.artist);
-        if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
-          params.set("duration", String(Math.round(track.durationMs / 1000)));
-        }
-
         try {
-          const response = await window.YTMod.fetchLRCLIB(
-            `${LRCLIB_API}?${params.toString()}`
-          );
-          if (!response.ok && response.status !== 404) {
-            throw new Error("LRCLIB returned HTTP " + response.status);
-          }
-          let data = response.ok ? response.data : null;
-
-          if (!data || !data.syncedLyrics) {
-            const searchParams = new URLSearchParams({
-              q: [track.title, track.artist].filter(Boolean).join(" "),
-            });
-            if (stale()) return true;
-            const searchResponse = await window.YTMod.fetchLRCLIB(
-              `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
-            );
-            if (!searchResponse.ok) {
-              throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
-            }
-            // Prefer a synced match; fall back to a plain (unsynced) match so the
-            // panel shows lyrics automatically instead of "No lyrics found"
-            // (AJ, 2026-09-18). Both are scored against the current track on the
-            // same search response — no second request.
-            data = selectLRCLIBResult(searchResponse.data, track)
-              || selectLRCLIBPlainResult(searchResponse.data, track);
-          }
-
+          const data = await fetchLrclibData();
           if (stale()) return true;
-          // Accept either a synced or a plain match. Only give up when there is no
-          // usable lyrics object at all.
-          if (!data || (!data.syncedLyrics && !data.plainLyrics)) return false;
-          cacheLRCLyrics(key, data);
-          cacheLyricsPersistent(key, data);
+          if (!data) return false;
           loadLRCLyrics(data, track.durationMs);
           return true;
         } catch (error) {
@@ -14422,7 +14455,7 @@
     }
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
-    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider));
+    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
     if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
     if (currentMaker) footer.appendChild(buildPersonRow("Made by", currentMaker));
     return footer;
@@ -14469,8 +14502,11 @@
     return svg;
   }
 
-  function buildProviderRow(provider) {
-    const warn = !!PROVIDER_WARN[provider];
+  function buildProviderRow(provider, isStatic) {
+    // The red pill/triangle means "these timings are machine-aligned". A static
+    // (unsynced) set has no timings at all, so the warning is meaningless and
+    // reads as a defect — show the normal credit instead (AJ, 2026-10-20).
+    const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
     row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
