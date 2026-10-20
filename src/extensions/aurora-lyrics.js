@@ -1505,7 +1505,9 @@
     // `url(https://...) format("woff2")`. A scale multiplier on top lets a font
     // nudge bigger/smaller without touching the size slider (AJ, 2026-10-20).
     customFont: "",
-    customFontScale: 1.0,
+    // AJ wants a newly-uploaded face to start at 200% (2026-10-20). size-adjust
+    // is a percentage of the font's own advance width, so 2.0 doubles it.
+    customFontScale: 2.0,
     // Which lyrics source is tried first. The resolver walks this list top to
     // bottom and stops at the first source that has the track. (The user-facing
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used

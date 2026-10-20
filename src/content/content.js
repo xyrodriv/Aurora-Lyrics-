@@ -1249,13 +1249,153 @@
   const CUSTOM_FONT_MIME = {
     ttf: "font/ttf", otf: "font/otf", woff: "font/woff", woff2: "font/woff2",
   };
+
+  /* ---- preview motion: the renderer's own primitives, ported verbatim ------
+     The preview has to MOVE like the lyrics, not just paint like them. These
+     are the exact curves and spring tunings from 03-animation-primitives.jsfrag
+     (which are themselves copied from upstream Spicy Lyrics v6.3.20). Copying
+     the numbers is the whole point: a hand-tuned ease looks close but drifts
+     from the real bounce, and AJ can tell. */
+  class CfontSpline {
+    constructor(points) {
+      const sorted = points.slice().sort((a, b) => a.Time - b.Time);
+      this.xs = sorted.map((p) => p.Time);
+      this.ys = sorted.map((p) => p.Value);
+      this.ks = this.solveTangents();
+    }
+    solveTangents() {
+      const xs = this.xs;
+      const ys = this.ys;
+      const n = xs.length - 1;
+      const a = new Array(n + 1).fill(0);
+      const b = new Array(n + 1).fill(0);
+      const c = new Array(n + 1).fill(0);
+      const r = new Array(n + 1).fill(0);
+      for (let i = 1; i < n; i++) {
+        const hPrev = xs[i] - xs[i - 1];
+        const hNext = xs[i + 1] - xs[i];
+        a[i] = 1 / hPrev;
+        b[i] = 2 * (1 / hPrev + 1 / hNext);
+        c[i] = 1 / hNext;
+        r[i] = 3 * ((ys[i] - ys[i - 1]) / (hPrev * hPrev) + (ys[i + 1] - ys[i]) / (hNext * hNext));
+      }
+      const firstH = xs[1] - xs[0];
+      a[0] = 1 / firstH;
+      b[0] = 2 / firstH;
+      c[0] = 1 / firstH;
+      r[0] = (3 * (ys[1] - ys[0])) / (firstH * firstH);
+      const lastH = xs[n] - xs[n - 1];
+      a[n] = 1 / lastH;
+      b[n] = 2 / lastH;
+      c[n] = 0;
+      r[n] = (3 * (ys[n] - ys[n - 1])) / (lastH * lastH);
+      for (let i = 1; i <= n; i++) {
+        const m = a[i] / b[i - 1];
+        b[i] -= m * c[i - 1];
+        r[i] -= m * r[i - 1];
+      }
+      const ks = new Array(n + 1).fill(0);
+      ks[n] = r[n] / b[n];
+      for (let i = n - 1; i >= 0; i--) ks[i] = (r[i] - c[i] * ks[i + 1]) / b[i];
+      return ks;
+    }
+    at(value) {
+      const xs = this.xs;
+      const ys = this.ys;
+      const ks = this.ks;
+      if (value <= xs[0]) return ys[0];
+      if (value >= xs[xs.length - 1]) return ys[ys.length - 1];
+      let index = 0;
+      while (index < xs.length - 2 && value > xs[index + 1]) index++;
+      const x0 = xs[index];
+      const x1 = xs[index + 1];
+      const width = x1 - x0 || 1;
+      const t = (value - x0) / width;
+      const rise = ys[index + 1] - ys[index];
+      const from = ks[index] * width - rise;
+      const to = -ks[index + 1] * width + rise;
+      return (1 - t) * ys[index] + t * ys[index + 1] + t * (1 - t) * (from * (1 - t) + to * t);
+    }
+  }
+  class CfontSpring {
+    constructor(startPosition, frequency, dampingRatio, goal) {
+      this.d = dampingRatio;
+      this.f = frequency;
+      this.g = goal == null ? startPosition : goal;
+      this.p = startPosition;
+      this.v = 0;
+    }
+    Step(dt) {
+      const d = this.d;
+      const f = this.f * (2 * Math.PI);
+      const g = this.g;
+      let p = this.p;
+      let v = this.v;
+      if (d === 1) {
+        const q = Math.exp(-f * dt);
+        const w = dt * q;
+        const c0 = q + w * f;
+        const c2 = q - w * f;
+        const c3 = w * f * f;
+        const o = p - g;
+        p = o * c0 + v * w + g;
+        v = v * c2 - o * c3;
+      } else if (d < 1) {
+        const q = Math.exp(-d * f * dt);
+        const c = Math.sqrt(1 - d * d);
+        const i = Math.cos(dt * f * c);
+        const j = Math.sin(dt * f * c);
+        const z = c > 1e-5 ? j / c : dt * f + (((dt * f) ** 2) * (c ** 4) / 20 - c * c) * (dt * f) ** 3 / 6;
+        const y = f * c > 1e-5 ? j / (f * c) : dt + (((dt * f * c) ** 2) * (f * f * c * c) / 20 - f * f * c * c) * dt ** 3 / 6;
+        const o = p - g;
+        p = (o * (i + z * d) + v * y) * q + g;
+        v = (v * (i - z * d) - o * (z * f)) * q;
+      } else {
+        const c = Math.sqrt(d * d - 1);
+        const r1 = -f * (d + c);
+        const r2 = -f * (d - c);
+        const ec1 = Math.exp(r1 * dt);
+        const ec2 = Math.exp(r2 * dt);
+        const o = p - g;
+        const co2 = (v - o * r1) / (2 * f * c);
+        const co1 = ec1 * (o - co2);
+        p = co1 + co2 * ec2 + g;
+        v = co1 * r1 + co2 * ec2 * r2;
+      }
+      this.p = p;
+      this.v = v;
+      return p;
+    }
+    SetGoal(goal, replacePosition) {
+      this.g = goal;
+      if (replacePosition) {
+        this.p = goal;
+        this.v = 0;
+      }
+    }
+  }
+  // Upstream's curves: resting scale 0.95, peak 1.0505 at 70%, settle 1; a
+  // dip-and-return Y offset peaking at 90%; a glow that snaps on at 15% and
+  // fades out by 100%. Spring tunings are upstream's too.
+  const CFONT_SCALE_SPLINE = new CfontSpline([
+    { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.0505 }, { Time: 1, Value: 1 },
+  ]);
+  const CFONT_Y_SPLINE = new CfontSpline([
+    { Time: 0, Value: 0 }, { Time: 0.9, Value: -(1 / 60) }, { Time: 1, Value: 0 },
+  ]);
+  const CFONT_GLOW_SPLINE = new CfontSpline([
+    { Time: 0, Value: 0 }, { Time: 0.15, Value: 1 }, { Time: 0.6, Value: 1 }, { Time: 1, Value: 0 },
+  ]);
+  const CFONT_SCALE_SPRING = [0.88, 0.64];
+  const CFONT_Y_SPRING = [1.45, 0.4];
+  const CFONT_GLOW_SPRING = [1.18, 0.56];
   // NORMAL pace (words ~250–450 ms) with deliberate imperfections: glued
   // part-of-word pairs ("shi|ning", "to|night"), a couple of long words, and
   // uneven gaps so the fill reads like a real track rather than a metronome.
   const CUSTOM_FONT_DEMO_TTML = [
     '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"',
     '     xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xml:lang="en">',
-    '<body dur="10.20"><div begin="00:00.400" end="00:09.700">',
+    '<body dur="13.60"><div begin="00:00.400" end="00:13.400">',
     '<p begin="00:00.400" end="00:04.900" ttm:agent="v1">',
     '<span begin="00:00.400" end="00:00.760" ttm:role="x-word">we</span>',
     '<span begin="00:00.780" end="00:01.060" ttm:role="x-word">were</span>',
@@ -1269,6 +1409,14 @@
     '<span begin="00:06.940" end="00:07.360" ttm:role="x-word">lights</span>',
     '<span begin="00:07.420" end="00:07.820" ttm:role="x-word">to</span><span begin="00:07.820" end="00:08.200" ttm:role="x-word" itunes:part-of-word="1">night</span>',
     '<span begin="00:08.420" end="00:09.020" ttm:role="x-word">a</span><span begin="00:09.020" end="00:09.700" ttm:role="x-word" itunes:part-of-word="1">gain</span>',
+    '</p>',
+    '<p begin="00:10.200" end="00:13.400" ttm:agent="v1">',
+    '<span begin="00:10.200" end="00:10.560" ttm:role="x-word">we</span>',
+    '<span begin="00:10.580" end="00:10.900" ttm:role="x-word">were</span>',
+    '<span begin="00:10.960" end="00:11.300" ttm:role="x-word">dan</span><span begin="00:11.300" end="00:11.760" ttm:role="x-word" itunes:part-of-word="1">cing</span>',
+    '<span begin="00:11.840" end="00:12.100" ttm:role="x-word">in</span>',
+    '<span begin="00:12.160" end="00:12.420" ttm:role="x-word">the</span>',
+    '<span begin="00:12.500" end="00:13.100" ttm:role="x-word">dark</span>',
     '</p></div></body></tt>',
   ].join("");
   const cfontTsToSec = (value) => {
@@ -1334,13 +1482,85 @@
     };
     reader.readAsArrayBuffer(file);
   });
+  // A custom range control: the native <input type=range> looks different on
+  // every platform and clashes with the panel, so this is a track + fill + thumb
+  // with pointer capture and full keyboard support (arrows, Home/End).
+  function buildCfontSlider({ min, max, step, value, onInput }) {
+    const wrap = h("div", {
+      class: "ym-cfont-slider",
+      tabindex: "0",
+      role: "slider",
+      "aria-valuemin": String(min),
+      "aria-valuemax": String(max),
+      "aria-valuenow": String(value),
+      "aria-label": "Custom font size",
+    });
+    const track = h("div", { class: "ym-cfont-slider-track" });
+    const fill = h("div", { class: "ym-cfont-slider-fill" });
+    const thumb = h("div", { class: "ym-cfont-slider-thumb" });
+    track.append(fill);
+    wrap.append(track, thumb);
+    let val = value;
+    const paint = () => {
+      const pct = Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100));
+      fill.style.width = pct + "%";
+      thumb.style.left = pct + "%";
+      wrap.setAttribute("aria-valuenow", String(val));
+    };
+    const set = (raw, fire) => {
+      const snapped = Math.round(raw / step) * step;
+      const next = Math.max(min, Math.min(max, snapped));
+      if (next !== val) {
+        val = next;
+        paint();
+        if (fire) onInput(val);
+      } else {
+        paint();
+      }
+    };
+    const fromClientX = (clientX) => {
+      const rect = track.getBoundingClientRect();
+      if (!rect.width) return val;
+      return min + ((clientX - rect.left) / rect.width) * (max - min);
+    };
+    let dragging = false;
+    wrap.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      dragging = true;
+      wrap.classList.add("is-dragging");
+      try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      set(fromClientX(e.clientX), true);
+    });
+    wrap.addEventListener("pointermove", (e) => {
+      if (dragging) set(fromClientX(e.clientX), true);
+    });
+    const endDrag = () => { dragging = false; wrap.classList.remove("is-dragging"); };
+    wrap.addEventListener("pointerup", endDrag);
+    wrap.addEventListener("pointercancel", endDrag);
+    wrap.addEventListener("lostpointercapture", endDrag);
+    wrap.addEventListener("keydown", (e) => {
+      const delta = { ArrowRight: step, ArrowUp: step, ArrowLeft: -step, ArrowDown: -step }[e.key];
+      if (delta != null) { e.preventDefault(); set(val + delta, true); }
+      else if (e.key === "Home") { e.preventDefault(); set(min, true); }
+      else if (e.key === "End") { e.preventDefault(); set(max, true); }
+    });
+    paint();
+    return { el: wrap, set: (v) => set(v, false), get: () => val };
+  }
+
   function buildCustomFontSection(ext, values, commit) {
     let appliedFont = typeof values.customFont === "string" ? values.customFont : "";
     let pendingFont = null;
     const initialScale = Number(values.customFontScale);
-    let scale = Number.isFinite(initialScale) && initialScale > 0 ? initialScale : 1;
+    // 200% is the intended starting point for a freshly uploaded face (AJ).
+    let scale = Number.isFinite(initialScale) && initialScale > 0 ? initialScale : 2;
+    // The first cut shipped 100% as the default. A stored 1.0 with NO font in
+    // use is almost certainly that old default rather than a deliberate choice,
+    // so let the new 200% win until a face is actually applied.
+    if (!appliedFont && scale === 1) scale = 2;
     let raf = 0;
     let t0 = 0;
+    let lastNow = 0;
     let previewSeq = 0;
     let previewFace = null;
 
@@ -1358,25 +1578,57 @@
       class: "ym-cfont-desc",
       text: "Upload a .ttf, .otf, .woff or .woff2. Both panes render with the real lyrics engine \u2014 line-synced on the left, word-synced on the right \u2014 before you apply it.",
     }));
+    // Default vs custom is a real SETTING, not just a Remove button: choosing
+    // Default drops the custom face and keeps the size for later.
+    const defBtn = h("button", { class: "ym-cfont-mode-opt", type: "button", text: "Default" });
+    const cusBtn = h("button", { class: "ym-cfont-mode-opt", type: "button", text: "Custom" });
+    const modeRow = h("div", { class: "ym-cfont-mode-row" },
+      h("span", { class: "ym-cfont-mode-label", text: "Font" }),
+      h("div", { class: "ym-cfont-mode" }, defBtn, cusBtn)
+    );
+    block.append(modeRow);
+
     const controls = h("div", { class: "ym-cfont-controls" });
     const uploadBtn = h("button", { class: "ym-cfont-btn ym-cfont-upload", type: "button", text: appliedFont ? "Replace font" : "Upload font" });
-    const scaleInput = h("input", { type: "range", min: "0.5", max: "2", step: "0.05", value: String(scale), "aria-label": "Custom font size" });
     const scaleVal = h("span", { class: "ym-cfont-scale-val", text: Math.round(scale * 100) + "%" });
-    const scaleWrap = h("label", { class: "ym-cfont-scale" },
+    const slider = buildCfontSlider({
+      min: 50, max: 200, step: 5, value: Math.round(scale * 100),
+      onInput: (v) => {
+        scale = v / 100;
+        scaleVal.textContent = v + "%";
+        previewWrap.style.setProperty("--ym-cfont-scale", String(scale));
+        // An already-APPLIED font updates live (same as the other sliders); a
+        // preview-only change stays local until Apply.
+        if (appliedFont && !pendingFont) commit({ customFontScale: scale });
+      },
+    });
+    const scaleWrap = h("div", { class: "ym-cfont-scale" },
       h("span", { class: "ym-cfont-scale-label", text: "Size" }),
-      scaleInput,
+      slider.el,
       scaleVal
     );
-    const removeBtn = h("button", { class: "ym-cfont-btn ym-cfont-remove hidden", type: "button", text: "Remove" });
     const fileInput = h("input", { type: "file", accept: ".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2", class: "ym-cfont-file" });
-    controls.append(uploadBtn, scaleWrap, removeBtn, fileInput);
+    controls.append(uploadBtn, scaleWrap, fileInput);
     const statusEl = h("div", { class: "ym-cfont-status" + (appliedFont ? " is-on" : "") });
     const paintStatus = () => {
-      statusEl.textContent = appliedFont ? "Using your custom font on the lyrics." : "Using the default SpicyLyrics font.";
-      statusEl.classList.toggle("is-on", !!appliedFont);
-      removeBtn.classList.toggle("hidden", !appliedFont);
+      const isCustom = !!appliedFont || !!pendingFont;
+      if (pendingFont) {
+        statusEl.textContent = "Previewing your font \u2014 press Apply to use it.";
+        statusEl.classList.add("is-pending");
+        statusEl.classList.remove("is-on");
+      } else if (appliedFont) {
+        statusEl.textContent = "Using your custom font on the lyrics.";
+        statusEl.classList.remove("is-pending");
+        statusEl.classList.add("is-on");
+      } else {
+        statusEl.textContent = "Using the default SpicyLyrics font.";
+        statusEl.classList.remove("is-pending", "is-on");
+      }
+      defBtn.classList.toggle("active", !isCustom);
+      cusBtn.classList.toggle("active", isCustom);
+      controls.classList.toggle("is-default", !isCustom);
       uploadBtn.textContent = appliedFont ? "Replace font" : "Upload font";
-      scaleWrap.classList.toggle("is-dim", !appliedFont && !pendingFont);
+      scaleWrap.classList.toggle("is-dim", !isCustom);
     };
 
     const previewWrap = h("div", { class: "ym-cfont-preview hidden" });
@@ -1384,54 +1636,84 @@
     const cancelBtn = h("button", { class: "ym-cfont-btn", type: "button", text: "Cancel" });
     const previewActions = h("div", { class: "ym-cfont-actions hidden" }, applyBtn, cancelBtn);
 
-    const stopLoop = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+    const stopLoop = () => { if (raf) cancelAnimationFrame(raf); raf = 0; lastNow = 0; };
 
-    // The preview paints with the SAME model as the real renderer: every word
-    // owns its gradient position and travels -20% -> 100% across its own time
-    // window, while the line flips NotSung -> Active -> Sung. That is what makes
-    // the left (line) and right (word) panes read like the actual lyrics rather
-    // than a generic progress bar.
-    const paintSweep = (elapsedMs) => {
+    // The preview paints AND moves with the same model as the real renderer:
+    // each word owns a gradient position (-20% -> 100% across its window), a
+    // Scale spring (0.95 rest -> 1.0505 peak -> 1), a Y spring (dip at 90%) and
+    // a Glow spring (on at 15%, off by 100%). The line flips
+    // NotSung -> Active -> Sung for its alpha. The values are stepped with the
+    // renderer's own Spring/Spline primitives, so the bounce matches rather
+    // than merely resembling it.
+    const paintSweep = (elapsedMs, dt) => {
       const rows = previewWrap.querySelectorAll(".ym-cfont-line");
       for (let r = 0; r < rows.length; r++) {
         const row = rows[r];
         const ls = Number(row.dataset.start);
         const le = Number(row.dataset.end);
-        const state = elapsedMs < ls ? "NotSung" : elapsedMs > le ? "Sung" : "Active";
-        row.classList.toggle("NotSung", state === "NotSung");
-        row.classList.toggle("Active", state === "Active");
-        row.classList.toggle("Sung", state === "Sung");
+        const lineState = elapsedMs < ls ? "NotSung" : elapsedMs > le ? "Sung" : "Active";
+        row.classList.toggle("NotSung", lineState === "NotSung");
+        row.classList.toggle("Active", lineState === "Active");
+        row.classList.toggle("Sung", lineState === "Sung");
         const words = row.querySelectorAll(".word");
         for (let i = 0; i < words.length; i++) {
-          const s = Number(words[i].dataset.start);
-          const e = Number(words[i].dataset.end);
+          const word = words[i];
+          const s = Number(word.dataset.start);
+          const e = Number(word.dataset.end);
           const prog = elapsedMs <= s ? 0 : elapsedMs >= e ? 1 : (elapsedMs - s) / Math.max(1, e - s);
-          words[i].style.setProperty("--cf-p", (-20 + 120 * prog).toFixed(2) + "%");
+          const wState = elapsedMs < s ? "NotSung" : elapsedMs > e ? "Sung" : "Active";
+          const target = wState === "Active" ? prog : wState === "Sung" ? 1 : 0;
+          const store = word._cf;
+          if (store) {
+            // Line-timed words never bounce (upstream pins scale 1 / Y 0), but
+            // they still carry the glow that follows the line's sweep.
+            store.scale.SetGoal(store.lineTimed ? 1 : (wState === "Active" ? CFONT_SCALE_SPLINE.at(prog) : wState === "Sung" ? 1 : 0.95));
+            store.y.SetGoal(store.lineTimed ? 0 : (wState === "Active" ? CFONT_Y_SPLINE.at(prog) : 0));
+            store.glow.SetGoal(CFONT_GLOW_SPLINE.at(target));
+            const sc = store.scale.Step(dt);
+            const yy = store.y.Step(dt);
+            const gl = store.glow.Step(dt);
+            word.style.transform = "translate3d(0, calc(1em * " + yy.toFixed(5) + "), 0) scale(" + sc.toFixed(5) + ")";
+            word.style.setProperty("--cf-glow", gl.toFixed(4));
+          }
+          word.style.setProperty("--cf-p", (-20 + 120 * prog).toFixed(2) + "%");
         }
       }
     };
     const tick = (now) => {
       if (!previewWrap.isConnected) { raf = 0; return; }
-      paintSweep(t0 ? (now - t0) % durationMs : 0);
+      const dt = lastNow ? Math.min(0.05, (now - lastNow) / 1000) : 0.016;
+      lastNow = now;
+      paintSweep(t0 ? (now - t0) % durationMs : 0, dt);
       raf = requestAnimationFrame(tick);
     };
     const startLoop = () => {
       stopLoop();
-      if (reducedMotion()) { paintSweep(durationMs + 1); return; }
+      if (reducedMotion()) { paintSweep(durationMs + 1, 1); return; }
       t0 = performance.now();
+      lastNow = 0;
       raf = requestAnimationFrame(tick);
     };
 
+    const attachSprings = (el, lineTimed) => {
+      el._cf = {
+        lineTimed,
+        scale: new CfontSpring(lineTimed ? 1 : 0.95, CFONT_SCALE_SPRING[0], CFONT_SCALE_SPRING[1]),
+        y: new CfontSpring(0, CFONT_Y_SPRING[0], CFONT_Y_SPRING[1]),
+        glow: new CfontSpring(0, CFONT_GLOW_SPRING[0], CFONT_GLOW_SPRING[1]),
+      };
+      return el;
+    };
     const makeLine = (line, mode) => {
-      const row = h("div", { class: "ym-cfont-line" });
+      const row = h("div", { class: "ym-cfont-line" + (mode === "lsync" ? " line-timed" : "") });
       row.dataset.start = String((line.start - baseTime) * 1000);
       row.dataset.end = String((line.end - baseTime) * 1000);
       if (mode === "lsync") {
         // Line-synced: one .word, one sweep across the whole line window.
-        const w = h("span", {
+        const w = attachSprings(h("span", {
           class: "word",
           text: line.words.map((x, i) => (i && x.spaceBefore ? " " : "") + x.text).join(""),
-        });
+        }), true);
         w.dataset.start = row.dataset.start;
         w.dataset.end = row.dataset.end;
         row.append(w);
@@ -1440,12 +1722,19 @@
         // A flex row drops whitespace-only text nodes, so the gap between words
         // must be a real element (the renderer uses .letter.SpaceLetter for the
         // same reason) — without it every word runs together ("ningso").
+        // Each WORD is wrapped in a nowrap group so its syllables can never be
+        // split across two rows ("to" on one line, "night" on the next).
+        let group = null;
         line.words.forEach((w) => {
-          if (w.spaceBefore) row.append(h("span", { class: "ym-cfont-space", text: " " }));
-          const el = h("span", { class: "word" + (w.partOfWord ? " PartOfWord" : ""), text: w.text });
+          if (!w.partOfWord) {
+            if (w.spaceBefore) row.append(h("span", { class: "ym-cfont-space", text: " " }));
+            group = h("span", { class: "ym-cfont-word-group" });
+            row.append(group);
+          }
+          const el = attachSprings(h("span", { class: "word" + (w.partOfWord ? " PartOfWord" : ""), text: w.text }), false);
           el.dataset.start = String((w.start - baseTime) * 1000);
           el.dataset.end = String((w.end - baseTime) * 1000);
-          row.append(el);
+          (group || row).append(el);
         });
       }
       return row;
@@ -1494,15 +1783,6 @@
         })
         .catch((err) => toast(err && err.message ? err.message : "Could not read that font"));
     });
-    scaleInput.addEventListener("input", () => {
-      scale = Number(scaleInput.value) || 1;
-      scaleVal.textContent = Math.round(scale * 100) + "%";
-      previewWrap.style.setProperty("--ym-cfont-scale", String(scale));
-      // An already-APPLIED font updates live (same as the other sliders); a
-      // preview-only change stays local until Apply.
-      if (appliedFont && !pendingFont) commit({ customFontScale: scale });
-    });
-
     // Show the applied font's own preview (read-only). No pending file means the
     // Apply/Cancel pair has nothing to act on, so it stays hidden.
     const dropPreviewFace = () => {
@@ -1532,7 +1812,9 @@
       paintStatus();
       showApplied();
     });
-    removeBtn.addEventListener("click", () => {
+    // "Default" is the explicit revert setting: drop the face, keep the size.
+    defBtn.addEventListener("click", () => {
+      if (!appliedFont && !pendingFont) return;
       appliedFont = "";
       pendingFont = null;
       dropPreviewFace();
@@ -1541,7 +1823,12 @@
       previewActions.classList.add("hidden");
       stopLoop();
       paintStatus();
-      toast("Font removed — back to the default");
+      toast("Using the default font");
+    });
+    // "Custom" with nothing staged opens the picker instead of doing nothing.
+    cusBtn.addEventListener("click", () => {
+      if (appliedFont || pendingFont) return;
+      fileInput.click();
     });
 
     block.append(controls, statusEl, previewWrap, previewActions);
@@ -1549,7 +1836,28 @@
     // An already-applied font shows its preview on open, so the section never
     // looks empty after a reload.
     if (appliedFont) showApplied();
-    return block;
+    // The section lives inside a collapsed disclosure: only run the rAF loop
+    // while it is actually open, or the preview burns frames off-screen.
+    const setActive = (open) => {
+      if (!open) { stopLoop(); return; }
+      if (!previewWrap.classList.contains("hidden")) startLoop();
+    };
+    // "Reset to defaults" also drops the font; keep this block's local state in
+    // sync with the settings object the reset just replaced.
+    const reset = () => {
+      appliedFont = "";
+      pendingFont = null;
+      dropPreviewFace();
+      scale = 2;
+      slider.set(200);
+      scaleVal.textContent = "200%";
+      previewWrap.classList.add("hidden");
+      previewActions.classList.add("hidden");
+      stopLoop();
+      paintStatus();
+    };
+    stopLoop();
+    return { el: block, setActive, reset };
   }
 
   // ---- Report a problem (AJ, 2026-10-19) ------------------------------------
@@ -2010,9 +2318,13 @@
       section.appendChild(row);
     }
 
+    let fontCtl = null; // assigned below once the font block is built
     const reset = h("button", { class: "ym-detail-settings-reset", type: "button", text: "Reset to defaults" });
     reset.addEventListener("click", () => {
-      values = getExtensionDefaults(ext);
+      // The font lives outside the catalog, so getExtensionDefaults() has no key
+      // for it. Clear it explicitly or "reset" would leave a stale face applied.
+      values = Object.assign(getExtensionDefaults(ext), { customFont: "", customFontScale: 2 });
+      if (fontCtl) fontCtl.reset();
       controls.forEach(({ input, valueEl, setting, syncRangeFill }) => {
         if (setting.type === "toggle") input.checked = Boolean(values[setting.key]);
         else input.value = values[setting.key];
@@ -2037,7 +2349,27 @@
         postExtensionSettings(ext.id, patch);
         saveExtensionSettings(ext.id, values);
       };
-      section.appendChild(buildCustomFontSection(ext, values, commitFont));
+      const font = buildCustomFontSection(ext, values, commitFont);
+      fontCtl = font;
+      // The font block is an advanced extra, so it stays collapsed behind a
+      // "More" disclosure under all the settings. The grid-rows transition gives
+      // it a real height animation (display:none cannot).
+      const moreLabel = h("span", { class: "ym-cfont-more-label", text: "More" });
+      const moreBtn = h("button", { class: "ym-cfont-more", type: "button", "aria-expanded": "false" }, moreLabel);
+      const chev = svgIcon("M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z");
+      chev.setAttribute("fill", "currentColor");
+      moreBtn.appendChild(chev);
+      const collapse = h("div", { class: "ym-cfont-collapse" });
+      collapse.append(h("div", { class: "ym-cfont-collapse-inner" }, font.el));
+      moreBtn.addEventListener("click", () => {
+        const open = !collapse.classList.contains("open");
+        collapse.classList.toggle("open", open);
+        moreBtn.classList.toggle("is-open", open);
+        moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        moreLabel.textContent = open ? "Less" : "More";
+        font.setActive(open);
+      });
+      section.append(moreBtn, collapse);
     }
     postExtensionSettings(ext.id, values);
     // Cascade the settings in with the SAME motion language the detail pane
