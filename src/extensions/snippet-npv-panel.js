@@ -4189,8 +4189,52 @@ function syncLyricsDock() {
     return "";
   }
 
+  // The app's OWN "play this queue item" path: the queue store's SET_INDEX.
+  // YTM's next/previous use exactly this (zO -> SET_INDEX); the player service
+  // subscribes to the current endpoint and runs playEndpoint ->
+  // loadVideoByPlayerVars, which updates the player bar, artwork, views and the
+  // queue selection WITHOUT changing the route. This is the only path that
+  // makes the bar follow the click (AJ, 2026-10-20).
+  function playViaQueueStore(id) {
+    try {
+      const el = document.querySelector("ytmusic-player-queue");
+      if (!el) return false;
+      // The element's created() hook resolves the queue service into `.queue`;
+      // THAT object owns the store, getItems() and selectQueueItem().
+      const q = el.queue || el;
+
+      const items = typeof q.getItems === "function" ? q.getItems() : null;
+      const list = Array.isArray(items) ? items : (Array.isArray(el.data) ? el.data : null);
+      if (!list) return false;
+
+      const idx = list.findIndex((entry) => {
+        if (!entry) return false;
+        if (entry.videoId === id) return true;
+        const r = entry.playlistPanelVideoRenderer || entry;
+        return !!(r && r.videoId === id);
+      });
+      if (idx < 0) return false;
+
+      const store = q.store;
+      if (store && typeof store.dispatch === "function") {
+        store.dispatch({ type: "SET_INDEX", payload: idx });
+        return true;
+      }
+      if (typeof q.selectQueueItem === "function") {
+        q.selectQueueItem(list[idx]);
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function playQueueTrack(id) {
     if (!id) return;
+    // 0) The app's own queue-index path (updates the player bar + queue).
+    if (playViaQueueStore(id)) return;
+
     const bar = document.querySelector("ytmusic-player-bar");
     const ytmPlayer = document.querySelector("ytmusic-player");
     const moviePlayer =
