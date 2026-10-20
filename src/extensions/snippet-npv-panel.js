@@ -4422,11 +4422,20 @@ function syncLyricsDock() {
       const prev = lastShownIds;
       const next = shown.map((r) => r.videoId);
       // The DOM must mirror the logical list 1:1 or the FLIP indices lie.
-      if (!prev.length || queueListEl.childElementCount !== prev.length) return 0;
-      if (next.length < prev.length) return 0;
+      if (!prev.length || !next.length) return 0;
+      if (queueListEl.childElementCount !== prev.length) return 0;
+      // The new list may be SHORTER than the old one (the queue ran out, or
+      // queueAll is on and the played row left), so compare the common prefix
+      // instead of requiring next.length >= prev.length.
       for (let k = 1; k < prev.length; k++) {
         const tail = prev.slice(k);
-        if (tail.every((id, i) => next[i] === id)) return k;
+        const common = Math.min(tail.length, next.length);
+        if (!common) continue;
+        let ok = true;
+        for (let i = 0; i < common; i++) {
+          if (tail[i] !== next[i]) { ok = false; break; }
+        }
+        if (ok) return k;
       }
       return 0;
     };
@@ -4456,8 +4465,23 @@ function syncLyricsDock() {
         anim.onfinish = () => { row.remove(); syncHeight(); };
       });
 
-      // Survivors: FLIP from their old slot to the reflowed one.
-      rows.slice(k).forEach((row, i) => {
+      const survivors = rows.slice(k);
+      const keepCount = Math.min(survivors.length, shown.length);
+
+      // Extra survivors at the bottom (the queue ran out) leave downward.
+      survivors.slice(keepCount).forEach((row) => {
+        const anim = row.animate(
+          [
+            { opacity: 1, transform: "translateY(0)" },
+            { opacity: 0, transform: "translateY(10px)" },
+          ],
+          { duration: 220, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+        );
+        anim.onfinish = () => { row.remove(); syncHeight(); };
+      });
+
+      // Kept survivors: FLIP from their old slot to the reflowed one.
+      survivors.slice(0, keepCount).forEach((row, i) => {
         const newTop = row.getBoundingClientRect().top;
         const delta = oldTops[k + i] - newTop;
         if (Math.abs(delta) > 0.5) {
@@ -4469,8 +4493,7 @@ function syncLyricsDock() {
       });
 
       // Newly revealed rows enter from below.
-      const prevSurvivors = Math.max(0, lastShownIds.length - k);
-      shown.slice(prevSurvivors).forEach((r, i) => {
+      shown.slice(keepCount).forEach((r, i) => {
         const row = buildRow(r, false, 0);
         queueListEl.appendChild(row);
         row.animate(
@@ -4494,6 +4517,56 @@ function syncLyricsDock() {
         );
       }
 
+      lastRenderedCount = shown.length;
+      lastShownIds = shown.map((r) => r.videoId);
+      syncMore();
+      syncHeight();
+    };
+
+    // Fallback for a track change that is NOT a clean forward shift (reorder,
+    // previous jump, wrapper renderers): slide the old rows out as overlays and
+    // bring the new ones in from below. Still a transition, never a hard refresh.
+    const crossfadeFull = () => {
+      const oldRows = Array.from(queueListEl.children);
+      const listRect = queueListEl.getBoundingClientRect();
+      oldRows.forEach((row) => {
+        const top = row.getBoundingClientRect().top - listRect.top;
+        row.style.position = "absolute";
+        row.style.left = "8px";
+        row.style.right = "8px";
+        row.style.top = top + "px";
+        row.style.pointerEvents = "none";
+        row.style.zIndex = "1";
+        const anim = row.animate(
+          [
+            { opacity: 1, transform: "translateY(0)" },
+            { opacity: 0, transform: "translateY(-12px)" },
+          ],
+          { duration: 220, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+        );
+        anim.onfinish = () => { row.remove(); syncHeight(); };
+      });
+      shown.forEach((r, i) => {
+        const row = buildRow(r, false, 0);
+        queueListEl.appendChild(row);
+        row.animate(
+          [
+            { opacity: 0, transform: "translateY(14px) scale(.985)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 380, delay: i * 35, easing: "cubic-bezier(.2,.7,.3,1)", fill: "backwards" }
+        );
+      });
+      if (queueListEl.animate && !prefersReducedMotion()) {
+        queueListEl.animate(
+          [
+            { transform: "scale(1)" },
+            { transform: "scale(1.008)", offset: 0.45 },
+            { transform: "scale(1)" },
+          ],
+          { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" }
+        );
+      }
       lastRenderedCount = shown.length;
       lastShownIds = shown.map((r) => r.videoId);
       syncMore();
@@ -4528,9 +4601,22 @@ function syncLyricsDock() {
     }
 
     if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
-    // A track change replays the cascade; "Show more" only animates the rows it
-    // just revealed.
-    paintFull(sameSig ? lastRenderedCount : 0);
+
+    // "Show more" / a forced repaint with the same upcoming list: only the rows
+    // it just revealed animate.
+    if (sameSig) {
+      paintFull(lastRenderedCount);
+      return;
+    }
+
+    // First paint has nothing to transition from.
+    if (!queueListEl.childElementCount) {
+      paintFull(0);
+      return;
+    }
+
+    // A track change that wasn't a clean forward shift: crossfade, not refresh.
+    crossfadeFull();
   }
 
   // Cheap per-poll refresh; only re-renders when the queue actually changes.
