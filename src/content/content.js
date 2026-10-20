@@ -697,10 +697,9 @@
         // above (which drives Kawarp) and controls that MV backdrop's brightness.
         // dev-only (AJ, 2026-09-28). Consumed cross-add-on by Aurora Lyrics.
         { key: "backdropBrightness", label: "Music video backdrop brightness", min: 0, max: 2.0, step: 0.05, default: 1.15, display: "decimal", dev: true },
-        // Force the animated Kawarp backdrop for EVERY music video, instead of
-        // the duplicated blurred-video backdrop. Off = only still uploads
-        // (Official Audio / Lyric Video) use Kawarp. Consumed by Aurora Lyrics.
-        { key: "preferKawarpAlways", label: "Prefer Aurora Bloom for music videos", type: "toggle", default: false },
+        // Music videos already always use the Kawarp backdrop (AJ, 2026-10-19),
+        // so the old "Prefer Aurora Bloom for music videos" toggle was
+        // redundant and has been removed (AJ, 2026-10-20).
         // Never sample the live video; keep the backdrop on the track's cover
         // art even for music videos (AJ, 2026-10-20).
         { key: "kawarpCoverArtOnly", label: "Cover art only (ignore video)", type: "toggle", default: false },

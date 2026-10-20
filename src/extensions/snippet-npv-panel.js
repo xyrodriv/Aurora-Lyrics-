@@ -4167,23 +4167,60 @@ function syncLyricsDock() {
     }
     return -1;
   }
-  // Play a queue track IN PLACE. YTMod.player has no playVideoById, so the old
-  // fallback always navigated to the song view. The YouTube player instance
-  // (#movie_player) is the API that swaps the video without changing the route.
+  // Play a queue track IN PLACE, through the SAME path YT Music uses itself.
+  //
+  // YTM's player service calls `playerApi.loadVideoByPlayerVars({video_id,...})`
+  // (its playEndpoint). That internal call fires `onVideoDataChange`, which is
+  // what refreshes the player bar (title / artist / art / views), the queue's
+  // selected row and the app state. `loadVideoById` only swaps the media, so the
+  // bar stayed on the old song (AJ, 2026-10-20).
+  function queuePlayerParams(id) {
+    try {
+      const host = document.querySelector("ytmusic-player-queue");
+      const data = host && host.data;
+      if (!Array.isArray(data)) return "";
+      for (const entry of data) {
+        const r = entry && entry.playlistPanelVideoRenderer;
+        if (!r || r.videoId !== id) continue;
+        const we = r.navigationEndpoint && r.navigationEndpoint.watchEndpoint;
+        return (we && we.playerParams) || r.playerParams || "";
+      }
+    } catch (_) { /* ignore */ }
+    return "";
+  }
+
   function playQueueTrack(id) {
     if (!id) return;
+    const bar = document.querySelector("ytmusic-player-bar");
+    const ytmPlayer = document.querySelector("ytmusic-player");
     const moviePlayer =
       document.querySelector("ytmusic-player #movie_player") ||
       document.querySelector("#song-video #movie_player") ||
       document.querySelector("#movie_player");
-    if (moviePlayer && typeof moviePlayer.loadVideoById === "function") {
-      try { moviePlayer.loadVideoById(id); return; } catch (_) {}
+    // The BAR is the element that renders title/artist/art/views, and it owns
+    // the playerApi it listens to (onVideoDataChange -> SET_PLAYER_RESPONSE).
+    // Loading through that exact object is what makes the bar follow.
+    const apis = [
+      bar && bar.playerApi,
+      ytmPlayer && ytmPlayer.playerApi,
+      moviePlayer,
+    ].filter(Boolean);
+
+    const vars = { video_id: id, start: 0, external_list: true };
+    const params = queuePlayerParams(id);
+    if (params) vars.player_params = params;
+
+    // 1) The app's own internal load path — updates the player bar + queue.
+    for (const api of apis) {
+      if (typeof api.loadVideoByPlayerVars === "function") {
+        try { api.loadVideoByPlayerVars(vars); return; } catch (_) {}
+      }
     }
-    // Some builds hang the API off ytmusic-player instead.
-    const ytmPlayer = document.querySelector("ytmusic-player");
-    const api = ytmPlayer && (ytmPlayer.playerApi || ytmPlayer.player_ || null);
-    if (api && typeof api.loadVideoById === "function") {
-      try { api.loadVideoById(id); return; } catch (_) {}
+    // 2) Public load: plays, but may leave the bar stale.
+    for (const api of apis) {
+      if (typeof api.loadVideoById === "function") {
+        try { api.loadVideoById(id); return; } catch (_) {}
+      }
     }
     if (ytmPlayer && typeof ytmPlayer.playVideoById === "function") {
       try { ytmPlayer.playVideoById(id); return; } catch (_) {}
