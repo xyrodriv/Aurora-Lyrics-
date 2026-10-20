@@ -2213,6 +2213,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
    from YTM's own innertube browse endpoint (page-world fetch, verified live). */
 #${ROOT_ID} .ym-npv-artist {
   flex: 0 0 auto;
+  position: relative;
   margin-top: 12px;
   border-radius: 16px;
   /* Card surface: same treatment as the lyrics slot so the two read as a
@@ -2226,6 +2227,46 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   text-align: left;
 }
 #${ROOT_ID} .ym-npv-artist[hidden] { display: none; }
+/* Loading skeleton: overlays the card while the next artist resolves, so the
+   card keeps its footprint and the queue below never jumps up. Covers the
+   banner image, artist name, monthly audience and the description (AJ, 2026-10-20). */
+#${ROOT_ID} .ym-npv-artist-skeleton {
+  position: absolute;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+  background: rgba(255, 255, 255, .015);
+}
+#${ROOT_ID} .ym-npv-artist[data-loading="true"] .ym-npv-artist-skeleton { display: block; }
+#${ROOT_ID} .ym-npv-artist[data-loading="true"] .ym-npv-artist-banner,
+#${ROOT_ID} .ym-npv-artist[data-loading="true"] .ym-npv-artist-info { visibility: hidden; }
+/* First load has no old card to hold the height: reserve the typical card. */
+#${ROOT_ID} .ym-npv-artist[data-loading="true"][data-skel-empty="true"] { min-height: 231px; }
+#${ROOT_ID} .ym-npv-skel-banner,
+#${ROOT_ID} .ym-npv-skel-line {
+  background: linear-gradient(90deg,
+    rgba(255,255,255,.05) 25%,
+    rgba(255,255,255,.14) 37%,
+    rgba(255,255,255,.05) 63%);
+  background-size: 200% 100%;
+  animation: ym-npv-skel 1.4s ease-in-out infinite;
+}
+#${ROOT_ID} .ym-npv-skel-banner { height: 120px; }
+#${ROOT_ID} .ym-npv-skel-info { padding: 10px 12px 12px; }
+#${ROOT_ID} .ym-npv-skel-line { border-radius: 6px; }
+#${ROOT_ID} .ym-npv-skel-name { width: 58%; height: 14px; }
+#${ROOT_ID} .ym-npv-skel-meta { width: 38%; height: 10px; margin-top: 8px; }
+#${ROOT_ID} .ym-npv-skel-desc1 { width: 94%; height: 10px; margin-top: 12px; }
+#${ROOT_ID} .ym-npv-skel-desc2 { width: 72%; height: 10px; margin-top: 6px; }
+#${ROOT_ID} .ym-npv-skel-more { width: 24%; height: 9px; margin-top: 10px; }
+@keyframes ym-npv-skel {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #${ROOT_ID} .ym-npv-skel-banner,
+  #${ROOT_ID} .ym-npv-skel-line { animation: none; }
+}
 #${ROOT_ID} .ym-npv-artist-banner {
   height: 120px;
   background-size: cover; /* fill the slot, just a light crop */
@@ -3324,6 +3365,8 @@ function syncLyricsDock() {
   function renderArtistCard(info, browseId, opts) {
     if (!artistCardEl) return;
     if (!info || !info.name) {
+      artistCardEl.removeAttribute("data-loading");
+      artistCardEl.removeAttribute("data-skel-empty");
       artistCardEl.hidden = true;
       return;
     }
@@ -3331,9 +3374,12 @@ function syncLyricsDock() {
     // Was a different artist already on screen? If so, play the OUT animation
     // first (fade/blur/slip the old card down), then swap content + replay IN.
     const oldId = artistCardEl.dataset.browseId;
-    const hasOld = animate && !artistCardEl.hidden && oldId && oldId !== browseId;
+    // While the skeleton is up it already covers the swap, so skip the exit.
+    const isLoading = artistCardEl.dataset.loading === "true";
+    const hasOld = !isLoading && animate && !artistCardEl.hidden && oldId && oldId !== browseId;
 
     const apply = () => {
+      const from = artistCardEl.hidden ? 0 : artistCardEl.offsetHeight;
       artistBannerEl.style.backgroundImage = info.banner ? 'url("' + info.banner + '")' : "none";
       artistNameEl.textContent = info.name;
       artistMonthlyEl.textContent = info.monthly || "";
@@ -3354,6 +3400,25 @@ function syncLyricsDock() {
       artistMoreEl.textContent = "SHOW MORE";
       artistCardEl.hidden = false;
       artistCardEl.dataset.browseId = browseId;
+      artistCardEl.removeAttribute("data-loading");
+      artistCardEl.removeAttribute("data-skel-empty");
+      // Glide the card to its real height so the queue below never jumps when
+      // the skeleton is replaced by content of a different height.
+      if (from > 0 && !prefersReducedMotion()) {
+        const to = artistCardEl.offsetHeight;
+        if (Math.abs(to - from) > 4) {
+          artistCardEl.style.height = from + "px";
+          artistCardEl.style.overflow = "hidden";
+          const anim = artistCardEl.animate(
+            [{ height: from + "px" }, { height: to + "px" }],
+            { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
+          );
+          anim.onfinish = () => {
+            artistCardEl.style.height = "";
+            artistCardEl.style.overflow = "";
+          };
+        }
+      }
       if (animate) {
         // Restart the rise-in animation by removing the class, forcing reflow, then
         // re-adding it (a no-op re-add won't replay). Drop any leftover OUT class.
@@ -3381,56 +3446,45 @@ function syncLyricsDock() {
     }
   }
 
-  let artistSwapTimer = 0;
-  let artistPendingInfo = null;
+  // Keep the card's footprint while the next artist loads: show the shimmer
+  // instead of hiding the card, so the queue below never jumps up.
+  function showArtistSkeleton() {
+    if (!artistCardEl) return;
+    const empty = artistCardEl.hidden || !artistCardEl.dataset.browseId;
+    artistCardEl.classList.remove("ym-npv-artist-out");
+    artistCardEl.hidden = false;
+    artistCardEl.setAttribute("data-loading", "true");
+    if (empty) artistCardEl.setAttribute("data-skel-empty", "true");
+    else artistCardEl.removeAttribute("data-skel-empty");
+  }
 
   function syncArtistCard() {
     const browseId = getArtistBrowseId();
     if (!browseId || browseId === artistCurrentId) return;
-    // Was a card actually on screen? Only then is there something to animate OUT.
     const hadVisibleCard = !!artistCurrentId && !!artistCardEl && !artistCardEl.hidden;
     artistCurrentId = browseId;
     const cached = artistCache.get(browseId);
 
-    const paint = () => {
-      const info = artistPendingInfo;
-      artistPendingInfo = null;
-      // A cached card appears without the IN animation only when it replaced a
-      // visible one (the exit already carried the transition).
-      if (info) renderArtistCard(info, browseId, { animate: !hadVisibleCard });
-      else if (cached) renderArtistCard(cached, browseId, { animate: !hadVisibleCard });
-      else artistCardEl.hidden = true;
-    };
+    // Hold the footprint immediately. With a cache the card renders in the same
+    // frame; without one the skeleton stays until the fetch resolves.
+    if (hadVisibleCard || !cached) showArtistSkeleton();
+    if (cached) renderArtistCard(cached, browseId, { animate: hadVisibleCard });
 
-    if (hadVisibleCard) {
-      // Exit FIRST, then swap: previously the new artist replaced the old card
-      // in the same frame, so there was no transition at all (AJ, 2026-10-19).
-      artistCardEl.classList.remove("ym-npv-artist-enter");
-      void artistCardEl.offsetWidth;
-      artistCardEl.classList.add("ym-npv-artist-out");
-      if (artistSwapTimer) window.clearTimeout(artistSwapTimer);
-      artistSwapTimer = window.setTimeout(() => {
-        artistSwapTimer = 0;
-        artistCardEl.classList.remove("ym-npv-artist-out");
-        paint();
-      }, 240);
-    } else {
-      paint();
-    }
-
-    // ...but ALWAYS re-fetch the authoritative artist info so the card (banner, bio,
-    // monthly listeners, subscriber count) stays current even if the cache is stale.
+    // Always re-fetch the authoritative artist info (banner, bio, monthly
+    // listeners) so a stale cache is corrected.
     fetchArtistInfo(browseId).then((info) => {
-      if (!info) return; // network blip — keep whatever is on screen
-      artistCache.set(browseId, info);
       if (artistCurrentId !== browseId) return;
-      // The exit animation is still running: hand the data to paint() instead
-      // of rendering over a card that is on its way out.
-      if (artistSwapTimer) {
-        artistPendingInfo = info;
+      if (!info) {
+        // No card for this artist: drop the skeleton and let the queue settle.
+        if (artistCardEl) {
+          artistCardEl.removeAttribute("data-loading");
+          artistCardEl.removeAttribute("data-skel-empty");
+          artistCardEl.hidden = true;
+        }
         return;
       }
-      renderArtistCard(info, browseId, { animate: !cached && !hadVisibleCard });
+      artistCache.set(browseId, info);
+      renderArtistCard(info, browseId, { animate: true });
     });
   }
 
@@ -3908,6 +3962,23 @@ function syncLyricsDock() {
         h("div", { class: "ym-npv-artist-meta" }, artistMonthlyEl, artistSubsEl),
         artistDescEl,
         artistMoreEl
+      ),
+      // Shimmer placeholder shown while the next artist loads. It overlays the
+      // card so the card's footprint never collapses and the queue below never
+      // jumps up (AJ, 2026-10-20).
+      h(
+        "div",
+        { class: "ym-npv-artist-skeleton", "aria-hidden": "true" },
+        h("div", { class: "ym-npv-skel-banner" }),
+        h(
+          "div",
+          { class: "ym-npv-skel-info" },
+          h("div", { class: "ym-npv-skel-line ym-npv-skel-name" }),
+          h("div", { class: "ym-npv-skel-line ym-npv-skel-meta" }),
+          h("div", { class: "ym-npv-skel-line ym-npv-skel-desc1" }),
+          h("div", { class: "ym-npv-skel-line ym-npv-skel-desc2" }),
+          h("div", { class: "ym-npv-skel-line ym-npv-skel-more" })
+        )
       )
     );
 
