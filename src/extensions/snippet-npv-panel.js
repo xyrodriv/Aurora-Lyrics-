@@ -2358,6 +2358,8 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   margin: 0;
   padding: 0 8px 6px;
   overflow: hidden;
+  /* The shift animation parks outgoing rows here as absolute overlays. */
+  position: relative;
   /* Smooth height change when "Open queue" grows / shrinks the list. */
   transition:
     max-height .42s cubic-bezier(.22, 1, .36, 1),
@@ -2396,6 +2398,10 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 @keyframes ym-npv-qrow-in {
   from { opacity: 0; transform: translateY(16px) scale(.985); }
   to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #${ROOT_ID} .ym-npv-queue-row.is-in,
+  #${ROOT_ID} .ym-npv-queue-showmore.is-in { animation: none; }
 }
 #${ROOT_ID} .ym-npv-queue-thumb {
   position: relative;
@@ -4115,8 +4121,13 @@ function syncLyricsDock() {
   let queueAll = false;      // fill mode: on the Lyrics tab the rail shows the whole queue
   let lastQueueSig = "";     // signature of the rendered upcoming list
   let lastRenderedCount = 0; // rows currently in the list (drives the entrance anim)
+  let lastShownIds = [];     // logical rows rendered last time (drives the shift anim)
   let queueMoreEl = null;    // "Show more" button (assigned in build())
   let queuePaintTimer = 0;   // deferred repaint used by the collapse fade
+  const prefersReducedMotion = () => {
+    try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+    catch (_) { return false; }
+  };
 
   // YouTube renderer text: { simpleText } or { runs: [{ text }] }.
   function queueTextOf(node) {
@@ -4288,8 +4299,13 @@ function syncLyricsDock() {
     location.href = "https://music.youtube.com/watch?v=" + id;
   }
 
-  // (Re)build the queue list. `force` skips the signature short-circuit (used by
-  // the toggle / show-more clicks so the entrance animation replays).
+  // (Re)build the queue list.
+  //
+  // A normal track change (next / skip) does NOT rebuild the list any more. The
+  // old top row slides out, the surviving rows FLIP upward, the newly-revealed
+  // row enters from below, and the list gives a slight zoom-in/out pulse
+  // (AJ, 2026-10-20). "Show more", a collapse, a reorder or a previous jump
+  // still fall back to the full staggered cascade.
   function renderQueue(force) {
     if (!queueEl || !queueListEl || !queueMoreEl) return;
     const list = queueRenderers();
@@ -4302,15 +4318,14 @@ function syncLyricsDock() {
     if (!upcoming.length) {
       if (!queueEl.hidden) queueEl.hidden = true;
       lastRenderedCount = 0;
+      lastShownIds = [];
       return;
     }
     queueEl.hidden = false;
 
     const sig = upcoming.map((r) => r.videoId).join("|");
-    if (!force && sig === lastQueueSig) return; // unchanged — don't replay the anim
-    // A new track replays the cascade from the top; revealing a batch only
-    // animates the rows that just appeared (AJ, 2026-10-19).
-    const animateFrom = sig === lastQueueSig ? lastRenderedCount : 0;
+    const sameSig = sig === lastQueueSig;
+    if (!force && sameSig) return; // unchanged
     lastQueueSig = sig;
 
     // Collapsed = next 5. Open = next 5 + a batch of 5 per "Show more" press.
@@ -4325,80 +4340,197 @@ function syncLyricsDock() {
     const hasMore = !queueAll && queueOpen && limit < upcoming.length;
     queueMoreEl.style.display = hasMore ? "" : "none";
 
-    const paint = () => {
-      queueListEl.textContent = "";
-      shown.forEach((r, i) => {
-        const id = r.videoId;
-        const title = queueTextOf(r.title);
-        const artist = queueTextOf(r.shortBylineText || r.longBylineText);
-        const thumb = queueThumbOf(r);
-        const play = h("div", { class: "ym-npv-queue-play" }, icon(["M8 5v14l11-7z"]));
-        const thumbWrap = h(
-          "div",
-          { class: "ym-npv-queue-thumb" },
-          thumb ? h("img", { alt: "", src: thumb }) : null,
-          play
-        );
-        const moreBtn = h(
-          "button",
-          { class: "ym-npv-queue-more", type: "button", title: "More options", "aria-label": "More options" },
-          icon(ICON_MORE)
-        );
-        // "..." currently opens the song view (a hook for a native context menu
-        // later); stopPropagation so it doesn't double-fire the row click.
-        moreBtn.addEventListener("click", (ev) => { ev.stopPropagation(); playQueueTrack(id); });
-        const fresh = i >= animateFrom;
-        const row = h(
-          "div",
-          {
-            class: "ym-npv-queue-row" + (fresh ? " is-in" : ""),
-            style: fresh ? "--d:" + ((i - animateFrom) * 45) + "ms" : "",
-          },
-          thumbWrap,
-          h(
-            "div",
-            { class: "ym-npv-queue-meta" },
-            h("div", { class: "ym-npv-queue-name", text: title, title: title }),
-            h("div", { class: "ym-npv-queue-artist", text: artist, title: artist })
-          ),
-          moreBtn
-        );
-        row.addEventListener("click", () => playQueueTrack(id));
-        queueListEl.appendChild(row);
-      });
-      lastRenderedCount = shown.length;
+    // Drop any outgoing row still mid-flight from a previous shift so it cannot
+    // be counted as a live row.
+    Array.from(queueListEl.children).forEach((row) => {
+      if (row.style.position === "absolute") row.remove();
+    });
 
-      if (hasMore) {
-        queueMoreEl.textContent = "Show more (" + (upcoming.length - shown.length) + ")";
-        // Re-trigger the pill's entrance so it reads as newly revealed.
-        queueMoreEl.classList.remove("is-in");
-        void queueMoreEl.offsetWidth;
-        queueMoreEl.classList.add("is-in");
-      }
+    const buildRow = (r, fresh, delayMs) => {
+      const id = r.videoId;
+      const title = queueTextOf(r.title);
+      const artist = queueTextOf(r.shortBylineText || r.longBylineText);
+      const thumb = queueThumbOf(r);
+      const play = h("div", { class: "ym-npv-queue-play" }, icon(["M8 5v14l11-7z"]));
+      const thumbWrap = h(
+        "div",
+        { class: "ym-npv-queue-thumb" },
+        thumb ? h("img", { alt: "", src: thumb }) : null,
+        play
+      );
+      const moreBtn = h(
+        "button",
+        { class: "ym-npv-queue-more", type: "button", title: "More options", "aria-label": "More options" },
+        icon(ICON_MORE)
+      );
+      // "..." currently opens the song view (a hook for a native context menu
+      // later); stopPropagation so it doesn't double-fire the row click.
+      moreBtn.addEventListener("click", (ev) => { ev.stopPropagation(); playQueueTrack(id); });
+      const row = h(
+        "div",
+        {
+          class: "ym-npv-queue-row" + (fresh ? " is-in" : ""),
+          style: fresh ? "--d:" + delayMs + "ms" : "",
+        },
+        thumbWrap,
+        h(
+          "div",
+          { class: "ym-npv-queue-meta" },
+          h("div", { class: "ym-npv-queue-name", text: title, title: title }),
+          h("div", { class: "ym-npv-queue-artist", text: artist, title: artist })
+        ),
+        moreBtn
+      );
+      row.dataset.videoId = id;
+      row.addEventListener("click", () => playQueueTrack(id));
+      return row;
+    };
 
-      // Animate the card to its new height once the rows are laid out. +8px
-      // buffer absorbs any late webfont swap so a row is never clipped.
+    const syncMore = () => {
+      if (!hasMore) return;
+      queueMoreEl.textContent = "Show more (" + (upcoming.length - shown.length) + ")";
+      // Re-trigger the pill's entrance so it reads as newly revealed.
+      queueMoreEl.classList.remove("is-in");
+      void queueMoreEl.offsetWidth;
+      queueMoreEl.classList.add("is-in");
+    };
+
+    // Animate the card to its new height once the rows are laid out. +8px
+    // buffer absorbs any late webfont swap so a row is never clipped.
+    const syncHeight = () => {
       requestAnimationFrame(() => {
         if (!queueListEl) return;
         queueListEl.style.maxHeight = (queueListEl.scrollHeight + 8) + "px";
       });
     };
 
-    // Collapsing drops rows: fade the list out first so the shorter set does not
-    // pop in under a container that is still shrinking.
+    const paintFull = (animateFrom) => {
+      queueListEl.textContent = "";
+      shown.forEach((r, i) => {
+        const fresh = i >= animateFrom;
+        queueListEl.appendChild(buildRow(r, fresh, fresh ? (i - animateFrom) * 45 : 0));
+      });
+      lastRenderedCount = shown.length;
+      lastShownIds = shown.map((r) => r.videoId);
+      syncMore();
+      syncHeight();
+    };
+
+    // Leading rows removed by a clean forward advance: next = prev.slice(k) +
+    // appended. 0 means "not a shift" (reorder, previous, collapse).
+    const forwardShift = () => {
+      const prev = lastShownIds;
+      const next = shown.map((r) => r.videoId);
+      // The DOM must mirror the logical list 1:1 or the FLIP indices lie.
+      if (!prev.length || queueListEl.childElementCount !== prev.length) return 0;
+      if (next.length < prev.length) return 0;
+      for (let k = 1; k < prev.length; k++) {
+        const tail = prev.slice(k);
+        if (tail.every((id, i) => next[i] === id)) return k;
+      }
+      return 0;
+    };
+
+    const animateShift = (k) => {
+      const rows = Array.from(queueListEl.children);
+      const listRect = queueListEl.getBoundingClientRect();
+      const oldTops = rows.map((r) => r.getBoundingClientRect().top);
+      const rowH = rows[0] ? rows[0].getBoundingClientRect().height + 2 : 16;
+
+      // Outgoing top rows leave the flow, then slide up and fade. Keeping them
+      // absolute means the survivors reflow immediately and can be FLIPped.
+      rows.slice(0, k).forEach((row, i) => {
+        row.style.position = "absolute";
+        row.style.left = "8px";
+        row.style.right = "8px";
+        row.style.top = (oldTops[i] - listRect.top) + "px";
+        row.style.zIndex = "2";
+        row.style.pointerEvents = "none";
+        const anim = row.animate(
+          [
+            { transform: "translateY(0)", opacity: 1 },
+            { transform: "translateY(-" + Math.max(14, rowH * 0.7) + "px)", opacity: 0 },
+          ],
+          { duration: 240, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+        );
+        anim.onfinish = () => { row.remove(); syncHeight(); };
+      });
+
+      // Survivors: FLIP from their old slot to the reflowed one.
+      rows.slice(k).forEach((row, i) => {
+        const newTop = row.getBoundingClientRect().top;
+        const delta = oldTops[k + i] - newTop;
+        if (Math.abs(delta) > 0.5) {
+          row.animate(
+            [{ transform: "translateY(" + delta + "px)" }, { transform: "translateY(0)" }],
+            { duration: 380, easing: "cubic-bezier(.22,1,.36,1)" }
+          );
+        }
+      });
+
+      // Newly revealed rows enter from below.
+      const prevSurvivors = Math.max(0, lastShownIds.length - k);
+      shown.slice(prevSurvivors).forEach((r, i) => {
+        const row = buildRow(r, false, 0);
+        queueListEl.appendChild(row);
+        row.animate(
+          [
+            { opacity: 0, transform: "translateY(16px) scale(.985)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 380, delay: i * 45, easing: "cubic-bezier(.2,.7,.3,1)", fill: "backwards" }
+        );
+      });
+
+      // The "zoom slightly in then out" accent over the scroll.
+      if (queueListEl.animate && !prefersReducedMotion()) {
+        queueListEl.animate(
+          [
+            { transform: "scale(1)" },
+            { transform: "scale(1.01)", offset: 0.45 },
+            { transform: "scale(1)" },
+          ],
+          { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" }
+        );
+      }
+
+      lastRenderedCount = shown.length;
+      lastShownIds = shown.map((r) => r.videoId);
+      syncMore();
+      syncHeight();
+    };
+
+    if (prefersReducedMotion()) {
+      paintFull(0);
+      return;
+    }
+
+    const shift = forwardShift();
     const shrinking = shown.length < lastRenderedCount && queueListEl.childElementCount > 0;
+
+    if (shift > 0) {
+      if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
+      animateShift(shift);
+      return;
+    }
+
     if (shrinking) {
+      // Collapsing drops rows: fade the list out first so the shorter set does
+      // not pop in under a container that is still shrinking.
       queueListEl.classList.add("is-swapping");
       if (queuePaintTimer) window.clearTimeout(queuePaintTimer);
       queuePaintTimer = window.setTimeout(() => {
         queuePaintTimer = 0;
-        paint();
+        paintFull(0);
         queueListEl.classList.remove("is-swapping");
       }, 130);
-    } else {
-      if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
-      paint();
+      return;
     }
+
+    if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
+    // A track change replays the cascade; "Show more" only animates the rows it
+    // just revealed.
+    paintFull(sameSig ? lastRenderedCount : 0);
   }
 
   // Cheap per-poll refresh; only re-renders when the queue actually changes.
