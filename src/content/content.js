@@ -771,6 +771,10 @@
         // stepping, so a word lights up as a single unit. The Spicy Lyrics
         // "whole word" toggle (AJ, 2026-10-19).
         { key: "joinSyllables", label: "Join syllables into words", type: "toggle", default: false },
+        // lrc.red's TTML often ships one span per syllable ("shi"+"ning"). This
+        // merges those runs at parse time so the fill/glow covers the whole word.
+        // Separate from the global whole-word renderer toggle above (AJ, 2026-10-20).
+        { key: "joinLrcRedSyllables", label: "Join lrc.red syllables into words", type: "toggle", default: true },
         { type: "header", label: "Scrolling" },
         // smoothScrolling back ON by default (AJ, 2026-10-07) — he prefers the
         // eased glide into the active line. `disabledWhen` dims + locks the row

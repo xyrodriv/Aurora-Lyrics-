@@ -1515,6 +1515,7 @@ return Kawarp;
   let lastKey = "";
   let metaPainted = false; // first paint skips the scroll-up delay (rises in instead)
   let collapsed = false;
+  let npvCloseTimer = 0; // clears the ym-npv-closing class after the slide-out
   let kawarpOn = true; // from the add-on's "Ambient background" setting
   let kawarpOffTimer = 0; // deferred teardown so the fade-out can finish
   let dragState = null;
@@ -1688,7 +1689,7 @@ return Kawarp;
   transition: transform .32s cubic-bezier(.22,1,.36,1);
   animation: ym-npv-in .3s cubic-bezier(.22,1,.36,1);
 }
-#${ROOT_ID}[data-collapsed="true"] .ym-npv-frame { transform: translateX(calc(100% - 10px)); }
+#${ROOT_ID}[data-collapsed="true"] .ym-npv-frame { transform: translateX(calc(100% - 18px)); }
 /* Seam width: how far the card is inset over the straight black backing.
    Tune the width here; the card keeps its own 14px corners. */
 #${ROOT_ID} .ym-npv-frame { --ym-npv-seam: 8px; }
@@ -1699,8 +1700,26 @@ return Kawarp;
   animation: ym-npv-slide-in .44s cubic-bezier(.32,.72,0,1) both;
 }
 @keyframes ym-npv-slide-in {
-  from { transform: translateX(26px); opacity: 0; filter: blur(7px); }
+  /* Start from the COLLAPSED position so expanding is a full slide out of the
+     edge, mirroring the close (AJ, 2026-10-20). */
+  from { transform: translateX(calc(100% - 18px)); opacity: 0; filter: blur(7px); }
   to   { transform: none; opacity: 1; filter: blur(0); }
+}
+/* Close motion: the rail slides out with a short blur while its content sinks,
+   so collapsing reads like the add-on panel instead of a hard snap (AJ, 2026-10-20). */
+#${ROOT_ID} .ym-npv-frame.ym-npv-closing {
+  animation: ym-npv-slide-out .38s cubic-bezier(.4,0,.2,1) both;
+}
+@keyframes ym-npv-slide-out {
+  from { transform: none; opacity: 1; filter: blur(0); }
+  to   { transform: translateX(calc(100% - 18px)); opacity: .85; filter: blur(4px); }
+}
+#${ROOT_ID} .ym-npv-closing .ym-npv-panel > * {
+  animation: ym-npv-sink .3s cubic-bezier(.4,0,.2,1) both;
+}
+@keyframes ym-npv-sink {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateY(10px) scale(.985); }
 }
 #${ROOT_ID} .ym-npv-opening .ym-npv-panel > * {
   animation: ym-npv-rise .48s cubic-bezier(.34,1.4,.5,1) both;
@@ -2543,18 +2562,20 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 /* Stretch = lyrics take the whole panel: the artist card goes away too. */
 #${ROOT_ID}[data-lyrics-stretch="true"] .ym-npv-artist { display: none; }
 
-/* Collapsed edge: a thin, always-clickable strip at the screen edge. */
+/* Collapsed edge: a thicker, rounded tab at the screen edge so the rail is
+   clearly discoverable, with a larger chevron (AJ, 2026-10-20). */
 #${ROOT_ID} .ym-npv-edge {
   position: fixed;
   right: 0;
   top: 0;
   bottom: 0;
-  width: 10px;
+  width: 18px;
   padding: 0;
   border: 0;
-  border-radius: 0;
-  background: linear-gradient(90deg, rgba(255,255,255,.16), rgba(255,255,255,.05));
-  color: rgba(255,255,255,.75);
+  border-radius: 14px 0 0 14px;
+  background: linear-gradient(90deg, rgba(255,255,255,.22), rgba(255,255,255,.07));
+  color: rgba(255,255,255,.85);
+  box-shadow: -6px 0 20px rgba(0, 0, 0, .35);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
@@ -2565,8 +2586,8 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   z-index: 2147483001;
 }
 #${ROOT_ID}[data-collapsed="true"] .ym-npv-edge { opacity: 1; pointer-events: auto; }
-#${ROOT_ID} .ym-npv-edge:hover { width: 16px; background: linear-gradient(90deg, rgba(255,255,255,.26), rgba(255,255,255,.1)); }
-#${ROOT_ID} .ym-npv-edge svg { width: 14px; height: 14px; display: block; pointer-events: none; }
+#${ROOT_ID} .ym-npv-edge:hover { width: 24px; background: linear-gradient(90deg, rgba(255,255,255,.32), rgba(255,255,255,.12)); }
+#${ROOT_ID} .ym-npv-edge svg { width: 18px; height: 18px; display: block; pointer-events: none; }
 
 /* DOCKED RAIL — full-height right column. The nav bar, player bar and all
    page content shift LEFT of the rail: the bottom bar (song + controls) ends
@@ -3577,9 +3598,17 @@ function syncLyricsDock() {
     edge.setAttribute("aria-expanded", String(!collapsed));
     const frameEl = root.querySelector(".ym-npv-frame");
     if (frameEl) {
-      frameEl.classList.remove("ym-npv-opening");
-      if (!collapsed) {
-        void frameEl.offsetWidth; // restart the animation
+      if (npvCloseTimer) { window.clearTimeout(npvCloseTimer); npvCloseTimer = 0; }
+      frameEl.classList.remove("ym-npv-opening", "ym-npv-closing");
+      void frameEl.offsetWidth; // restart whichever animation we add
+      if (collapsed) {
+        // Slide out + blur + let the content sink, instead of snapping away.
+        frameEl.classList.add("ym-npv-closing");
+        npvCloseTimer = window.setTimeout(() => {
+          npvCloseTimer = 0;
+          frameEl.classList.remove("ym-npv-closing");
+        }, 420);
+      } else {
         frameEl.classList.add("ym-npv-opening");
       }
     }

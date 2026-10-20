@@ -139,6 +139,34 @@
     return words;
   }
 
+  // lrc.red TTML often splits one word into syllable spans ("shi" + "ning").
+  // Merge each part-of-word run back into its head word so the renderer fills
+  // and glows the WHOLE word instead of per syllable. The settings toggle can
+  // turn this off (AJ, 2026-10-20).
+  function joinPartOfWordRuns(words) {
+    const merged = [];
+    for (const word of words || []) {
+      const prev = merged[merged.length - 1];
+      if (word.isPartOfWord && prev) {
+        prev.text += word.text;
+        prev.end = word.end;
+        prev.timed = !!(prev.timed || word.timed);
+      } else {
+        merged.push(Object.assign({}, word, { isPartOfWord: false }));
+      }
+    }
+    return merged;
+  }
+
+  function joinTTMLSyllables(parsed) {
+    return (parsed || []).map((line) => Object.assign({}, line, {
+      words: joinPartOfWordRuns(line.words),
+      background: (line.background || []).map((bg) => Object.assign({}, bg, {
+        words: joinPartOfWordRuns(bg.words),
+      })),
+    }));
+  }
+
   // Returns the compact TTML form used by the YTMod adapter.
   function parseTTML(xml) {
     const parsed = [];

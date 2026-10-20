@@ -250,6 +250,34 @@
     return words;
   }
 
+  // lrc.red TTML often splits one word into syllable spans ("shi" + "ning").
+  // Merge each part-of-word run back into its head word so the renderer fills
+  // and glows the WHOLE word instead of per syllable. The settings toggle can
+  // turn this off (AJ, 2026-10-20).
+  function joinPartOfWordRuns(words) {
+    const merged = [];
+    for (const word of words || []) {
+      const prev = merged[merged.length - 1];
+      if (word.isPartOfWord && prev) {
+        prev.text += word.text;
+        prev.end = word.end;
+        prev.timed = !!(prev.timed || word.timed);
+      } else {
+        merged.push(Object.assign({}, word, { isPartOfWord: false }));
+      }
+    }
+    return merged;
+  }
+
+  function joinTTMLSyllables(parsed) {
+    return (parsed || []).map((line) => Object.assign({}, line, {
+      words: joinPartOfWordRuns(line.words),
+      background: (line.background || []).map((bg) => Object.assign({}, bg, {
+        words: joinPartOfWordRuns(bg.words),
+      })),
+    }));
+  }
+
   // Returns the compact TTML form used by the YTMod adapter.
   function parseTTML(xml) {
     const parsed = [];
@@ -1499,6 +1527,11 @@
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
+    // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
+    // those runs into words at PARSE time so the fill/glow covers the whole
+    // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
+    // renderer toggle above, which only changes how each word is painted.
+    joinLrcRedSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
@@ -1671,6 +1704,10 @@
     currentSettings.joinSyllables = booleanValue(
       currentSettings.joinSyllables,
       DEFAULT_SETTINGS.joinSyllables
+    );
+    currentSettings.joinLrcRedSyllables = booleanValue(
+      currentSettings.joinLrcRedSyllables,
+      DEFAULT_SETTINGS.joinLrcRedSyllables
     );
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale
@@ -12169,7 +12206,12 @@
 
   function loadTTML(xml, source, provider) {
     const rawXml = String(xml || "");
-    const parsed = parseTTML(rawXml);
+    let parsed = parseTTML(rawXml);
+    // lrc.red ships syllable-level spans; join them into words unless the user
+    // turned the toggle off (AJ, 2026-10-20).
+    if (provider === "lrc.red" && currentSettings.joinLrcRedSyllables !== false) {
+      parsed = joinTTMLSyllables(parsed);
+    }
     if (!parsed.length) {
       staticLyricsActive = false;
       currentLyricsIsTTML = false;

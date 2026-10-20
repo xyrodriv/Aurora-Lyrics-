@@ -674,7 +674,12 @@
 
   function loadTTML(xml, source, provider) {
     const rawXml = String(xml || "");
-    const parsed = parseTTML(rawXml);
+    let parsed = parseTTML(rawXml);
+    // lrc.red ships syllable-level spans; join them into words unless the user
+    // turned the toggle off (AJ, 2026-10-20).
+    if (provider === "lrc.red" && currentSettings.joinLrcRedSyllables !== false) {
+      parsed = joinTTMLSyllables(parsed);
+    }
     if (!parsed.length) {
       staticLyricsActive = false;
       currentLyricsIsTTML = false;

@@ -361,6 +361,11 @@
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
+    // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
+    // those runs into words at PARSE time so the fill/glow covers the whole
+    // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
+    // renderer toggle above, which only changes how each word is painted.
+    joinLrcRedSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
@@ -533,6 +538,10 @@
     currentSettings.joinSyllables = booleanValue(
       currentSettings.joinSyllables,
       DEFAULT_SETTINGS.joinSyllables
+    );
+    currentSettings.joinLrcRedSyllables = booleanValue(
+      currentSettings.joinLrcRedSyllables,
+      DEFAULT_SETTINGS.joinLrcRedSyllables
     );
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale
