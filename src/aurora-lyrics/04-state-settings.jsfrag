@@ -16,6 +16,12 @@
   let panelVisible = false;
   let nativeTabAtOpen = null;
   let lyricsTabObserver = null;
+  /* ---- external host (NPV dock) ----
+     The Now Playing snippet can claim the live panel and dock it inside its own
+     rail. Same idea as fullscreen: park the tab-driven visibility state, force
+     the render loop on, and stop mountPanel() from reclaiming the node. */
+  let externalHostActive = false;
+  let externalHostSavedVisible = null;
   /* ---- fullscreen (video left, lyrics right) ----
      Deliberately minimal: only one flag plus the DOM restore points needed to
      put YTM's real <video> and our live lyrics panel back where they came from. */
@@ -34,6 +40,7 @@
   let fsLayoutMode = "side";
   let fsControls = null;
   let fsLayoutSelect = null;
+  let fsOptionsButton = null;
   let fsOffsetRange = null;
   let fsOffsetValue = null;
   let fsLyricsToggle = null;
@@ -48,6 +55,8 @@
   // mirrors the result onto these.
   let fsPlayerShuffleButton = null;
   let fsPlayerRepeatButton = null;
+  let fsPlayerLikeButton = null;   // fullscreen "like" button (clones YTM's own icon)
+  let fsPlayerDislikeButton = null; // fullscreen "dislike" button (clones YTM's own icon)
   let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
   let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
   let fsPlayerSeekRange = null;
@@ -84,6 +93,7 @@
   let fsKawarp = null;
   let fsKawarpModulePromise = null;
   let fsKawarpArtUrl = ""; // artwork currently loaded into the Kawarp instance
+  let fsKawarpVideoEl = null; // live <video> currently feeding the Kawarp instance
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
   let fsKawarpResizeObserver = null;
@@ -345,13 +355,44 @@
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
     simpleLyrics: false,
+    // Join syllables: paint each word as ONE whole-word fill instead of the
+    // per-letter syllable karaoke, so a word lights up whole with no syllable
+    // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
+    // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
+    // a plain .word instead of a letterGroup.
+    joinSyllables: false,
+    // Which lyrics source is tried first. The user drags this order in the
+    // add-on's settings; the resolver walks it top to bottom
+    // (AJ, 2026-10-19).
+    sourceOrder: ["spicy", "lrc.red", "unison", "lrclib"],
   };
+
+  // Every source id, in the canonical fallback order. Kept as a literal inside
+  // the function so it cannot be read before its fragment has initialised.
+  function normalizeSourceOrder(value) {
+    const all = ["spicy", "lrc.red", "unison", "lrclib"];
+    const seen = new Set();
+    const out = [];
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const id = String(entry || "");
+        if (all.indexOf(id) === -1 || seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    // Anything the user removed from the list still runs, at the end — a
+    // corrupted or partial value must never silently disable a source.
+    for (const id of all) if (!seen.has(id)) out.push(id);
+    return out;
+  }
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
   function applySettings(next) {
     const prevRomanization = currentSettings.romanizationEnabled;
     const prevSize = currentSettings.size;
     const prevSimpleLyrics = currentSettings.simpleLyrics;
+    const prevJoinSyllables = currentSettings.joinSyllables;
     const prevAnimatedArt = currentSettings.animatedArt;
     // Only merge a plain object. `Object.assign` will happily spread a string or
     // an array by index, so a corrupted stored value would inject junk keys
@@ -368,6 +409,9 @@
       return Boolean(value);
     };
     currentSettings.size = clamp(finite(currentSettings.size, DEFAULT_SETTINGS.size), 0.75, 6.0);
+    // Source order is a user-editable list, so it is normalised on every apply:
+    // unknown ids dropped, duplicates dropped, missing sources appended.
+    currentSettings.sourceOrder = normalizeSourceOrder(currentSettings.sourceOrder);
     // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
     // is gone and the panel simply sits at the default -80px. PINNED rather than
     // merely defaulted, because a value stored back when the slider existed would
@@ -433,6 +477,10 @@
     currentSettings.simpleLyrics = booleanValue(
       currentSettings.simpleLyrics,
       DEFAULT_SETTINGS.simpleLyrics
+    );
+    currentSettings.joinSyllables = booleanValue(
+      currentSettings.joinSyllables,
+      DEFAULT_SETTINGS.joinSyllables
     );
     currentSettings.animatedArt = booleanValue(
       currentSettings.animatedArt,
@@ -508,6 +556,11 @@
     // property's -50% default and read as un-sung until it next changed state. A
     // rebuild puts every word back through the animator under the new mode.
     if (prevSimpleLyrics !== currentSettings.simpleLyrics && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+    // Join syllables flips makeWord between letterGroup (per-letter karaoke) and
+    // plain .word (whole-word fill), so the current lines must rebuild too.
+    if (prevJoinSyllables !== currentSettings.joinSyllables && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
   }

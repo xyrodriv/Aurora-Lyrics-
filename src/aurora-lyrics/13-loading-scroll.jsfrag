@@ -319,8 +319,6 @@
     scrollGlideLastWhole = null;
     scrollGlideReconciles = 0;
     setScrollFraction(0);
-    // Release the compositor promotion the glide held (see startScrollGlide).
-    if (lineScrollEl) lineScrollEl.style.willChange = "";
   }
 
   // Start or retarget the glide. The spring is REUSED so its velocity carries
@@ -339,12 +337,12 @@
     scrollGlideGoal = clampedGoal;
     scrollGlide.SetGoal(clampedGoal);
     scrollGlideReconciles = 0;
-    // Promote for the duration of the glide. The sub-pixel fraction rewrites the
-    // scroller's transform every frame, and the scroller ALSO carries the lyrics
-    // mask — without promotion each write re-rasterises the masked content. Held
-    // only while gliding, released in stopScrollGlide (per the standing rule that
-    // will-change is never left on permanently).
-    lineScrollEl.style.willChange = "transform";
+    // NOTE: no will-change here on purpose. Promoting the SCROLLER puts every
+    // glyph inside it onto a composited layer, and Chromium drops LCD sub-pixel
+    // text antialiasing on composited layers — the words render a hair differently
+    // and read as shifting left while the glide runs, snapping back the moment the
+    // promotion is released (AJ, 2026-10-07). The sub-pixel carry still works
+    // without it; the @property registration is what carries the perf.
     scrollGlideActive = true;
   }
 

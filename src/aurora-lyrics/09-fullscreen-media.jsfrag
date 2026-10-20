@@ -35,15 +35,16 @@
     }
     fsKawarpCanvas = null;
     fsKawarpArtUrl = "";
+    fsKawarpVideoEl = null;
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
-  async function startFullscreenKawarp(artUrl) {
-    if (!fsOverlay) return;
+  async function startFullscreenKawarp(artUrl, videoEl) {
+    if (!fsOverlay) return false;
     // Gate on the Dynamic add-on: its handshake object is our signal that the
     // page-wide Kawarp exists, and we take the backdrop over from it.
     const dyn = window.__ymAuroraDynamic;
-    if (!dyn || typeof dyn.suspend !== "function") return;
+    if (!dyn || typeof dyn.suspend !== "function") return false;
     // Defensive: never stack a second canvas. Every canvas is inserted as
     // fsOverlay.firstChild, so a restart that left the old one in place put the
     // stale canvas LATER in document order - where it painted over the new art.
@@ -59,17 +60,32 @@
     }
     try {
       const Kawarp = await getKawarpConstructor();
-      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return;
+      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return false;
       sizeFullscreenKawarp();
       fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
-      if (artUrl) {
+      if (videoEl) {
+        // Music videos: feed the LIVE <video> so the backdrop reacts to the
+        // picture instead of a heavily blurred + dimmed copy of it (AJ,
+        // 2026-10-19). Kawarp samples a small colour map, so this is far
+        // cheaper than the old full-viewport canvas blur.
+        await fsKawarp.loadVideo(videoEl, {
+          sampleWidth: 72,
+          sampleHeight: 128,
+          smoothing: 120,
+          frameRate: 30,
+        });
+        fsKawarpVideoEl = videoEl;
+        fsKawarpArtUrl = "";
+      } else if (artUrl) {
         await fsKawarp.loadImage(artUrl);
         fsKawarpArtUrl = artUrl;
+        fsKawarpVideoEl = null;
       }
-      if (seq !== fsKawarpSeq) return;
+      if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
+      return true;
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
@@ -82,10 +98,33 @@
       }
       fsKawarpCanvas = null;
       fsKawarpActive = false;
+      fsKawarpVideoEl = null;
+      return false;
     }
   }
 
+  // Swap the backdrop source of an ALREADY running Kawarp (no restart: a second
+  // canvas would stack and the older one would paint over the new source).
+  function syncFullscreenKawarpVideo(videoEl) {
+    if (!fsKawarpActive || !fsKawarp || !videoEl || videoEl === fsKawarpVideoEl) return;
+    fsKawarpVideoEl = videoEl;
+    fsKawarpArtUrl = "";
+    try {
+      fsKawarp.loadVideo(videoEl, {
+        sampleWidth: 72,
+        sampleHeight: 128,
+        smoothing: 120,
+        frameRate: 30,
+      });
+    } catch (_) {}
+  }
+
   function syncFullscreenKawarpArt(artUrl) {
+    // Never replace a LIVE video feed with a still. The 2s artwork refresh used
+    // to do exactly that, so a music video's backdrop froze on the first frame
+    // it had sampled (AJ, 2026-10-19). The video path owns the instance until
+    // stopFullscreenKawarp() clears fsKawarpVideoEl.
+    if (fsKawarpVideoEl) return;
     if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
     fsKawarpArtUrl = artUrl;
     try { fsKawarp.loadImage(artUrl); } catch (_) {}
@@ -123,10 +162,19 @@
   function applyStaticVideoBackdrop() {
     if (!fsActive || !fsOverlay || !fsSavedVideo) return;
     const raw = getRawVideoTitle();
-    // "Prefer Kawarp for music videos" (Aurora Bloom, cross-add-on) forces
-    // Kawarp for EVERY MV; otherwise only still uploads (Official Audio /
-    // Lyric Video) hand the backdrop over to Kawarp. The choice is part of the
-    // key, so flipping the setting re-runs the swap on the next call.
+    // Music videos now ALWAYS use Kawarp fed by the live video: it replaces the
+    // old full-viewport blurred/dimmed canvas copy, which was both heavier and
+    // visually muddier (AJ, 2026-10-19).
+    const liveVideo = fsSavedVideo.node
+      ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
+      : null;
+    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" ? liveVideo : null;
+    if (videoNode) {
+      if (fsKawarpActive) syncFullscreenKawarpVideo(videoNode);
+      else startFullscreenKawarp("", videoNode);
+      return;
+    }
+    // No video element: fall back to the artwork-backed backdrop.
     const wantKawarp = !!currentSettings.preferKawarpAlways || FS_STATIC_VIDEO_RE.test(raw);
     const key = (wantKawarp ? "kawarp|" : "canvas|") + raw;
     if (key === fsStaticVideoKey) return;
@@ -635,7 +683,19 @@
     if (fsArtVideo.parentElement !== target) target.appendChild(fsArtVideo);
     if (inFs) {
       // The fullscreen stylesheet owns the geometry.
+      //
+      // PRESERVE the inline `display`. Assigning cssText replaces the WHOLE
+      // inline style, which used to erase the `display:none` that keeps a
+      // not-yet-ready (or missed) video OUT of the pane's flex row. With it
+      // gone, the video became a second 583px square beside the static card:
+      // two squares in a 960px row shoved the cover art to x=-65, so the
+      // title/seek/transport anchored to it were clipped on the left
+      // (live-measured: img x=-65, video x=518, AJ 2026-10-18).
+      // Visibility of the video is owned by attachAnimatedArt/hideAnimatedArt;
+      // this function only owns its HOME and GEOMETRY.
+      const keepDisplay = fsArtVideo.style.display;
       fsArtVideo.style.cssText = "background:transparent;";
+      fsArtVideo.style.display = keepDisplay;
     } else {
       fsArtVideo.style.cssText =
         "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" +
@@ -701,6 +761,9 @@
     if (fsArtImg) fsArtImg.style.display = "";
     // The ready class is gone, so this restores the player view's own cover too.
     placeArtVideo();
+    // The static card is back in layout — republish so the band anchors to the
+    // ART box again instead of a stale value (AJ, 2026-10-18).
+    publishFsBandVars();
   }
 
   // Full removal: drop the video element + its hls instance entirely. Used when
@@ -716,6 +779,8 @@
     fsArtVideoLoadingKey = "";
     if (fsArtImg) fsArtImg.style.display = "";
     setInlineCoverHidden(false); // the player view gets its own cover back
+    // Static card is laid out again — re-anchor the band to the ART box.
+    publishFsBandVars();
   }
 
   // A CACHED animated cover is about to load, so do NOT show the static YTM cover
@@ -747,6 +812,13 @@
         if (fsArtImg) fsArtImg.style.display = "none";
         // Player view: hide YTM's own cover now that the animated one is up.
         placeArtVideo();
+        // REPUBLISH the band now that a real art box exists again. While the
+        // stream loaded, suppressStaticCardForAnimated() had the static card at
+        // display:none and the video was not ready, so publishFsBandVars()
+        // skipped the art box and left --ym-sl-fs-art-left/width unset. The CSS
+        // then fell back to the WIDER pane box, shifting the title + controls
+        // left and clipping them (AJ, 2026-10-18, intermittent after a skip).
+        publishFsBandVars();
         const p = video.play();
         if (p && p.catch) p.catch(() => {}); // autoplay may be deferred; ignore
       };
@@ -973,8 +1045,19 @@
     // the hls engine down and hides the video until the new manifest parses, which
     // flickered the cover back to YTM's own art every few seconds
     // (AJ, 2026-10-03).
-    if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.isConnected))) {
+    //
+    // Gate on the READY class, not isConnected: hideAnimatedArt() removes the
+    // class and display:none's the element but leaves fsArtVideoKey set, so an
+    // isConnected check kept taking this branch after a miss and re-hid the
+    // static card, leaving the pane blank. A detached-but-ready element keeps
+    // the class, so the re-home case is still covered (AJ, 2026-10-18).
+    if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")))) {
       placeArtVideo();
+      // Re-anchor the band to the art box. This path is reached on every 2s
+      // reconcile tick while a stream is already playing, so it doubles as the
+      // catch-all that repairs a stale --ym-sl-fs-art-left/width after a skip
+      // (AJ, 2026-10-18).
+      publishFsBandVars();
       // Re-assert the static card's hide: the MV -> song transition can null
       // fsArtImg (the player-bar artwork briefly still reads as the MV's own
       // i.ytimg thumbnail, so reconcile's thumbnail branch drops the card),

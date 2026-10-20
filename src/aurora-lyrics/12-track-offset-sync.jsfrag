@@ -162,7 +162,10 @@
   function setVideoOffsetMs(value, save) {
     const numeric = Number(value);
     const ms = Number.isFinite(numeric)
-      ? clamp(Math.round(numeric / 100) * 100, -30000, 30000)
+      // +/- 60s. This clamp is what actually ENFORCES the offset limit — the
+      // sliders in 06-panel-ui.jsfrag and 08-fullscreen-controls.jsfrag only
+      // advertise it. Keep all three in step.
+      ? clamp(Math.round(numeric / 100) * 100, -60000, 60000)
       : 0;
     if (editingOffsetMode === "video") offsetVideoMs = ms;
     else offsetSongMs = ms;
@@ -442,7 +445,11 @@
   }
 
   const NO_LYRICS_MESSAGE = "No lyrics found.";
-  const LOAD_FAILED_MESSAGE = "Could not load lyrics. Try again later or import a TTML file.";
+  const LOAD_FAILED_MESSAGE = "Lyrics didn't load.";
+  // Why the last lookup ended in an error, shown in the search panel footer.
+  // "no lyrics" is self-explanatory; a failed fetch is almost always rate
+  // limiting, so it gets an explicit ERR line instead.
+  let lastLyricsError = "";
 
   function showLyricsMessage(message) {
     // A message means the lookup is OVER, so the fullscreen loading spinner has to
@@ -450,6 +457,12 @@
     // forever, because only the success paths ever called hideFsSpinner()
     // (AJ, 2026-10-01).
     hideFsSpinner();
+    lastLyricsError = message === LOAD_FAILED_MESSAGE ? "rate" : "";
+    if (searchPanelEl && searchPanelEl._foot) {
+      searchPanelEl._foot.textContent = lastLyricsError
+        ? "ERR: rate limited — try again in a couple of minutes."
+        : "";
+    }
     // Fullscreen Video Background keeps the lyrics panel hidden until the first
     // line actually plays (see the intro-dim rules), so a track with NO lyrics
     // produced no feedback at all there — no panel, no message, nothing
@@ -466,6 +479,12 @@
     if (lineScrollEl) lineScrollEl.classList.add("offline");
     const empty = h("div", { class: "ym-sl-empty" });
     empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
+    // Spicy-style body line: tells the user the Search button looks on LRCLIB,
+    // which is the actual escape hatch when auto-sync finds nothing.
+    empty.appendChild(h("div", {
+      class: "ym-sl-empty-body",
+      text: "Search LRCLIB to pull in synced lyrics for this track.",
+    }));
     // Surface a Search button under the empty-state message — that's the
     // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
     const emptySearch = h("button", {

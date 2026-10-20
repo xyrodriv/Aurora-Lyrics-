@@ -478,7 +478,13 @@
     // (Upstream Spicy Lyrics does the same with ProcessedPosition =
     // Position + PositionOffset, and is explicit that Status follows the real
     // position.)
-    const scrollLeadMs = currentSettings.scrollLeadEnabled ? currentSettings.scrollLeadMs : 0;
+    // While the panel is docked in the NPV's compact lyrics box, look-ahead
+    // centering pushes the ACTIVE line into the top quarter (only ~4 lines fit,
+    // so the box reads top-heavy with a dead band below). Center the active
+    // line there instead; the tall Lyrics tab keeps its normal look-ahead.
+    const scrollLeadMs = !externalHostActive && currentSettings.scrollLeadEnabled
+      ? currentSettings.scrollLeadMs
+      : 0;
     const scrollIndex = scrollLeadMs > 0
       ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
       : activeIndex;
@@ -678,6 +684,41 @@
 
   function removeMvSyncChip() {
     if (mvSyncChip) { mvSyncChip.remove(); mvSyncChip = null; }
+  }
+
+  /* Source warning chip — same component as the music-video one above, used
+     when the lyrics came from a source whose timing is machine-aligned rather
+     than hand-synced (lrc.red). Reusing .ym-sl-mv-sync-chip keeps one visual
+     language and inherits the shrinking timer bar for free (AJ, 2026-10-19). */
+  let sourceChip = null;
+  let sourceChipFadeTimer = 0;
+  let sourceChipRemoveTimer = 0;
+  const SOURCE_NOTICE_MS = 6500;
+  const SOURCE_FADE_MS = 450;
+
+  function removeSourceChip() {
+    if (sourceChip) { sourceChip.remove(); sourceChip = null; }
+  }
+
+  function showSourceNotice(text) {
+    if (!panelEl || !text) return;
+    if (sourceChipFadeTimer) { clearTimeout(sourceChipFadeTimer); sourceChipFadeTimer = 0; }
+    if (sourceChipRemoveTimer) { clearTimeout(sourceChipRemoveTimer); sourceChipRemoveTimer = 0; }
+    removeSourceChip();
+    sourceChip = h("div", { class: "ym-sl-mv-sync-chip ym-sl-source-chip" },
+      h("span", { text }),
+      h("span", { class: "ym-sl-mv-sync-chip-timer" })
+    );
+    panelEl.appendChild(sourceChip);
+    sourceChipFadeTimer = setTimeout(() => {
+      sourceChipFadeTimer = 0;
+      if (!sourceChip) return;
+      sourceChip.classList.add("ym-sl-fading");
+      sourceChipRemoveTimer = setTimeout(() => {
+        sourceChipRemoveTimer = 0;
+        removeSourceChip();
+      }, SOURCE_FADE_MS);
+    }, SOURCE_NOTICE_MS);
   }
 
   function syncMvSyncNotice() {

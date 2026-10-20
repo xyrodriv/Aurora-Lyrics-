@@ -51,12 +51,14 @@
         "src/content/public-api.js",
         "src/extensions/*",
         "changelog.json",
-        "assets/manifest-logo.webp",
-        "assets/art/*"
+        "assets/*"
       ],
       "matches": [
         "https://music.youtube.com/*"
       ]
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  }
 }

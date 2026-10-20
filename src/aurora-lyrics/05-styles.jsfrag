@@ -374,19 +374,21 @@
       position: fixed;
       top: 96px;
       right: 28px;
-      z-index: 2147483000;
-      width: 340px;
+      z-index: 2147483200;
+      width: 430px;
       max-width: calc(100vw - 32px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
       border-radius: 20px;
       border: 1px solid rgba(255,255,255,.12);
-      /* SOLID, like the marketplace panel. The old translucent + blurred shell
-         read as a different surface sitting next to it (AJ, 2026-10-01). The
-         inner top highlight is the same one the marketplace card uses. */
-      background: #0f1116;
-      box-shadow: 0 40px 120px -40px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15);
+      /* FROSTED GLASS on AJ's call (2026-10-19): a blurred translucent shell so
+         the panel floats over the lyrics instead of being a solid dark slab.
+         The inset top highlight still keeps a crisp top edge. */
+      background: rgba(16,18,24,.55);
+      -webkit-backdrop-filter: blur(24px) saturate(1.7);
+      backdrop-filter: blur(24px) saturate(1.7);
+      box-shadow: 0 40px 120px -40px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.15);
       color: #fff;
       /* The panel is appended to body, so inheriting gave it YTM's Roboto rather
          than the panel face. Same stack the marketplace uses. */
@@ -497,6 +499,217 @@
       color: rgba(244,241,238,.6);
       padding: 4px 2px 0;
     }
+    /* Grouped settings-list cards (AJ, 2026-10-19). Each concern lives in a
+       frosted inset panel with a title + comfortable rows; replaces the old flat
+       <hr>-separated stack. */
+    .ym-sl-options-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.09);
+    }
+    .ym-sl-options-group > .ym-sl-options-section-title {
+      padding: 0;
+      color: rgba(244,241,238,.5);
+      font-size: 10.5px;
+      letter-spacing: .09em;
+    }
+    .ym-sl-options-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ym-sl-options-row-actions {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-options-row .ym-sl-import {
+      flex: 0 0 auto;
+    }
+    /* Tabbed side-rail layout (AJ, 2026-10-19): vertical tab rail on the LEFT,
+       the active section's controls on the RIGHT, one panel visible at a time. */
+    .ym-sl-options-body.ym-sl-options-tabbed {
+      flex-direction: row;
+      align-items: stretch;
+      gap: 0;
+      padding: 0;
+    }
+    .ym-sl-options-rail {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      flex: 0 0 126px;
+      width: 126px;
+      padding: 12px 9px;
+      border-right: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.035);
+    }
+    .ym-sl-options-tab {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 10px;
+      padding: 9px 11px;
+      text-align: left;
+      font: inherit;
+      font-size: 12.5px;
+      line-height: 1.2;
+      color: rgba(255,255,255,.62);
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease;
+    }
+    .ym-sl-options-tab:hover { background: rgba(255,255,255,.07); color: #fff; }
+    .ym-sl-options-tab.active {
+      background: rgba(255,255,255,.13);
+      color: #fff;
+      font-weight: 600;
+    }
+    .ym-sl-options-panels {
+      position: relative;
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 120px;
+      transition: height .34s cubic-bezier(.34,1.4,.5,1);
+    }
+    .ym-sl-options-panel {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 6px 18px 18px;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(10px);
+      transition: opacity .24s ease, transform .24s ease, visibility 0s linear .24s;
+    }
+    /* Incoming panel is opaque instantly — its children do the spring (staggerIn);
+       the panel being left fades out via the base transition above. */
+    .ym-sl-options-panel.active {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition: opacity 0s, visibility 0s;
+    }
+    .ym-sl-options-panel-title {
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -.01em;
+      color: #f4f1ee;
+      padding: 14px 0 2px;
+    }
+    /* Custom dropdown (AJ, 2026-10-19): styled button + popup menu instead of a
+       native <select>, matching the frosted panel. */
+    .ym-sl-select { position: relative; }
+    .ym-sl-select-button {
+      appearance: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 128px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .ym-sl-select-button:hover { background: rgba(255,255,255,.13); }
+    .ym-sl-select.open .ym-sl-select-button { border-color: rgba(255,255,255,.35); }
+    .ym-sl-select-label { flex: 1 1 auto; white-space: nowrap; }
+    .ym-sl-select-caret {
+      flex: 0 0 auto;
+      width: 0;
+      height: 0;
+      margin-left: auto;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid rgba(255,255,255,.6);
+      transition: transform .2s ease, border-top-color .2s ease;
+    }
+    .ym-sl-select.open .ym-sl-select-caret {
+      transform: rotate(180deg);
+      border-top-color: #fff;
+    }
+    .ym-sl-select-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 2147483100;
+      min-width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(22,24,30,.92);
+      -webkit-backdrop-filter: blur(18px) saturate(1.6);
+      backdrop-filter: blur(18px) saturate(1.6);
+      box-shadow: 0 22px 55px -22px rgba(0,0,0,.75);
+    }
+    .ym-sl-select-menu.hidden { display: none; }
+    .ym-sl-select-option {
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: rgba(255,255,255,.82);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ym-sl-select-option:hover { background: rgba(255,255,255,.08); color: #fff; }
+    .ym-sl-select-option.selected { background: rgba(255,255,255,.14); color: #fff; font-weight: 600; }
+    /* Segmented control (pill row) — the cleaner replacement for the dropdown. */
+    .ym-sl-segmented {
+      display: inline-flex;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 11px;
+      background: rgba(0,0,0,.28);
+      border: 1px solid rgba(255,255,255,.14);
+    }
+    .ym-sl-segmented-option {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 14px;
+      font: inherit;
+      font-size: 12.5px;
+      line-height: 1.2;
+      color: rgba(255,255,255,.72);
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease;
+      white-space: nowrap;
+    }
+    .ym-sl-segmented-option:hover { color: #fff; }
+    .ym-sl-segmented-option.active {
+      background: rgba(255,255,255,.92);
+      color: #14161a;
+      font-weight: 600;
+    }
+    /* File tab: full-width segmented track so each pill lines up with the action
+       buttons below; Upload + Delete saved share a 2-col row at the same width. */
+    .ym-sl-options-panel .ym-sl-segmented { width: 100%; }
+    .ym-sl-options-panel .ym-sl-segmented-option { flex: 1 1 0; text-align: center; }
+    .ym-sl-options-file-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .ym-sl-options-file-actions .ym-sl-import {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
+    }
     .ym-sl-options-body .ym-sl-track { width: 100%; }
     /* The offset row is a wide horizontal rail; let it wrap and give the slider
        its own line so nothing overflows the 340px panel. */
@@ -514,6 +727,62 @@
     .ym-sl-options-body .ym-sl-cache-clear {
       align-self: flex-start;
     }
+    .ym-sl-cache-clear.hidden { display: none; }
+    /* Confirmation step for "Clear cache" (AJ, 2026-10-19): a red delete action
+       so the irreversible wipe is never a single accidental click. */
+    .ym-sl-cache-confirm {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 11px 12px;
+      border-radius: 12px;
+      background: rgba(229,72,77,.10);
+      border: 1px solid rgba(229,72,77,.30);
+    }
+    .ym-sl-cache-confirm.hidden { display: none; }
+    .ym-sl-cache-confirm-text {
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255,255,255,.82);
+    }
+    .ym-sl-cache-confirm-row {
+      display: flex;
+      gap: 10px;
+    }
+    .ym-sl-cache-delete {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 14px;
+      border: none;
+      border-radius: 10px;
+      background: #e5484d;
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ym-sl-cache-delete:hover { background: #d23b40; }
+    .ym-sl-cache-delete:disabled { opacity: .55; cursor: default; }
+    .ym-sl-trash-icon {
+      width: 16px;
+      height: 16px;
+      display: block;
+      fill: currentColor;
+    }
+    .ym-sl-cache-cancel {
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: transparent;
+      color: rgba(255,255,255,.8);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .ym-sl-cache-cancel:hover { background: rgba(255,255,255,.06); }
+    .ym-sl-cache-cancel:disabled { opacity: .5; cursor: default; }
     .ym-sl-export-actions {
       display: flex;
       flex-wrap: wrap;
@@ -584,6 +853,15 @@
         opacity .35s ease,
         padding .45s cubic-bezier(.22, .61, .36, 1);
       will-change: left, width, transform, opacity, padding;
+    }
+    /* AJ 2026-10-09: on entry the layout is applied while this class is present,
+       so the panes jump straight to their final geometry instead of sliding in
+       from the CSS default (the "side layout" cover-art flash). buildFullscreen
+       Controls drops the class via a double-rAF once the overlay has painted, so
+       layout cycling on the cycle button still animates normally. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-anim .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-no-anim .ym-sl-fs-lyrics {
+      transition: none;
     }
     .ym-sl-fs-media { z-index: 2; }
     .ym-sl-fs-lyrics { z-index: 3; }
@@ -1169,6 +1447,12 @@
       min-height: 40px;
       padding: 0;
       border: 0;
+      /* No focus ring. Chrome draws a default focus outline on click, which
+         appeared as a "circle border" behind the like/dislike buttons (AJ,
+         2026-10-08). These are fullscreen transport buttons with a dedicated
+         active pill, so the focus ring is redundant. */
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
       border-radius: 50%;
       position: relative;
       background: none;
@@ -1181,6 +1465,9 @@
       transition: transform .22s cubic-bezier(.34,1.56,.64,1),
         color .22s ease;
     }
+    .ym-sl-fs-player-controls button:focus,
+    .ym-sl-fs-player-controls button:focus-visible,
+    .ym-sl-fs-player-controls button:focus-within { outline: none; }
     .ym-sl-fs-player-controls button:hover {
       transform: scale(1.08);
       background: none;
@@ -1264,6 +1551,88 @@
     .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active::after,
     .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active::after {
       opacity: 1;
+    }
+    /* Like / Dislike are OUR OWN buttons. Inactive = outline thumb; active =
+       the GLYPH itself fills (CSS fills the path) — there is NO background pill
+       / circle highlight (AJ, 2026-10-08 evening: "take away the little circle
+       highlight"). Container-agnostic selectors so the rule works regardless of
+       which layer the button is parented to. */
+    .ym-sl-fs-player-like.active,
+    .ym-sl-fs-player-dislike.active {
+      background: none;
+      color: #fff;
+      box-shadow: none;
+    }
+    .ym-sl-fs-player-like.active:hover,
+    .ym-sl-fs-player-dislike.active:hover {
+      background: none;
+    }
+    /* Filled glyph when engaged: CSS fill overrides the path's presentation
+       fill="none", turning the outline thumb into a solid filled thumb. The
+       stroke stays currentColor (set by fsThumbSvg) so the edges read cleanly. */
+    .ym-sl-fs-player-like.active svg path,
+    .ym-sl-fs-player-dislike.active svg path {
+      fill: currentColor;
+    }
+    /* Edge placement: the buttons live in the CONTROLS LAYER (inset:0,
+       z-index 21) so they paint ABOVE the lyrics pane (z-index 3) instead of
+       being hidden behind it in side layout. JS (positionFsEdgeButtons) pins
+       them to the media pane's left/right edges and to the transport row's
+       vertical centre, so they sit on the same line as the controls. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge {
+      position: absolute;
+      z-index: 4;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
+      min-height: 44px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: none;
+      outline: none;
+      color: rgba(255, 255, 255, .88);
+      cursor: pointer;
+      pointer-events: auto;
+      box-shadow: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform .22s cubic-bezier(.34, 1.56, .64, 1), color .22s ease;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge:hover {
+      transform: scale(1.08);
+      color: #fff;
+      background: none;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge:active {
+      transform: scale(.92);
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+      pointer-events: none;
+    }
+    /* Cover-art-only songs: NO rating buttons at all (AJ, 2026-10-18). The
+       Apple Music stack already carries title, progress, transport and volume;
+       two more edge controls read as clutter, and there is no video edge to
+       anchor them to. Music videos keep them. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-player-dislike--edge {
+      display: none;
+    }
+    /* Video Background layout: the video IS the backdrop, so the edge rating
+       buttons would float over it with nothing to anchor to (AJ, 2026-10-19). */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-dislike--edge {
+      display: none;
     }
     /* offset rail (inside the options overlay) — keep the original look */
     .ym-sl-fs-control-offset input[type="range"] {
@@ -1888,7 +2257,13 @@
       display: flex;
       flex-direction: column;
       align-items: stretch;
-      gap: 12px;
+      /* No uniform gap: the transport chip owns the space BELOW it (see its
+         margin-bottom) so it can be optically centred between the seek bar and
+         the volume. The scrubber's time row sits ABOVE the chip and adds height
+         on that side, so a symmetric 12px gap left the transport ~12px low
+         (AJ, 2026-10-18). gap:0 + chip margin-bottom:24px keeps the same total
+         stack height while equalising the two distances. */
+      gap: 0;
       /* 18px below the title, matching FS_BAND_GAP: this offset IS the gap
          between the title/artist block and the progress bar, and AJ asked for
          it to match the cover-art -> title gap above (2026-10-03). */
@@ -1938,6 +2313,10 @@
       display: flex;
       justify-content: center;
       padding: 0;
+      /* The whole gap below the transport. Paired with gap:0 on the stack above,
+         this centres the transport between the seek bar and the volume even
+         though the time row adds height on the seek side (AJ, 2026-10-18). */
+      margin-bottom: 24px;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
       order: 3;
@@ -2616,6 +2995,14 @@
       background: #000;
     }
     .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
+    /* A not-ready animated cover must never occupy flex space. Two 583px squares
+       in the 960px pane row shove the static card to x=-65 and clip the whole
+       title/seek/transport stack (live-measured, AJ, 2026-10-18). This must
+       outrank the display:block in .ym-sl-fs-media > video.ym-sl-fs-art-video
+       (0,2,1), hence the same scope plus the :not() class (0,3,1). */
+    .ym-sl-fs-media > video.ym-sl-fs-art-video:not(.ym-sl-fs-art-video-ready) {
+      display: none;
+    }
     /* .ym-sl-fs-media / .ym-sl-fs-lyrics base position + z-index are set by
        the animated rules higher up. */
     .ym-sl-fs-lyrics {
@@ -2669,16 +3056,62 @@
       border-color: rgba(96,165,250,.6);
       color: #eaf2ff;
     }
+    /* Empty / failed state, styled after Spicy Lyrics' .LyricsNotice
+       (default.scss): a centred notice with a title-weight message and a pill
+       action, rather than the old small grey line. */
     .ym-sl-empty {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 14px;
-      padding: 28px 12px;
+      justify-content: safe center;
+      gap: 0;
+      padding: 2rem 8%;
       text-align: center;
+      animation: ym-sl-notice-in .35s cubic-bezier(.22,1,.36,1) both;
     }
-    .ym-sl-empty-msg { color: rgba(255,255,255,.72); }
-    .ym-sl-empty-search { min-height: 34px; padding: 0 16px; font-size: 12px; }
+    .ym-sl-empty-msg {
+      max-width: 34em;
+      font-size: 1.35em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+      text-wrap: balance;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-empty-body {
+      margin-top: .85em;
+      max-width: 34em;
+      font-size: .95em;
+      font-weight: 400;
+      line-height: 1.55;
+      color: rgba(255,255,255,.62);
+      text-wrap: pretty;
+    }
+    .ym-sl-empty-search {
+      margin-top: 1.6em;
+      display: inline-flex;
+      align-items: center;
+      gap: .5em;
+      height: 2.6em;
+      padding: 0 1.15em;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
+      color: rgba(255,255,255,.92);
+      font-size: .9em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .18s ease, transform .18s ease;
+    }
+    .ym-sl-empty-search:hover {
+      background: rgba(255,255,255,.14);
+      transform: translateY(-1px);
+    }
+    @keyframes ym-sl-notice-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
     /* Loading skeleton. Sized off --DefaultLyricsSize so it tracks the size
        slider: a real .line rule is font-size: var(--DefaultLyricsSize) at
        line-height 1.4 plus .12em block padding, i.e. ~1.64x, so a 0.6x bar with
@@ -2724,104 +3157,171 @@
       z-index: 30;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      padding: 12px;
-      border: 1px solid rgba(255,255,255,.16);
-      border-radius: 12px;
-      background: rgba(16,18,24,.96);
-      box-shadow: 0 12px 30px rgba(0,0,0,.5);
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      background: rgba(20,20,26,.97);
       pointer-events: auto;
+      animation: ym-sl-search-in .42s cubic-bezier(.32,.72,0,1) both;
     }
     .ym-sl-search.hidden { display: none !important; }
+    .ym-sl-search.closing {
+      animation: ym-sl-search-out .2s cubic-bezier(.4,0,1,1) both;
+      pointer-events: none;
+    }
+    @keyframes ym-sl-search-out {
+      from { opacity: 1; transform: none; filter: blur(0); }
+      to { opacity: 0; transform: translateY(6px) scale(.972); filter: blur(6px); }
+    }
+    @keyframes ym-sl-search-in {
+      from { opacity: 0; transform: translateY(10px) scale(.965); filter: blur(8px); }
+      to { opacity: 1; transform: none; filter: blur(0); }
+    }
     .ym-sl-search-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
     .ym-sl-search-title {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 700;
-      color: rgba(255,255,255,.92);
+      letter-spacing: -.01em;
+      color: rgba(255,255,255,.94);
     }
     .ym-sl-search-close {
       flex: 0 0 auto;
-      width: 24px;
-      height: 24px;
-      border: none;
-      border-radius: 6px;
-      background: rgba(255,255,255,.1);
-      color: rgba(255,255,255,.85);
+      width: 26px;
+      height: 26px;
+      border: 0;
+      border-radius: 8px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.7);
       font-size: 13px;
       line-height: 1;
       cursor: pointer;
+      transition: background .18s ease, color .18s ease, transform .18s ease;
     }
-    .ym-sl-search-close:hover { background: rgba(255,255,255,.18); }
-    .ym-sl-search-form { display: flex; gap: 6px; }
+    .ym-sl-search-close:hover {
+      background: rgba(255,255,255,.16);
+      color: #fff;
+      transform: scale(1.06);
+    }
+    .ym-sl-search-form { display: flex; gap: 8px; }
     .ym-sl-search-input {
       flex: 1 1 auto;
-      min-height: 30px;
-      padding: 0 10px;
-      border: 1px solid rgba(255,255,255,.16);
-      border-radius: 7px;
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 10px;
       background: rgba(255,255,255,.06);
-      color: rgba(255,255,255,.92);
+      color: rgba(255,255,255,.94);
       font: inherit;
-      font-size: 12px;
+      font-size: 12.5px;
+      transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
     }
-    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.45); }
+    .ym-sl-search-input:focus {
+      outline: none;
+      border-color: rgba(63,224,197,.55);
+      background: rgba(255,255,255,.09);
+      box-shadow: 0 0 0 3px rgba(63,224,197,.14);
+    }
+    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.4); }
     .ym-sl-search-remember {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
       font-size: 11px;
-      color: rgba(255,255,255,.7);
+      color: rgba(255,255,255,.62);
       cursor: pointer;
       user-select: none;
     }
     .ym-sl-search-status {
       min-height: 14px;
       font-size: 11px;
-      color: rgba(255,255,255,.6);
+      color: rgba(255,255,255,.55);
     }
+    .ym-sl-search-foot {
+      font-size: 10.5px;
+      line-height: 1.4;
+      letter-spacing: .01em;
+      color: rgba(255,140,140,.82);
+    }
+    .ym-sl-search-foot:empty { display: none; }
     .ym-sl-search-results {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      max-height: 240px;
+      gap: 6px;
+      max-height: 250px;
       overflow-y: auto;
       margin: 0;
-      padding: 0;
+      padding: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,.2) transparent;
     }
+    .ym-sl-search-results::-webkit-scrollbar { width: 6px; }
+    .ym-sl-search-results::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,.18);
+      border-radius: 3px;
+    }
+    /* Each row rises + unblurs in, staggered down the list. --r-op carries the
+       per-state opacity so .no-sync can stay dim without the animation's
+       fill-mode overriding it. */
     .ym-sl-search-result {
+      --r-op: 1;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 1px;
+      gap: 2px;
       text-align: left;
-      padding: 7px 9px;
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 8px;
-      background: rgba(255,255,255,.05);
-      color: rgba(255,255,255,.9);
+      padding: 9px 11px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px;
+      background: rgba(255,255,255,.045);
+      color: rgba(255,255,255,.92);
       font: inherit;
       cursor: pointer;
-      transition: background .12s ease;
+      opacity: var(--r-op);
+      animation: ym-sl-result-in .44s cubic-bezier(.34,1.3,.5,1) both;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
     }
-    .ym-sl-search-result:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-result:nth-child(2) { animation-delay: .04s; }
+    .ym-sl-search-result:nth-child(3) { animation-delay: .08s; }
+    .ym-sl-search-result:nth-child(4) { animation-delay: .12s; }
+    .ym-sl-search-result:nth-child(5) { animation-delay: .16s; }
+    .ym-sl-search-result:nth-child(6) { animation-delay: .2s; }
+    .ym-sl-search-result:nth-child(n+7) { animation-delay: .24s; }
+    @keyframes ym-sl-result-in {
+      from { opacity: 0; transform: translateY(9px); filter: blur(5px); }
+      to { opacity: var(--r-op, 1); transform: none; filter: blur(0); }
+    }
+    .ym-sl-search-result:hover {
+      background: rgba(255,255,255,.08);
+      border-color: rgba(63,224,197,.38);
+      transform: translateX(2px);
+    }
     .ym-sl-search-result.no-sync {
-      opacity: .42;
+      --r-op: .42;
       cursor: not-allowed;
       background: rgba(255,255,255,.03);
     }
-    .ym-sl-search-result.no-sync:hover { background: rgba(255,255,255,.03); }
-    .ym-sl-search-result.no-sync-available {
-      opacity: .62;
-      cursor: pointer;
-      background: rgba(255,255,255,.04);
+    .ym-sl-search-result.no-sync:hover {
+      background: rgba(255,255,255,.03);
+      border-color: rgba(255,255,255,.08);
+      transform: none;
     }
-    .ym-sl-search-result.no-sync-available:hover { background: rgba(96,165,250,.2); }
-    .ym-sl-search-name { font-size: 12px; font-weight: 600; }
-    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.6); }
+    .ym-sl-search-result.no-sync-available {
+      --r-op: .62;
+      cursor: pointer;
+    }
+    .ym-sl-search-result.no-sync-available:hover {
+      background: rgba(255,255,255,.08);
+      border-color: rgba(63,224,197,.38);
+      transform: translateX(2px);
+    }
+    .ym-sl-search-name { font-size: 12.5px; font-weight: 600; }
+    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.55); }
     .ym-sl-jump {
       position: absolute;
       right: 18px;
@@ -3228,6 +3728,11 @@
     }
     .ym-sl-mv-sync-chip.ym-sl-fading {
       opacity: 0;
+    }
+    /* Source warning (lrc.red) — same pill, nudged down so it can coexist with
+       the music-video sync chip instead of covering it (AJ, 2026-10-19). */
+    .ym-sl-source-chip {
+      top: 40px;
     }
     .ym-sl-mv-sync-chip-timer {
       position: absolute;
@@ -3761,12 +4266,13 @@
       --gradient-alpha-end: 1;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-empty {
-      width: min(90%, 300px);
+      width: min(92%, 34em);
       margin: auto;
-      color: rgba(255,255,255,.55);
-      font-size: 13px;
+      color: inherit;
+      font-size: 14px;
       line-height: 1.5;
       text-align: center;
+      padding: 2rem 6%;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
       margin: 48px 4px 22px;
@@ -3932,6 +4438,60 @@
     #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
       color: rgba(255,255,255,.85);
       font-weight: 600;
+    }
+    /* Provider name as a link (lrc.red / Unison / LRCLIB) — keeps the same
+       weight and colour, underlines only on hover. */
+    #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name {
+      text-decoration: none;
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name:hover {
+      text-decoration: underline;
+    }
+    /* Machine-aligned sources (lrc.red) get a persistent red warning pill —
+       same family as the transient chip above the lyrics, but it stays. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      width: fit-content;
+      padding: 5px 12px 5px 10px;
+      border-radius: 999px;
+      background: rgba(229, 72, 77, .14);
+      border: 1px solid rgba(229, 72, 77, .42);
+      color: rgba(255, 255, 255, .9);
+      font-size: 12px;
+      letter-spacing: .01em;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn-icon {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      display: block;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn .ym-sl-provider-label {
+      color: rgba(255, 255, 255, .72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn .ym-sl-provider-name {
+      color: #ffffff;
+    }
+    /* Pill + explanation as one block: the block owns the top margin, so the
+       pill sits tight above its note. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 7px;
+      margin-top: 22px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-block .ym-sl-provider-warn {
+      margin-top: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-note {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .42);
+      max-width: 42ch;
     }
     /* Tighter leading when the provider is followed by a person row, and when
        two person rows stack (uploader then maker) — otherwise the three

@@ -504,6 +504,26 @@
       "position:absolute;top:0;right:-2px;padding:1px 3px;border-radius:6px;",
       "background:rgba(0,0,0,.66);color:#fff;font:600 8px/1 Roboto,Arial,sans-serif;",
       "letter-spacing:.2px;pointer-events:none}",
+      // Injected-icon carousel. The row of add-on icons lives in a capped
+      // viewport that scrolls instead of growing without bound, so on a small
+      // monitor the icons scroll rather than overflowing the bar and colliding
+      // with the middle controls. The two arrows reveal on hover and are hidden
+      // outright when there is nothing to scroll (see .ym-pb-carousel--static).
+      ".ym-pb-carousel{display:flex;align-items:center;flex:0 1 auto;min-width:0;",
+      "max-width:220px;overflow:hidden}",
+      ".ym-pb-carousel-viewport{display:flex;align-items:center;overflow:hidden;",
+      "scroll-behavior:smooth}",
+      ".ym-pb-arrow{flex:0 0 auto;width:24px;height:36px;padding:0;border:0;",
+      "background:none;color:#909090;cursor:pointer;border-radius:50%;",
+      "display:none;align-items:center;justify-content:center;",
+      "transition:color .12s ease,background-color .12s ease}",
+      ".ym-pb-carousel:hover .ym-pb-arrow{display:flex}",
+      ".ym-pb-arrow:hover{color:#fff;background:rgba(255,255,255,.1)}",
+      // Disabled (at either end) and static (nothing to scroll) both hide the
+      // arrow outright — a visible-but-dead arrow reads as a broken control.
+      ".ym-pb-arrow[disabled]{display:none}",
+      ".ym-pb-carousel.ym-pb-carousel--static .ym-pb-arrow{display:none !important}",
+      ".ym-pb-arrow svg{width:20px;height:20px;fill:currentColor;pointer-events:none}",
     ].join("");
     (document.head || document.documentElement).appendChild(style);
   }
@@ -530,7 +550,7 @@
   // button is not part of its template, so it can be silently dropped — which
   // also silently un-breaks any layout it influenced. Re-append it if it goes
   // missing. Re-appending inside the callback fires one more mutation, but that
-  // pass finds parentNode === container and stops, so it converges.
+  // pass finds parentNode === viewport and stops, so it converges.
   let playerBarRowObserver = null;
 
   function watchPlayerBarRow() {
@@ -539,14 +559,96 @@
     if (playerBarRowObserver && playerBarRowObserver.__target === row && row.isConnected) return;
     if (playerBarRowObserver) playerBarRowObserver.disconnect();
     playerBarRowObserver = new MutationObserver(() => {
-      const live = $(".right-controls-buttons");
-      if (!live) return;
+      const container = $(".right-controls-buttons");
+      if (!container) return;
+      // The carousel wrapper lives inside that row too, so a YTM re-render can
+      // drop the whole thing — recreate it, then re-home any orphaned icon.
+      const carousel = getOrCreatePlayerBarCarousel();
+      const viewport = carousel ? carousel.querySelector(".ym-pb-carousel-viewport") : container;
       for (const btn of document.querySelectorAll(".ym-pb-btn")) {
-        if (btn.parentNode !== live) live.appendChild(btn);
+        if (btn.parentNode !== viewport) viewport.appendChild(btn);
       }
+      if (carousel && carousel.__syncArrows) carousel.__syncArrows();
     });
     playerBarRowObserver.__target = row;
     playerBarRowObserver.observe(row, { childList: true, subtree: true });
+  }
+
+  // Material "chevron_left" / "chevron_right" — filled, so they take the
+  // .ym-pb-arrow svg{fill:currentColor} colour like every other bar glyph.
+  const CHEVRON_LEFT = "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z";
+  const CHEVRON_RIGHT = "M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z";
+
+  function appendChevron(el, pathData) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    svg.appendChild(path);
+    el.appendChild(svg);
+  }
+
+  // The carousel is created lazily on the first addPlayerBarButton and hosted
+  // inside YTM's own .right-controls-buttons. YTM re-renders that row, so this
+  // has to be idempotent and cheap to call on every mutation.
+  function getOrCreatePlayerBarCarousel() {
+    const container = $(".right-controls-buttons");
+    if (!container) return null;
+    const already = container.querySelector(".ym-pb-carousel");
+    if (already) return already;
+    const carousel = document.createElement("div");
+    carousel.className = "ym-pb-carousel";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "ym-pb-arrow ym-pb-arrow-prev";
+    prev.setAttribute("aria-label", "Scroll player-bar buttons left");
+    appendChevron(prev, CHEVRON_LEFT);
+    const viewport = document.createElement("div");
+    viewport.className = "ym-pb-carousel-viewport";
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "ym-pb-arrow ym-pb-arrow-next";
+    next.setAttribute("aria-label", "Scroll player-bar buttons right");
+    appendChevron(next, CHEVRON_RIGHT);
+    carousel.append(prev, viewport, next);
+    // Append, not prepend: addPlayerBarButton always put the icons at the END of
+    // the row (bottom-right of the bar), and dropping them in front of YTM's own
+    // buttons would move them off that corner.
+    container.appendChild(carousel);
+    wireCarouselScroll(carousel);
+    return carousel;
+  }
+
+  function wireCarouselScroll(carousel) {
+    if (carousel.__wired) return;
+    carousel.__wired = true;
+    const viewport = carousel.querySelector(".ym-pb-carousel-viewport");
+    const prev = carousel.querySelector(".ym-pb-arrow-prev");
+    const next = carousel.querySelector(".ym-pb-arrow-next");
+    // 36px button + its 6px margins either side = YTM's 48px pitch.
+    const PITCH = 48;
+    const sync = () => {
+      const max = viewport.scrollWidth - viewport.clientWidth;
+      const nothing = max <= 1;
+      carousel.classList.toggle("ym-pb-carousel--static", nothing);
+      prev.disabled = nothing || viewport.scrollLeft <= 0;
+      next.disabled = nothing || viewport.scrollLeft >= max - 1;
+    };
+    const step = (dir) => viewport.scrollBy({ left: dir * PITCH, behavior: "smooth" });
+    prev.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      step(-1);
+    });
+    next.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      step(1);
+    });
+    viewport.addEventListener("scroll", sync, { passive: true });
+    carousel.__syncArrows = sync;
+    sync();
   }
 
   function addPlayerBarButton(opts) {
@@ -556,11 +658,13 @@
     if (!container) return null;
     ensurePlayerBarStyle();
     watchPlayerBarRow();
+    const carousel = getOrCreatePlayerBarCarousel();
+    const target = carousel ? carousel.querySelector(".ym-pb-carousel-viewport") : container;
     const id = "ym-pb-" + o.id;
     const existing = document.getElementById(id);
     if (existing) {
       // YTM can re-render the row; make sure we are still inside it.
-      if (existing.parentNode !== container) container.appendChild(existing);
+      if (existing.parentNode !== target) target.appendChild(existing);
       return playerBarHandle(existing);
     }
     const btn = document.createElement("button");
@@ -584,7 +688,10 @@
       e.stopPropagation();
       if (typeof o.onClick === "function") o.onClick(e, playerBarHandle(btn));
     });
-    container.appendChild(btn);
+    target.appendChild(btn);
+    // A new icon can push the row past its visible width, which is what makes
+    // the arrows meaningful — re-decide whether they are live.
+    if (carousel && carousel.__syncArrows) carousel.__syncArrows();
     return playerBarHandle(btn);
   }
 
@@ -676,6 +783,9 @@
     fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
+    // Deezer track search — the ISRC source for lrc.red (YTM exposes none).
+    fetchDeezerTracks: (title, artist, album) =>
+      cmd("fetchDeezerTracks", [title, artist, album]),
     fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
   };
   console.log("[Aurora Lyrics] public API ready (page world) v" + window.YTMod.version);

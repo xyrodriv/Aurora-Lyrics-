@@ -216,12 +216,18 @@
     // the gradient sweeps across the line as one unit, which is what line-synced
     // lyrics are supposed to look like. Word-by-word karaoke is the Syllable
     // body's job, and those words are short enough to stay plain words too.
-    const letterCapable =
+    let letterCapable =
       !lineTimed &&
       !suppressKaraoke &&
       !word.DisableLetterAnimation &&
       !word.disableLetterAnimation &&
       isLetterCapable(word.Text, duration);
+    // Join syllables (AJ, 2026-10-19): paint every word as ONE whole-word fill
+    // instead of a per-letter karaoke group, so a word lights up whole with no
+    // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
+    // plain-.word path keeps its own scale/glow/gradient springs, so it still
+    // animates, just as a single unit.
+    if (currentSettings.joinSyllables) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -268,15 +274,48 @@
   }
 
   function appendWords(lineElement, lineModel, words, background, noKaraoke) {
+    // Join syllables (AJ, 2026-10-19): a logical word is a run of syllable tokens
+    // glued by IsPartOfWord. Left alone each token fills in sequence, so a word
+    // reads as separate syllables. When the setting is on, collapse every run into
+    // ONE word spanning the whole run (merged text + merged time window) so it
+    // fills as a single unit. OFF by default, so the per-syllable karaoke and the
+    // .word-group wrapping are unchanged unless the user opts in.
+    let renderWords = words;
+    if (currentSettings.joinSyllables && Array.isArray(words) && words.length) {
+      const joined = [];
+      for (const word of words) {
+        const open = joined[joined.length - 1];
+        if (open && open.__joining) {
+          // Extend the open word: append this token's text and let it run to the
+          // token's end. Keep the run open only while this token still glues
+          // forward (a joined word never carries a trailing PartOfWord class).
+          open.Text = (open.Text || "") + (word.Text || "");
+          open.EndTime = word.EndTime;
+          open.__joining = !!word.IsPartOfWord;
+        } else {
+          joined.push({
+            Text: word.Text,
+            StartTime: word.StartTime,
+            EndTime: word.EndTime,
+            IsPartOfWord: false,
+            DisableLetterAnimation: word.DisableLetterAnimation,
+            disableLetterAnimation: word.disableLetterAnimation,
+            __joining: !!word.IsPartOfWord,
+          });
+        }
+      }
+      joined.forEach((w) => { delete w.__joining; });
+      renderWords = joined;
+    }
     let currentWordGroup = null;
-    words.forEach((word, wordIndex) => {
-      const wordModel = makeWord(word, wordIndex === words.length - 1, lineModel.LineTimed, noKaraoke);
+    renderWords.forEach((word, wordIndex) => {
+      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke);
       if (background) wordModel.BGWord = true;
       if (background) {
         wordModel.BGWord = true;
         wordModel.HTMLElement.classList.add("bg-word");
       }
-      const previous = words[wordIndex - 1];
+      const previous = renderWords[wordIndex - 1];
       const belongsToGroupedWord =
         word.IsPartOfWord || (previous && previous.IsPartOfWord && currentWordGroup);
 
@@ -359,11 +398,72 @@
 
   // "Lyrics provided by <provider>" — every API source owes this one, so it is
   // plain text and never conditional on a person existing.
+  // lrc.red's docs explicitly ask for credit; a link is the strongest form of it
+  // and lets the user check the source (AJ, 2026-10-19).
+  const PROVIDER_URLS = {
+    "lrc.red": "https://lrc.red",
+    "Unison": "https://unison.boidu.dev/",
+    "LRCLIB": "https://lrclib.net/",
+  };
+  // Sources whose timing is machine-aligned rather than hand-synced get the
+  // warning treatment: red pill + triangle. Persistent, unlike the transient
+  // chip above the lyrics (AJ, 2026-10-19).
+  const PROVIDER_WARN = { "lrc.red": true };
+
+  // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
+  function buildProviderWarnIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-provider-warn-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const tri = document.createElementNS(NS, "path");
+    tri.setAttribute("d", "M12 2.6 22.6 21.2H1.4Z");
+    tri.setAttribute("fill", "#e5484d");
+    const bar = document.createElementNS(NS, "rect");
+    bar.setAttribute("x", "11.05");
+    bar.setAttribute("y", "8.3");
+    bar.setAttribute("width", "1.9");
+    bar.setAttribute("height", "6.5");
+    bar.setAttribute("rx", "0.95");
+    bar.setAttribute("fill", "#ffffff");
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", "12");
+    dot.setAttribute("cy", "17.5");
+    dot.setAttribute("r", "1.15");
+    dot.setAttribute("fill", "#ffffff");
+    svg.append(tri, bar, dot);
+    return svg;
+  }
+
   function buildProviderRow(provider) {
-    const row = h("div", { class: "ym-sl-provider" });
+    const warn = !!PROVIDER_WARN[provider];
+    const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
+    if (warn) row.appendChild(buildProviderWarnIcon());
     row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
-    row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
-    return row;
+    const url = PROVIDER_URLS[provider] || "";
+    if (url) {
+      row.appendChild(h("a", {
+        class: "ym-sl-provider-name",
+        href: url,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: provider,
+      }));
+    } else {
+      row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
+    }
+    if (!warn) return row;
+    // Explain WHY it is flagged, so the red pill is not just alarm without
+    // context. Static — it lives as long as the lyrics do (AJ, 2026-10-19).
+    return h("div", { class: "ym-sl-provider-block" },
+      row,
+      h("div", {
+        class: "ym-sl-provider-note",
+        text: "Timing may have felt off — this source aligns the lyrics automatically.",
+      })
+    );
   }
 
   // RGB <-> HSL, used only to push the two sampled colours apart when the avatar

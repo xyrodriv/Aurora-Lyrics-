@@ -512,6 +512,69 @@
   font-size: calc(var(--ym-u) * 1.125);
   font-weight: 600;
 }
+/* Info button + "what it does / pros / cons" panel (AJ, 2026-10-19). */
+#ym-market .ym-detail-settings-titlerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+#ym-market .ym-mk-info-btn {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 50%;
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.62);
+  font: 600 11px/1 "SpicyLyrics", system-ui, sans-serif;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease, border-color .16s ease, transform .2s cubic-bezier(.34,1.56,.64,1);
+}
+#ym-market .ym-mk-info-btn:hover,
+#ym-market .ym-mk-info-btn.on {
+  background: rgba(63,224,197,.16);
+  border-color: rgba(63,224,197,.55);
+  color: #bff6ec;
+  transform: scale(1.08);
+}
+#ym-market .ym-mk-info {
+  margin: 0 0 var(--ym-u);
+  padding: 11px 13px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 10px;
+  background: rgba(255,255,255,.035);
+  display: grid;
+  gap: 8px;
+}
+#ym-market .ym-mk-info.hidden { display: none; }
+#ym-market .ym-mk-info-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: calc(var(--ym-u) * .75);
+  line-height: 1.45;
+}
+#ym-market .ym-mk-info-label {
+  color: rgba(255,255,255,.42);
+  font-size: calc(var(--ym-u) * .6875);
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#ym-market .ym-mk-info-text { color: rgba(255,255,255,.72); }
+#ym-market .ym-mk-info-list {
+  margin: 0;
+  padding: 0 0 0 15px;
+  display: grid;
+  gap: 3px;
+  color: rgba(255,255,255,.72);
+}
+#ym-market .ym-mk-info-list li::marker { color: rgba(255,255,255,.32); }
+#ym-market .ym-mk-info-pro .ym-mk-info-list li::marker { color: #6ee06f; }
+#ym-market .ym-mk-info-con .ym-mk-info-list li::marker { color: #ffb15c; }
 #ym-market .ym-detail-settings-subtitle {
   max-width: 60%;
   color: #888;
@@ -528,6 +591,85 @@
   min-width: 0;
   min-height: calc(var(--ym-u) * 2.875);
 }
+/* ---- source order (setting type "order") ---------------------------------
+   A draggable priority list. Motion is handled in JS (FLIP + staggered
+   entrance); these rules only own the look. */
+#ym-market .ym-detail-setting-row-order {
+  display: block;
+  padding: calc(var(--ym-u) * .5) 0;
+}
+#ym-market .ym-detail-setting-row-order .ym-detail-setting-label {
+  margin-bottom: calc(var(--ym-u) * .625);
+}
+#ym-market .ym-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#ym-market .ym-order-row {
+  display: grid;
+  grid-template-columns: 14px 16px minmax(0, 1fr) 26px 26px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 10px;
+  background: rgba(255,255,255,.03);
+  cursor: grab;
+  transition: background .18s ease, border-color .18s ease, scale .18s ease, box-shadow .18s ease;
+}
+#ym-market .ym-order-row:hover {
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.15);
+}
+#ym-market .ym-order-row.dragging {
+  cursor: grabbing;
+  scale: 1.015;
+  border-color: rgba(63,224,197,.5);
+  background: rgba(63,224,197,.08);
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+#ym-market .ym-order-handle {
+  color: rgba(255,255,255,.26);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+#ym-market .ym-order-num {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255,255,255,.34);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#ym-market .ym-order-body { min-width: 0; }
+#ym-market .ym-order-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255,255,255,.92);
+}
+#ym-market .ym-order-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: rgba(255,255,255,.42);
+}
+#ym-market .ym-order-move {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 7px;
+  background: rgba(255,255,255,.04);
+  color: rgba(255,255,255,.6);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease, scale .16s ease, opacity .16s ease;
+}
+#ym-market .ym-order-move:hover { background: rgba(255,255,255,.12); color: #fff; scale: 1.06; }
+#ym-market .ym-order-move:active { scale: .94; }
+#ym-market .ym-order-move:disabled { opacity: .25; pointer-events: none; }
 /* Sub-heading inside a settings panel, declared via {type:"header"} on a
    schema entry. Sits between regular rows and groups the following settings
    under one label. No input, no value, no reset interaction. */
@@ -1141,3 +1283,682 @@
   #ym-market .ym-sheet-text { width: 100%; }
 }
 
+/* =====================================================================
+   PLAYER-BAR + FULLSCREEN PRESS / SPRING-BACK (AJ, 2026-10-07)
+   Every player-bar button and the fullscreen transport controls shrink on
+   press and spring back on release.
+
+   Deliberately in the ALWAYS-INJECTED content stylesheet rather than in the
+   Smooth Motion add-on: AJ wants this "in general", i.e. with that add-on off.
+   The add-on's micro module also had to give up its player-bar transitions,
+   because its selectors are more specific and its plain .16s transition would
+   have won and silently killed the spring.
+
+   The BOUNCE is the asymmetry between two transitions: the press is a fast .1s
+   ease-in down to the shrunk size, and the release falls back to a .34s
+   back-out curve, whose overshoot carries it past normal before it settles.
+
+   The "scale" PROPERTY is used, never transform: scale(). These buttons carry
+   transforms of their own — the player-page arrow is rotate(180deg), and the
+   fullscreen controls hover at scale(1.06/1.08) — and transform would REPLACE
+   them rather than compose with them.
+
+   Selector SHAPES matter too: a blanket "ytmusic-player-bar button" would scale
+   the inner button AND its yt-icon-button wrapper, compounding the scale. So
+   the shapes are named individually. The fullscreen rules re-list the
+   properties Aurora already animates there (background / color / transform), so
+   this adds "scale" without dropping those.
+   ===================================================================== */
+ytmusic-player-bar yt-icon-button,
+ytmusic-player-bar tp-yt-paper-icon-button,
+ytmusic-player-bar [class*="ytSpecButtonShapeNextHost"] {
+  transition: scale .34s cubic-bezier(.34,1.56,.64,1), opacity .16s ease !important;
+}
+ytmusic-player-bar .ym-pb-btn {
+  transition: scale .34s cubic-bezier(.34,1.56,.64,1), color .16s ease,
+              background-color .16s ease !important;
+}
+.ym-sl-fs-controls button.ym-sl-fs-icon-btn {
+  transition: scale .34s cubic-bezier(.34,1.56,.64,1), background .18s ease,
+              color .18s ease, transform .18s ease !important;
+}
+.ym-sl-fs-player-controls button {
+  transition: scale .34s cubic-bezier(.34,1.56,.64,1) !important;
+}
+ytmusic-player-bar yt-icon-button:active,
+ytmusic-player-bar tp-yt-paper-icon-button:active,
+ytmusic-player-bar [class*="ytSpecButtonShapeNextHost"]:active,
+ytmusic-player-bar .ym-pb-btn:active,
+.ym-sl-fs-controls button.ym-sl-fs-icon-btn:active,
+.ym-sl-fs-player-controls button:active {
+  scale: .82 !important;
+  transition: scale .1s ease-in !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  ytmusic-player-bar yt-icon-button:active,
+  ytmusic-player-bar tp-yt-paper-icon-button:active,
+  ytmusic-player-bar [class*="ytSpecButtonShapeNextHost"]:active,
+  ytmusic-player-bar .ym-pb-btn:active,
+  .ym-sl-fs-controls button.ym-sl-fs-icon-btn:active,
+  .ym-sl-fs-player-controls button:active {
+    scale: 1 !important;
+    transition: none !important;
+  }
+}
+
+/* =====================================================================
+   MARKETPLACE V2 (AJ, 2026-10-19)
+   Rail + master–detail surface. Every selector is scoped to .ym-mk2 so the
+   old tabs/grid/sheet rules stay inert rather than being deleted blind.
+   ===================================================================== */
+#ym-market.ym-mk2 {
+  --mk-line: rgba(255,255,255,.07);
+  --mk-line2: rgba(255,255,255,.12);
+  --mk-dim: rgba(255,255,255,.56);
+  --mk-dim2: rgba(255,255,255,.36);
+  --mk-surf: #121217;
+  --mk-surf2: #17171e;
+  --mk-grad: linear-gradient(100deg,#3fe0c5,#6ee06f);
+  display: grid;
+  grid-template-columns: 322px minmax(0,1fr);
+  grid-template-rows: minmax(0,1fr);
+  background: #101015;
+  color: #f3f3f5;
+  overflow: hidden;
+}
+/* Must out-rank the base `#ym-market.hidden` rule above, which this block's
+   `display:grid` would otherwise override (same specificity, later wins). */
+#ym-market.ym-mk2.hidden { display: none; }
+/* Scoped reset: without it the detail's `height:100%` + 88px padding exceeds
+   the pane and the bottom of the page is clipped (and Home will not scroll). */
+#ym-market.ym-mk2, #ym-market.ym-mk2 * { box-sizing: border-box; }
+#ym-market.ym-mk2.ym-floating {
+  width: min(1060px, 96vw);
+  height: min(740px, 92vh);
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  border-radius: 16px;
+  background: #101015;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12), 0 40px 120px -40px rgba(0,0,0,.7);
+}
+#ym-market.ym-mk2.ym-floating::before { display: none; }
+#ym-market.ym-mk2 > * { min-height: 0; }
+/* Ambient wash: the brand gradient, blurred behind both panels. Raised from
+   .22/0.8 — it read as almost black (AJ, 2026-10-19). */
+#ym-market .ym-mk-bg {
+  position: absolute; inset: -60px; z-index: 0; pointer-events: none;
+  background-position: center; background-size: cover; background-repeat: no-repeat;
+  opacity: .38;
+  filter: blur(22px) saturate(1.22) brightness(1.02);
+}
+
+/* ---- rail ---- */
+#ym-market .ym-mk-rail {
+  position: relative; z-index: 2;
+  display: flex; flex-direction: column;
+  background: rgba(16,16,22,.62);
+  border-right: 1px solid var(--mk-line);
+  overflow: hidden;
+}
+#ym-market .ym-mk-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 16px 14px 12px;
+  border-bottom: 1px solid var(--mk-line);
+  cursor: grab; user-select: none; touch-action: none;
+}
+#ym-market .ym-mk-head h1 {
+  margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em;
+}
+#ym-market .ym-mk-cbtn {
+  width: 28px; height: 28px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--mk-dim); cursor: pointer;
+  transition: background .2s, color .2s;
+}
+#ym-market .ym-mk-cbtn svg { width: 18px; height: 18px; }
+#ym-market .ym-mk-cbtn:hover { background: rgba(255,255,255,.08); color: #fff; }
+#ym-market .ym-mk-logo {
+  width: 26px; height: 26px; border-radius: 8px; flex: 0 0 auto;
+  background: var(--mk-surf2) center/cover no-repeat;
+  border: 1px solid var(--mk-line2);
+}
+#ym-market .ym-mk-head #ym-close {
+  width: 26px; height: 26px; margin-left: auto;
+  color: rgba(255,255,255,.5);
+}
+#ym-market .ym-mk-head #ym-close svg { width: 15px; height: 15px; }
+#ym-market .ym-mk-head #ym-close:hover { color: #fff; background: rgba(255,255,255,.08); }
+/* The whole rail header block is the drag handle. */
+#ym-market .ym-mk-railtop { cursor: grab; user-select: none; touch-action: none; }
+#ym-market.ym-dragging .ym-mk-railtop { cursor: grabbing; }
+#ym-market .ym-mk-seg {
+  position: relative;
+  display: flex; gap: 2px;
+  margin: 12px 14px 10px; padding: 3px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--mk-line); border-radius: 10px;
+}
+#ym-market .ym-mk-segbtn {
+  position: relative; z-index: 1;
+  flex: 1; border: 0; background: transparent;
+  color: var(--mk-dim); font-family: inherit;
+  font-weight: 700; font-size: 12px; padding: 7px 4px;
+  border-radius: 8px; cursor: pointer;
+  transition: color .22s;
+}
+#ym-market .ym-mk-segbtn.on { color: #fff; }
+/* One pill that slides between the four labels. */
+#ym-market .ym-mk-segpill {
+  position: absolute; left: 0; top: 3px; bottom: 3px; width: 0;
+  z-index: 0; pointer-events: none;
+  border-radius: 8px; background: var(--mk-surf2);
+  box-shadow: 0 1px 0 rgba(255,255,255,.06) inset;
+  transition: transform .42s cubic-bezier(.34,1.4,.5,1),
+              width .42s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-rows {
+  position: relative; flex: 1; min-height: 0;
+  overflow-y: auto; padding: 8px;
+  scrollbar-width: thin; scrollbar-color: #2a2a33 transparent;
+}
+#ym-market .ym-mk-rows::-webkit-scrollbar { width: 9px; }
+#ym-market .ym-mk-rows::-webkit-scrollbar-track { background: transparent; }
+#ym-market .ym-mk-rows::-webkit-scrollbar-thumb { background: #2a2a33; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+#ym-market .ym-mk-ind {
+  position: absolute; left: 0; top: 0; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--mk-grad);
+  opacity: 0; z-index: 3;
+  transition: transform .42s cubic-bezier(.34,1.4,.5,1),
+              height .42s cubic-bezier(.34,1.4,.5,1), opacity .2s;
+}
+#ym-market .ym-mk-card {
+  display: flex; align-items: center; gap: 11px;
+  padding: 9px 10px; border-radius: 11px;
+  cursor: pointer; position: relative;
+  transition: background .22s;
+}
+#ym-market .ym-mk-card:hover { background: rgba(255,255,255,.045); }
+#ym-market .ym-mk-card.sel { background: rgba(255,255,255,.075); }
+#ym-market .ym-mk-card:focus-visible { outline: 2px solid #3fe0c5; outline-offset: -2px; }
+#ym-market .ym-mk-mono {
+  width: 38px; height: 38px; border-radius: 10px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: var(--mk-surf2); border: 1px solid var(--mk-line);
+  font-weight: 700; font-size: 16px; color: var(--mk-dim);
+}
+#ym-market .ym-mk-mono svg { width: 18px; height: 18px; fill: currentColor; }
+#ym-market .ym-mk-card.sel .ym-mk-mono { color: #fff; border-color: var(--mk-line2); }
+#ym-market .ym-mk-name {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 600;
+  letter-spacing: -.01em; color: var(--mk-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#ym-market .ym-mk-card.sel .ym-mk-name { color: #fff; }
+#ym-market .ym-mk-check { width: 16px; height: 16px; flex: 0 0 auto; fill: #38cf92; opacity: 0; }
+#ym-market .ym-mk-card.installed .ym-mk-check { opacity: 1; }
+#ym-market .ym-mk-cat {
+  margin: 14px 8px 7px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--mk-dim2);
+}
+/* Collapsed rail: the inner layout keeps its expanded width and is clipped by
+   the rail, so the monograms never slide sideways while the column animates. */
+/* Labels fade instead of popping when the rail collapses. */
+#ym-market .ym-mk-name,
+#ym-market .ym-mk-cat,
+#ym-market .ym-mk-seg,
+#ym-market .ym-mk-check,
+#ym-market .ym-mk-logo,
+#ym-market .ym-mk-head h1,
+#ym-market .ym-mk-head #ym-close {
+  transition: opacity .26s ease;
+}
+#ym-market.ym-mk2 { transition: grid-template-columns .5s cubic-bezier(.32,.72,0,1); }
+#ym-market.ym-mk-collapsed { grid-template-columns: 78px minmax(0,1fr); }
+#ym-market.ym-mk-collapsed .ym-mk-railtop,
+#ym-market.ym-mk-collapsed .ym-mk-rows { width: 322px; min-width: 322px; }
+#ym-market.ym-mk-collapsed .ym-mk-seg,
+#ym-market.ym-mk-collapsed .ym-mk-cat,
+#ym-market.ym-mk-collapsed .ym-mk-name,
+#ym-market.ym-mk-collapsed .ym-mk-check,
+#ym-market.ym-mk-collapsed .ym-mk-head h1,
+#ym-market.ym-mk-collapsed .ym-mk-logo,
+#ym-market.ym-mk-collapsed .ym-mk-head #ym-close {
+  opacity: 0; pointer-events: none;
+}
+#ym-market.ym-mk-collapsed .ym-mk-head { justify-content: flex-start; }
+#ym-market.ym-mk-collapsed .ym-mk-card { padding: 6px 10px; }
+/* No visible scrollbars in either pane (AJ, 2026-10-19). */
+#ym-market .ym-mk-rows, #ym-market .ym-mk-detail { scrollbar-width: none; -ms-overflow-style: none; }
+#ym-market .ym-mk-rows::-webkit-scrollbar,
+#ym-market .ym-mk-detail::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* ---- detail pane ---- */
+#ym-market .ym-mk-pane { position: relative; z-index: 1; min-height: 0; height: 100%; overflow: hidden; }
+/* Invisible drag strip over the detail pane's top padding. */
+#ym-market .ym-mk-draghandle {
+  position: absolute; left: 0; right: 0; top: 0; height: 26px; z-index: 4;
+  cursor: grab; touch-action: none; user-select: none;
+}
+#ym-market.ym-dragging .ym-mk-draghandle { cursor: grabbing; }
+#ym-market .ym-mk-detail { height: 100%; min-height: 0; overflow-y: auto; padding: 40px 44px 48px; scrollbar-width: thin; scrollbar-color: #2a2a33 transparent; }
+#ym-market .ym-mk-detail::-webkit-scrollbar { width: 10px; }
+#ym-market .ym-mk-detail::-webkit-scrollbar-thumb { background: #2a2a33; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+#ym-market .ym-mk-dwrap { max-width: 720px; }
+#ym-market .ym-mk-dhead { display: flex; align-items: flex-start; gap: 18px; }
+#ym-market .ym-mk-dmono {
+  width: 66px; height: 66px; border-radius: 16px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: var(--mk-surf2); border: 1px solid var(--mk-line2);
+  font-weight: 700; font-size: 30px; color: #fff;
+}
+#ym-market .ym-mk-dmono svg { width: 30px; height: 30px; fill: currentColor; }
+#ym-market .ym-mk-dtitles { min-width: 0; padding-top: 2px; }
+#ym-market .ym-mk-dtitles h1 {
+  margin: 0; font-size: 34px; font-weight: 700;
+  letter-spacing: -.02em; line-height: 1.02;
+}
+/* Provenance line under the add-on name — deliberately quiet. */
+#ym-market .ym-mk-disclaimer {
+  margin-top: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  color: rgba(255,255,255,.36);
+}
+#ym-market .ym-mk-status { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mk-dim); }
+#ym-market .ym-mk-pill {
+  font-size: 11px; font-weight: 700; color: #38cf92;
+  background: rgba(56,207,146,.12); border: 1px solid rgba(56,207,146,.22);
+  padding: 2px 9px; border-radius: 7px;
+}
+#ym-market .ym-mk-pill.avail { color: var(--mk-dim); background: rgba(255,255,255,.06); border-color: var(--mk-line); }
+#ym-market .ym-mk-sweep {
+  position: relative; height: 2px; width: 120px;
+  margin: 22px 0 26px; background: var(--mk-line);
+  border-radius: 2px; overflow: hidden;
+}
+#ym-market .ym-mk-sweep::after {
+  content: ""; position: absolute; inset: 0;
+  background: var(--mk-grad); border-radius: 2px;
+  transform-origin: left; animation: ym-mk-sweep .62s cubic-bezier(.32,.72,0,1) both;
+}
+@keyframes ym-mk-sweep { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+/* Quiet re-render (install/uninstall): the accent rule must not replay. */
+#ym-market .ym-mk-quiet .ym-mk-sweep::after { animation: none; transform: scaleX(1); }
+#ym-market .ym-mk-lead { margin: 0 0 30px; font-size: 16px; line-height: 1.6; color: var(--mk-dim); }
+
+/* attribution */
+#ym-market .ym-mk-sources {
+  margin: -12px 0 30px; padding: 13px 15px;
+  border: 1px solid var(--mk-line); border-radius: 11px;
+  background: rgba(255,255,255,.025);
+  display: grid; gap: 7px;
+}
+#ym-market .ym-mk-srclab { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--mk-dim2); }
+#ym-market .ym-mk-srcrow { display: grid; grid-template-columns: 104px 1fr; gap: 14px; align-items: baseline; font-size: 12.5px; color: var(--mk-dim); }
+#ym-market .ym-mk-srcrow b { font-weight: 600; color: rgba(255,255,255,.7); }
+#ym-market .ym-mk-srclinks { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+#ym-market .ym-mk-srclinks i { font-style: normal; color: var(--mk-dim2); font-size: 11px; }
+#ym-market .ym-mk-lnk {
+  text-decoration: none; position: relative; color: transparent;
+  background-image: linear-gradient(100deg,#fff 0%,#fff 34%,var(--mk-la,#3fe0c5) 46%,var(--mk-lb,#6ee06f) 56%,#fff 68%,#fff 100%);
+  background-size: 260% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  animation: ym-mk-sweep-link 5s linear infinite, ym-mk-glow 5.5s ease-in-out infinite;
+}
+@keyframes ym-mk-sweep-link { from { background-position: 0% 0; } to { background-position: 162.5% 0; } }
+@keyframes ym-mk-glow {
+  0%,100% { filter: drop-shadow(0 0 4px var(--mk-lg, rgba(63,224,197,.6))) drop-shadow(0 0 9px transparent); }
+  50% { filter: drop-shadow(0 0 9px var(--mk-lg, rgba(63,224,197,.6))) drop-shadow(0 0 20px var(--mk-lg, rgba(63,224,197,.6))); }
+}
+#ym-market .ym-mk-lnk::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+  background: var(--mk-grad); transform: scaleX(0); transform-origin: left;
+  transition: transform .34s cubic-bezier(.32,.72,0,1);
+}
+#ym-market .ym-mk-lnk:hover::after, #ym-market .ym-mk-lnk:focus-visible::after { transform: scaleX(1); }
+#ym-market .ym-mk-lnk-spicy { --mk-la:#FF5C9E; --mk-lb:#59A9FF; --mk-lg:rgba(255,92,158,.62); }
+#ym-market .ym-mk-lnk-unison { --mk-la:#F20C32; --mk-lb:#FFA0A8; --mk-lg:rgba(242,12,50,.62); }
+#ym-market .ym-mk-lnk-lrclib { --mk-la:#6F6CFF; --mk-lb:#B0AEFF; --mk-lg:rgba(111,108,255,.72); }
+#ym-market .ym-mk-lnk-mb { --mk-la:#B84088; --mk-lb:#E87038; --mk-lg:rgba(184,64,136,.68); }
+#ym-market .ym-mk-lnk-lb { --mk-la:#EB743B; --mk-lb:#8F86E8; --mk-lg:rgba(235,116,59,.66); }
+@media (prefers-reduced-motion: reduce) {
+  #ym-market .ym-mk-lnk { animation: none; filter: none; }
+}
+
+/* settings + promo */
+#ym-market .ym-mk-dcols { display: grid; grid-template-columns: minmax(0,1fr) 292px; gap: 30px; align-items: start; margin-top: 6px; }
+#ym-market .ym-mk-dcols.solo { grid-template-columns: minmax(0,1fr); max-width: 520px; }
+#ym-market .ym-mk-left { min-width: 0; }
+#ym-market .ym-mk-hint { font-size: 13px; color: var(--mk-dim2); padding: 10px 0 0; }
+#ym-market .ym-mk-promo { position: sticky; top: 6px; }
+#ym-market .ym-mk-promobox {
+  position: relative; aspect-ratio: 3/4; border-radius: 14px;
+  overflow: hidden; background: var(--mk-surf);
+  border: 1px solid var(--mk-line2);
+}
+#ym-market .ym-mk-promomedia { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#ym-market .ym-mk-promofallback {
+  inset: -5%; width: 110%; height: 110%;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+  animation: ym-mk-ken 24s ease-in-out infinite alternate;
+}
+@keyframes ym-mk-ken { from { transform: scale(1.02); } to { transform: scale(1.12) translate(-2.5%,-3.5%); } }
+#ym-market .ym-mk-badge {
+  position: absolute; left: 10px; bottom: 10px;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: rgba(255,255,255,.78); background: rgba(8,8,12,.55);
+  border: 1px solid rgba(255,255,255,.16); padding: 4px 8px; border-radius: 6px;
+}
+#ym-market .ym-mk-badge i { width: 5px; height: 5px; border-radius: 50%; background: var(--mk-grad); }
+#ym-market .ym-mk-promocap { margin-top: 10px; font-size: 11px; color: var(--mk-dim2); text-align: center; }
+
+/* existing settings markup, re-skinned */
+#ym-market .ym-mk-settings { margin: 0; padding: 0; border: 0; background: none; }
+#ym-market .ym-mk-settings .ym-detail-settings-head { margin: 0 0 4px; }
+#ym-market .ym-mk-settings .ym-detail-settings-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--mk-dim2);
+}
+#ym-market .ym-mk-settings .ym-detail-settings-subtitle { display: none; }
+#ym-market .ym-mk-settings .ym-detail-setting-section {
+  margin: 18px 0 4px; font-size: 10.5px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--mk-dim2);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 18px; padding: 13px 2px; border-bottom: 1px solid var(--mk-line);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-label { font-size: 14px; color: #f3f3f5; }
+#ym-market .ym-mk-settings .ym-detail-setting-control { display: flex; align-items: center; gap: 10px; }
+#ym-market .ym-mk-settings .ym-detail-setting-value {
+  font-size: 12px; color: var(--mk-dim2); min-width: 46px; text-align: right;
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 170px; height: 5px; border-radius: 99px; outline: none;
+  background: linear-gradient(90deg,#fff 0 var(--val,50%),rgba(255,255,255,.14) var(--val,50%) 100%);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.5); cursor: pointer;
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  width: 46px; height: 27px; border-radius: 99px; margin: 0; position: relative;
+  background: rgba(255,255,255,.14); cursor: pointer; transition: background .3s; flex: 0 0 auto;
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 21px; height: 21px;
+  border-radius: 50%; background: #fff; box-shadow: 0 2px 5px rgba(0,0,0,.4);
+  transition: transform .38s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]:checked { background: #38cf92; }
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]:checked::after { transform: translateX(19px); }
+#ym-market .ym-mk-settings .ym-detail-settings-reset {
+  margin-top: 14px; padding: 8px 12px; border-radius: 9px;
+  background: none; border: 1px solid var(--mk-line);
+  color: var(--mk-dim); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+
+/* actions */
+#ym-market .ym-mk-acts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 28px; }
+#ym-market .ym-mk-btn-un, #ym-market .ym-mk-btn-in {
+  display: inline-flex; align-items: center; gap: 9px;
+  border: 0; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 14px;
+  padding: 11px 18px; border-radius: 11px;
+  transition: transform .3s cubic-bezier(.34,1.2,.5,1), background .25s;
+}
+#ym-market .ym-mk-btn-un { background: #ff5470; color: #fff; }
+#ym-market .ym-mk-btn-in { background: #f3f3f5; color: #111; }
+#ym-market .ym-mk-btn-un svg { width: 18px; height: 18px; overflow: visible; }
+#ym-market .ym-mk-btn-in svg { width: 18px; height: 18px; fill: currentColor; }
+#ym-market .ym-mk-btn-un:hover, #ym-market .ym-mk-btn-in:hover { transform: translateY(-2px); }
+/* Held-down state: :active lasts as long as the pointer is down, so the button
+   stays compressed instead of springing back mid-press. */
+#ym-market .ym-mk-btn-un:active, #ym-market .ym-mk-btn-in:active {
+  transform: translateY(0) scale(.955);
+  transition-duration: .26s;
+}
+#ym-market .ym-mk-btn-un.busy, #ym-market .ym-mk-btn-in.busy { opacity: .7; pointer-events: none; }
+#ym-market .ym-mk-ghlink {
+  display: inline-flex; align-items: center; gap: 7px;
+  color: var(--mk-dim); font-size: 13px; font-weight: 600; text-decoration: none;
+}
+#ym-market .ym-mk-ghlink svg { width: 15px; height: 15px; fill: currentColor; opacity: .75; }
+#ym-market .ym-mk-ghlink:hover { color: #fff; }
+
+/* home */
+#ym-market .ym-mk-home { min-height: 100%; display: flex; flex-direction: column; }
+#ym-market .ym-mk-hero {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center;
+  padding: 40px 34px 10px;
+}
+#ym-market .ym-mk-mark {
+  width: 68px; height: 68px; border-radius: 19px; margin-bottom: 22px;
+  background: var(--mk-surf2) center/cover no-repeat;
+  border: 1px solid var(--mk-line2);
+  box-shadow: 0 14px 44px rgba(0,0,0,.5);
+}
+#ym-market .ym-mk-htitle { margin: 0; font-size: 40px; font-weight: 700; letter-spacing: -.02em; line-height: 1.05; max-width: 540px; }
+#ym-market .ym-mk-hsub { margin: 16px 0 30px; max-width: 440px; font-size: 15px; line-height: 1.6; color: var(--mk-dim); }
+#ym-market .ym-mk-stats { display: flex; gap: 12px; margin-bottom: 30px; }
+#ym-market .ym-mk-stat {
+  min-width: 106px; padding: 14px 20px; border-radius: 12px;
+  background: rgba(255,255,255,.04); border: 1px solid var(--mk-line);
+}
+#ym-market .ym-mk-stat b { display: block; font-size: 24px; font-weight: 700; line-height: 1.1; }
+#ym-market .ym-mk-stat span { font-size: 11.5px; color: var(--mk-dim); }
+#ym-market .ym-mk-cta {
+  border: 0; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 14px;
+  color: #111; background: #fff; padding: 12px 24px; border-radius: 11px;
+  transition: transform .25s cubic-bezier(.34,1.4,.5,1), box-shadow .25s;
+}
+#ym-market .ym-mk-cta:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0,0,0,.5); }
+#ym-market .ym-mk-previews { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; padding: 10px 34px 32px; }
+#ym-market .ym-mk-prev .ym-mk-promobox { aspect-ratio: 3/4; border-radius: 13px; cursor: pointer; }
+#ym-market .ym-mk-prevcap { margin-top: 9px; font-size: 12px; color: var(--mk-dim); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ym-market .ym-mk-empty { padding: 40px 8px; font-size: 13px; line-height: 1.6; color: var(--mk-dim); }
+
+/* ---- compact / narrow / short ---- */
+@media (max-width: 1100px), (max-height: 720px) {
+  #ym-market.ym-mk2 { grid-template-columns: 282px minmax(0,1fr); }
+  #ym-market .ym-mk-detail { padding: 28px 30px 34px; }
+  #ym-market .ym-mk-dtitles h1 { font-size: 28px; }
+  #ym-market .ym-mk-dmono { width: 56px; height: 56px; font-size: 26px; border-radius: 14px; }
+  #ym-market .ym-mk-sweep { margin: 18px 0 20px; }
+  #ym-market .ym-mk-lead { font-size: 14.5px; margin-bottom: 22px; }
+  #ym-market .ym-mk-sources { margin: -8px 0 22px; padding: 11px 13px; }
+  #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr) 228px; gap: 24px; }
+  #ym-market .ym-mk-settings .ym-detail-setting-row { padding: 12px 2px; }
+  #ym-market .ym-mk-settings .ym-detail-setting-label { font-size: 13.5px; }
+  #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] { width: 150px; }
+  #ym-market .ym-mk-btn-un, #ym-market .ym-mk-btn-in { padding: 10px 16px; font-size: 13px; }
+  #ym-market .ym-mk-acts { margin-top: 24px; gap: 11px; }
+  #ym-market .ym-mk-htitle { font-size: 32px; }
+  #ym-market .ym-mk-hsub { font-size: 14px; margin: 14px 0 24px; }
+  #ym-market .ym-mk-mark { width: 56px; height: 56px; margin-bottom: 18px; }
+  #ym-market .ym-mk-hero { padding: 30px 28px 8px; }
+  #ym-market .ym-mk-stat { padding: 11px 16px; min-width: 92px; }
+  #ym-market .ym-mk-stat b { font-size: 21px; }
+  #ym-market .ym-mk-previews { padding: 8px 28px 26px; gap: 12px; }
+  #ym-market .ym-mk-mono { width: 34px; height: 34px; font-size: 14px; border-radius: 9px; }
+  #ym-market .ym-mk-card { padding: 8px 9px; gap: 10px; }
+  #ym-market .ym-mk-name { font-size: 13.5px; }
+}
+@media (max-width: 860px) {
+  #ym-market .ym-mk-detail { padding: 24px 22px 30px; }
+  #ym-market .ym-mk-dtitles h1 { font-size: 24px; }
+  #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr); }
+  #ym-market .ym-mk-promo { position: static; max-width: 210px; margin-top: 24px; }
+  #ym-market .ym-mk-promocap { display: none; }
+  #ym-market .ym-mk-htitle { font-size: 28px; }
+  #ym-market .ym-mk-hsub { font-size: 13.5px; max-width: 360px; }
+  #ym-market .ym-mk-stats { gap: 8px; }
+  #ym-market .ym-mk-stat { padding: 10px 13px; min-width: 80px; }
+  #ym-market .ym-mk-previews { gap: 10px; padding: 8px 22px 22px; }
+}
+@media (max-height: 560px) {
+  #ym-market .ym-mk-detail { padding: 20px 24px 24px; }
+  #ym-market .ym-mk-sweep { margin: 14px 0 16px; }
+  #ym-market .ym-mk-lead { margin-bottom: 16px; }
+  #ym-market .ym-mk-hero { padding: 20px 24px 6px; }
+  #ym-market .ym-mk-mark { width: 48px; height: 48px; margin-bottom: 14px; }
+  #ym-market .ym-mk-hsub { margin: 10px 0 18px; }
+  #ym-market .ym-mk-previews { display: none; }
+  #ym-market .ym-mk-acts { margin-top: 20px; }
+}
+
+/* Collapsed must out-rank the compact media query's 282px column. */
+#ym-market.ym-mk2.ym-mk-collapsed { grid-template-columns: 78px minmax(0,1fr); }
+
+/* Toasts in the v2 panel: a top-centre pill instead of the old
+   bottom-left-accent card from the previous marketplace skin. */
+#ym-market.ym-mk2 #ym-toasts {
+  position: absolute; left: 50%; top: 18px; bottom: auto;
+  transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+}
+#ym-market.ym-mk2 .ym-toast {
+  background: #141419;
+  border: 1px solid rgba(63,224,197,.34);
+  border-left: 1px solid rgba(63,224,197,.34);
+  border-radius: 999px;
+  padding: 9px 18px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+  color: #f3f3f5;
+  box-shadow: 0 14px 40px rgba(0,0,0,.55);
+  transform: translateY(-10px);
+  transition: opacity .26s cubic-bezier(.32,.72,0,1), transform .34s cubic-bezier(.34,1.3,.5,1);
+}
+#ym-market.ym-mk2 .ym-toast.show { transform: none; }
+
+/* ---- Report a problem modal (AJ, 2026-10-19) ---- */
+.ym-report-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10,12,18,.5);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  backdrop-filter: blur(8px) saturate(1.2);
+}
+.ym-report-scrim.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.ym-report-card {
+  box-sizing: border-box;
+  width: 520px;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 34px 30px 26px;
+  border-radius: 22px;
+  border: 1px solid rgba(0,0,0,.08);
+  background: #ffffff;
+  box-shadow: 0 40px 120px -40px rgba(0,0,0,.5);
+  color: #14161a;
+  font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
+}
+.ym-report-head { position: relative; display: flex; align-items: flex-start; justify-content: center; gap: 12px; }
+.ym-report-title { font-size: 20px; font-weight: 700; line-height: 1.2; letter-spacing: -.01em; color: #14161a; text-align: center; }
+.ym-report-x {
+  appearance: none; background: transparent; border: 0; padding: 0 4px;
+  position: absolute; top: 0; right: 0;
+  font: inherit; font-size: 24px; line-height: 1; color: rgba(20,22,26,.5); cursor: pointer;
+}
+.ym-report-x:hover { color: #14161a; }
+.ym-report-sub { font-size: 13px; color: rgba(20,22,26,.6); margin-top: -6px; text-align: center; }
+.ym-report-pick { display: flex; flex-direction: column; gap: 16px; }
+.ym-report-pick.hidden { display: none; }
+.ym-report-options { display: flex; flex-direction: column; gap: 10px; }
+.ym-report-option {
+  box-sizing: border-box;
+  appearance: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left; padding: 12px 14px; border-radius: 12px;
+  border: 1px solid #000000; background: #000000;
+  color: #ffffff; font: inherit; font-size: 14px; cursor: pointer;
+  transition: background .18s ease, border-color .18s ease, transform .16s cubic-bezier(.34,1.4,.5,1);
+}
+.ym-report-option:hover { background: #171717; }
+.ym-report-option:active { transform: scale(.99); }
+.ym-report-option.selected { border-color: #e5484d; background: #000000; }
+.ym-report-radio {
+  flex: 0 0 auto; position: relative; width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.5); display: flex; align-items: center; justify-content: center;
+  transition: border-color .18s ease, background .18s ease;
+}
+.ym-report-option.selected .ym-report-radio { border-color: #e5484d; background: #e5484d; }
+.ym-report-check {
+  width: 14px; height: 14px; color: #fff; display: flex;
+  opacity: 0; transform: scale(.4);
+  transition: opacity .16s ease, transform .3s cubic-bezier(.34,1.4,.5,1);
+}
+.ym-report-option.selected .ym-report-check { opacity: 1; transform: scale(1); }
+.ym-report-other.hidden { display: none; }
+.ym-report-other-input {
+  box-sizing: border-box;
+  width: 100%; max-width: 100%; resize: vertical; min-height: 64px; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid rgba(0,0,0,.2); background: #f5f5f6; color: #14161a;
+  font: inherit; font-size: 13.5px; line-height: 1.4;
+}
+.ym-report-other-input::placeholder { color: rgba(20,22,26,.42); }
+.ym-report-other-input:focus { outline: none; border-color: rgba(0,0,0,.45); }
+.ym-report-send {
+  appearance: none; align-self: center; margin-top: 6px; padding: 11px 26px; border: 0; border-radius: 12px;
+  background: #e5484d; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 8px 22px -8px rgba(229,72,77,.55);
+  transition: background .18s ease, opacity .18s ease, transform .15s ease;
+}
+.ym-report-send:hover { background: #d23b40; }
+.ym-report-send:active { transform: scale(.97); }
+.ym-report-send:disabled { opacity: .45; cursor: default; }
+.ym-report-thanks { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; min-height: 240px; padding: 24px 0; text-align: center; }
+.ym-report-thanks.hidden { display: none; }
+.ym-report-thanks-title { font-size: 27px; font-weight: 700; color: #14161a; }
+.ym-report-thanks-sub { font-size: 14px; line-height: 1.5; color: rgba(20,22,26,.7); max-width: 340px; }
+.ym-report-close {
+  appearance: none; padding: 11px 28px; border: 1px solid #000000; border-radius: 999px;
+  background: #000000; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: transform .2s cubic-bezier(.34,1.4,.5,1), background .18s ease;
+}
+.ym-report-close:hover { background: #171717; transform: translateY(-1px) scale(1.04); }
+.ym-report-close:active { transform: scale(.98); }
+.ym-report-done.hidden { display: none; }
+.ym-report-done {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px; min-height: 240px; padding: 24px 0; text-align: center;
+}
+.ym-report-done-title { font-size: 24px; font-weight: 700; color: #14161a; }
+.ym-report-done-sub { font-size: 14px; line-height: 1.5; color: rgba(20,22,26,.7); max-width: 340px; }
+.ym-report-discord {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: #000000; font-weight: 600; text-decoration: none;
+  transition: color .16s ease;
+}
+.ym-report-discord:hover { color: #000000; }
+.ym-report-discord-text { text-decoration: underline; }
+.ym-report-discord-arrow {
+  width: 13px; height: 13px; flex: 0 0 auto;
+  transition: transform .18s cubic-bezier(.34,1.4,.5,1);
+}
+.ym-report-discord:hover .ym-report-discord-arrow { transform: translate(1.5px, -1.5px); }
+.ym-report-foot { display: flex; justify-content: flex-end; margin-top: 18px; }
+.ym-report-btn {
+  appearance: none;
+  padding: 9px 18px; border: 0; border-radius: 11px;
+  background: #e5484d; color: #fff; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 8px 22px -10px rgba(229,72,77,.8);
+  transition: background .18s ease, transform .15s ease;
+}
+.ym-report-btn:hover { background: #d23b40; }
+.ym-report-btn:active { transform: scale(.97); }

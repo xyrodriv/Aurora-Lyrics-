@@ -14,6 +14,10 @@
  *                pre-hidden on yt-navigate-start and revealed on the content
  *                swap, so the fade IS the appearance (not after it).
  *   4. micro   — small hover/press transitions on buttons, cards and chips.
+ *   5. tabs    — the watch-page tab panel (Up next / Lyrics / Comments /
+ *                Related) fades + rises in instead of hard-cutting.
+ *   6. like    — press-shrink + spring-back on the like / dislike buttons, plus
+ *                a small emoji flourish (up for like, down for dislike).
  *
  * Runs in the page world (injected as <script src>), so it can read YTM's DOM
  * and receive settings over window.postMessage like the other add-ons.
@@ -32,7 +36,7 @@
   // debug loop is: set true, reload the tab, drive the page, read the console.
   const SM_DEBUG = false;
   const dbg = (...args) => { if (SM_DEBUG) console.log("[SmoothMotion]", ...args); };
-  dbg("build r17 loaded");
+  dbg("build r29 loaded");
 
   const EXT_ID = "ytmod-smooth-motion";
   const STYLE_ID = "ym-sm-style";
@@ -43,7 +47,7 @@
   const REVEAL_QUIET_MS = 140; // quiet period that means "the page has settled"
   const FALLBACK_MS = 1500;    // last-resort reveal if the swap was never seen
 
-  const DEFAULTS = { master: true, guide: true, search: true, pages: true, micro: true };
+  const DEFAULTS = { master: true, guide: true, search: true, pages: true, micro: true, tabs: true, like: true };
   let settings = Object.assign({}, DEFAULTS);
   let urlPoll = 0;
   let lastUrl = location.href;
@@ -63,6 +67,12 @@
     :root {
       --ym-sm-ease: cubic-bezier(.22,.61,.36,1);
       --ym-sm-dur: .3s;
+      /* Guide-only ease: a stronger easeOutQuint so the panel collapse/read
+         reads as a real deceleration rather than the linear snap the drawer
+         inherits from YTM's inline transition-duration:0ms. The other modules
+         keep --ym-sm-ease (their durations are short enough that the curve
+         matters less, and their curves were chosen deliberately). */
+      --ym-sm-guide-ease: cubic-bezier(.22,1,.36,1);
     }
 
     /* 1. Guide open/close. Ease the browse-content offset so it glides. Gated on
@@ -117,17 +127,114 @@
       from { opacity: 1; }
       to   { opacity: 0; }
     }
+    /* Rail-ghost: a clone of #mini-guide we drop on open so the icons can fade
+       out beneath the expanding panel. YTM REMOVES #mini-guide from the DOM
+       the instant the guide opens (verified by querySelector + elementsFromPoint
+       — the element is gone, not just display:none), so the animation on the
+       real element never has time to run and the icons vanish instantly. A
+       fixed-position clone preserves the visual at the rail's last box and
+       fades underneath the panel (z-index 3, below the panel's 4). pointer-
+       events:none so a half-faded rail is never clickable. */
+    .ym-sm-rail-ghost {
+      position: fixed !important;
+      z-index: 3 !important;
+      pointer-events: none !important;
+      animation: ym-sm-mini-out .2s var(--ym-sm-guide-ease) both !important;
+    }
+    /* Guide-ghost: the mirror of the rail ghost, for the COLLAPSE direction.
+       YTM snaps #guide to 72px in one frame AND swaps its content out, so the
+       full 240px panel is gone before any transition could run on it. Cloning
+       the panel preserves a full-width copy that CAN be collapsed: the clip
+       eats it away from the right edge inward while it fades, which is the
+       visible "collapsing to the left". Held ABOVE the drawer (z-index 5) so
+       the snapped 72px drawer behind it can never occlude it. */
+    .ym-sm-guide-ghost {
+      position: fixed !important;
+      z-index: 5 !important;
+      pointer-events: none !important;
+      animation: ym-sm-guide-ghost-out var(--ym-sm-dur) var(--ym-sm-guide-ease) both !important;
+    }
+    @keyframes ym-sm-guide-ghost-out {
+      from { opacity: 1; clip-path: inset(0 0 0 0); }
+      to   { opacity: 0; clip-path: inset(0 100% 0 0); }
+    }
+    /* The drawer's background AND its 1px right divider line live on
+       #mini-guide-background (position:fixed, purely decorative). YTM snaps its
+       width 240px -> 72px carrying only an opacity transition, so that divider
+       jumped to the rail edge in one frame — a hard cut, and a second line
+       drawn right next to the panel's own. Give it a width transition for the
+       window so the background and its line glide in step with the collapse.
+       Safe: it is fixed and decorative, so animating its width reflows nothing
+       else on the page. */
+    html.ym-sm-guide.ym-sm-guiding #mini-guide-background {
+      transition: width var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  opacity .2s linear !important;
+    }
+    /* Content motion — the main page content glides instead of snapping.
+       #player-page is position:fixed and YTM owns its left/width, which is why
+       it was left out entirely before: gliding the CONTAINER on its own is what
+       produced the "black space" — the box slides to its new size while the
+       video inside keeps its fixed inline width/height for the whole 0.3s, so
+       the page behind shows through the difference.
+       The way to get the glide WITHOUT the artefact is to move BOTH: the
+       container and the video's own inline geometry, on the same duration and
+       the same curve. The video is then resizing in step with the box it lives
+       in, so there is no gap for anything to show through — the artefact is
+       closed by construction rather than by refusing to animate at all.
+       The FLIP is suppressed for the length of this window (see applyFlip) so
+       its inline transform cannot fight these transitions. */
+    html.ym-sm-guide.ym-sm-guiding #player-page {
+      transition: left var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  width var(--ym-sm-dur) var(--ym-sm-guide-ease) !important;
+    }
+    html.ym-sm-guide.ym-sm-guiding #player-page video.video-stream {
+      transition: width var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  height var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  left var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  top var(--ym-sm-dur) var(--ym-sm-guide-ease) !important;
+    }
+    /* Base clip-path on the drawer so the collapse transition has an explicit
+       from-value to interpolate from (clip-path: none -> inset() does not
+       interpolate cleanly in every engine). Fully visible at rest; the
+       collapsed state overrides it; the opening animation overrides it during
+       its window. */
+    html.ym-sm-guide #guide {
+      clip-path: inset(0 0 0 0);
+    }
     /* The drawer itself. YTM pins transition-duration:0ms inline, so the panel
        vanishes in one frame; an !important stylesheet rule beats a normal inline
-       style. We also fade the panel's opacity with the slide. Visibility is
-       delayed when collapsing (so the fade is visible) but immediate when
-       opening (so it does not appear late). */
+       style. We also fade the panel's opacity with the slide, and clip the
+       panel from the RIGHT edge inward on collapse so it visibly collapses
+       leftward instead of snapping away. Visibility is delayed when collapsing
+       (so the fade is visible) but immediate when opening (so it does not
+       appear late). */
     html.ym-sm-guide.ym-sm-guiding #guide {
-      transition: opacity var(--ym-sm-dur) var(--ym-sm-ease),
+      transition: opacity var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  clip-path var(--ym-sm-dur) var(--ym-sm-guide-ease),
                   visibility 0s linear 0s !important;
     }
+    /* Collapse. The width is HELD at the expanded size for the length of the
+       window: YTM snaps the drawer to 72px in one frame (its inline
+       transition-duration:0ms), and a clip-path on a 72px box has nothing left
+       to collapse — the full panel is already gone by then, which is why a
+       fade on the snapped box reads as "it just disappears". Forcing the
+       expanded width back on for the interaction gives the clip a full 240px
+       panel to eat away from the right edge inward: that IS the visible
+       "collapsing to the left".
+       It is released together with .ym-sm-guiding, by which point the panel is
+       fully clipped and hidden, so the snap back to 72px is never seen. YTM's
+       expanded guide is 240px — the same constant the JS thresholds use
+       (offsetWidth < 120 means collapsed).
+
+       REVERTED: that width hold is what made the PAGE CONTENT hard-cut. YTM's
+       layout math reads the drawer's rendered width, so holding it at 240 for
+       the window left the content at the expanded offset and then snapped it
+       when the class was released. The drawer is now left to snap on its own
+       and the visible collapse is carried by a GHOST clone of the panel
+       (.ym-sm-guide-ghost / dropGuideGhost) — same look, zero layout cost. */
     html.ym-sm-guide.ym-sm-guiding.ym-sm-guide-collapsed #guide {
-      transition: opacity var(--ym-sm-dur) var(--ym-sm-ease),
+      transition: opacity var(--ym-sm-dur) var(--ym-sm-guide-ease),
+                  clip-path var(--ym-sm-dur) var(--ym-sm-guide-ease),
                   visibility 0s linear var(--ym-sm-dur) !important;
     }
     /* The collapsed END STATE, on the persistent class. This used to hang off the
@@ -140,6 +247,7 @@
        between the two states, never a state of its own. */
     html.ym-sm-guide.ym-sm-guide-collapsed #guide {
       opacity: 0 !important;
+      clip-path: inset(0 100% 0 0) !important;
     }
     /* Opening. While collapsed #guide is display:none, and a transition cannot
        run out of a display:none start state — there is no computed style to
@@ -150,11 +258,16 @@
        above already hands the transition an opacity:0 to start from; the
        animation then simply does the same job. Both paths, one visual.) */
     html.ym-sm-guide.ym-sm-guide-opening #guide {
-      animation: ym-sm-guide-in var(--ym-sm-dur) var(--ym-sm-ease) both;
+      animation: ym-sm-guide-in var(--ym-sm-dur) var(--ym-sm-guide-ease) both;
     }
+    /* The clip now STARTS at the rail width (72px) instead of at zero.
+       #mini-guide-background carries the panel's real 1px divider line and
+       animates 72px -> 240px, so starting the clip at 72px makes the clip edge
+       and that divider travel as ONE line. Starting it at 0 left two edges at
+       different positions — the "duplicate line" on uncollapse. */
     @keyframes ym-sm-guide-in {
-      from { opacity: 0; }
-      to   { opacity: 1; }
+      from { opacity: 0; clip-path: inset(0 calc(100% - 72px) 0 0); }
+      to   { opacity: 1; clip-path: inset(0 0 0 0); }
     }
     html.ym-sm-guide.ym-sm-guiding #guide #contentContainer {
       transition-duration: var(--ym-sm-dur) !important;
@@ -229,18 +342,15 @@
           Deliberately NOT a blanket "ytmusic-player-bar button": every
           yt-icon-button wraps an inner <button>, and scaling both compounds to
           1.08 squared. */
+    /* The PLAYER-BAR buttons are deliberately NOT in this list any more. Their
+       press + spring-back is wanted "in general" (AJ, 2026-10-07) — i.e. with
+       this add-on off — so that styling lives in the always-injected
+       src/content/styles.css. Keeping a transition for them here would also
+       WIN on specificity and silently kill that spring. This module keeps the
+       nav-bar buttons, which are not part of that ask. */
     html.ym-sm-micro ytmusic-nav-bar yt-icon-button,
-    html.ym-sm-micro ytmusic-nav-bar tp-yt-paper-icon-button,
-    html.ym-sm-micro ytmusic-player-bar yt-icon-button,
-    html.ym-sm-micro ytmusic-player-bar tp-yt-paper-icon-button,
-    html.ym-sm-micro ytmusic-player-bar [class*="ytSpecButtonShapeNextHost"] {
+    html.ym-sm-micro ytmusic-nav-bar tp-yt-paper-icon-button {
       transition: scale .16s var(--ym-sm-ease), opacity .16s ease !important;
-    }
-    /* Ours already animate colour, so keep those in the list rather than
-       replacing them with a scale-only transition. */
-    html.ym-sm-micro ytmusic-player-bar .ym-pb-btn {
-      transition: scale .16s var(--ym-sm-ease), color .16s ease,
-                  background-color .16s ease !important;
     }
     html.ym-sm-micro ytmusic-nav-bar yt-icon-button:hover,
     html.ym-sm-micro ytmusic-nav-bar tp-yt-paper-icon-button:hover,
@@ -285,6 +395,73 @@
       transition: opacity .15s var(--ym-sm-ease) !important;
     }
 
+    /* 6. Watch-page tabs. Up next / Lyrics / Comments / Related swap the
+       #tab-renderer panel by flipping display on its direct children, and both
+       the tabs and the container compute transition-duration: 0s — so the swap
+       hard-cuts. A transition cannot fix a display flip: a display:none element
+       has no computed style to animate FROM. So the entrance is an ANIMATION,
+       and it rides a class on the CONTAINER rather than on a child — at click
+       time we do not know which child will be shown, and an animation only runs
+       on an element once it is actually rendered, so whichever child is
+       displayed while the class is live runs the entrance on its own. The child
+       going to display:none is not rendered, so it never animates.
+       The transform lives on the CHILDREN, never on #tab-renderer itself: that
+       node is a scroller (it carries the scroller class), and promoting it is
+       exactly what drops the LCD sub-pixel AA on the text inside it. */
+    html.ym-sm-tabs #tab-renderer.ym-sm-tabswap > * {
+      /* Same blur-lift the Centered-home snippet uses, but armed from the CLICK
+         (capture phase) so it starts the instant the tab flips instead of
+         waiting for the new child to be rendered (AJ, 2026-10-19). */
+      animation: ym-sm-tab-in .4s cubic-bezier(.32,.72,0,1) both;
+    }
+    @keyframes ym-sm-tab-in {
+      from { opacity: 0; transform: translateY(10px); filter: blur(6px); }
+      to   { opacity: 1; transform: none; filter: blur(0); }
+    }
+    /* Comment replies. YTM loads them on demand, so the reply items are
+       INSERTED when "View replies" is hit — and an animation declared on an
+       inserted element runs the moment it lands, which is exactly the right
+       time. That is why this one needs no JS at all, unlike the tab entrance.
+       Scoped to the replies renderer so the top-level comments (same
+       ytd-comment-view-model tag) are not swept up. */
+    html.ym-sm-tabs ytd-comment-replies-renderer ytd-comment-view-model {
+      animation: ym-sm-tab-in .28s var(--ym-sm-ease) both;
+    }
+    /* The reply connector line was attempted here and REVERTED (r26). What the
+       investigation established, so it is not re-chased:
+         - the visible line is NOT .continuation: hiding that element changed
+           nothing on screen;
+         - at the line's own pixels elementsFromPoint returns div.thread-hitbox
+           topmost with EVERY element in the stack at background rgba(0,0,0,0),
+           which means a ::before/::after paints it — a pseudo cannot be
+           targeted, only scaled through its host;
+         - animating the host (.threadline / .thread-hitbox) drew nothing, and
+           the earlier .continuation attempt rested on its from keyframe
+           instead of progressing, which points at YTM re-stamping these nodes
+           (virtualised comment list) and defeating the animation.
+       A CSS animation on this 1px pseudo is not reliably reachable, so it was
+       dropped rather than chased. */
+
+    /* 7. Like / Dislike flourish — the emoji burst on the state change.
+       The press-shrink and its spring-back are deliberately NOT here: they are
+       wanted "in general" (AJ, 2026-10-07), so they live in the always-injected
+       src/content/styles.css alongside the rest of the player-bar buttons.
+       The particles are spawned by JS (spawnLikeFlourish) and are
+       position:fixed, so the player bar can never clip them. */
+    .ym-sm-flourish {
+      position: fixed;
+      z-index: 2147483000;
+      pointer-events: none;
+      user-select: none;
+      font-size: 12px;
+      line-height: 1;
+      animation: ym-sm-flourish .78s cubic-bezier(.22,.61,.36,1) both;
+    }
+    @keyframes ym-sm-flourish {
+      from { opacity: 1; transform: translate(-50%, -50%) translate(0, 0) scale(.35); }
+      to   { opacity: 0; transform: translate(-50%, -50%) translate(var(--dx), var(--dy)) scale(1); }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       /* These selectors MUST carry the same .ym-sm-guiding class as the rules
          they override. Both sides are !important, so specificity decides — and
@@ -314,6 +491,9 @@
          on screen for the whole window, so hand the display back to YTM. */
       html.ym-sm-guide.ym-sm-guide-opening #mini-guide { display: none !important; }
       html.ym-sm-micro * { transition: none !important; }
+      html.ym-sm-tabs #tab-renderer.ym-sm-tabswap > * { animation: none !important; }
+      html.ym-sm-tabs ytd-comment-replies-renderer ytd-comment-view-model { animation: none !important; }
+      .ym-sm-flourish { animation: none !important; }
     }
   `;
 
@@ -347,6 +527,8 @@
     root.classList.toggle("ym-sm-search", on("search"));
     root.classList.toggle("ym-sm-pages", on("pages"));
     root.classList.toggle("ym-sm-micro", on("micro"));
+    root.classList.toggle("ym-sm-tabs", on("tabs"));
+    root.classList.toggle("ym-sm-like", on("like"));
     syncGuideState();
     // The video glide belongs to this module too: it is what keeps the player
     // looking right while the panel reflows, and it covers a devtools open or a
@@ -414,6 +596,20 @@
     const root = document.documentElement;
     root.classList.add("ym-sm-guiding");
     root.classList.toggle("ym-sm-guide-opening", !!opening);
+    // On OPEN: YTM is about to remove #mini-guide from the DOM (it does so
+    // synchronously on the click). Drop a fixed-position clone of the rail at
+    // its last box so the icons can fade out beneath the expanding panel —
+    // the .ym-sm-rail-ghost rule runs ym-sm-mini-out on it and self-cleans on
+    // animationend. No-op on COLLAPSE: the rail fades in via the existing
+    // ym-sm-mini-in animation on the real #mini-guide, which YTM only ADDS to
+    // the DOM, so the animation has a target to run on.
+    if (opening) dropRailGhost();
+    // COLLAPSE: YTM snaps #guide to 72px and swaps its content out in the same
+    // frame, so the full panel is gone before anything could animate it. Drop a
+    // clone of the panel (240px) and let THAT carry the collapse — the real
+    // drawer is free to snap, which keeps YTM's layout math and the page
+    // content's own offset correct.
+    else dropGuideGhost();
     if (guidingTimer) clearTimeout(guidingTimer);
     guidingTimer = window.setTimeout(() => {
       guidingTimer = 0;
@@ -425,6 +621,48 @@
       // no pointerdown at all.
       syncGuideState();
     }, GUIDE_ANIM_MS);
+  }
+
+  // Snapshot of the collapsed rail, dropped as a position:fixed overlay so it
+  // can fade out after YTM tears down the real element. Cloned (not moved) so
+  // the original is untouched for syncGuideState and any future reads. Appended
+  // to <body> (NOT inside ytmusic-app) so a re-collapse doesn't mistake it for
+  // a second #mini-guide. Self-removes on animationend.
+  function dropRailGhost() {
+    const rail = document.querySelector("#mini-guide");
+    if (!rail) return;
+    const rect = rail.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const ghost = rail.cloneNode(true);
+    ghost.removeAttribute("id");
+    ghost.classList.add("ym-sm-rail-ghost");
+    ghost.style.left = rect.left + "px";
+    ghost.style.top = rect.top + "px";
+    ghost.style.width = rect.width + "px";
+    ghost.style.height = rect.height + "px";
+    document.body.appendChild(ghost);
+    ghost.addEventListener("animationend", () => ghost.remove(), { once: true });
+  }
+
+  // Collapse-side counterpart of dropRailGhost: a snapshot of the EXPANDED
+  // panel (#guide-content, ~239px), dropped as a position:fixed overlay at its
+  // last box so it can collapse away while the real drawer snaps underneath it.
+  // Cloned (never moved), id stripped, appended to <body>, self-removed on
+  // animationend — so nothing downstream can mistake it for the real panel.
+  function dropGuideGhost() {
+    const panel = document.querySelector("#guide-content");
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const ghost = panel.cloneNode(true);
+    ghost.removeAttribute("id");
+    ghost.classList.add("ym-sm-guide-ghost");
+    ghost.style.left = rect.left + "px";
+    ghost.style.top = rect.top + "px";
+    ghost.style.width = rect.width + "px";
+    ghost.style.height = rect.height + "px";
+    document.body.appendChild(ghost);
+    ghost.addEventListener("animationend", () => ghost.remove(), { once: true });
   }
 
   /* ---- video re-fit glide (FLIP) -------------------------------------------
@@ -475,6 +713,14 @@
 
   function applyFlip(el, prev, next) {
     if (REDUCED_MOTION) return;
+    // While the guide window is armed the video is gliding through its own CSS
+    // width/height transition (see the content-motion block). A FLIP on top of
+    // that would fight it — it installs an inline transition on the very same
+    // element and would compound two offsets — so stand down for the window and
+    // let the CSS transitions own the motion. The FLIP still covers every OTHER
+    // re-fit reason (window resize, devtools open, fullscreen), where no guide
+    // window is armed and the geometry genuinely snaps.
+    if (guidingTimer) return;
     if (!prev || !next || !prev.width || !next.width || !next.height) return;
     // The video keeps its aspect ratio, so both axes change by the same factor —
     // one uniform scale is enough, and it is what stops the frame distorting
@@ -583,7 +829,13 @@
     const collapsed = guide
       ? guide.offsetWidth < 120
       : root.classList.contains("ym-sm-guide-collapsed");
-    beginGuideMotion(!collapsed);
+    // DIRECTION FIX. `!collapsed` is the NEW collapsed state (used by the class
+    // toggle below); the "opening" direction is its INVERSE — this toggle OPENS
+    // the guide exactly when it is currently collapsed. Passing !collapsed here
+    // marked every collapse as an opening and every opening as a collapse, so
+    // the open-side rules (ym-sm-guide-in, and the rail ghost) never fired on a
+    // real open, and the open-side animation instead fought the collapse.
+    beginGuideMotion(collapsed);
     root.classList.toggle("ym-sm-guide-collapsed", !collapsed);
     lastGuideToggle = performance.now();
   }
@@ -1085,6 +1337,178 @@
     menuAnimPollRAF = requestAnimationFrame(() => pollMenuPopupOpen(performance.now() + 600));
   }
 
+  // ---- 6. watch-page tabs --------------------------------------------------
+  // Up next / Lyrics / Comments / Related on the watch page swap the
+  // #tab-renderer panel by flipping display on its direct children — measured
+  // live: both the tabs and the container compute transition-duration: 0s, and
+  // a display flip cannot be transitioned at all (a display:none element has no
+  // computed style to animate FROM). So the entrance is an ANIMATION, applied
+  // through a class on the CONTAINER: whichever child is displayed while the
+  // class is live runs it, and the child going to display:none is not rendered
+  // so it never animates. That also means we never have to work out which child
+  // is the new one.
+  //
+  // Armed from the CLICK in the capture phase, so it lands before the tab's own
+  // handler swaps the content and before the next paint — the swap itself is
+  // synchronous, so the class is already live when the new child is displayed.
+  // Arrow keys are paper-tabs' keyboard selection path and move the selection
+  // with no click, so they are covered separately.
+  //
+  // Deliberately NOT a MutationObserver: the lyrics panel lives inside one of
+  // these children and repaints on every word sweep, so a subtree observer here
+  // would fire hundreds of times a second.
+  const TAB_ANIM_MS = 400;
+  let tabSwapTimer = 0;
+  let tabContentObserver = null;
+  let tabContentTimer = 0;
+
+  function tabsOn() { return settings.master !== false && settings.tabs !== false; }
+
+  function playTabEntrance() {
+    if (REDUCED_MOTION) return;
+    const host = document.querySelector("#tab-renderer");
+    if (!host) return;
+    // Restart the entrance: drop the class, flush the style so the browser
+    // commits "no animation", then re-add it. Without the flush a second switch
+    // would keep the same class and the animation would not replay.
+    host.classList.remove("ym-sm-tabswap");
+    void host.offsetWidth;
+    host.classList.add("ym-sm-tabswap");
+    if (tabSwapTimer) clearTimeout(tabSwapTimer);
+    tabSwapTimer = window.setTimeout(() => {
+      tabSwapTimer = 0;
+      host.classList.remove("ym-sm-tabswap");
+    }, TAB_ANIM_MS + 60);
+  }
+
+  // The Comments tab re-fetches on every visit: the panel is shown first and the
+  // comments land a moment later, so an entrance armed at click time animates an
+  // EMPTY box and the comments then pop in (AJ: "the animation happens too
+  // early"). So after a switch we watch the newly shown panel and run the
+  // entrance again the moment real content lands.
+  function shownTabChild() {
+    const host = document.querySelector("#tab-renderer");
+    if (!host) return null;
+    for (const child of host.children) {
+      if (getComputedStyle(child).display !== "none") return child;
+    }
+    return null;
+  }
+
+  function stopTabContentWatch() {
+    if (tabContentObserver) { tabContentObserver.disconnect(); tabContentObserver = null; }
+    if (tabContentTimer) { clearTimeout(tabContentTimer); tabContentTimer = 0; }
+  }
+
+  function watchTabContent() {
+    stopTabContentWatch();
+    // The swap happens in YTM's own click handler, so read the shown child on
+    // the next frame rather than now.
+    requestAnimationFrame(() => {
+      const shown = shownTabChild();
+      // Never watch the lyrics panel: it is the extension's own, it is populated
+      // already, and it repaints on every word sweep — a subtree observer on it
+      // would fire hundreds of times a second.
+      if (!shown || shown.id === "ym-sl-panel") return;
+      tabContentObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const node of m.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            // The panel paints a loading placeholder first; that is not the
+            // content we are waiting for.
+            if (/loading|spinner/i.test(String(node.className || ""))) continue;
+            stopTabContentWatch();
+            playTabEntrance();
+            return;
+          }
+        }
+      });
+      tabContentObserver.observe(shown, { childList: true, subtree: true });
+      tabContentTimer = window.setTimeout(stopTabContentWatch, 2500);
+    });
+  }
+
+  function onTabSelect(event) {
+    if (!tabsOn()) return;
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    if (!target.closest("tp-yt-paper-tab")) return;
+    playTabEntrance();
+    watchTabContent();
+  }
+
+  function onTabKey(event) {
+    if (!tabsOn()) return;
+    // Only the keys that MOVE the tab selection: paper-tabs select on focus
+    // change, so an arrow key switches tabs with no click to hook.
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" &&
+        event.key !== "Home" && event.key !== "End") return;
+    onTabSelect(event);
+  }
+
+  // ---- 7. like / dislike flourish ------------------------------------------
+  // The press-shrink and its spring-back are pure CSS (the section 7 block).
+  // This only spawns the emoji burst, and only on the SET direction: YTM KEEPS
+  // the label ("Like" / "Dislike") and carries the set state in
+  // aria-pressed="true" (verified live on a liked track), so that attribute is
+  // what keeps a toggle-OFF quiet.
+  const LIKE_EMOJI = ["🎉", "✨", "💚", "⭐", "🎊", "💫"];
+  const DISLIKE_EMOJI = ["💧", "😢", "💔", "😞"];
+  const FLOURISH_COUNT = 7;
+  const FLOURISH_MS = 900;
+
+  function likeOn() { return settings.master !== false && settings.like !== false; }
+
+  // Emoji burst around a button. Built with createElement + textContent (never
+  // innerHTML) so it stays Trusted-Types safe. Each particle is appended to
+  // <body> at the button's centre and carries its own --dx/--dy, so the single
+  // shared keyframe sends them in different directions: like bursts upward,
+  // dislike drips downward.
+  function spawnLikeFlourish(button, sad) {
+    if (REDUCED_MOTION) return;
+    const rect = button.getBoundingClientRect();
+    if (!rect.width) return;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const pool = sad ? DISLIKE_EMOJI : LIKE_EMOJI;
+    for (let i = 0; i < FLOURISH_COUNT; i++) {
+      const p = document.createElement("span");
+      p.className = "ym-sm-flourish";
+      p.textContent = pool[i % pool.length];
+      const spread = FLOURISH_COUNT > 1 ? (i / (FLOURISH_COUNT - 1)) * 2 - 1 : 0;
+      const dx = spread * 26 + (Math.random() * 8 - 4);
+      const dy = sad ? 26 + Math.random() * 12 : -30 - Math.random() * 12;
+      p.style.left = cx + "px";
+      p.style.top = cy + "px";
+      p.style.fontSize = (10 + Math.random() * 5).toFixed(1) + "px";
+      p.style.setProperty("--dx", dx.toFixed(1) + "px");
+      p.style.setProperty("--dy", dy.toFixed(1) + "px");
+      p.style.animationDelay = (i * 24) + "ms";
+      document.body.appendChild(p);
+      p.addEventListener("animationend", () => p.remove(), { once: true });
+      // Belt and braces: if the animation never fires (tab hidden mid-burst, or
+      // reduced motion switched on while it is in flight) the particle is still
+      // collected rather than left on screen.
+      window.setTimeout(() => p.remove(), FLOURISH_MS + 400 + i * 24);
+    }
+  }
+
+  function onLikeClick(event) {
+    if (!likeOn()) return;
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    const btn = target.closest("ytmusic-like-button-renderer button");
+    if (!btn) return;
+    // YTM does NOT relabel the button once it is set — the label stays "Like" /
+    // "Dislike" and the SET state is carried by aria-pressed="true". So the
+    // state has to come from aria-pressed, otherwise the flourish fires on the
+    // way OUT as well as the way in. Only the UNSET direction bursts.
+    if (btn.getAttribute("aria-pressed") === "true") return;
+    const label = btn.getAttribute("aria-label") || "";
+    if (/^like$/i.test(label)) spawnLikeFlourish(btn, false);
+    else if (/^dislike$/i.test(label)) spawnLikeFlourish(btn, true);
+  }
+
   // ---- lifecycle -----------------------------------------------------------
   function start() {
     ensureStyle();
@@ -1092,6 +1516,9 @@
     dbg("start", JSON.stringify(settings));
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("click", onGuideClick, true);
+    document.addEventListener("click", onTabSelect, true);
+    document.addEventListener("keydown", onTabKey, true);
+    document.addEventListener("click", onLikeClick, true);
     startPageWatch();
     syncGuideState();
     document.addEventListener("click", onActionMenuClickCapture, true);
@@ -1105,6 +1532,9 @@
   function teardown() {
     document.removeEventListener("pointerdown", onPointerDown, true);
     document.removeEventListener("click", onGuideClick, true);
+    document.removeEventListener("click", onTabSelect, true);
+    document.removeEventListener("keydown", onTabKey, true);
+    document.removeEventListener("click", onLikeClick, true);
     document.removeEventListener("click", onDocClick, true);
     document.removeEventListener("keydown", onKeyDown, true);
     if (navHandler) {
@@ -1122,6 +1552,8 @@
     if (revealTimer) { clearTimeout(revealTimer); revealTimer = 0; }
     if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = 0; }
     if (guidingTimer) { clearTimeout(guidingTimer); guidingTimer = 0; }
+    if (tabSwapTimer) { clearTimeout(tabSwapTimer); tabSwapTimer = 0; }
+    stopTabContentWatch();
     // Never leave a half-finished glide on the video: the inline transform is
     // ours, and leaving it behind would offset the player permanently.
     if (flipTimer) { clearTimeout(flipTimer); flipTimer = 0; }
@@ -1156,11 +1588,14 @@
     shownEl = null;
     const root = document.documentElement;
     root.classList.remove(
-      "ym-sm-on", "ym-sm-guide", "ym-sm-search", "ym-sm-pages", "ym-sm-micro",
-      "ym-sm-guide-collapsed", "ym-sm-guiding", "ym-sm-guide-opening"
+      "ym-sm-on", "ym-sm-guide", "ym-sm-search", "ym-sm-pages", "ym-sm-micro", "ym-sm-tabs",
+      "ym-sm-like", "ym-sm-guide-collapsed", "ym-sm-guiding", "ym-sm-guide-opening"
     );
     document.querySelectorAll(".ym-sm-page-in, .ym-sm-page-out")
       .forEach((el) => el.classList.remove("ym-sm-page-in", "ym-sm-page-out"));
+    document.querySelectorAll("#tab-renderer.ym-sm-tabswap")
+      .forEach((el) => el.classList.remove("ym-sm-tabswap"));
+    document.querySelectorAll(".ym-sm-flourish").forEach((el) => el.remove());
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
   }

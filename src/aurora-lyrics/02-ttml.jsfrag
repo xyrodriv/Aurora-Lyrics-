@@ -252,10 +252,20 @@
         if (bg.end > end) end = bg.end;
       }
 
-      const plainText = words
-        .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
-        .join("")
-        .trim();
+      const plainText = words.length
+        ? words
+            .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
+            .join("")
+            .trim()
+        : // No inner spans: a line-only body (lrc.red `lrc:timing="Line"`, plain
+          // TTML exports) carries its whole line as bare <p> text. Derive the text
+          // from the body so the line SURVIVES — otherwise empty plainText hits the
+          // `continue` below, the parse returns nothing, and loadTTML reports a
+          // failure. That is why lrc.red fetched line-level TTML and then silently
+          // fell through to the next source (AJ, 2026-10-19).
+          decodeEntities(String(body).replace(/<[^>]*>/g, " "))
+            .replace(/\s+/g, " ")
+            .trim();
       if (!plainText && !words.length && !background.length) continue;
       const pTiming = !!(
         lineAttrs.begin ||

@@ -84,6 +84,12 @@
       fsPlayerPlayButton.setAttribute("aria-label", playState === "play" ? "Play" : "Pause");
     }
     syncFullscreenModeButtons();
+    refreshFsRatingState();
+    // Re-pin the edge Like / Dislike every tick so a layout swap (side <-> cover /
+    // MV) that moves the media pane or the transport chip still lands the buttons
+    // correctly. positionFsEdgeButtons() re-reads both rects, so it is a no-op
+    // unless something actually moved.
+    positionFsEdgeButtons();
   }
 
   /* ---- shuffle / repeat mirroring -----------------------------------------
@@ -187,6 +193,16 @@
     { tag: "rect", attrs: { x: "3", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
     { tag: "rect", attrs: { x: "14", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
   ];
+  // Sliders/adjust icon — reads as "options" (AJ, 2026-10-19). Opens the SAME
+  // tabbed options overlay the normal panel uses, so fullscreen has it too.
+  const FS_ICON_OPTIONS = [
+    { tag: "line", attrs: { x1: "4", y1: "6", x2: "20", y2: "6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "9", cy: "6", r: "2.4", fill: "currentColor" } },
+    { tag: "line", attrs: { x1: "4", y1: "12", x2: "20", y2: "12", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "15", cy: "12", r: "2.4", fill: "currentColor" } },
+    { tag: "line", attrs: { x1: "4", y1: "18", x2: "20", y2: "18", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "7", cy: "18", r: "2.4", fill: "currentColor" } },
+  ];
   // Solid-fill Spicy icons for the transport chip (Prev / Play / Pause /
   // Next). The path data is byte-for-byte from Icons.ts; only the wrapping
   // <svg> viewBox is normalised so the chip's square buttons can render it
@@ -270,6 +286,188 @@
     return svg;
   }
 
+  /* ---- like / dislike buttons in fullscreen --------------------------------
+     AJ (2026-10-08, evening): drop the YTM-native mirroring entirely. The old
+     build cloned YTM's icon and mirrored its like-status every 500ms, which
+     flickered and showed a permanently-filled thumb (YTM's aria-pressed is
+     unreliable). These buttons are now 100% OURS: our own glyph, our own state,
+     our own persistence. We STILL fire YTM's real rating (updateLikeStatus) as a
+     best-effort sync so the like persists to the YouTube account, but our visual
+     state is the sole source of truth and never reads YTM's renderer for display.
+
+     State lives in window.localStorage keyed by the current videoId (the `v` URL
+     param — available in the page world, unlike chrome.storage). On video change
+     the buttons re-seed from that saved map; a one-time seed from YTM's
+     like-status lets a like made on the native bar show up once. No per-tick YTM
+     reads, so no flicker. */
+
+  const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
+  let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
+  let fsCurrentFsVideoId = null;            // last videoId we painted for
+  let fsEdgeObserver = null;                // ResizeObserver that re-pins the edge buttons
+
+  function loadFsRatings() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(FS_RATINGS_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === "object" ? obj : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function saveFsRatings() {
+    try {
+      if (window.localStorage) window.localStorage.setItem(FS_RATINGS_KEY, JSON.stringify(fsRatings));
+    } catch (_) {}
+  }
+  function getCurrentFsVideoId() {
+    try {
+      const v = new URLSearchParams(window.location.search).get("v");
+      return v || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function getFsRating(videoId) {
+    if (!videoId) return null;
+    return fsRatings[videoId] || null;      // "like" | "dislike" | null
+  }
+
+  // Pin the Like / Dislike to the MEDIA PANE's left/right edges, but on the
+  // CONTROLS ROW's vertical centre (AJ, 2026-10-18).
+  //
+  // The buttons live in .ym-sl-fs-player-controls (inset:0 over the overlay,
+  // z-index 21) rather than inside .ym-sl-fs-media. Two reasons:
+  //   1. .ym-sl-fs-media is z-index 2 and .ym-sl-fs-lyrics is z-index 3, so a
+  //      button parented to the media is painted UNDER the lyrics pane and the
+  //      dislike disappeared behind the lyrics in side layout (AJ's report).
+  //      The controls layer is above everything.
+  //   2. The controls layer is a full-overlay layer, so we can compute BOTH the
+  //      media's horizontal edges and the transport chip's vertical centre in
+  //      the same coordinate space.
+  //
+  // Horizontal: media pane edges (so they track cover art / MV width).
+  // Vertical:   the play chip's centre (so they sit on the same line as the
+  //             transport controls, not floating at the video's mid-height).
+  function positionFsEdgeButtons() {
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
+    const layer = fsPlayerControls;
+    const media = document.querySelector(".ym-sl-fs-media");
+    if (!layer || !media) return;
+    const lc = layer.getBoundingClientRect();
+    const mc = media.getBoundingClientRect();
+    if (!lc.width || !lc.height || !mc.width) return;
+    const pad = 14, bW = 44, bH = 44;
+    const left = mc.left - lc.left + pad;
+    const right = mc.right - lc.left - pad - bW;
+    // Vertical: centre on the transport chip. Its rect is valid even while the
+    // chip is faded out (opacity does not affect layout). Fall back to the
+    // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
+    const chip = layer.querySelector(".ym-sl-fs-play-chip");
+    let top;
+    if (chip) {
+      const cc = chip.getBoundingClientRect();
+      top = cc.top - lc.top + cc.height / 2 - bH / 2;
+    } else {
+      top = lc.height - 46 - bH / 2;
+    }
+    for (const btn of [fsPlayerLikeButton, fsPlayerDislikeButton]) {
+      btn.style.position = "absolute";
+      btn.style.top = top + "px";
+    }
+    fsPlayerLikeButton.style.left = left + "px";
+    fsPlayerDislikeButton.style.left = right + "px";
+  }
+
+  // Our OWN thumb glyph: outline by default (fill:none, stroke:currentColor).
+  // CSS fills it when .active (see 05-styles.jsfrag). Not cloned from YTM.
+  function fsThumbSvg(kind) {
+    const d = kind === "like"
+      ? "M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"
+      : "M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2h-1zm4 0v12h4V3h-4z";
+    return fsSvgIcon(
+      [{ tag: "path", attrs: { d, fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linejoin": "round", "stroke-linecap": "round" } }],
+      "0 0 24 24"
+    );
+  }
+
+  // YTM renderer — used ONLY for the best-effort real-rating sync, never for our
+  // visual state. updateLikeStatus is the only way to rate without firing a DOM
+  // click (which would trigger smooth-motion's emoji particles).
+  function getYtmLikeRenderer() {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return null;
+    return bar.querySelector("ytmusic-like-button-renderer") || null;
+  }
+  function getYtmLikeStatus() {
+    // Reliable, label-independent (INDIFFERENT / LIKE / DISLIKE). Used only to
+    // converge YTM to our state and for the one-time seed — NOT as our truth.
+    const renderer = getYtmLikeRenderer();
+    if (!renderer) return "INDIFFERENT";
+    const attr = renderer.getAttribute("like-status");
+    if (attr) return attr.toUpperCase();
+    const prop = renderer.likeStatus;
+    if (prop) return String(prop).toUpperCase();
+    return "INDIFFERENT";
+  }
+
+  function applyFsRatingToButtons(videoId) {
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
+    const state = getFsRating(videoId);
+    const likeOn = state === "like";
+    const dislikeOn = state === "dislike";
+    fsPlayerLikeButton.classList.toggle("active", likeOn);
+    fsPlayerLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
+    fsPlayerDislikeButton.classList.toggle("active", dislikeOn);
+    fsPlayerDislikeButton.setAttribute("aria-pressed", dislikeOn ? "true" : "false");
+  }
+
+  // Best-effort: converge YTM's REAL like to our state. Our visual never waits on
+  // this. NOTE: disliking on YTM advances the queue (native YTM behaviour) — that
+  // is expected when syncing a real dislike.
+  function syncFsRatingToYtm(target) {
+    const renderer = getYtmLikeRenderer();
+    if (!renderer || typeof renderer.updateLikeStatus !== "function") return;
+    const current = getYtmLikeStatus();
+    try {
+      if (target === "like" && current !== "LIKE") renderer.updateLikeStatus("LIKE");
+      else if (target === "dislike" && current !== "DISLIKE") renderer.updateLikeStatus("DISLIKE");
+      else if (target === null && (current === "LIKE" || current === "DISLIKE")) renderer.updateLikeStatus(current);
+    } catch (_) { /* visual state is authoritative; ignore YTM sync failure */ }
+  }
+
+  function clickFsRating(kind) {
+    const videoId = getCurrentFsVideoId();
+    if (!videoId) return;
+    const current = getFsRating(videoId);
+    // Toggle: pressing the active one clears it; pressing the other switches.
+    const newState = current === kind ? null : kind;
+    if (newState === null) delete fsRatings[videoId];
+    else fsRatings[videoId] = newState;
+    saveFsRatings();
+    applyFsRatingToButtons(videoId);
+    syncFsRatingToYtm(newState);
+  }
+
+  // Called on the 500ms tick AND on build. Only does work when the video changes:
+  // re-seed our buttons from saved state (one-time seed from YTM for videos we
+  // haven't rated ourselves). No per-tick YTM reads, so no flicker.
+  function refreshFsRatingState() {
+    const videoId = getCurrentFsVideoId();
+    if (!videoId) return;
+    if (videoId !== fsCurrentFsVideoId) {
+      fsCurrentFsVideoId = videoId;
+      if (fsRatings[videoId] === undefined) {
+        const yt = getYtmLikeStatus();
+        if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+      }
+      applyFsRatingToButtons(videoId);
+    }
+  }
+  // (Like/Dislike handlers are defined above: clickFsRating() and
+  // refreshFsRatingState(). The old YTM-mirroring functions were removed
+  // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+
   function buildFullscreenControls() {
     if (!fsOverlay || fsControls) return;
     const exit = h(
@@ -306,12 +504,14 @@
       h("option", { value: "song", text: "Song" })
     );
     offsetScopeFs.value = editingOffsetMode;
+    // +/- 60s, kept in step with the options panel (06-panel-ui.jsfrag) and the
+    // clamp in 12-track-offset-sync.jsfrag.
     fsOffsetRange = h("input", {
-      type: "range", min: "-30000", max: "30000", step: "100",
+      type: "range", min: "-60000", max: "60000", step: "100",
       value: "0", "aria-label": "Lyric offset",
     });
     const fsOffsetNumber = h("input", {
-      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-30", max: "30",
+      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-60", max: "60",
       value: "0", "aria-label": "Lyric offset in seconds", title: "Offset in seconds (typed)",
     });
     fsOffsetValue = h("span", { class: "ym-sl-fs-control-offset-value", text: "0.0s" });
@@ -332,11 +532,32 @@
       h("span", { class: "ym-sl-fs-btn-label", text: "Hide lyrics" }),
       fsSvgIcon(FS_ICON_LYRICS),
     );
-    // Options gear removed (AJ 2026-09-27). The offset rail stays reachable
-    // from the normal panel; fullscreen chrome is now just Exit / Layout cycle
-    // / Hide lyrics. offsetWrap (built above) is now a local unused variable -
-    // left in place to keep this diff focused.
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLayoutSelect, fsLyricsToggle);
+    // Options button (AJ, 2026-10-19): fullscreen now reuses the SAME tabbed
+    // options overlay as the normal panel (it is a <body> child floated at a higher
+    // z-index), so no duplicate FS overlay is needed. offsetWrap (built above) stays
+    // a local unused variable; the overlay's Sync tab carries the offset.
+    fsOptionsButton = h(
+      "button",
+      {
+        type: "button",
+        class: "ym-sl-fs-icon-btn ym-sl-fs-options-btn",
+        title: "Options",
+        "aria-label": "Open lyrics options",
+      },
+      h("span", { class: "ym-sl-fs-btn-label", text: "Options" }),
+      fsSvgIcon(FS_ICON_OPTIONS),
+    );
+    fsOptionsButton.addEventListener("click", () => {
+      const overlay = document.querySelector(".ym-sl-options-overlay");
+      if (!overlay) return;
+      const opening = overlay.classList.contains("hidden");
+      overlay.classList.toggle("hidden");
+      if (opening && overlay._staggerOpen) overlay._staggerOpen();
+    });
+    // Order: Exit (left) · Hide lyrics · Layout · Options (right). Cycling the
+    // layout must never sit next to Exit, or a mis-click exits fullscreen
+    // (AJ, 2026-10-19).
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLyricsToggle, fsLayoutSelect, fsOptionsButton);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -352,6 +573,22 @@
     const repeatButton = h("button", { class: "ym-sl-fs-player-repeat", type: "button", title: "Repeat", "aria-label": "Repeat", "aria-pressed": "false" }, fsSvgIcon(FS_ICON_REPEAT, "0 0 24 24"));
     fsPlayerShuffleButton = shuffleButton;
     fsPlayerRepeatButton = repeatButton;
+    // Like / Dislike sit on the MEDIA PANE's left/right edges, but on the
+    // CONTROLS ROW's vertical centre (AJ, 2026-10-18). They are appended into
+    // .ym-sl-fs-player-controls (z-index 21) so they paint above the lyrics
+    // pane; positionFsEdgeButtons() computes the media's horizontal edges and
+    // the transport chip's vertical centre. These are our OWN buttons (see the
+    // like/dislike section): our own glyph, our own state, our own persistence.
+    // The click fires YTM's real rating as a best-effort sync, but our visual
+    // state is the source of truth and never reads YTM's renderer. Our glyph is
+    // drawn here (outline; CSS fills it when .active).
+    const likeButton = h("button", { class: "ym-sl-fs-player-like ym-sl-fs-player-like--edge", type: "button", title: "Like", "aria-label": "Like", "aria-pressed": "false" }, fsThumbSvg("like"));
+    const dislikeButton = h("button", { class: "ym-sl-fs-player-dislike ym-sl-fs-player-dislike--edge", type: "button", title: "Dislike", "aria-label": "Dislike", "aria-pressed": "false" }, fsThumbSvg("dislike"));
+    fsPlayerLikeButton = likeButton;
+    fsPlayerDislikeButton = dislikeButton;
+    // Seed our OWN rating state for this video (one-time seed from saved map / YTM,
+    // then paint the buttons). Our visual state is authoritative — no YTM mirroring.
+    refreshFsRatingState();
     playButton.dataset.playState = "pause";
     fsPlayerSeekRange = h("input", {
       class: "ym-sl-fs-player-seek",
@@ -396,6 +633,41 @@
     fsPlayerPlayButton = playButton;
     fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
     fsOverlay.append(fsControls, fsPlayerControls);
+    // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
+    // The media is z-index 2 and the lyrics pane is z-index 3, so a button
+    // parented to the media was painted UNDER the lyrics and the dislike
+    // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
+    // is above both; positionFsEdgeButtons() then pins them to the media's
+    // horizontal edges and the transport row's vertical centre.
+    const fsMedia = document.querySelector(".ym-sl-fs-media");
+    fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
+      .forEach((n) => n.remove());
+    fsPlayerControls.appendChild(likeButton);
+    fsPlayerControls.appendChild(dislikeButton);
+    // Bootstrap transient (AJ 2026-10-08): the media/lyrics panes settle from a
+    // stale side layout + stale art over ~1s while native fullscreen opens. Fade
+    // them in over the existing .35s opacity transition instead of snapping them
+    // on, so that flash is hidden behind the fade. The rating buttons live in the
+    // controls layer now, so this fade does not affect their positioning.
+    if (fsMediaHost) fsMediaHost.style.opacity = "0";
+    if (fsLyricsHost) fsLyricsHost.style.opacity = "0";
+    // Double rAF: paint opacity:0 first, then (a) drop ym-sl-fs-no-anim so the
+    // panes' .35s opacity transition is live, (b) clear opacity so they fade in,
+    // and (c) re-pin the edge buttons once the final layout has actually been
+    // laid out. positionFsEdgeButtons() reads the pane's own box, which is valid
+    // here whether or not the cover image has decoded yet.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
+      if (fsMediaHost) fsMediaHost.style.opacity = "";
+      if (fsLyricsHost) fsLyricsHost.style.opacity = "";
+      positionFsEdgeButtons();
+    }));
+    positionFsEdgeButtons();
+    if (fsEdgeObserver) { try { fsEdgeObserver.disconnect(); } catch (_) {} }
+    if (fsMedia && typeof ResizeObserver !== "undefined") {
+      fsEdgeObserver = new ResizeObserver(() => positionFsEdgeButtons());
+      fsEdgeObserver.observe(fsMedia);
+    }
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
     exit.addEventListener("click", exitFullscreenMode);
@@ -404,6 +676,8 @@
     nextButton.addEventListener("click", () => clickPlayerButton("next"));
     shuffleButton.addEventListener("click", () => clickPlayerButton("shuffle"));
     repeatButton.addEventListener("click", () => clickPlayerButton("repeat"));
+    likeButton.addEventListener("click", () => clickFsRating("like"));
+    dislikeButton.addEventListener("click", () => clickFsRating("dislike"));
     // Single source of truth for the custom slider: writes the fill (via
     // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
     function applyFullscreenVolume(v) {

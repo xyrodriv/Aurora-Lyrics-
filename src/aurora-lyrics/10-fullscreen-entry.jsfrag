@@ -42,6 +42,13 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
+    // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
+    // applying the entry layout to them animates them sliding in from the CSS
+    // default (side) — a visible "side layout" flash on cover-art entry. Hold
+    // transitions off until the first paint, then drop the class (the double-rAF
+    // in buildFullscreenControls does the actual removal so the opacity fade is
+    // live too). Layout cycling on the cycle button keeps animating normally.
+    fsOverlay.classList.add("ym-sl-fs-no-anim");
     // Overlay title ("Artist Track"). Built here rather than inside
     // buildFullscreenControls() because it is not a control: it belongs to the
     // overlay surface and must exist independently of the chrome row.
@@ -139,19 +146,25 @@
       };
       fsOverlay.classList.add("ym-sl-fs-has-video");
 
-      // Ambient blurred backdrop: a low-res duplicate of the live video that
-      // the CSS blurs + dims to fill the entire overlay. The sharp video sits
-      // on top in fsMediaHost, so the empty letterbox space and the area
-      // behind the lyrics both get the blurred ambient fill.
+      // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
+      // low-res blurred/dimmed copy of the video, which cost a full-viewport
+      // canvas blur every frame and looked muddier (AJ, 2026-10-19). The 2D
+      // canvas is created but left blank; it only starts drawing if Kawarp is
+      // unavailable (no WebGL / Dynamic add-on off).
       fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
       fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
       fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
       fsBgLastDrawAt = 0;
-      // Defer the first draw + loop start until the canvas is laid out so
-      // clientWidth/clientHeight are valid for sizing.
-      requestAnimationFrame(() => {
-        drawBgFrame();
-        startBgDrawLoop();
+      // findPlayerVideo() returns the <video> itself, not a container — querying
+      // a video inside a video returns null, which silently started Kawarp with
+      // no source at all (AJ, 2026-10-19).
+      const liveVideoEl = video.tagName === "VIDEO" ? video : video.querySelector("video");
+      startFullscreenKawarp("", liveVideoEl).then((ok) => {
+        if (ok || !fsActive) return;
+        requestAnimationFrame(() => {
+          drawBgFrame();
+          startBgDrawLoop();
+        });
       });
 
       fsMediaHost.appendChild(video);
@@ -408,6 +421,8 @@
     fsPlayerPlayButton = null;
     fsPlayerShuffleButton = null;
     fsPlayerRepeatButton = null;
+    fsPlayerLikeButton = null;
+    fsPlayerDislikeButton = null;
     fsPlayerVolumeRange = null;
     fsPlayerSeekRange = null;
     fsTimeCurrent = null;
@@ -591,7 +606,8 @@
   function setPanel(on) {
     // While fullscreen is up, the lyrics panel is owned by the overlay. Ignore
     // tab-driven visibility changes so the lyrics can't be hidden underneath us.
-    if (fsActive) return;
+    // Same while the NPV snippet owns the panel.
+    if (fsActive || externalHostActive) return;
     panelVisible = on;
     // Hide YTM's own tab content and show Aurora's panel in its place. The native
     // tab bar (and its #selectionBar) are left entirely to YTM.
@@ -603,6 +619,67 @@
       syncTrackLyrics();
     }
   }
+
+  /* ---- external host (NPV dock) ----
+     Lets the Now Playing snippet MOVE the already-rendered panel (the very same
+     #ym-sl-panel node, same renderer, no second engine) into its own rail and
+     back. While docked: the tab-driven visibility state is parked (like
+     fullscreen does), the render loop is forced on so the lyrics keep syncing,
+     and mountPanel() is blocked from reclaiming the node on YTM re-renders. */
+  function setExternalHost(host, reveal) {
+    if (!panelEl || fsActive) return false;
+    if (host) {
+      if (externalHostActive && panelEl.parentElement === host) return true;
+      if (!externalHostActive) {
+        externalHostSavedVisible = panelVisible;
+        externalHostActive = true;
+      }
+      if (panelEl.parentElement !== host) host.appendChild(panelEl);
+      panelEl.classList.remove("hidden");
+      panelVisible = true;
+      // The panel left #tab-renderer, so its native children can show again.
+      syncNativePanel(false);
+      refreshTrack();
+      syncTrackLyrics();
+      return true;
+    }
+    if (!externalHostActive) return false;
+    externalHostActive = false;
+    // `reveal` forces the panel visible on return. Needed when the host gives it
+    // back BECAUSE the user opened the Lyrics tab: without it the panel restores
+    // to its pre-dock state (usually hidden), so the tab falls back to YTM's own
+    // lyrics instead of ours (AJ, 2026-10-19).
+    panelVisible = reveal === true ? true : externalHostSavedVisible === true;
+    externalHostSavedVisible = null;
+    // Put the panel back where the tab system expects it (#tab-renderer, or
+    // <body> if the watch page — and with it the tab — is gone right now;
+    // mountTab() will re-mount it into the tab when the page returns).
+    const tabRenderer = document.querySelector("#tab-renderer");
+    if (tabRenderer) {
+      if (panelEl.parentElement !== tabRenderer) tabRenderer.appendChild(panelEl);
+    } else if (!panelEl.parentElement || !panelEl.parentElement.isConnected) {
+      document.body.appendChild(panelEl);
+    }
+    panelEl.classList.toggle("hidden", !panelVisible);
+    syncNativePanel(panelVisible);
+    if (panelVisible) {
+      refreshTrack();
+      syncTrackLyrics();
+    }
+    return true;
+  }
+
+  // Expose the dock API for page-world snippets. YTMod is created by
+  // public-api.js, which may load after this script — retry briefly.
+  function exposeExternalHost() {
+    if (!window.YTMod) {
+      window.setTimeout(exposeExternalHost, 200);
+      return;
+    }
+    window.YTMod.lyrics = window.YTMod.lyrics || {};
+    window.YTMod.lyrics.setExternalHost = setExternalHost;
+  }
+  exposeExternalHost();
 
   /**
    * Paint the fullscreen overlay title.

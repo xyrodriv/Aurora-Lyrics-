@@ -306,9 +306,68 @@
     );
   }
 
-  /** Title strings worth trying: stripped first, then as YTM reported it. */
-  function listenbrainzTitleVariants(title) {
-    return variantList(stripParensLoose(title), title);
+  /* Uploader-styled titles never match a catalogue. The live console showed
+     queries like "more than life ft. glaive (Official Music Video) (feat.
+     glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
+     exclusive" — those miss MusicBrainz, ListenBrainz AND Deezer every time.
+     Strip the noise before querying anything (AJ, 2026-10-19). */
+  const TITLE_NOISE_RE =
+    /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;
+  // Bracketed text that describes a DIFFERENT RECORDING must survive: dropping
+  // "(Remix)" would query the original and fetch the wrong ISRC/timing.
+  const TITLE_VERSION_RE =
+    /\b(remix|re-?mix|live|acoustic|instrumental|sped\s*up|slowed|reverb|nightcore|demo|edit|version|cover|orchestral)\b/i;
+
+  function cleanSearchTitle(title, artist) {
+    let s = String(title || "");
+    // "Song | Channel" — everything after the pipe is uploader branding.
+    s = s.split("|")[0];
+    // Bracketed qualifiers: drop (Official Video) / [Lyrics / AMV], keep
+    // (Remix) / (Live) / (Acoustic) because those are different recordings.
+    s = s.replace(/[\(\[]\s*([^\)\]]*)[\)\]]/g, (match, inner) =>
+      TITLE_VERSION_RE.test(inner) ? match : " "
+    );
+    s = s.replace(/\{[^}]*\}/g, " ");
+    // YTM sometimes truncates a title mid-bracket: "Song (Official ...".
+    s = s.replace(/[\(\[]\s*[^\)\]]*$/, " ");
+    // Inline feature credits: "Song ft. X" / "Song feat. X".
+    s = s.replace(/\s+(?:ft|feat|featuring)\.?\s+.*$/i, " ");
+    s = s.replace(TITLE_NOISE_RE, " ");
+    s = s.replace(/\s*[-–—]\s*$/, " ");
+    // "Artist - Song" -> "Song" when the prefix is the artist we already know.
+    const dash = /^(.+?)\s*[-–—]\s*(.+)$/.exec(s);
+    if (dash && artist) {
+      const left = dash[1].toLowerCase().replace(/\s+/g, " ").trim();
+      const known = String(artist).toLowerCase().replace(/\s+/g, " ").trim();
+      if (known && (left === known || known.indexOf(left) !== -1 || left.indexOf(known) !== -1)) {
+        s = dash[2];
+      }
+    }
+    return s.replace(/\s{2,}/g, " ").trim();
+  }
+
+  /** Title strings worth trying: cleaned first, then stripped, then raw. */
+  function listenbrainzTitleVariants(title, artist) {
+    const cleaned = cleanSearchTitle(title, artist);
+    return variantList(cleaned, stripParensLoose(title), title);
+  }
+
+  /* YTM's player bar renders a title with the uploader noise already removed —
+     the raw videoDetails.title still carries "(Official Music Video)". That
+     makes the bar text the best canonical string available without a catalogue
+     lookup, and Spicy is the source we most want to hit (AJ, 2026-10-19). */
+  function playerBarTitle() {
+    const selectors = [
+      "ytmusic-player-bar .title",
+      "ytmusic-player-bar #song-title",
+      "ytmusic-player-bar yt-formatted-string.title",
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      const text = el && el.textContent ? el.textContent.trim() : "";
+      if (text) return text;
+    }
+    return "";
   }
 
   /**
@@ -423,7 +482,7 @@
     if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
     try {
       const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        track.title,
+        cleanSearchTitle(track.title, track.artist),
         track.artist,
         track.album,
         track.durationMs
@@ -464,7 +523,12 @@
 
     const artist = (track && track.artist) || "";
     const album = (track && track.album) || "";
-    const titles = listenbrainzTitleVariants(title);
+    const titles = listenbrainzTitleVariants(title, artist);
+    // Prefer the player bar's already-cleaned title when it says something new.
+    const barTitle = cleanSearchTitle(playerBarTitle(), artist);
+    if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
+      titles.unshift(barTitle);
+    }
     const artists = listenbrainzArtistVariants(artist, title);
     // Try the album YTM gave us first, then the loose empty form. YTM's album
     // string is often close enough to tighten the match, and when it isn't the
@@ -882,6 +946,229 @@
     return parsed;
   }
 
+  /* ---- lrc.red (AJ, 2026-10-19) -----------------------------------------
+     Static file host keyed by ISRC — no search endpoint, no auth, no key:
+       https://lrc.red/s/{ISRC}.ttml   word-level Apple-style TTML
+       https://lrc.red/s/{ISRC}.lrc    line-level fallback
+       https://lrc.red/s/{ISRC}.json   metadata
+     CORS is `access-control-allow-origin: *`, so the page can fetch it
+     directly. The hard part is the ISRC: YTM exposes it only sometimes, so a
+     MusicBrainz recording lookup is the fallback (MB search results already
+     carry `isrcs`, no extra `inc` needed).
+     Their docs ask for credit when the API is proxied — passing "lrc.red" as
+     the provider label satisfies that through the normal credits footer. */
+  const LRC_RED_BASE = "https://lrc.red/s/";
+  const LRC_RED_ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{2}\d{5}$/;
+  const lrcRedCache = new Map(); // isrc -> { ttml?, lrc? }
+  const lrcRedIsrcCache = new Map(); // track key -> isrc
+  // A dead lrc.red origin (Cloudflare 522) hangs until the network gives up,
+  // which made track changes feel frozen. Bound it, and after a failure skip
+  // the source entirely for a while instead of paying the timeout per track.
+  const LRC_RED_TIMEOUT_MS = 4000;
+  const LRC_RED_COOLDOWN_MS = 5 * 60 * 1000;
+  let lrcRedCooldownUntil = 0;
+
+  function lrcRedSignal(trackSignal) {
+    try {
+      if (
+        typeof AbortSignal !== "undefined" &&
+        typeof AbortSignal.any === "function" &&
+        typeof AbortSignal.timeout === "function"
+      ) {
+        return AbortSignal.any([trackSignal, AbortSignal.timeout(LRC_RED_TIMEOUT_MS)]);
+      }
+    } catch (_) {}
+    return trackSignal;
+  }
+
+  function normalizeIsrc(value) {
+    const compact = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return LRC_RED_ISRC_RE.test(compact) ? compact : "";
+  }
+
+  // Score a Deezer search hit against the track. Title dominates; artist and
+  // duration break ties (Deezer lists remixes/live versions separately, and
+  // picking the wrong one would fetch the wrong ISRC).
+  function deezerIsrcScore(candidate, track) {
+    const norm = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const candidateTitle = norm(candidate && candidate.title);
+    const trackTitle = norm(track && track.title);
+    if (!candidateTitle || !trackTitle) return 0;
+    let score = 0;
+    if (candidateTitle === trackTitle) score += 60;
+    else if (candidateTitle.indexOf(trackTitle) !== -1 || trackTitle.indexOf(candidateTitle) !== -1) score += 30;
+    else return 0;
+    const candidateArtist = norm(candidate.artist && candidate.artist.name);
+    const trackArtist = norm(track && track.artist);
+    if (candidateArtist && trackArtist) {
+      if (candidateArtist === trackArtist) score += 30;
+      else if (candidateArtist.indexOf(trackArtist) !== -1 || trackArtist.indexOf(candidateArtist) !== -1) score += 15;
+    }
+    const candidateDuration = Number(candidate.duration);
+    const trackDuration = Number(track && track.durationMs) / 1000;
+    if (candidateDuration > 0 && trackDuration > 0) {
+      const delta = Math.abs(candidateDuration - trackDuration);
+      if (delta <= 2) score += 25;
+      else if (delta <= 5) score += 12;
+      else if (delta > 15) score -= 20;
+    }
+    return score;
+  }
+
+  // ISRC for this track. YTM exposes none (verified against /player and /next),
+  // so: Deezer first — it carries new releases on release day and returns
+  // `isrc` on every hit — then MusicBrainz for older catalogue where Deezer
+  // misses (AJ, 2026-10-19).
+  async function resolveLrcRedIsrc(track, controller, key) {
+    const direct = normalizeIsrc(track && track.isrc);
+    if (direct) return direct;
+    const memo = lrcRedIsrcCache.get(key);
+    if (memo) return memo;
+    if (controller.signal.aborted || key !== currentTrackKey) return "";
+
+    if (window.YTMod && typeof window.YTMod.fetchDeezerTracks === "function") {
+      try {
+        // Cleaned title: Deezer's catalogue uses canonical names, not the
+        // uploader's "X (Official Video) [Lyrics]" styling.
+        const response = await window.YTMod.fetchDeezerTracks(
+          cleanSearchTitle(track.title, track.artist),
+          track.artist,
+          track.album
+        );
+        if (controller.signal.aborted || key !== currentTrackKey) return "";
+        if (response && response.ok && response.data && Array.isArray(response.data.data)) {
+          const best = response.data.data
+            .map((candidate) => ({ candidate, score: deezerIsrcScore(candidate, track) }))
+            .filter((entry) => entry.score >= 60 && normalizeIsrc(entry.candidate.isrc))
+            .sort((a, b) => b.score - a.score)[0];
+          if (best) {
+            const isrc = normalizeIsrc(best.candidate.isrc);
+            lrcRedIsrcCache.set(key, isrc);
+            console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via Deezer (score ${best.score}).`);
+            return isrc;
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return "";
+        console.warn("[SpicyLyrics] lrc.red: Deezer ISRC lookup failed:", error && error.message);
+      }
+    }
+
+    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") return "";
+    if (controller.signal.aborted || key !== currentTrackKey) return "";
+    try {
+      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
+        cleanSearchTitle(track.title, track.artist),
+        track.artist,
+        track.album,
+        track.durationMs
+      );
+      if (controller.signal.aborted || key !== currentTrackKey) return "";
+      if (!response || !response.ok || !response.data || !Array.isArray(response.data.recordings)) return "";
+      const best = response.data.recordings
+        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
+        .filter((candidate) =>
+          candidate.score > 0 &&
+          Array.isArray(candidate.recording.isrcs) &&
+          candidate.recording.isrcs.length
+        )
+        .sort((a, b) => b.score - a.score)[0];
+      const isrc = best ? normalizeIsrc(best.recording.isrcs[0]) : "";
+      if (!isrc) {
+        console.warn(`[SpicyLyrics] lrc.red: no ISRC for "${track.title}" from Deezer or MusicBrainz.`);
+        return "";
+      }
+      lrcRedIsrcCache.set(key, isrc);
+      console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via MusicBrainz (score ${best.score}).`);
+      return isrc;
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.warn("[SpicyLyrics] lrc.red: MusicBrainz ISRC lookup failed:", error && error.message);
+      }
+      return "";
+    }
+  }
+
+  async function fetchLrcRedLyrics(track, controller, key) {
+    const isrc = await resolveLrcRedIsrc(track, controller, key);
+    if (!isrc) return null;
+    const cached = lrcRedCache.get(isrc);
+    if (cached) return cached;
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    // Origin known to be unreachable right now — skip without paying the
+    // timeout again on this track (AJ, 2026-10-19).
+    if (Date.now() < lrcRedCooldownUntil) return null;
+    const result = {};
+    let unreachable = false;
+    // TTML first (word-level); LRC only if the TTML entry does not exist.
+    for (const ext of ["ttml", "lrc"]) {
+      try {
+        const response = await fetch(`${LRC_RED_BASE}${isrc}.${ext}`, {
+          headers: { Accept: ext === "ttml" ? "application/ttml+xml" : "text/plain" },
+          credentials: "omit",
+          signal: lrcRedSignal(controller.signal),
+        });
+        if (!response.ok) continue; // 404 -> try the next format
+        const text = await response.text();
+        if (!text || text.length < 40) continue;
+        // A 200 with an HTML body is Cloudflare's interstitial, not lyrics.
+        if (ext === "ttml" && text.indexOf("<tt") === -1) continue;
+        result[ext] = text;
+        break;
+      } catch (error) {
+        if (controller.signal.aborted) return null;
+        // A THROW here is not an HTTP status: it is CORS / DNS / a Cloudflare
+        // 522 page (which carries no Access-Control-Allow-Origin, so the
+        // browser reports it as a CORS failure), or our own timeout. The second
+        // extension would fail the same way, so stop instead of waiting twice.
+        unreachable = true;
+        break;
+      }
+    }
+    if (unreachable) {
+      lrcRedCooldownUntil = Date.now() + LRC_RED_COOLDOWN_MS;
+      console.warn(
+        `[SpicyLyrics] lrc.red is unreachable (CORS/522/timeout) — skipping it for ` +
+        `${Math.round(LRC_RED_COOLDOWN_MS / 60000)} min so playback is not delayed.`
+      );
+      return null;
+    }
+    if (!result.ttml && !result.lrc) {
+      console.log(`[SpicyLyrics] lrc.red: no lyrics for ISRC ${isrc}.`);
+      return null;
+    }
+    lrcRedCache.set(isrc, result);
+    console.log(`[SpicyLyrics] lrc.red: fetched ${result.ttml ? "TTML" : "LRC"} for ${isrc}.`);
+    return result;
+  }
+
+  // Does this TTML carry real per-WORD timing (Apple/Spicy <span ttm:role="x-word">
+  // structure, or lrc.red's Word mode)? Line-only TTML (lrc:timing="Line", plain <p>
+  // text) has NO word timing — rendering it through the karaoke path makes every
+  // line light at once, so it is shown as static auto-scroll instead (AJ, 2026-10-19).
+  function ttmlHasWordTiming(xml) {
+    const s = String(xml || "");
+    if (/lrc:timing\s*=\s*["']Word["']/i.test(s)) return true;
+    if (/<span\b[^>]*\bttm:role\s*=\s*["']x-word["']/i.test(s)) return true;
+    return /<span\b/i.test(s) && /\bbegin\s*=/.test(s);
+  }
+  // Flattens a line-level TTML to plain text (one <p> -> one line) for the static path.
+  function ttmlPlainText(xml) {
+    const s = String(xml || "");
+    const lines = [];
+    const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+    let m;
+    while ((m = re.exec(s))) {
+      const text = decodeEntities(m[1].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+      if (text) lines.push(text);
+    }
+    return lines.join("\n");
+  }
+  // A synced LRC line is prefixed with a [mm:ss(.xx)] timestamp; plain lyrics are not.
+  function isSyncedLRC(text) {
+    return /\[\s*\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\s*\]/.test(String(text || ""));
+  }
+
   async function fetchLRCLyrics(track, key) {
     const requestId = ++trackRequestSeq;
     if (activeTrackAbort) activeTrackAbort.abort();
@@ -891,125 +1178,189 @@
     // Skeleton rather than a text message: this covers the network wait AND the
     // synchronous DOM build that follows it (see showLyricsSkeleton).
     showLyricsSkeleton();
-    try {
-      const spicyResult = await fetchSpicyLyrics(track, key, controller);
-      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) {
-        // Silence here was a real dead end: the TTML was fetched and parsed, then
-        // dropped on the floor with no output, which reads as "the fetch failed".
-        console.warn(`[SpicyLyrics] discarding the Spicy result — ${
-          controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
-        return;
-      }
-      if (spicyResult && spicyResult.ttml) {
-        // Attribution + songwriters ride along with the API result; stash them
-        // before loadTTML so the credits footer can render them.
-        pendingSpicyCredits = {
-          // The whole attribution object, not just the uploader: the footer
-          // needs the provider (every source) and the maker (community syncs).
-          attribution: spicyResult.attribution || null,
-          songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
-        };
-        if (loadTTML(spicyResult.ttml, "external")) {
-          console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
-          return;
+
+    const stale = () =>
+      controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey;
+
+    /* Each source is a runner that returns true when it produced lyrics (or
+       when the request went stale). The resolver walks them in the order the
+       user set in the add-on's settings — "Source order" — instead of a
+       hard-coded sequence (AJ, 2026-10-19). Runners never show a terminal
+       "no lyrics" message themselves; the tail of this function does, so a
+       source that misses early cannot flash a message before the next one
+       has had its turn. */
+    const runners = {
+      spicy: async () => {
+        try {
+          const spicyResult = await fetchSpicyLyrics(track, key, controller);
+          if (stale()) {
+            // Silence here was a real dead end: the TTML was fetched and parsed,
+            // then dropped on the floor with no output, which reads as "the fetch
+            // failed".
+            console.warn(`[SpicyLyrics] discarding the Spicy result — ${
+              controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
+            return true;
+          }
+          if (spicyResult && spicyResult.ttml) {
+            // Attribution + songwriters ride along with the API result; stash them
+            // before loadTTML so the credits footer can render them.
+            pendingSpicyCredits = {
+              attribution: spicyResult.attribution || null,
+              songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
+            };
+            if (loadTTML(spicyResult.ttml, "external")) {
+              console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            console.warn("[SpicyLyrics] API returned TTML we could not parse; trying the next source.");
+          } else {
+            console.warn("[SpicyLyrics] no Spicy TTML for this track; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] lookup failed; trying the next source:", error);
         }
-        pendingSpicyCredits = null;
-        console.warn("[SpicyLyrics] API returned TTML we could not parse; falling back to Unison/LRCLIB.");
-      } else {
-        console.warn("[SpicyLyrics] no Spicy TTML for this track; falling back to Unison/LRCLIB.");
-      }
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      console.warn("[SpicyLyrics] lookup failed; falling back to Unison/LRCLIB:", error);
-    }
-    try {
-      const unisonData = await fetchUnisonLyrics(track, key, controller);
-      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
-      if (unisonData && unisonData.format === "ttml") {
-        if (loadTTML(unisonData.lyrics, "external", "Unison")) return;
-        console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; falling back to LRCLIB.");
-      }
-      if (unisonData && unisonData.format === "lrc") {
-        if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return;
-        console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; falling back to LRCLIB.");
-      }
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      console.warn("[SpicyLyrics] Unison lookup failed; falling back to LRCLIB:", error);
-    }
+        return false;
+      },
 
-    const cached = lrclibCache.get(key);
-    if (cached) {
-      lrclibCache.delete(key);
-      lrclibCache.set(key, cached);
-      loadLRCLyrics(cached, track.durationMs);
-      return;
-    }
-    const persisted = getLyricsPersistent(key);
-    if (persisted) {
-      lrclibCache.set(key, persisted);
-      loadLRCLyrics(persisted, track.durationMs);
-      return;
-    }
-
-    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
-      showLyricsMessage("Could not load lyrics. Reload Aurora Lyrics and try again.");
-      return;
-    }
-    const params = new URLSearchParams();
-    params.set("track_name", track.title);
-    if (track.artist) params.set("artist_name", track.artist);
-    if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
-      params.set("duration", String(Math.round(track.durationMs / 1000)));
-    }
-
-    try {
-      const response = await window.YTMod.fetchLRCLIB(
-        `${LRCLIB_API}?${params.toString()}`
-      );
-      if (!response.ok && response.status !== 404) {
-        throw new Error("LRCLIB returned HTTP " + response.status);
-      }
-      let data = response.ok ? response.data : null;
-
-      if (!data || !data.syncedLyrics) {
-        const searchParams = new URLSearchParams({
-          q: [track.title, track.artist].filter(Boolean).join(" "),
-        });
-        if (controller.signal.aborted ||
-            requestId !== trackRequestSeq ||
-            key !== currentTrackKey) return;
-        const searchResponse = await window.YTMod.fetchLRCLIB(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
-        );
-        if (!searchResponse.ok) {
-          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+      "lrc.red": async () => {
+        try {
+          const lrcRed = await fetchLrcRedLyrics(track, controller, key);
+          if (stale()) return true;
+          if (lrcRed && lrcRed.ttml) {
+            let ok = false;
+            if (ttmlHasWordTiming(lrcRed.ttml)) {
+              // Word-level TTML -> normal word-by-word karaoke.
+              ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
+              if (ok) console.log("[SpicyLyrics] TTML rendered from lrc.red.");
+            } else {
+              // Line-level-only TTML: no per-word timing. The karaoke/line fill
+              // reads as every line lighting at once, so present it as STATIC
+              // auto-scroll instead (AJ, 2026-10-19).
+              ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
+            }
+            if (ok) {
+              showSourceNotice("lrc.red lyrics may be slightly out of sync");
+              return true;
+            }
+            console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
+          }
+          if (lrcRed && lrcRed.lrc) {
+            // A plain (untimestamped) .lrc piling on one line is the "all fire at
+            // once" bug — feed it through the STATIC path, not syncedLyrics.
+            const payload = isSyncedLRC(lrcRed.lrc)
+              ? { syncedLyrics: lrcRed.lrc }
+              : { plainLyrics: lrcRed.lrc };
+            if (loadLRCLyrics(payload, track.durationMs, "lrc.red")) {
+              showSourceNotice("lrc.red lyrics may be slightly out of sync");
+              return true;
+            }
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] lrc.red lookup failed; trying the next source:", error);
         }
-        // Prefer a synced match; fall back to a plain (unsynced) match so the
-        // panel shows lyrics automatically instead of "No lyrics found"
-        // (AJ, 2026-09-18). Both are scored against the current track on the
-        // same search response — no second request.
-        data = selectLRCLIBResult(searchResponse.data, track)
-          || selectLRCLIBPlainResult(searchResponse.data, track);
-      }
+        return false;
+      },
 
-      if (controller.signal.aborted ||
-          requestId !== trackRequestSeq ||
-          key !== currentTrackKey) return;
-      // Accept either a synced or a plain match. Only give up when there is no
-      // usable lyrics object at all.
-      if (!data || (!data.syncedLyrics && !data.plainLyrics)) {
-        showLyricsMessage(NO_LYRICS_MESSAGE);
-        return;
-      }
-      cacheLRCLyrics(key, data);
-      cacheLyricsPersistent(key, data);
-      loadLRCLyrics(data, track.durationMs);
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
-      console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
-      showLyricsMessage(LOAD_FAILED_MESSAGE);
+      unison: async () => {
+        try {
+          const unisonData = await fetchUnisonLyrics(track, key, controller);
+          if (stale()) return true;
+          if (unisonData && unisonData.format === "ttml") {
+            if (loadTTML(unisonData.lyrics, "external", "Unison")) return true;
+            console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; trying the next source.");
+          }
+          if (unisonData && unisonData.format === "lrc") {
+            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return true;
+            console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] Unison lookup failed; trying the next source:", error);
+        }
+        return false;
+      },
+
+      lrclib: async () => {
+        const cached = lrclibCache.get(key);
+        if (cached) {
+          lrclibCache.delete(key);
+          lrclibCache.set(key, cached);
+          loadLRCLyrics(cached, track.durationMs);
+          return true;
+        }
+        const persisted = getLyricsPersistent(key);
+        if (persisted) {
+          lrclibCache.set(key, persisted);
+          loadLRCLyrics(persisted, track.durationMs);
+          return true;
+        }
+
+        if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return false;
+        const params = new URLSearchParams();
+        params.set("track_name", track.title);
+        if (track.artist) params.set("artist_name", track.artist);
+        if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+          params.set("duration", String(Math.round(track.durationMs / 1000)));
+        }
+
+        try {
+          const response = await window.YTMod.fetchLRCLIB(
+            `${LRCLIB_API}?${params.toString()}`
+          );
+          if (!response.ok && response.status !== 404) {
+            throw new Error("LRCLIB returned HTTP " + response.status);
+          }
+          let data = response.ok ? response.data : null;
+
+          if (!data || !data.syncedLyrics) {
+            const searchParams = new URLSearchParams({
+              q: [track.title, track.artist].filter(Boolean).join(" "),
+            });
+            if (stale()) return true;
+            const searchResponse = await window.YTMod.fetchLRCLIB(
+              `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+            );
+            if (!searchResponse.ok) {
+              throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+            }
+            // Prefer a synced match; fall back to a plain (unsynced) match so the
+            // panel shows lyrics automatically instead of "No lyrics found"
+            // (AJ, 2026-09-18). Both are scored against the current track on the
+            // same search response — no second request.
+            data = selectLRCLIBResult(searchResponse.data, track)
+              || selectLRCLIBPlainResult(searchResponse.data, track);
+          }
+
+          if (stale()) return true;
+          // Accept either a synced or a plain match. Only give up when there is no
+          // usable lyrics object at all.
+          if (!data || (!data.syncedLyrics && !data.plainLyrics)) return false;
+          cacheLRCLyrics(key, data);
+          cacheLyricsPersistent(key, data);
+          loadLRCLyrics(data, track.durationMs);
+          return true;
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          if (stale()) return true;
+          console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
+          return false;
+        }
+      },
+    };
+
+    // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
+    // was removed. Spicy Lyrics wins when both it and lrc.red carry the track;
+    // lrc.red is next for new releases; Unison + LRCLIB are last-resort fallbacks.
+    const order = ["spicy", "lrc.red", "unison", "lrclib"];
+    for (const id of order) {
+      const runner = runners[id];
+      if (!runner) continue;
+      if (await runner()) return;
+      if (stale()) return;
     }
+    showLyricsMessage(NO_LYRICS_MESSAGE);
   }
 

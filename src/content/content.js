@@ -25,6 +25,10 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 
+  // Expose the extension root to PAGE-world snippets (they are injected as
+  // <script src> and have no chrome.runtime). data-* is readable across worlds.
+  try { document.documentElement.dataset.ymExtBase = chrome.runtime.getURL(""); } catch (_) {}
+
   function h(tag, attrs, ...kids) {
     const e = document.createElement(tag);
     if (attrs) for (const k in attrs) {
@@ -187,6 +191,15 @@
         return !/^(false|0|off|no)$/i.test(value.trim());
       }
       return value == null ? Boolean(setting.default) : Boolean(value);
+    }
+    if (setting.type === "order") {
+      // Ordered list of ids. Without this branch it would fall through to
+      // settingNumber and become NaN, wiping the default order.
+      const allowed = (setting.options || []).map((option) => option.id);
+      const given = Array.isArray(value) ? value.map(String) : [];
+      const out = given.filter((id) => allowed.indexOf(id) !== -1);
+      for (const id of allowed) if (out.indexOf(id) === -1) out.push(id);
+      return out;
     }
     return settingNumber(setting, value);
   };
@@ -499,6 +512,54 @@
     return result;
   };
 
+  /* Deezer track search, used to obtain an ISRC for lrc.red.
+     Why Deezer: YouTube Music does NOT expose ISRC anywhere in its API —
+     verified against /youtubei/v1/player (videoDetails has musicVideoType but
+     no isrc) and /youtubei/v1/next (no isrc, no externalIds). Deezer returns
+     `isrc` on every track and carries new releases on release day, which
+     MusicBrainz does not (AJ, 2026-10-19).
+
+     It MUST go through the service worker: api.deezer.com sends no
+     Access-Control-Allow-Origin, and a content script is bound by the page's
+     CORS policy. The worker runs on the extension origin and can reach it.
+     Falls back to a direct fetch only if the worker is unavailable. */
+  const fetchDeezerTracks = async (title, artist, album) => {
+    const q = [title, artist, album].filter(Boolean).join(" ").trim();
+    if (!q) return { ok: false, status: 400, data: null };
+    const url = new URL("https://api.deezer.com/search/track");
+    url.search = new URLSearchParams({ q, limit: "10" }).toString();
+
+    const proxied = await Promise.race([
+      new Promise((resolve) => {
+        try {
+          chrome.runtime.sendMessage({ type: "ym-fetch-json", url: url.href }, (response) => {
+            // lastError is set when no listener exists (worker not running/failed).
+            resolve(chrome.runtime.lastError ? null : response || null);
+          });
+        } catch (_) {
+          resolve(null);
+        }
+      }),
+      // A hung worker must not stall the lyrics chain behind it.
+      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
+    if (proxied) return proxied;
+
+    try {
+      const response = await fetch(url.href, {
+        headers: { Accept: "application/json" },
+        credentials: "omit",
+      });
+      return {
+        ok: response.ok,
+        status: response.status,
+        data: response.ok ? await response.json() : null,
+      };
+    } catch (error) {
+      return { ok: false, status: 0, data: null, error: String(error && error.message) };
+    }
+  };
+
   const fetchCoverArt = async (title, artist) => {
     const trackTitle = String(title || "");
     const trackArtist = String(artist || "");
@@ -665,7 +726,9 @@
       // read as Spicy Lyrics' own product. Hence the plain "Unofficial." and a
       // github link to THIS project rather than to Spikerko's repo, which would
       // imply origin/endorsement.
-      description: "Unofficial. Karaoke-style synced lyrics that follow the music line-by-line and word-by-word. Built on the Spicy Lyrics Syllable renderer; community syncs fetched via the Spicy Lyrics API.",
+      // Rewritten in plain language (AJ, 2026-10-19): no renderer/API jargon.
+      description: "Unofficial. Shows the lyrics of whatever you're playing, in time with the music — the words light up as they're sung. You can make the text bigger, change how it looks, and open a full-screen lyric view.",
+      disclaimer: "Not affiliated with Spicy Lyrics · Unofficial",
       version: "0.2.0",
       lastUpdated: "2026-10-07",
       github: "https://github.com/xyrodriv/Aurora-Lyrics-",
@@ -676,10 +739,10 @@
         // shows to everyone; everything with it is hidden until the 6-tap gesture
         // has been used — see visibleSettings(). Keep the non-dev entries first.
         // Lyric size ceiling is 600%. Default back to 130% (AJ, 2026-10-07) —
-        // 145% (2026-09-28) read too big; 130% is the intended look.
+          // 145% (2026-09-28) read too big; 130% is the intended look.
         { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.30, display: "percent" },
         { key: "romanizationEnabled", label: "Romanization (JP / KR)", type: "toggle", default: true },
-        { key: "legibilityBackdrop", label: "Legibility backdrop", type: "toggle", default: false },
+        { key: "legibilityBackdrop", label: "Dark shade behind lyrics", type: "toggle", default: false },
         // Extends the adaptive lyric readability shade (which Video Background
         // already uses) to the SIDE layout for music videos, where the lyrics
         // sit over the blurred video backdrop. AJ, 2026-09-28.
@@ -695,6 +758,10 @@
         // custom property and broke the active-line highlight, so the mode is now
         // strictly the spring/spline swap.
         { key: "simpleLyrics", label: "Apple Music style lyrics", type: "toggle", default: false },
+        // Joins each word into one whole-word fill — no per-syllable/letter karaoke
+        // stepping, so a word lights up as a single unit. The Spicy Lyrics
+        // "whole word" toggle (AJ, 2026-10-19).
+        { key: "joinSyllables", label: "Join syllables into words", type: "toggle", default: false },
         { type: "header", label: "Scrolling" },
         // smoothScrolling back ON by default (AJ, 2026-10-07) — he prefers the
         // eased glide into the active line. `disabledWhen` dims + locks the row
@@ -717,6 +784,10 @@
         // on AJ's call (2026-09-26) — the slider is gone and aurora-lyrics.js pins
         // the offset at its -80px default, so a value stored while the slider
         // existed cannot keep shifting the lyrics with no UI left to undo it.
+        // NOTE: "Where lyrics come from" (source reordering) was removed (AJ,
+        // 2026-10-19). The resolver now uses a fixed priority — Spicy Lyrics wins
+        // when it has the track, lrc.red next for new releases, Unison/LRCLIB as
+        // fallbacks — so there is no user-facing reordering.
       ],
     },
     {
@@ -765,7 +836,9 @@
       version: "1.0.0",
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/pip-lyrics.js"),
-      art: { video: "assets/art/pip-lyrics.mp4", poster: "assets/art/pip-lyrics.jpg" },
+      // Preview clip removed (AJ, 2026-10-19): it showed real lyric text, and
+      // redistributing copyrighted lyrics in the add-on art is avoidable risk.
+      // The preview slot falls back to the brand mark.
       // Settings removed on AJ's call (2026-09-29): the add-on's own defaults
       // (DEFAULTS = { master: true, showTransport: true }) are what we want, and
       // an empty array renders NO Settings section at all (same as Ambient).
@@ -837,6 +910,94 @@
       // No settings: the add-on is a single button plus its own popup, and empty
       // settings render no Settings section at all (same as Ambient / Sleep Timer).
       settings: [],
+    },
+
+    /* ---- Snippets ---------------------------------------------------------
+       Small standalone tweaks that are NOT add-ons, but deliberately carry the
+       SAME entry shape so they reuse the whole install / enable / disable
+       pipeline (loadExtensionJS + the ytmod-ext enable/disable messages) and the
+       same card UI. A snippet therefore runs only while it is INSTALLED and ON,
+       exactly like an add-on (AJ, 2026-10-07) — it is not an always-on tweak.
+       The Snippets tab is just this category; nothing else special-cases it, so
+       an empty category simply renders that tab's empty state.
+
+       History — two attempts, both built and both parked, so neither gets
+       re-tried from scratch:
+
+       1. "Dislike: keep the song playing" (2026-10-07). YTM rates AND advances
+          the queue in one motion, so keeping the song meant rating and then
+          jumping straight back. It worked, but the track visibly switched away
+          and back for a moment — too much churn for a regular user.
+
+       2. "Song / Video toggle" (2026-10-08). YTM renders the premium Song/Video
+          switch and merely HIDES it, so revealing it worked, and the mechanism
+          turned out to be the redux action SET_PLAYBACK_CONTENT_MODE. But a free
+          account's player ignores that action, and the counterpart version's
+          video id is NOT anywhere in the page data (searched exhaustively), so
+          the switch cannot be completed without resolving the song/video pair
+          through the API.
+
+       Both are backed up in .workbuddy-ai/backups/ and written up in the daily
+       logs and SNIPPET-IDEAS.txt. */
+    {
+      id: "snippet-track-toast",
+      name: "Track-change notification",
+      author: "Aurora Lyrics",
+      category: "Snippets",
+      stars: 5,
+      tags: ["notification", "toast", "track change", "now playing"],
+      description: "Shows a notification with the song, artist and cover art whenever a new track starts.",
+      version: "0.1.0",
+      lastUpdated: "2026-10-08",
+      jsUrl: chrome.runtime.getURL("src/extensions/snippet-track-toast.js"),
+      // No art: the card falls back to its monogram tile.
+      settings: [],
+    },
+    {
+      id: "snippet-copy-lyrics",
+      name: "Copy lyrics",
+      author: "Aurora Lyrics",
+      category: "Snippets",
+      stars: 5,
+      tags: ["lyrics", "copy", "clipboard"],
+      description: "Adds a Copy lyrics button that puts the whole song on your clipboard in one click.",
+      version: "0.1.0",
+      lastUpdated: "2026-10-08",
+      jsUrl: chrome.runtime.getURL("src/extensions/snippet-copy-lyrics.js"),
+      // No art: the card falls back to its monogram tile.
+      settings: [],
+    },
+    {
+      id: "snippet-centered-home",
+      name: "Centered home",
+      author: "Aurora Lyrics",
+      category: "Snippets",
+      stars: 5,
+      tags: ["home", "layout", "centered", "headers", "chips", "sidebar"],
+      description: "Centers the home page section headers and the filter chips.",
+      version: "0.1.0",
+      lastUpdated: "2026-10-19",
+      jsUrl: chrome.runtime.getURL("src/extensions/snippet-centered-home.js"),
+      // No art: the card falls back to its monogram tile.
+      settings: [],
+    },
+    {
+      id: "snippet-npv-panel",
+      name: "Now Playing panel (NPV)",
+      author: "Aurora Lyrics",
+      category: "Snippets",
+      stars: 5,
+      tags: ["now playing", "npv", "panel", "sidebar", "cover art"],
+      description: "Adds a side panel with cover art, song details and live lyrics. It works on the home page and in the song view, and collapses to a thin edge when you want the space back.",
+      version: "0.1.0",
+      lastUpdated: "2026-10-18",
+      jsUrl: chrome.runtime.getURL("src/extensions/snippet-npv-panel.js"),
+      // No art: the card falls back to its monogram tile.
+      settings: [
+        // Lives here rather than on the panel itself (AJ, 2026-10-19): it is a
+        // preference, not a per-session action.
+        { key: "kawarp", label: "Ambient background", type: "toggle", default: true },
+      ],
     },
   ];
   const findAvail = (id) => AVAILABLE.find((a) => a.id === id);
@@ -914,15 +1075,545 @@
     return out;
   }
 
+  function mkInfoList(label, items, kind) {
+    const row = h("div", { class: "ym-mk-info-row ym-mk-info-" + kind });
+    row.appendChild(h("span", { class: "ym-mk-info-label", text: label }));
+    const ul = h("ul", { class: "ym-mk-info-list" });
+    (items || []).forEach((t) => ul.appendChild(h("li", { text: t })));
+    row.appendChild(ul);
+    return row;
+  }
+
+  /* Draggable priority list (setting type "order").
+     Motion follows the panel's own language rather than a generic drag feel:
+     rows stagger in with a rise + blur when the settings first paint, and every
+     reorder is a FLIP — each displaced row glides to its new slot with a short
+     blur, which is the same blur the add-on switch uses (AJ, 2026-10-19).
+     Arrow buttons mirror the drag so the list is usable without a pointer. */
+  const orderRepaints = new Map(); // setting key -> repaint(), for Reset
+  // Deferred apply for the "order" setting. Set whenever the user reorders the
+  // lyrics sources; consumed (and cleared) by finishCloseDetail() so the current
+  // track only re-resolves ONCE — after the panel closes — instead of on every
+  // drag/arrow nudge (AJ, 2026-10-19).
+  let pendingOrderPost = null;
+
+  function buildOrderControl(setting, getValues, onChange) {
+    const options = Array.isArray(setting.options) ? setting.options : [];
+    const byId = new Map(options.map((option) => [option.id, option]));
+
+    const currentOrder = () => {
+      // getValues() rather than a captured object: the caller REASSIGNS `values`
+      // on every change and on Reset, so a snapshot would go stale.
+      const all = getValues() || {};
+      const saved = Array.isArray(all[setting.key]) ? all[setting.key] : [];
+      const ids = saved.filter((id) => byId.has(id));
+      // Anything missing from the saved value is appended, so a partial or
+      // corrupted entry can never hide a source from the user.
+      for (const option of options) if (ids.indexOf(option.id) === -1) ids.push(option.id);
+      return ids;
+    };
+
+    const list = h("div", {
+      class: "ym-order-list",
+      role: "listbox",
+      "aria-label": setting.label,
+    });
+    let dragEl = null;
+
+    // FLIP: measure, mutate the DOM, then animate each moved row from its old
+    // position to the new one.
+    const flip = (mutate) => {
+      const before = new Map();
+      Array.from(list.children).forEach((el) => before.set(el, el.getBoundingClientRect()));
+      mutate();
+      Array.from(list.children).forEach((el) => {
+        const prev = before.get(el);
+        if (!prev || !el.animate) return;
+        const next = el.getBoundingClientRect();
+        const dy = prev.top - next.top;
+        if (!dy) return;
+        el.animate(
+          [
+            { transform: "translateY(" + dy + "px)", filter: "blur(3px)" },
+            { transform: "none", filter: "blur(0px)" },
+          ],
+          { duration: 300, easing: "cubic-bezier(.22,1,.36,1)" }
+        );
+      });
+    };
+
+    const commit = () => {
+      onChange(Array.from(list.children).map((el) => el.dataset.id));
+    };
+
+    function move(row, dir) {
+      const sibling = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+      if (!sibling) return;
+      flip(() => list.insertBefore(row, dir < 0 ? sibling : sibling.nextSibling));
+      commit();
+    }
+
+    function paint(animateIn) {
+      list.replaceChildren();
+      const ids = currentOrder();
+      ids.forEach((id, index) => {
+        const meta = byId.get(id) || { label: id, hint: "" };
+        const row = h("div", {
+          class: "ym-order-row",
+          role: "option",
+          draggable: "true",
+          "data-id": id,
+        });
+        const up = h("button", {
+          class: "ym-order-move", type: "button", "aria-label": "Move up", title: "Move up", text: "\u2191",
+        });
+        const down = h("button", {
+          class: "ym-order-move", type: "button", "aria-label": "Move down", title: "Move down", text: "\u2193",
+        });
+        up.addEventListener("click", (ev) => { ev.preventDefault(); move(row, -1); });
+        down.addEventListener("click", (ev) => { ev.preventDefault(); move(row, 1); });
+        if (index === 0) up.disabled = true;
+        if (index === ids.length - 1) down.disabled = true;
+
+        row.append(
+          h("span", { class: "ym-order-handle", "aria-hidden": "true", text: "\u28FF" }),
+          h("span", { class: "ym-order-num", text: String(index + 1) }),
+          h("div", { class: "ym-order-body" },
+            h("div", { class: "ym-order-name", text: meta.label || id }),
+            meta.hint ? h("div", { class: "ym-order-hint", text: meta.hint }) : null
+          ),
+          up,
+          down
+        );
+
+        row.addEventListener("dragstart", (ev) => {
+          dragEl = row;
+          row.classList.add("dragging");
+          if (ev.dataTransfer) {
+            ev.dataTransfer.effectAllowed = "move";
+            try { ev.dataTransfer.setData("text/plain", id); } catch (_) {}
+          }
+        });
+        row.addEventListener("dragend", () => {
+          row.classList.remove("dragging");
+          dragEl = null;
+          commit();
+        });
+        row.addEventListener("dragover", (ev) => {
+          ev.preventDefault();
+          if (!dragEl || dragEl === row) return;
+          const rect = row.getBoundingClientRect();
+          const after = ev.clientY > rect.top + rect.height / 2;
+          // Skip the no-op case, otherwise the row twitches when the pointer is
+          // still inside the slot it already occupies.
+          if (after && row.nextElementSibling === dragEl) return;
+          if (!after && row.previousElementSibling === dragEl) return;
+          flip(() => list.insertBefore(dragEl, after ? row.nextSibling : row));
+        });
+
+        list.appendChild(row);
+      });
+
+      if (animateIn) {
+        Array.from(list.children).forEach((el, i) => {
+          if (!el.animate) return;
+          el.animate(
+            [
+              { opacity: 0, transform: "translateY(12px)", filter: "blur(5px)" },
+              { opacity: 1, transform: "none", filter: "blur(0px)" },
+            ],
+            { duration: 440, delay: 70 + i * 55, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+          );
+        });
+      }
+    }
+
+    paint(true);
+    // Reset to defaults rebuilds the list without the entrance stagger.
+    orderRepaints.set(setting.key, () => paint(false));
+    return h("div", { class: "ym-detail-setting-row ym-detail-setting-row-order" },
+      h("div", { class: "ym-detail-setting-label", text: setting.label }),
+      list
+    );
+  }
+
+  // ---- Report a problem (AJ, 2026-10-19) ------------------------------------
+  // A red "Report a problem" button in every add-on's settings opens a frosted,
+  // dimmed modal: pick an issue (or Other -> a textarea), then Send -> "Thanks for
+  // reporting!". Send is a placeholder for now (no backend yet). Singleton overlay
+  // on <body>, reused across add-ons.
+  let reportOverlay = null;
+  const reportedExts = new Set(); // ext ids reported this session (per-add-on gate)
+  let reportSendCount = 0;        // total reports sent this session
+  const REPORT_MAX = 3;           // beyond this, the panel points to Discord only
+  let currentReportExtId = "";    // ext id currently open in the modal
+  let reportGen = 0;              // bumped on open; guards stale close/Send callbacks
+  const REPORT_DISCORD_URL = "https://example.com"; // TODO: real invite (AJ will supply)
+  function reportIssuesFor(ext) {
+    const byId = {
+      "ytmod-spicy-lyrics": ["Lyrics not showing", "Romanization", "Fullscreen", "Lyric sources", "Other"],
+      "ytmod-smooth-motion": ["Animations look wrong", "Panel / corner motion", "Performance / lag", "Buttons / controls", "Other"],
+      "ytmod-artwork-accent": ["Ambient glow / accent color", "Colors", "Performance", "Other"],
+      "ytmod-dynamic": ["Cover art animation", "Video background / backdrop", "Gallery dimming", "Performance", "Other"],
+      "ytmod-sleep-timer": ["Timer never fires", "Fade / volume", "Pause behaviour", "Other"],
+      "ytmod-pip-lyrics": ["Picture-in-picture window", "Lyrics inside PiP", "Controls", "Other"],
+      "ytmod-share-lyric": ["Sharing", "Exported image", "Other"],
+    };
+    return (ext && byId[ext.id]) || ["Doesn't work", "Visual / layout", "Performance", "Buttons / controls", "Other"];
+  }
+  function buildReportProblem() {
+    const scrim = h("div", { class: "ym-report-scrim hidden" });
+    const card = h("div", { class: "ym-report-card" });
+    // Whole PICK view (title + × + sub + options + other + send) fades out as one.
+    const pick = h("div", { class: "ym-report-pick" });
+    const title = h("div", { class: "ym-report-title" });
+    const x = h("button", { class: "ym-report-x", type: "button", "aria-label": "Close", title: "Close", text: "\u00d7" });
+    pick.append(h("div", { class: "ym-report-head" }, title, x));
+    pick.append(h("div", { class: "ym-report-sub", text: "Pick one of the options below" }));
+    const options = h("div", { class: "ym-report-options" });
+    const otherWrap = h("div", { class: "ym-report-other hidden" });
+    const otherInput = h("textarea", {
+      class: "ym-report-other-input",
+      placeholder: "Tell us what went wrong\u2026",
+      rows: "3",
+      maxlength: "1000",
+    });
+    otherWrap.append(otherInput);
+    const send = h("button", { class: "ym-report-send", type: "button", text: "Send" });
+    send.disabled = true;
+
+    let rows = [];
+    const renderOptions = (issues) => {
+      options.replaceChildren();
+      rows = issues.map((label) => {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        p.setAttribute("d", "M5 13l4 4L19 7");
+        p.setAttribute("fill", "none");
+        p.setAttribute("stroke", "currentColor");
+        p.setAttribute("stroke-width", "3");
+        p.setAttribute("stroke-linecap", "round");
+        p.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(p);
+        const circle = h("span", { class: "ym-report-radio" }, h("span", { class: "ym-report-check" }, svg));
+        const row = h("button", {
+          class: "ym-report-option", type: "button", role: "radio", "aria-checked": "false", "data-value": label,
+        }, h("span", { class: "ym-report-option-label", text: label }), circle);
+        row.addEventListener("click", () => {
+          rows.forEach((r) => { r.classList.remove("selected"); r.setAttribute("aria-checked", "false"); });
+          row.classList.add("selected");
+          row.setAttribute("aria-checked", "true");
+          send.disabled = false;
+          if (label === "Other") {
+            otherWrap.classList.remove("hidden");
+            if (!reducedMotion() && otherWrap.animate) {
+              otherWrap.animate(
+                [{ opacity: 0, height: "0px" }, { opacity: 1, height: otherWrap.scrollHeight + "px" }],
+                { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
+              );
+            }
+            otherInput.focus();
+          } else {
+            otherWrap.classList.add("hidden");
+          }
+        });
+        options.appendChild(row);
+        return row;
+      });
+    };
+    pick.append(options, otherWrap, send);
+
+    // Discord link (embedded inline with a top-right arrow); reused by the
+    // thanks / "already reported" / "report limit reached" views.
+    const arrowNs = "http://www.w3.org/2000/svg";
+    const makeDiscordLink = () => {
+      const arrow = document.createElementNS(arrowNs, "svg");
+      arrow.setAttribute("viewBox", "0 0 24 24");
+      arrow.setAttribute("class", "ym-report-discord-arrow");
+      arrow.setAttribute("aria-hidden", "true");
+      ["M7 17 17 7", "M8 7h9v9"].forEach((d) => {
+        const path = document.createElementNS(arrowNs, "path");
+        path.setAttribute("d", d);
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", "2.5");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        arrow.appendChild(path);
+      });
+      return h("a", { class: "ym-report-discord", href: REPORT_DISCORD_URL, target: "_blank", rel: "noopener noreferrer" },
+        h("span", { class: "ym-report-discord-text", text: "Join our Discord" }), arrow);
+    };
+    const thanks = h("div", { class: "ym-report-thanks hidden" },
+      h("div", { class: "ym-report-thanks-title", text: "Thanks for reporting!" }),
+      h("div", { class: "ym-report-thanks-sub" },
+        document.createTextNode("Need extra help? "),
+        makeDiscordLink(),
+        document.createTextNode(".")
+      ),
+      h("button", { class: "ym-report-close", type: "button", text: "Close" })
+    );
+    // Shown on a LATER re-open, once THIS add-on has already been reported.
+    const done = h("div", { class: "ym-report-done hidden" },
+      h("div", { class: "ym-report-done-title", text: "You've already reported" }),
+      h("div", { class: "ym-report-done-sub" },
+        document.createTextNode("If you're experiencing another bug, please "),
+        makeDiscordLink(),
+        document.createTextNode(".")
+      ),
+      h("button", { class: "ym-report-close", type: "button", text: "Close" })
+    );
+    // Shown once this session has hit the report cap (Discord only from here).
+    const blocked = h("div", { class: "ym-report-done hidden" },
+      h("div", { class: "ym-report-done-title", text: "You can't report anymore" }),
+      h("div", { class: "ym-report-done-sub" },
+        document.createTextNode("You've reached the report limit. Please "),
+        makeDiscordLink(),
+        document.createTextNode(" if you need help.")
+      ),
+      h("button", { class: "ym-report-close", type: "button", text: "Close" })
+    );
+
+    card.append(pick, thanks, done, blocked);
+    scrim.appendChild(card);
+
+    // Track + cancel running animations so a re-open never inherits a stale
+    // fill:forwards or a stale close timer (the "opens then abruptly closes" bug).
+    const lives = [];
+    const track = (a) => { if (a) lives.push(a); return a; };
+    const cancelAll = () => { lives.forEach((a) => { try { a.cancel(); } catch (_) {} }); lives.length = 0; };
+    const resetStyles = () => {
+      pick.style.filter = ""; pick.style.opacity = ""; pick.style.transform = "";
+      thanks.style.opacity = ""; thanks.style.transform = ""; thanks.style.filter = "";
+      done.style.opacity = ""; done.style.transform = ""; done.style.filter = "";
+      blocked.style.opacity = ""; blocked.style.transform = ""; blocked.style.filter = "";
+      card.style.height = ""; card.style.opacity = ""; card.style.transform = ""; card.style.filter = "";
+    };
+    const markReported = () => {
+      reportSendCount++;
+      if (currentReportExtId) reportedExts.add(currentReportExtId);
+    };
+
+    const closeReport = () => {
+      const genAtClose = reportGen;
+      cancelAll();
+      if (reducedMotion() || !scrim.animate) { scrim.classList.add("hidden"); return; }
+      const a = track(card.animate(
+        [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.96) translateY(8px)", filter: "blur(6px)" }],
+        { duration: 200, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }));
+      track(scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: "ease-out", fill: "forwards" }));
+      // A close scheduled before a re-open must NOT hide the freshly opened modal.
+      const finishClose = () => {
+        if (genAtClose !== reportGen) return;
+        scrim.classList.add("hidden");
+        cancelAll();
+      };
+      a.onfinish = finishClose;
+      window.setTimeout(finishClose, 320);
+    };
+    x.addEventListener("click", closeReport);
+    thanks.querySelector(".ym-report-close").addEventListener("click", closeReport);
+    done.querySelector(".ym-report-close").addEventListener("click", closeReport);
+    blocked.querySelector(".ym-report-close").addEventListener("click", closeReport);
+    scrim.addEventListener("click", (e) => { if (e.target === scrim) closeReport(); });
+
+    send.addEventListener("click", () => {
+      if (send.disabled) return;
+      // Placeholder — wire the real submit later (AJ, 2026-10-19).
+      if (reducedMotion() || !pick.animate) { pick.classList.add("hidden"); thanks.classList.remove("hidden"); markReported(); return; }
+      // Track this fade so a re-open's cancelAll() clears it — an untracked
+      // fill:forwards would pin `pick` at opacity:0 and render the form invisible
+      // (the "blank white panel" on the next open). AJ, 2026-10-21.
+      track(pick.animate(
+        [{ opacity: 1, transform: "none", filter: "blur(0)" }, { opacity: 0, transform: "translateY(-8px)", filter: "blur(6px)" }],
+        { duration: 240, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }
+      )).onfinish = () => {
+        const fromH = card.offsetHeight;
+        pick.classList.add("hidden");
+        pick.style.filter = "";
+        thanks.classList.remove("hidden");
+        markReported();
+        const toH = card.offsetHeight;
+        // Smoothly shrink the card to the smaller thanks layout (AJ, 2026-10-19).
+        if (card.animate && toH > 0 && fromH !== toH) {
+          card.style.height = fromH + "px";
+          const shrink = track(card.animate(
+            [{ height: fromH + "px" }, { height: toH + "px" }],
+            { duration: 380, easing: "cubic-bezier(.34,1.2,.5,1)", fill: "forwards" }));
+          shrink.onfinish = () => { card.style.height = ""; };
+        }
+        track(thanks.animate(
+          [{ opacity: 0, transform: "translateY(12px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }],
+          { duration: 460, easing: "cubic-bezier(.34,1.4,.5,1)" }));
+      };
+    });
+
+    document.body.appendChild(scrim);
+    reportOverlay = { scrim, title, pick, thanks, done, blocked, options, otherWrap, otherInput, send, renderOptions, cancelAll, resetStyles };
+    return reportOverlay;
+  }
+  function openReportProblem(ext) {
+    const r = reportOverlay || buildReportProblem();
+    ++reportGen;               // invalidate any in-flight close/Send callbacks
+    r.cancelAll();             // kill stale fill:forwards so nothing looks "closed"
+    r.resetStyles();           // clear inline height/opacity/transform from last time
+    currentReportExtId = (ext && ext.id) || "";
+    const atLimit = reportSendCount >= REPORT_MAX;
+    const alreadyExt = !atLimit && reportedExts.has(currentReportExtId);
+    const showingPick = !atLimit && !alreadyExt;
+    const nameTitle = `Report a problem with ${ext && ext.name ? ext.name : "Aurora Lyrics"}`;
+    r.pick.classList.add("hidden");
+    r.thanks.classList.add("hidden");
+    r.done.classList.add("hidden");
+    r.blocked.classList.add("hidden");
+    if (showingPick) {
+      // Fresh report (per add-on): show the pick form and build its options.
+      r.title.textContent = nameTitle;
+      r.pick.classList.remove("hidden");
+      r.otherWrap.classList.add("hidden");
+      r.otherInput.value = "";
+      r.send.disabled = true;
+      r.renderOptions(reportIssuesFor(ext));
+    } else if (alreadyExt) {
+      // This add-on was already reported this session (others can still report).
+      r.title.textContent = nameTitle;
+      r.done.classList.remove("hidden");
+    } else {
+      // Session report cap reached: point to Discord only.
+      r.title.textContent = "Report a problem";
+      r.blocked.classList.remove("hidden");
+    }
+    r.scrim.classList.remove("hidden");
+    if (reducedMotion() || !r.scrim.animate) return;
+    r.scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
+    const card = r.scrim.querySelector(".ym-report-card");
+    if (card && card.animate) {
+      card.animate(
+        [{ opacity: 0, transform: "scale(.96) translateY(10px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }],
+        { duration: 440, easing: "cubic-bezier(.34,1.4,.5,1)" });
+    }
+    if (showingPick) {
+      Array.from(r.options.children).forEach((row, i) => {
+        if (!row.animate) return;
+        row.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, delay: 80 + i * 45, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" });
+      });
+    }
+  }
+  // Appends the right-aligned "Report a problem" footer button to a detail host, so
+  // EVERY add-on has it — even ones with no settings — and it never reads as an
+  // Uninstall/Action button (AJ, 2026-10-19).
+  function mountReportButton(host, ext) {
+    const btn = h("button", { class: "ym-report-btn", type: "button", text: "Report a problem" });
+    btn.addEventListener("click", () => openReportProblem(ext));
+    host.appendChild(h("div", { class: "ym-report-foot" }, btn));
+  }
+
   async function buildSettingsSection(ext) {
     const list = visibleSettings(ext);
     if (!list.length) return null;
     let values = await getExtensionSettings(ext);
     const section = h("section", { class: "ym-detail-settings" });
+    // Info button: plain-language "what it does / pros / cons" for this add-on.
+    const info = MK_INFO[ext.id];
+    const infoPanel = h("div", { class: "ym-mk-info hidden" });
+    let infoBtn = null;
+    if (info) {
+      if (info.what) {
+        infoPanel.appendChild(h("div", { class: "ym-mk-info-row" },
+          h("span", { class: "ym-mk-info-label", text: "What it does" }),
+          h("span", { class: "ym-mk-info-text", text: info.what })
+        ));
+      }
+      if (info.pros && info.pros.length) infoPanel.appendChild(mkInfoList("Pros", info.pros, "pro"));
+      if (info.cons && info.cons.length) infoPanel.appendChild(mkInfoList("Cons", info.cons, "con"));
+      infoBtn = h("button", {
+        class: "ym-mk-info-btn",
+        type: "button",
+        title: "What this add-on does, with pros and cons",
+        "aria-label": "About this add-on",
+        "aria-expanded": "false",
+        text: "i",
+      });
+      let infoBusy = false;
+      let infoCloseAnim = null;
+      infoBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (infoBusy) return;
+        const open = infoPanel.classList.contains("hidden");
+        infoBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        infoBtn.classList.toggle("on", open);
+        // Same motion language as switching add-ons: a springy rise on open,
+        // a short blur-out on close (AJ, 2026-10-19).
+        if (open) {
+          // A close animation with fill:forwards keeps holding height:0 and
+          // opacity:0. If it is not cancelled the reopened card stays collapsed
+          // and only flashes its top edge on the next click (AJ, 2026-10-19).
+          if (infoCloseAnim) {
+            try { infoCloseAnim.cancel(); } catch (e) {}
+            infoCloseAnim = null;
+          }
+          infoPanel.classList.remove("hidden");
+          if (!infoPanel.animate) return;
+          infoBusy = true;
+          // Grow the block while its rows rise, so the settings below slide
+          // down instead of jumping (AJ, 2026-10-19).
+          const target = infoPanel.offsetHeight;
+          infoPanel.style.overflow = "hidden";
+          const grow = infoPanel.animate(
+            [{ height: "0px" }, { height: target + "px" }],
+            { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" }
+          );
+          grow.onfinish = () => { infoPanel.style.overflow = ""; };
+          // Stagger each row exactly like mkAnimateIn does when you switch
+          // add-ons — a single block tween felt stiff (AJ, 2026-10-19).
+          Array.from(infoPanel.children).forEach((el, i) => {
+            if (!el.animate) return;
+            el.animate(
+              [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
+              { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+            );
+          });
+          const total = 40 + infoPanel.children.length * 54 + 540;
+          window.setTimeout(() => { infoBusy = false; }, total);
+        } else if (infoPanel.animate) {
+          infoBusy = true;
+          const h0 = infoPanel.offsetHeight;
+          infoPanel.style.overflow = "hidden";
+          const a = infoPanel.animate(
+            [
+              { height: h0 + "px", opacity: 1, transform: "none", filter: "blur(0px)" },
+              { height: "0px", opacity: 0, transform: "translateY(-10px)", filter: "blur(6px)" },
+            ],
+            { duration: 220, easing: "cubic-bezier(.4,0,.35,1)", fill: "forwards" }
+          );
+          infoCloseAnim = a;
+          const done = () => {
+            infoPanel.classList.add("hidden");
+            infoPanel.style.overflow = "";
+            // Cancel AFTER hiding: display:none already holds the collapsed
+            // state, so the forwards fill is no longer needed.
+            try { a.cancel(); } catch (e) {}
+            if (infoCloseAnim === a) infoCloseAnim = null;
+            infoBusy = false;
+          };
+          a.onfinish = done;
+          window.setTimeout(done, 260);
+        } else {
+          infoPanel.classList.add("hidden");
+        }
+      });
+    }
     section.appendChild(h("div", { class: "ym-detail-settings-head" },
-      h("div", { class: "ym-detail-settings-title", text: "Settings" }),
+      h("div", { class: "ym-detail-settings-titlerow" },
+        h("div", { class: "ym-detail-settings-title", text: "Settings" }),
+        infoBtn
+      ),
       h("div", { class: "ym-detail-settings-subtitle", text: "Changes apply immediately and are saved automatically." })
     ));
+    if (info) section.appendChild(infoPanel);
     const controls = new Map();
     for (const setting of list) {
       if (setting.type === "header") {
@@ -930,6 +1621,19 @@
         // (so the Reset button ignores it) and no entry in `values` (so
         // postExtensionSettings does not post a junk key to the extension).
         section.appendChild(h("div", { class: "ym-detail-setting-section", text: setting.label }));
+        continue;
+      }
+      if (setting.type === "order") {
+        // Reordering does NOT push to the extension immediately. Posting on every
+        // drag/arrow step would make the resolver re-run and refetch lyrics for the
+        // current track each time. We persist the choice now (so a reload keeps it)
+        // and stash it in pendingOrderPost; finishCloseDetail() flushes it once,
+        // after the panel is closed (AJ, 2026-10-19).
+        section.appendChild(buildOrderControl(setting, () => values, (next) => {
+          values = Object.assign({}, values, { [setting.key]: next });
+          saveExtensionSettings(ext.id, values);
+          pendingOrderPost = { id: ext.id, values };
+        }));
         continue;
       }
       const isText = setting.type === "text";
@@ -1000,12 +1704,30 @@
         valueEl.textContent = formatSettingValue(setting, values[setting.key]);
         if (syncRangeFill) syncRangeFill();
       });
+      // Order lists are not in `controls` (they have no input element), so they
+      // rebuild themselves from the restored values.
+      orderRepaints.forEach((repaint) => repaint());
       postExtensionSettings(ext.id, values);
       saveExtensionSettings(ext.id, values);
+      // Reset is a single deliberate apply, so it does not need deferral — clear
+      // any stale pending post so closeDetail() does not re-fire it (AJ, 2026-10-19).
+      pendingOrderPost = null;
       toast("Settings reset");
     });
     section.appendChild(reset);
     postExtensionSettings(ext.id, values);
+    // Cascade the settings in with the SAME motion language the detail pane
+    // uses when you switch add-ons, so a block that appears right after
+    // "Installing…" lands instead of popping (AJ, 2026-10-19).
+    if (section.animate) {
+      Array.from(section.children).forEach((el, i) => {
+        if (!el.animate) return;
+        el.animate(
+          [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
+          { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+        );
+      });
+    }
     return section;
   }
 
@@ -1054,7 +1776,7 @@
     toast(ui.dev ? "Developer mode on" : "Developer mode off");
     // Settings only exist inside a detail view, so re-render whatever is on
     // screen to apply the change now instead of on the next navigation.
-    if (detailExt && sheetOpen) renderDetail(detailExt);
+    if (mkDetail && mkSel !== "home") renderSection();
   }
 
   function onTitleTap() {
@@ -1235,7 +1957,7 @@
     await setReg(reg);
     applyExtension(id, true);
     toast((ext.name || id) + " installed");
-    renderSection();
+    renderSection(true);
     console.debug("[YTMod] installed extension:", id);
   }
 
@@ -1259,7 +1981,7 @@
     await setReg(reg);
     await removeExtensionSettings(id);
     toast((ext ? ext.name : id) + " removed");
-    renderSection();
+    renderSection(true);
     console.debug("[YTMod] uninstalled extension:", id);
   }
 
@@ -1378,23 +2100,26 @@
   }
 
   function marketKey(e) {
-    if (overlay.classList.contains("hidden")) return;
+    if (!overlay || overlay.classList.contains("hidden")) return;
     if (e.key === "Escape") {
       e.preventDefault();
-      if (sheetOpen) closeDetail();
-      else closeMarketplace();
+      closeMarketplace();
       return;
     }
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
-    if (sheetOpen) return; // no card navigation while the detail sheet is open
-    const cards = $$(".ym-card-grid, .ym-card-list", $("#ym-section"));
+    if (!mkRows) return;
+    const cards = $$(".ym-mk-card", mkRows);
     if (!cards.length) return;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); kbIndex++; focusCard(cards); }
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); kbIndex--; focusCard(cards); }
-    else if (e.key === "Home") { e.preventDefault(); kbIndex = 0; focusCard(cards); }
-    else if (e.key === "End") { e.preventDefault(); kbIndex = cards.length - 1; focusCard(cards); }
-    else if (e.key === "Enter") { e.preventDefault(); if (cards[kbIndex]) cards[kbIndex].click(); }
+    const cur = cards.findIndex((c) => c.classList.contains("sel"));
+    let i = cur < 0 ? 0 : cur;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); i = Math.min(cards.length - 1, i + 1); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); i = Math.max(0, i - 1); }
+    else if (e.key === "Home") { e.preventDefault(); i = 0; }
+    else if (e.key === "End") { e.preventDefault(); i = cards.length - 1; }
+    else if (e.key === "Enter") { e.preventDefault(); if (cards[i]) cards[i].click(); return; }
+    else return;
+    if (cards[i]) cards[i].click();
   }
 
   // Bridge from the page-world public API (src/content/public-api.js). It posts
@@ -1438,6 +2163,9 @@
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
             break;
+          case "fetchDeezerTracks":
+            r = await fetchDeezerTracks(args[0], args[1], args[2]);
+            break;
           case "fetchCoverArt": r = await fetchCoverArt(args[0], args[1]); break;
           default: throw new Error("unknown method " + method);
         }
@@ -1458,6 +2186,694 @@
     (document.head || document.documentElement).appendChild(s);
   }
 
+  /* ---- marketplace v2: rail + master–detail (AJ, 2026-10-19) ----------
+     Replaces the tabs + grid + sheet surface. The registry, install /
+     uninstall, settings engine, floating drag and dev gesture are unchanged;
+     this block only owns how the catalog is presented. */
+  let mkRows = null, mkInd = null, mkDetail = null, mkSegPill = null;
+  let mkSel = "home", mkFilter = "All";
+  let mkAutoCollapsed = false;
+  let mkNarrowState = null;
+
+  // Compact rail: auto-collapse below 860px, but only when the breakpoint is
+  // actually crossed — otherwise every re-render would undo a manual expand.
+  function syncMkCollapse() {
+    if (!overlay) return;
+    const narrow = !!(window.matchMedia && window.matchMedia("(max-width: 860px)").matches);
+    if (mkNarrowState === narrow) return;
+    mkNarrowState = narrow;
+    if (narrow) {
+      if (!overlay.classList.contains("ym-mk-collapsed")) {
+        overlay.classList.add("ym-mk-collapsed");
+        mkAutoCollapsed = true;
+      }
+    } else if (mkAutoCollapsed) {
+      overlay.classList.remove("ym-mk-collapsed");
+      mkAutoCollapsed = false;
+    }
+  }
+
+  // Only these add-ons carry a preview clip (AJ, 2026-10-19).
+  // PiP Lyrics removed entirely: its preview showed real lyric text, and even
+  // the logo fallback read as a preview slot (AJ, 2026-10-19).
+  const MK_PROMO = new Set([
+    "ytmod-sleep-timer", "ytmod-share-lyric",
+    "ytmod-next-up", "ytmod-song-notes",
+  ]);
+
+  // Plain-language "what it does / pros / cons" shown from the info button next
+  // to each add-on's Settings heading. Kept short and concrete — this is the
+  // text a first-time user actually reads before installing (AJ, 2026-10-19).
+  const MK_INFO = {
+    "ytmod-dynamic": {
+      what: "Replaces the flat page background with a live, blurred version of the current artwork (or music video).",
+      pros: ["Ties the whole app to the song you're playing", "Follows the video on music videos", "Adjustable brightness, saturation and warp"],
+      cons: ["Uses GPU continuously while playing", "Most visible on pages with large empty areas"],
+    },
+    "ytmod-artwork-accent": {
+      what: "Samples the cover art and tints Aurora Lyrics to match it.",
+      pros: ["Every song feels themed without any setup", "Keeps lyric colours readable on dark art"],
+      cons: ["Very colourful art can shift the accent mid-song", "Tint is subtle on near-monochrome covers"],
+    },
+    "ytmod-spicy-lyrics": {
+      what: "The lyric engine: synced lyrics, word-by-word animation, TTML import, offset control and fullscreen layouts.",
+      pros: ["Best-in-class word and letter animation", "Imported TTML and per-track offsets", "Three fullscreen layouts"],
+      cons: ["Imported TTML files are the only way to fix badly timed songs", "Fullscreen modes are heavier on older hardware"],
+    },
+    "ytmod-smooth-motion": {
+      what: "Animates page, sidebar and player transitions instead of letting YouTube Music snap between states.",
+      pros: ["Makes navigation feel fluid", "Covers the guide, player and video resize"],
+      cons: ["Adds a short transition you can't skip", "Can feel slower on very low-end machines"],
+    },
+    "ytmod-sleep-timer": {
+      what: "Pauses playback after a set time or at the end of the current track.",
+      pros: ["No need to keep the tab focused", "Fades out rather than cutting abruptly"],
+      cons: ["Timer state resets if you reload the page", "One timer at a time"],
+    },
+    "ytmod-pip-lyrics": {
+      what: "Shows the current lyric line in a small always-on-top window.",
+      pros: ["Lyrics stay visible while you use other apps", "Follows the main renderer's styling"],
+      cons: ["Needs a second window open", "Limited to one line of context"],
+    },
+    "ytmod-share-lyric": {
+      what: "Turns the current lyric line into a shareable image card.",
+      pros: ["Clean, consistent output", "Includes artwork and track credits"],
+      cons: ["Image is rendered locally, so custom fonts must be installed", "No built-in social posting"],
+    },
+    "ytmod-next-up": {
+      what: "Shows what's playing next, with a queue preview and quick jump.",
+      pros: ["See the queue without leaving the page", "One click to jump to a track"],
+      cons: ["Reads YouTube's queue, so it matches YTM's own ordering", "Long queues need scrolling"],
+    },
+    "ytmod-song-notes": {
+      what: "Lets you attach private notes to a track and read them back later.",
+      pros: ["Notes are stored per track", "Useful for references and reminders"],
+      cons: ["Stored locally, not synced across devices", "No rich text formatting"],
+    },
+    "snippet-track-toast": {
+      what: "Pops a small notification with the song, artist and cover art whenever a track starts.",
+      pros: ["Useful when the player bar is hidden", "Unobtrusive and auto-dismisses"],
+      cons: ["Can overlap content briefly", "Duplicates the player bar on the song view"],
+    },
+    "snippet-copy-lyrics": {
+      what: "Adds a button that copies the full lyric text of the current song.",
+      pros: ["One click, no selection dragging", "Works with imported TTML too"],
+      cons: ["Plain text only — no timestamps", "Copies the whole song, not a single line"],
+    },
+    "snippet-centered-home": {
+      what: "Centers the home page section headers and filter chips.",
+      pros: ["Calmer, more balanced home layout", "No configuration needed"],
+      cons: ["Purely cosmetic", "Can look off on very wide screens"],
+    },
+    "snippet-npv-panel": {
+      what: "A docked side rail with cover art or video, title, artist card, lyrics and the up-next queue.",
+      pros: ["Keeps lyrics and queue visible while browsing", "Collapses to a thin edge", "Follows the Aurora Bloom backdrop"],
+      cons: ["Takes horizontal space while open", "Feels cramped in a narrow window"],
+    },
+  };
+
+  // Per-add-on glyph + tint for the rail tiles and the detail monogram.
+  const MK_GLYPH = {
+    "ytmod-dynamic":      { c: "#3fe0c5", d: "M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z" },
+    "ytmod-artwork-accent": { c: "#6ee06f", d: "M12 4a8 8 0 100 16 8 8 0 000-16zm0 3a5 5 0 110 10 5 5 0 010-10z" },
+    "ytmod-spicy-lyrics": { c: "#ff5c9e", d: "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z" },
+    "ytmod-smooth-motion": { c: "#7aa2ff", d: "M3 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0v3c-2-3-4-3-6 0s-4 3-6 0-4-3-6 0z" },
+    "ytmod-sleep-timer":  { c: "#9b8cff", d: "M12 3a9 9 0 108.5 12A7 7 0 1112 3z" },
+    "ytmod-pip-lyrics":   { c: "#ffb454", d: "M3 5h18v14H3V5zm2 2v10h14V7H5zm6 4h6v4h-6v-4z" },
+    "ytmod-share-lyric":  { c: "#ff7a59", d: "M14 3l7 7-7 7v-4c-5 0-8 2-10 5 0-6 4-9 10-9V3z" },
+    "ytmod-next-up":      { c: "#4fd1c5", d: "M4 6h12v2H4V6zm0 5h12v2H4v-2zm0 5h8v2H4v-2zm14-5l4 3-4 3v-6z" },
+    "ytmod-song-notes":   { c: "#f5c542", d: "M4 4h16v12H8l-4 4V4zm3 4h10v2H7V8zm0 4h7v2H7v-2z" },
+    "snippet-track-toast":{ c: "#9aa7ff", d: "M12 22a2 2 0 002-2h-4a2 2 0 002 2zm7-6V11a7 7 0 10-14 0v5l-2 2v1h18v-1l-2-2z" },
+    "snippet-copy-lyrics":{ c: "#7bd88f", d: "M8 3h10v14H8V3zm-2 4H4v14h10v-2H6V7z" },
+    "snippet-centered-home": { c: "#a78bfa", d: "M7 5h10v2H7zM5 9h14v2H5zM8 13h8v2H8zM6 17h12v2H6z" },
+    "snippet-npv-panel":  { c: "#3fe0c5", d: "M3 4h18v16H3V4zm2 2v12h4V6H5zm6 0v12h8V6h-9z" },
+  };
+  // "#rrggbb" + alpha byte, for the tinted tile background/border.
+  const mkTint = (hex, alpha) => hex + alpha;
+
+  // Attribution for Aurora Lyrics. Spicy ToS s6 requires naming the provider
+  // on screen wherever lyrics appear.
+  const MK_SOURCES = {
+    "ytmod-spicy-lyrics": [
+      ["Lyrics", [["Spicy Lyrics", "https://spicylyrics.org/"], ["Unison", "https://unison.boidu.dev/"], ["LRCLIB", "https://lrclib.net/"]]],
+      ["Track matching", [["MusicBrainz", "https://musicbrainz.org/"], ["ListenBrainz", "https://listenbrainz.org/"]]],
+    ],
+  };
+  const MK_LNK = {
+    "Spicy Lyrics": "ym-mk-lnk-spicy",
+    Unison: "ym-mk-lnk-unison",
+    LRCLIB: "ym-mk-lnk-lrclib",
+    MusicBrainz: "ym-mk-lnk-mb",
+    ListenBrainz: "ym-mk-lnk-lb",
+  };
+  const MK_CHECK = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
+  const MK_HOME = "M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z";
+  const MK_PLUS = "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z";
+  const MK_CAT_ORDER = { Themes: 0, Extensions: 1, Snippets: 2 };
+
+  // AVAILABLE is not grouped by category (Aurora Flow sits between two
+  // Extensions), so a naive "category changed" check emits the same heading
+  // twice. Sort by the rail order first — Array#sort is stable, so the catalog
+  // order inside each group is preserved.
+  function mkFilteredList() {
+    return AVAILABLE
+      .filter((e) => mkFilter === "All" || e.category === mkFilter)
+      .slice()
+      .sort((a, b) => (MK_CAT_ORDER[a.category] ?? 9) - (MK_CAT_ORDER[b.category] ?? 9));
+  }
+
+  function mkLogoUrl() {
+    try { return chrome.runtime.getURL("assets/manifest-logo.webp"); } catch (_) { return ""; }
+  }
+
+  // Outline trash with a separate lid group so it can swing open on click.
+  function mkTrashIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.9");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const lid = document.createElementNS(NS, "g");
+    lid.setAttribute("class", "ym-mk-lid");
+    // Same pivot as the mockup. Without it the lid rotates around the SVG
+    // origin and visibly detaches from the bin.
+    lid.style.transformBox = "view-box";
+    lid.style.transformOrigin = "9px 6px";
+    for (const d of ["M4 7h16", "M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7"]) {
+      const p = document.createElementNS(NS, "path");
+      p.setAttribute("d", d);
+      lid.appendChild(p);
+    }
+    svg.appendChild(lid);
+    for (const d of [
+      "M6.5 7l.9 12.1A1.5 1.5 0 0 0 8.9 20.5h6.2a1.5 1.5 0 0 0 1.5-1.4L17.5 7",
+      "M10 11v6M14 11v6",
+    ]) {
+      const p = document.createElementNS(NS, "path");
+      p.setAttribute("d", d);
+      svg.appendChild(p);
+    }
+    return svg;
+  }
+
+  function mkSidebarIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.8");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const rect = document.createElementNS(NS, "rect");
+    for (const pair of [["x", "3"], ["y", "4"], ["width", "18"], ["height", "16"], ["rx", "3"]]) rect.setAttribute(pair[0], pair[1]);
+    const line = document.createElementNS(NS, "path");
+    line.setAttribute("d", "M9.5 4v16");
+    svg.appendChild(rect);
+    svg.appendChild(line);
+    return svg;
+  }
+
+  function mkCard(id, label, monoText, installed, isHome) {
+    const card = h("div", {
+      class: "ym-mk-card" + (installed ? " installed" : "") + (String(mkSel) === String(id) ? " sel" : ""),
+      "data-id": id,
+      role: "button",
+      tabindex: "0",
+    });
+    const mono = h("div", { class: "ym-mk-mono" });
+    const glyph = !isHome && MK_GLYPH[id];
+    if (isHome) mono.appendChild(svgIcon(MK_HOME));
+    else if (glyph) {
+      mono.appendChild(svgIcon(glyph.d));
+      mono.style.color = glyph.c;
+      mono.style.background = mkTint(glyph.c, "1f");
+      mono.style.borderColor = mkTint(glyph.c, "3d");
+    } else mono.textContent = monoText;
+    card.appendChild(mono);
+    card.appendChild(h("div", { class: "ym-mk-name", text: label }));
+    if (installed) {
+      const chk = svgIcon(MK_CHECK);
+      chk.classList.add("ym-mk-check");
+      card.appendChild(chk);
+    }
+    const go = () => { mkSelect(id); };
+    card.addEventListener("click", go);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+    });
+    return card;
+  }
+
+  function mkBuildRows(list, reg) {
+    if (!mkRows || !mkInd) return;
+    mkRows.replaceChildren(mkInd);
+    mkRows.appendChild(mkCard("home", "Home", "", false, true));
+    let last = null;
+    for (const ext of list) {
+      if (ext.category !== last) {
+        last = ext.category;
+        mkRows.appendChild(h("div", { class: "ym-mk-cat", text: ext.category || "Add-ons" }));
+      }
+      mkRows.appendChild(mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false));
+    }
+    mkPositionInd(true);
+  }
+
+  function mkPositionInd(instant) {
+    if (!mkInd || !mkRows) return;
+    const el = mkRows.querySelector(".ym-mk-card.sel");
+    if (!el) { mkInd.style.opacity = "0"; return; }
+    mkInd.style.opacity = "1";
+    if (instant) mkInd.style.transition = "none";
+    mkInd.style.height = el.offsetHeight + "px";
+    mkInd.style.transform = "translateY(" + el.offsetTop + "px)";
+    if (instant) requestAnimationFrame(() => { mkInd.style.transition = ""; });
+  }
+
+  function mkPositionSegPill(instant) {
+    if (!mkSegPill || !overlay) return;
+    const btn = overlay.querySelector(".ym-mk-segbtn.on");
+    if (!btn) return;
+    if (instant) mkSegPill.style.transition = "none";
+    mkSegPill.style.width = btn.offsetWidth + "px";
+    mkSegPill.style.transform = "translateX(" + btn.offsetLeft + "px)";
+    if (instant) requestAnimationFrame(() => { mkSegPill.style.transition = ""; });
+  }
+
+  // Filter switch: the rail cascades out in the direction of travel, then the
+  // new list cascades in from the opposite side.
+  function mkListOut(dir) {
+    if (!mkRows) return Promise.resolve();
+    const items = Array.from(mkRows.querySelectorAll(".ym-mk-card, .ym-mk-cat"));
+    if (!items.length) return Promise.resolve();
+    items.forEach((el, i) => {
+      if (!el.animate) return;
+      el.animate([
+        { opacity: 1, transform: "none" },
+        { opacity: 0, transform: "translateX(" + dir * 10 + "px)" },
+      ], { duration: 140, delay: i * 12, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" });
+    });
+    return new Promise((resolve) => setTimeout(resolve, items.length * 12 + 160));
+  }
+
+  function mkListIn(dir) {
+    if (!mkRows) return;
+    const items = Array.from(mkRows.querySelectorAll(".ym-mk-card, .ym-mk-cat"));
+    items.forEach((el, i) => {
+      if (!el.animate) return;
+      el.animate([
+        { opacity: 0, transform: "translateX(" + -dir * 12 + "px)" },
+        { opacity: 1, transform: "none" },
+      ], { duration: 340, delay: i * 20, easing: "cubic-bezier(.34,1.3,.5,1)", fill: "both" });
+    });
+  }
+
+  function mkAnimateIn() {
+    if (!mkDetail) return;
+    const w = mkDetail.firstElementChild;
+    if (!w || !w.animate) return;
+    Array.from(w.children).forEach((el, i) => {
+      if (!el.animate) return;
+      el.animate(
+        [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
+        { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "both" }
+      );
+    });
+    const m = w.querySelector(".ym-mk-dmono") || w.querySelector(".ym-mk-mark");
+    if (m && m.animate) {
+      m.animate([{ transform: "scale(.84)" }, { transform: "scale(1)" }],
+        { duration: 640, easing: "cubic-bezier(.34,1.5,.5,1)", fill: "both" });
+    }
+  }
+
+  // Grow a freshly inserted block from 0 to its natural height so everything
+  // below it slides instead of jumping. WAAPI (no fill) leaves no inline styles
+  // behind, so the element measures normally afterwards.
+  function mkGrowIn(el) {
+    if (!el || !el.animate) return;
+    const target = el.offsetHeight;
+    if (!target) return;
+    el.style.overflow = "hidden";
+    const a = el.animate(
+      [{ height: "0px", opacity: 0 }, { height: target + "px", opacity: 1 }],
+      { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" }
+    );
+    const done = () => { el.style.overflow = ""; };
+    a.onfinish = done;
+    window.setTimeout(done, 460);
+  }
+
+  async function mkOut(dir) {
+    const w = mkDetail && mkDetail.firstElementChild;
+    if (!w || !w.animate) return;
+    const shift = dir < 0 ? -14 : 14;
+    const out = w.animate([
+      { opacity: 1, transform: "none", filter: "blur(0px)" },
+      { opacity: 0, transform: "translateY(" + shift + "px)", filter: "blur(6px)" },
+    ], { duration: 180, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" });
+    await new Promise((resolve) => {
+      let done = false;
+      // Do NOT cancel here: cancelling drops fill:forwards and the old view
+      // snaps back to full opacity for a frame before the render swaps it,
+      // which reads as a flash. The node is replaced by replaceChildren().
+      const finish = () => { if (done) return; done = true; resolve(); };
+      out.onfinish = finish;
+      setTimeout(finish, 280);
+    });
+  }
+
+  async function mkSelect(id) {
+    if (String(id) === String(mkSel)) return;
+    const list = mkFilteredList();
+    const from = mkSel === "home" ? -1 : list.findIndex((e) => e.id === mkSel);
+    const to = id === "home" ? -1 : list.findIndex((e) => e.id === id);
+    const dir = to > from ? 1 : -1;
+    mkSel = id;
+    if (mkRows) {
+      mkRows.querySelectorAll(".ym-mk-card").forEach((c) => c.classList.toggle("sel", c.dataset.id === String(id)));
+    }
+    mkPositionInd(false);
+    await mkOut(dir);
+    const reg = await getReg();
+    await mkRenderDetail(reg);
+  }
+
+  async function setMkFilter(c) {
+    if (c === mkFilter) return;
+    const order = ["All", "Themes", "Extensions", "Snippets"];
+    const dir = order.indexOf(c) > order.indexOf(mkFilter) ? -1 : 1;
+    mkFilter = c;
+    if (overlay) {
+      overlay.querySelectorAll(".ym-mk-segbtn").forEach((b) => b.classList.toggle("on", b.dataset.c === c));
+    }
+    mkPositionSegPill(false);
+    const reg = await getReg();
+    const list = mkFilteredList();
+    // Land on the first add-on of the chosen filter. Keeping Home selected meant
+    // its entrance animation replayed on every tab switch, which read as spam.
+    mkSel = list.length ? list[0].id : "home";
+    await Promise.all([mkListOut(dir), mkOut(dir)]);
+    mkBuildRows(list, reg);
+    mkListIn(dir);
+    await mkRenderDetail(reg);
+  }
+
+  function mkSources(src) {
+    const box = h("div", { class: "ym-mk-sources" });
+    box.appendChild(h("div", { class: "ym-mk-srclab", text: "Data sources" }));
+    for (const [label, links] of src) {
+      const row = h("div", { class: "ym-mk-srcrow" });
+      row.appendChild(h("b", { text: label }));
+      const wrap = h("span", { class: "ym-mk-srclinks" });
+      links.forEach(([name, url], i) => {
+        if (i) wrap.appendChild(h("i", { text: "·" }));
+        wrap.appendChild(h("a", {
+          class: "ym-mk-lnk " + (MK_LNK[name] || ""),
+          href: url,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          text: name,
+        }));
+      });
+      row.appendChild(wrap);
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  function mkPromoBox(ext, caption) {
+    const box = h("div", { class: "ym-mk-promobox" });
+    const art = ext.art || {};
+    if (art.video) {
+      const v = h("video", {
+        class: "ym-mk-promomedia",
+        src: extArtUrl(art.video),
+        poster: extArtUrl(art.poster || art.image || ""),
+        loop: "", autoplay: "", muted: "", playsinline: "",
+        disablepictureinpicture: "",
+      });
+      v.muted = true;
+      box.appendChild(v);
+    } else if (art.image || art.poster) {
+      // Still-only add-ons (Sleep Timer, Next Up, Song Notes) ship a 3:4 card.
+      const still = h("div", { class: "ym-mk-promomedia ym-mk-promofallback" });
+      still.style.backgroundImage = 'url("' + extArtUrl(art.image || art.poster) + '")';
+      box.appendChild(still);
+    } else {
+      const fb = h("div", { class: "ym-mk-promomedia ym-mk-promofallback" });
+      const url = mkLogoUrl();
+      if (url) fb.style.backgroundImage = 'url("' + url + '")';
+      box.appendChild(fb);
+    }
+    if (!caption) return box;
+    return h("div", { class: "ym-mk-promo" }, box, h("div", { class: "ym-mk-promocap", text: caption }));
+  }
+
+  // Change the label AND morph the width in the same beat, so the button never
+  // jumps between "Uninstall" and "Uninstalling…".
+  function mkBtnLabel(btn, text) {
+    const label = btn.querySelector("span");
+    if (!label) return;
+    const first = btn.getBoundingClientRect().width;
+    label.textContent = text;
+    const last = btn.getBoundingClientRect().width;
+    if (Math.abs(last - first) < 1 || !btn.animate) return;
+    btn.style.overflow = "hidden";
+    const a = btn.animate([{ width: first + "px" }, { width: last + "px" }],
+      { duration: 300, easing: "cubic-bezier(.34,1.16,.5,1)" });
+    a.onfinish = () => { btn.style.overflow = ""; };
+  }
+
+  function mkActions(ext, installed) {
+    const acts = h("div", { class: "ym-mk-acts" });
+    if (installed) {
+      const b = h("button", { class: "ym-mk-btn-un", type: "button" });
+      b.appendChild(mkTrashIcon());
+      b.appendChild(h("span", { text: "Uninstall" }));
+      b.addEventListener("click", async () => {
+        if (b.dataset.busy) return;
+        b.dataset.busy = "1";
+        b.classList.add("busy");
+        mkBtnLabel(b, "Uninstalling…");
+        const lid = b.querySelector(".ym-mk-lid");
+        if (lid && lid.animate) {
+          lid.animate([
+            { transform: "translateY(-2px) rotate(-14deg)" },
+            { transform: "translateY(-9px) rotate(-44deg)" },
+          ], { duration: 480, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "forwards" });
+        }
+        // Fake work: the mockup's 850ms beat makes the removal feel real and
+        // gives the lid swing time to finish before the row re-renders.
+        await new Promise((resolve) => setTimeout(resolve, 850));
+        // Collapse the settings block with the same exit motion the detail pane
+        // uses, so it does not vanish mid-beat — and animate its HEIGHT so the
+        // actions row slides up instead of snapping (AJ, 2026-10-19).
+        const settingsEl = document.querySelector("#ym-market .ym-mk-settings");
+        if (settingsEl) {
+          const h0 = settingsEl.offsetHeight;
+          settingsEl.style.overflow = "hidden";
+          const out = settingsEl.animate([
+            { height: h0 + "px", opacity: 1, transform: "none", filter: "blur(0px)", marginBottom: "" },
+            { height: "0px", opacity: 0, transform: "translateY(-12px)", filter: "blur(6px)", marginBottom: "0px" },
+          ], { duration: 260, easing: "cubic-bezier(.4,0,.35,1)", fill: "forwards" });
+          await new Promise((resolve) => {
+            out.onfinish = resolve;
+            setTimeout(resolve, 320);
+          });
+        }
+        await uninstall(ext.id);
+      });
+      acts.appendChild(b);
+    } else {
+      const b = h("button", { class: "ym-mk-btn-in", type: "button" });
+      b.appendChild(svgIcon(MK_PLUS));
+      b.appendChild(h("span", { text: "Install" }));
+      b.addEventListener("click", async () => {
+        if (b.dataset.busy) return;
+        b.dataset.busy = "1";
+        b.classList.add("busy");
+        mkBtnLabel(b, "Installing…");
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        await install(ext.id);
+      });
+      acts.appendChild(b);
+    }
+    for (const g of githubLinks(ext)) {
+      const a = h("a", { class: "ym-mk-ghlink", href: g.url, target: "_blank", rel: "noopener noreferrer" });
+      a.appendChild(svgIcon(ICON_GITHUB));
+      a.appendChild(h("span", { text: g.label }));
+      acts.appendChild(a);
+    }
+    return acts;
+  }
+
+  function mkHome(reg) {
+    const installedCount = Object.keys(reg).length;
+    const themes = AVAILABLE.filter((e) => e.category === "Themes").length;
+    const exts = AVAILABLE.filter((e) => e.category === "Extensions").length;
+    const wrap = h("div", { class: "ym-mk-home" });
+    const hero = h("div", { class: "ym-mk-hero" });
+    const mark = h("div", { class: "ym-mk-mark" });
+    const markUrl = mkLogoUrl();
+    if (markUrl) mark.style.backgroundImage = 'url("' + markUrl + '")';
+    hero.appendChild(mark);
+    hero.appendChild(h("h1", { class: "ym-mk-htitle", text: "Make YouTube Music yours." }));
+    hero.appendChild(h("p", { class: "ym-mk-hsub", text: "Themes, synced lyrics, and little touches — all in one place. Pick an add-on to dive in." }));
+    const stats = h("div", { class: "ym-mk-stats" });
+    for (const pair of [[installedCount, "Installed"], [themes, "Themes"], [exts, "Extensions"]]) {
+      stats.appendChild(h("div", { class: "ym-mk-stat" }, h("b", { text: String(pair[0]) }), h("span", { text: pair[1] })));
+    }
+    hero.appendChild(stats);
+    const cta = h("button", { class: "ym-mk-cta", type: "button", text: "Browse add-ons" });
+    cta.addEventListener("click", () => {
+      const first = AVAILABLE.find((e) => mkFilter === "All" || e.category === mkFilter);
+      if (first) mkSelect(first.id);
+    });
+    hero.appendChild(cta);
+    wrap.appendChild(hero);
+
+    const prev = h("div", { class: "ym-mk-previews" });
+    // PiP Lyrics is deliberately absent: its preview showed copyrighted lyric
+    // text (AJ, 2026-10-19).
+    for (const id of ["ytmod-sleep-timer", "ytmod-next-up", "ytmod-song-notes"]) {
+      const ext = findAvail(id);
+      if (!ext) continue;
+      const card = h("div", { class: "ym-mk-prev" });
+      const box = mkPromoBox(ext, "");
+      box.addEventListener("click", () => mkSelect(id));
+      card.appendChild(box);
+      card.appendChild(h("div", { class: "ym-mk-prevcap", text: ext.name }));
+      prev.appendChild(card);
+    }
+    wrap.appendChild(prev);
+    return wrap;
+  }
+
+  function mkQuietPolish(prevBtnW, prevPillBg, keepPromo) {
+    if (!mkDetail) return;
+    // Button width: FLIP from the previous width so Install <-> Uninstall grows
+    // and shrinks instead of snapping.
+    const btn = mkDetail.querySelector(".ym-mk-btn-un, .ym-mk-btn-in");
+    if (prevBtnW && btn && btn.animate) {
+      const w = btn.getBoundingClientRect().width;
+      if (Math.abs(w - prevBtnW) > 1) {
+        btn.style.overflow = "hidden";
+        const a = btn.animate([{ width: prevBtnW + "px" }, { width: w + "px" }],
+          { duration: 420, easing: "cubic-bezier(.34,1.16,.5,1)" });
+        a.onfinish = () => { btn.style.overflow = ""; };
+      }
+    }
+    // Status pill: cross-fade the old colour into the new one.
+    if (prevPillBg) {
+      const pill = mkDetail.querySelector(".ym-mk-pill");
+      if (pill && pill.animate) {
+        pill.animate([
+          { backgroundColor: prevPillBg, opacity: .45, transform: "scale(.94)" },
+          { backgroundColor: getComputedStyle(pill).backgroundColor, opacity: 1, transform: "none" },
+        ], { duration: 340, easing: "cubic-bezier(.34,1.3,.5,1)" });
+      }
+    }
+    // Preview: put the original node back so the clip does not restart.
+    if (keepPromo) {
+      const fresh = mkDetail.querySelector(".ym-mk-promo");
+      if (fresh) fresh.replaceWith(keepPromo);
+      const v = keepPromo.querySelector("video");
+      if (v) { try { v.play(); } catch (_) {} }
+    }
+  }
+
+  async function mkRenderDetail(reg, quiet) {
+    if (!mkDetail) return;
+    const keepScroll = quiet ? mkDetail.scrollTop : 0;
+    // Snapshot the bits that should morph instead of snapping on a quiet
+    // re-render (install / uninstall).
+    const prevBtn = quiet ? mkDetail.querySelector(".ym-mk-btn-un, .ym-mk-btn-in") : null;
+    const prevBtnW = prevBtn ? prevBtn.getBoundingClientRect().width : 0;
+    const prevPill = quiet ? mkDetail.querySelector(".ym-mk-pill") : null;
+    const prevPillBg = prevPill ? getComputedStyle(prevPill).backgroundColor : "";
+    // Did the previous view already show a settings block? Used to animate the
+    // block growing in after an install instead of snapping the actions row down.
+    const prevHadSettings = quiet && !!mkDetail.querySelector(".ym-mk-settings");
+    const keepPromo = quiet ? mkDetail.querySelector(".ym-mk-promo") : null;
+    if (keepPromo) keepPromo.remove(); // detach so the <video> keeps its position
+    mkDetail.replaceChildren();
+    mkDetail.scrollTop = 0;
+    if (mkSel === "home" || !findAvail(mkSel)) {
+      mkSel = "home";
+      mkDetail.appendChild(mkHome(reg));
+      if (!quiet) mkAnimateIn();
+      mkDetail.scrollTop = keepScroll;
+      return;
+    }
+    const ext = findAvail(mkSel);
+    const installed = !!reg[ext.id];
+    const wrap = h("div", { class: "ym-mk-dwrap" + (quiet ? " ym-mk-quiet" : "") });
+
+    const head = h("div", { class: "ym-mk-dhead" });
+    const dmono = h("div", { class: "ym-mk-dmono" });
+    const dg = MK_GLYPH[ext.id];
+    if (dg) {
+      dmono.appendChild(svgIcon(dg.d));
+      dmono.style.color = dg.c;
+      dmono.style.background = mkTint(dg.c, "1f");
+      dmono.style.borderColor = mkTint(dg.c, "3d");
+    } else {
+      dmono.textContent = (ext.name || "?").charAt(0).toUpperCase();
+    }
+    head.appendChild(dmono);
+    const titles = h("div", { class: "ym-mk-dtitles" });
+    titles.appendChild(h("h1", { text: ext.name }));
+    // Small, dimmed provenance line under the name (AJ, 2026-10-19).
+    if (ext.disclaimer) {
+      titles.appendChild(h("div", { class: "ym-mk-disclaimer", text: ext.disclaimer }));
+    }
+    const status = h("div", { class: "ym-mk-status" });
+    status.appendChild(h("span", { class: "ym-mk-pill" + (installed ? "" : " avail"), text: installed ? "Installed" : "Available" }));
+    status.appendChild(h("span", { class: "ym-mk-ver", text: "v" + (ext.version || "?") }));
+    titles.appendChild(status);
+    head.appendChild(titles);
+    wrap.appendChild(head);
+
+    wrap.appendChild(h("div", { class: "ym-mk-sweep" }));
+    wrap.appendChild(h("p", { class: "ym-mk-lead", text: ext.description || "" }));
+
+    const src = MK_SOURCES[ext.id];
+    if (src) wrap.appendChild(mkSources(src));
+
+    const cols = h("div", { class: "ym-mk-dcols" + (MK_PROMO.has(ext.id) ? "" : " solo") });
+    const left = h("div", { class: "ym-mk-left" });
+    if (installed && ext.settings && ext.settings.length) {
+      const settings = await buildSettingsSection(ext);
+      if (settings) {
+        settings.classList.add("ym-mk-settings");
+        left.appendChild(settings);
+      }
+    } else if (!installed && ext.settings && ext.settings.length) {
+      left.appendChild(h("div", { class: "ym-mk-hint", text: "Install this add-on to change its settings." }));
+    }
+    left.appendChild(mkActions(ext, installed));
+    cols.appendChild(left);
+    if (MK_PROMO.has(ext.id)) cols.appendChild(mkPromoBox(ext, ""));
+    wrap.appendChild(cols);
+    mountReportButton(wrap, ext);
+    mkDetail.appendChild(wrap);
+    if (!quiet) mkAnimateIn();
+    else {
+      // Settings just appeared (install): grow the block so the actions row
+      // slides down instead of snapping (AJ, 2026-10-19).
+      if (!prevHadSettings) {
+        const se = mkDetail.querySelector(".ym-mk-settings");
+        if (se) mkGrowIn(se);
+      }
+      mkQuietPolish(prevBtnW, prevPillBg, keepPromo);
+    }
+    mkDetail.scrollTop = keepScroll;
+  }
+
   function buildMarketplace() {
     // Spicy Lyrics font for the whole panel (AJ, 2026-09-28). The stylesheet's
     // relative woff2 URLs resolve against the extension, so a <link> is enough.
@@ -1475,150 +2891,93 @@
     }, "Close");
     close.id = "ym-close";
 
-    const title = h("h1", { text: "Aurora Lyrics" });
+    const collapse = h("button", {
+      class: "ym-mk-cbtn", type: "button",
+      "aria-label": "Toggle sidebar", title: "Toggle sidebar",
+    });
+    collapse.appendChild(mkSidebarIcon());
+    collapse.addEventListener("click", () => {
+      overlay.classList.toggle("ym-mk-collapsed");
+      mkAutoCollapsed = false; // manual choice wins over the media query
+      mkPositionInd(true);
+    });
+
+    const logo = h("div", { class: "ym-mk-logo" });
+    const logoUrl = mkLogoUrl();
+    if (logoUrl) logo.style.backgroundImage = 'url("' + logoUrl + '")';
+
+    const title = h("h1", { text: "Add-ons" });
     // Secret entry point for developer mode — see onTitleTap(). Bound to
     // pointerdown rather than click on purpose: in floating mode
     // enableMarketplaceDrag() calls preventDefault() on the header's pointerdown,
-    // which suppresses the derived mouse events, so a click listener would
-    // silently stop counting there.
+    // which suppresses the derived mouse events.
     title.addEventListener("pointerdown", onTitleTap);
-    const header = h("div", { class: "ym-head" },
-      title,
-      h("span", { class: "ym-sub", text: "Add-ons" }),
-      close
-    );
+    const header = h("div", { class: "ym-head ym-mk-head" }, collapse, logo, title, close);
 
-    // Tabs row (with a sliding indicator)
-    const tabsRow = h("div", { class: "ym-tabs-row" });
-    tabThumb = h("span", { class: "ym-tab-thumb" });
-    for (const t of ["Extensions", "Themes", "Installed"]) {
-      const tab = h("button", {
-        class: "ym-tab" + (t === ui.category ? " active" : ""),
+    const seg = h("div", { class: "ym-mk-seg" });
+    mkSegPill = h("span", { class: "ym-mk-segpill" });
+    seg.appendChild(mkSegPill);
+    for (const c of ["All", "Themes", "Extensions", "Snippets"]) {
+      const b = h("button", {
+        class: "ym-mk-segbtn" + (c === mkFilter ? " on" : ""),
         type: "button",
-        "data-tab": t,
-        text: t,
+        "data-c": c,
+        text: c,
       });
-      tab.addEventListener("click", () => {
-        if (t === ui.category) return;
-        animateTabSwitch(t);
-      });
-      tabsRow.appendChild(tab);
+      b.addEventListener("click", () => setMkFilter(c));
+      seg.appendChild(b);
     }
-    tabsRow.appendChild(tabThumb);
 
-    // Toolbar (view / density / float) REMOVED on AJ's call (2026-09-28): the
-    // panel is now a single fixed glass card, so there is nothing to switch.
-    // ui.view / ui.density / ui.floating stay pinned to their defaults below.
+    const railTop = h("div", { class: "ym-mk-railtop" }, header, seg);
+    mkInd = h("div", { class: "ym-mk-ind" });
+    mkRows = h("div", { class: "ym-mk-rows" }, mkInd);
+    const rail = h("aside", { class: "ym-mk-rail" }, railTop, mkRows);
+    mkDetail = h("div", { class: "ym-mk-detail" });
+    const paneHandle = h("div", { class: "ym-mk-draghandle", "aria-hidden": "true" });
+    const pane = h("main", { class: "ym-mk-pane" }, paneHandle, mkDetail);
 
-    // Hint about the secret 6-tap developer-mode gesture on the Aurora Lyrics
-    // header title. Lives as its own slim bar between the header and the tabs
-    // so it is discoverable without cluttering the header row (AJ 2026-09-28).
-    const devHint = h("div", {
-      class: "ym-dev-hint",
-      text: "Want to change settings for an extension? Click the Aurora Lyrics title 6 times to enable developer mode, 6 times to turn it off.",
-    });
-
-    const section = h("div", { class: "ym-section", id: "ym-section" });
-
-    // Detail sheet — fills the panel and morphs out of the clicked card.
-    sheetCover = h("div", { class: "ym-sheet-cover" });
-    sheetScrim = h("div", { class: "ym-sheet-scrim" });
-    sheetBg = h("div", { class: "ym-sheet-bg" }, sheetCover, sheetScrim);
-    sheetPoster = h("div", { class: "ym-sheet-poster" });
-    sheetText = h("div", { class: "ym-sheet-text", id: "ym-sheet-text" });
-    const sheetInner = h("div", { class: "ym-sheet-inner" }, sheetPoster, sheetText);
-    const sheetScroll = h("div", { class: "ym-sheet-scroll" }, sheetInner);
-    sheetCloseBtn = makeIconButton(ICON_CLOSE, () => closeDetail(), "Close");
-    sheetCloseBtn.classList.add("ym-sheet-close");
-    sheetEl = h("div", { class: "ym-sheet", id: "ym-sheet" }, sheetBg, sheetCloseBtn, sheetScroll);
-
-    // Brand watermark (AJ, 2026-09-28): the logo, large, blurred and dimmed behind
-    // the glass — mirrors the demo. Resolved through the extension so the URL works
-    // regardless of the page origin.
+    const bg = h("div", { class: "ym-mk-bg" });
     try {
-      watermarkEl = h("div", { class: "ym-watermark" });
-      watermarkAltEl = h("div", { class: "ym-watermark ym-watermark-alt" });
-      LOGO_URL = chrome.runtime.getURL("assets/manifest-logo.webp");
-    } catch (_) { watermarkEl = null; watermarkAltEl = null; }
+      bg.style.backgroundImage = 'url("' + chrome.runtime.getURL("assets/ambient-gradient.png") + '")';
+    } catch (_) {}
 
-    overlay = h("div", { id: "ym-market", class: "hidden" }, watermarkEl, watermarkAltEl, header, devHint, tabsRow, section, sheetEl);
-    refreshPanelArt();
-    // Keep the ambient background in step with the track while the panel is open
-    // (1.2s so a track change lands quickly).
-    window.setInterval(() => {
-      if (overlay && !overlay.classList.contains("hidden")) refreshPanelArt();
-    }, 1200);
-    enableMarketplaceDrag(header);
+    overlay = h("div", { id: "ym-market", class: "hidden ym-mk2" }, bg, rail, pane);
     document.body.appendChild(overlay);
+    // Drag from the whole rail header block and from the detail pane's top strip.
+    enableMarketplaceDrag(railTop);
+    enableMarketplaceDrag(paneHandle);
     applyMarketplaceMode(false);
     document.addEventListener("keydown", marketKey);
-    window.addEventListener("resize", moveTabThumb);
-
+    window.addEventListener("resize", syncMkCollapse);
+    window.addEventListener("resize", () => mkPositionSegPill(true));
     renderSection();
   }
 
-  async function renderSection() {
-    const section = $("#ym-section");
-    if (!section) return;
-    // Read BEFORE clearing. This function is async, so clearing first means a
-    // failed or hung storage read leaves the marketplace permanently blank —
-    // no cards and no empty-state message (see safeStorageGet).
+  async function renderSection(quiet) {
+    if (!mkRows || !mkDetail) return;
+    // Read BEFORE clearing: a failed storage read must not leave the panel blank.
     storageReadFailed = false;
     const reg = await getReg();
-    // Drop the previous cards' video observers before the nodes are removed.
-    if (thumbVideoObserver) thumbVideoObserver.disconnect();
-    section.replaceChildren();
-    kbIndex = -1;
-
-    // The registry could not be read at all. Say so, rather than implying the
-    // user has nothing installed: every chrome.* call fails this way once the
-    // extension has been reloaded with this tab open, and only a tab refresh
-    // brings the content script back.
     if (storageReadFailed) {
-      section.className = "ym-section";
-      section.appendChild(
-        h("div", {
-          class: "ym-empty",
-          text: "Couldn't read your add-ons — the extension was reloaded while this tab was open. Refresh the tab (F5) to reconnect.",
-        })
-      );
+      mkDetail.replaceChildren(h("div", {
+        class: "ym-mk-empty",
+        text: "Couldn't read your add-ons — the extension was reloaded while this tab was open. Refresh the tab (F5) to reconnect.",
+      }));
       return;
     }
-
-    let list;
-    if (ui.category === "Installed") {
-      list = Object.keys(reg).map((id) => {
-        const e = findAvail(id);
-        return e
-          ? { ...e, installed: true }
-          : { id, name: id, description: "(installed)", version: reg[id].version || "?", author: "Aurora Lyrics", stars: 0, tags: ["installed"], lastUpdated: "?", installed: true };
-      });
-    } else {
-      list = AVAILABLE
-        .filter((e) => e.category === ui.category)
-        .map((e) => (reg[e.id] ? { ...e, installed: true } : e));
+    const list = mkFilteredList();
+    if (mkSel !== "home" && !list.some((e) => e.id === mkSel)) mkSel = "home";
+    mkBuildRows(list, reg);
+    if (quiet && mkRows) {
+      const chk = mkRows.querySelector(".ym-mk-card.sel .ym-mk-check");
+      if (chk && chk.animate) {
+        chk.animate([{ opacity: 0, transform: "scale(.5)" }, { opacity: 1, transform: "scale(1)" }],
+          { duration: 320, easing: "cubic-bezier(.34,1.4,.5,1)" });
+      }
     }
-
-    if (!list.length) {
-      section.appendChild(
-        h("div", {
-          class: "ym-empty",
-          text: ui.category === "Installed" ? "No extensions installed yet. Browse Available below." : "No extensions match your search.",
-        })
-      );
-      return;
-    }
-
-    section.className = "ym-section" + (ui.view === "list" ? " list" : "") + (ui.density === "compact" ? " compact" : "");
-    section.appendChild(h("h2", { class: "ym-section-title", text: ui.category }));
-    const grid = h("div", { class: ui.view === "list" ? "ym-list" : "ym-grid" });
-    list.forEach((ext, i) => {
-      const c = gridCard(ext, !!ext.installed, reg[ext.id] && reg[ext.id].enabled);
-      c.style.setProperty("--d", i * 45 + "ms");
-      grid.appendChild(c);
-    });
-    section.appendChild(grid);
-    moveTabThumb();
+    await mkRenderDetail(reg, quiet);
+    syncMkCollapse();
+    mkPositionSegPill(true);
   }
 
   function gridCard(ext, installed, enabled) {
@@ -1800,6 +3159,7 @@
       const settings = await buildSettingsSection(ext);
       if (settings) wrap.appendChild(settings);
     }
+    mountReportButton(wrap, ext);
 
     // Paint the sheet: a per-add-on video / image if given, else the card's thumb
     // artwork. The video plays only while the sheet is open (paused on close).
@@ -1983,6 +3343,14 @@
   }
 
   function finishCloseDetail() {
+    // Flush any deferred source-order change: the user reordered lyrics sources
+    // and is now closing the panel, so push the final order to the extension once
+    // and let it re-resolve the current track. Cleared so this never double-fires
+    // (AJ, 2026-10-19).
+    if (pendingOrderPost) {
+      postExtensionSettings(pendingOrderPost.id, pendingOrderPost.values);
+      pendingOrderPost = null;
+    }
     cancelSheetAnims();
     // Hand the time back to the list loop so it resumes where the sheet left off.
     const sv = sheetPoster && sheetPoster.querySelector("video");
@@ -2052,7 +3420,14 @@
     const btn = makeIconButton(ICON_APPS, () => {
       // The hint has done its job the moment they click it.
       clearNavHint();
-      openMarketplace();
+      // Toggle: the launcher closes an open panel instead of re-opening it
+      // (AJ, 2026-10-19).
+      const isOpen =
+        overlay &&
+        !overlay.classList.contains("hidden") &&
+        !overlay.classList.contains("ym-leaving");
+      if (isOpen) closeMarketplace();
+      else openMarketplace();
     }, "Aurora Lyrics — Marketplace");
     btn.id = "ym-nav-btn";
     const bar = $("ytmusic-nav-bar");
@@ -2492,6 +3867,174 @@
     } catch (_) {}
   }
 
+  /* ---- remember last watch-page tab (always on) ----
+     YTM always reopens on its default tab; it never restores the tab you were
+     last on. This remembers the last tab you selected (Up next / Lyrics /
+     Related / ...) in chrome.storage.local and re-selects it on each new video.
+     Intentionally NOT a snippet: AJ wants this as general, always-on behaviour
+     with no toggle. The tab is matched by label first, then by index, so it
+     survives the Lyrics tab mounting a beat after the page settles. */
+  const LAST_TAB_KEY = "ytmod_last_watch_tab";
+
+  function isWatchPage() {
+    try {
+      return /(\/watch([?#]|$)|[?&]v=)/.test(location.href);
+    } catch (e) {
+      return false;
+    }
+  }
+  function watchTabBar() {
+    return (
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
+      document.querySelector("tp-yt-paper-tabs.tab-header-container") ||
+      document.querySelector("tp-yt-paper-tabs")
+    );
+  }
+  function watchTabs() {
+    const bar = watchTabBar();
+    if (!bar) return null;
+    const tabs = Array.from(bar.querySelectorAll("tp-yt-paper-tab"));
+    return tabs.length ? { bar, tabs } : null;
+  }
+  function tabLabel(tab) {
+    return (tab.getAttribute("name") || (tab.textContent || "").trim()).toLowerCase();
+  }
+  function currentVideoId() {
+    try {
+      const u = new URL(location.href);
+      return u.searchParams.get("v") || u.pathname;
+    } catch (e) {
+      return location.href;
+    }
+  }
+
+  let rltAppliedFor = null; // video id we've already applied the remembered tab for
+  let rltSaveEnabled = false; // only record user changes AFTER we've applied
+  let rltPending = null; // remembered identity we still want to apply
+  let rltLoading = false; // guards the async storage read
+  let rltRaf = 0;
+
+  function rltSelect(tab) {
+    try { tab.click(); } catch (e) {}
+  }
+  function rltScheduleApply() {
+    if (rltRaf) return;
+    rltRaf = setTimeout(() => {
+      rltRaf = 0;
+      rltApplyRemembered();
+    }, 250);
+  }
+  function rltApplyRemembered() {
+    if (!isWatchPage()) {
+      rltAppliedFor = null;
+      rltSaveEnabled = false;
+      rltPending = null;
+      return;
+    }
+    const found = watchTabs();
+    if (!found) return;
+    const id = currentVideoId();
+    if (rltAppliedFor === id && !rltPending) return;
+    if (!rltPending && !rltLoading) {
+      rltLoading = true;
+      safeStorageGet(LAST_TAB_KEY, null).then((saved) => {
+        rltLoading = false;
+        if (!saved) {
+          rltAppliedFor = id;
+          rltSaveEnabled = true;
+          return;
+        }
+        rltPending = saved;
+        rltTryApply();
+      });
+      return;
+    }
+    rltTryApply();
+  }
+  function rltTryApply() {
+    const found = watchTabs();
+    if (!found) return;
+    const { tabs } = found;
+    const id = currentVideoId();
+    let target = null;
+    if (rltPending && typeof rltPending === "object") {
+      target =
+        tabs.find((t) => tabLabel(t) === rltPending.label) ||
+        (rltPending.index >= 0 && tabs[rltPending.index] ? tabs[rltPending.index] : null);
+    } else if (typeof rltPending === "string") {
+      target = tabs.find((t) => tabLabel(t) === rltPending);
+    }
+    if (!target) {
+      // Remembered tab not present yet (e.g. the Lyrics tab mounts after load).
+      // Keep pending so navigation / the observer re-applies when it shows, but
+      // let the user override in the meantime.
+      rltSaveEnabled = true;
+      return;
+    }
+    if (target.classList.contains("iron-selected")) {
+      rltPending = null;
+      rltAppliedFor = id;
+      rltSaveEnabled = true;
+      return;
+    }
+    console.log("[Aurora Lyrics] restoring last watch tab:", rltPending);
+    rltSaveEnabled = false; // suppress the select we are about to trigger
+    rltSelect(target);
+    rltPending = null;
+    rltAppliedFor = id;
+    setTimeout(() => { rltSaveEnabled = true; }, 0);
+  }
+  function rltOnSelect(e) {
+    if (!rltSaveEnabled) return;
+    const tab = e && e.detail && e.detail.item;
+    if (!tab || typeof tab.matches !== "function" || !tab.matches("tp-yt-paper-tab")) return;
+    const found = watchTabs();
+    if (!found) return;
+    const identity = { label: tabLabel(tab), index: found.tabs.indexOf(tab) };
+    console.log("[Aurora Lyrics] remembered watch tab:", identity.label);
+    rltPending = null;
+    rltAppliedFor = currentVideoId();
+    safeStorageSet({ [LAST_TAB_KEY]: identity });
+  }
+  function rltBindBar() {
+    const bar = watchTabBar();
+    if (bar && !bar.__rltBound) {
+      bar.addEventListener("iron-select", rltOnSelect);
+      bar.__rltBound = true;
+    }
+  }
+  function initRememberLastWatchTab() {
+    rltBindBar();
+    rltApplyRemembered();
+    const root = document.querySelector("ytmusic-player-page") || document.body;
+    if (root) {
+      let obsRaf = 0;
+      const obs = new MutationObserver(() => {
+        if (obsRaf) return;
+        obsRaf = setTimeout(() => {
+          obsRaf = 0;
+          rltBindBar();
+          rltApplyRemembered();
+        }, 250);
+      });
+      obs.observe(root, { childList: true, subtree: true });
+    }
+    document.addEventListener("yt-navigate-finish", () => {
+      rltAppliedFor = null;
+      rltSaveEnabled = false;
+      rltPending = null;
+      rltApplyRemembered();
+    });
+    window.addEventListener("popstate", () => {
+      rltAppliedFor = null;
+      rltSaveEnabled = false;
+      rltPending = null;
+      rltApplyRemembered();
+    });
+    console.log("[Aurora Lyrics] remember-last-watch-tab active");
+  }
+
   /* ---- boot ---- */
   async function boot() {
     injectPublicAPI(); // expose window.YTMod (page world) before any JS extension loads
@@ -2553,6 +4096,9 @@
 
     // Fire-and-forget: never block the marketplace on a network round trip.
     runUpdateCheck();
+
+    // Always-on personalisation: reopen the watch-page tab you last used.
+    initRememberLastWatchTab();
 
     console.log("[Aurora Lyrics] booted v" + VERSION);
   }

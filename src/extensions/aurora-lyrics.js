@@ -363,10 +363,20 @@
         if (bg.end > end) end = bg.end;
       }
 
-      const plainText = words
-        .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
-        .join("")
-        .trim();
+      const plainText = words.length
+        ? words
+            .map((word) => (word.hasSpaceBefore ? " " : "") + word.text)
+            .join("")
+            .trim()
+        : // No inner spans: a line-only body (lrc.red `lrc:timing="Line"`, plain
+          // TTML exports) carries its whole line as bare <p> text. Derive the text
+          // from the body so the line SURVIVES — otherwise empty plainText hits the
+          // `continue` below, the parse returns nothing, and loadTTML reports a
+          // failure. That is why lrc.red fetched line-level TTML and then silently
+          // fell through to the next source (AJ, 2026-10-19).
+          decodeEntities(String(body).replace(/<[^>]*>/g, " "))
+            .replace(/\s+/g, " ")
+            .trim();
       if (!plainText && !words.length && !background.length) continue;
       const pTiming = !!(
         lineAttrs.begin ||
@@ -1144,6 +1154,12 @@
   let panelVisible = false;
   let nativeTabAtOpen = null;
   let lyricsTabObserver = null;
+  /* ---- external host (NPV dock) ----
+     The Now Playing snippet can claim the live panel and dock it inside its own
+     rail. Same idea as fullscreen: park the tab-driven visibility state, force
+     the render loop on, and stop mountPanel() from reclaiming the node. */
+  let externalHostActive = false;
+  let externalHostSavedVisible = null;
   /* ---- fullscreen (video left, lyrics right) ----
      Deliberately minimal: only one flag plus the DOM restore points needed to
      put YTM's real <video> and our live lyrics panel back where they came from. */
@@ -1162,6 +1178,7 @@
   let fsLayoutMode = "side";
   let fsControls = null;
   let fsLayoutSelect = null;
+  let fsOptionsButton = null;
   let fsOffsetRange = null;
   let fsOffsetValue = null;
   let fsLyricsToggle = null;
@@ -1176,6 +1193,8 @@
   // mirrors the result onto these.
   let fsPlayerShuffleButton = null;
   let fsPlayerRepeatButton = null;
+  let fsPlayerLikeButton = null;   // fullscreen "like" button (clones YTM's own icon)
+  let fsPlayerDislikeButton = null; // fullscreen "dislike" button (clones YTM's own icon)
   let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
   let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
   let fsPlayerSeekRange = null;
@@ -1212,6 +1231,7 @@
   let fsKawarp = null;
   let fsKawarpModulePromise = null;
   let fsKawarpArtUrl = ""; // artwork currently loaded into the Kawarp instance
+  let fsKawarpVideoEl = null; // live <video> currently feeding the Kawarp instance
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
   let fsKawarpResizeObserver = null;
@@ -1473,13 +1493,44 @@
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
     simpleLyrics: false,
+    // Join syllables: paint each word as ONE whole-word fill instead of the
+    // per-letter syllable karaoke, so a word lights up whole with no syllable
+    // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
+    // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
+    // a plain .word instead of a letterGroup.
+    joinSyllables: false,
+    // Which lyrics source is tried first. The user drags this order in the
+    // add-on's settings; the resolver walks it top to bottom
+    // (AJ, 2026-10-19).
+    sourceOrder: ["spicy", "lrc.red", "unison", "lrclib"],
   };
+
+  // Every source id, in the canonical fallback order. Kept as a literal inside
+  // the function so it cannot be read before its fragment has initialised.
+  function normalizeSourceOrder(value) {
+    const all = ["spicy", "lrc.red", "unison", "lrclib"];
+    const seen = new Set();
+    const out = [];
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const id = String(entry || "");
+        if (all.indexOf(id) === -1 || seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    // Anything the user removed from the list still runs, at the end — a
+    // corrupted or partial value must never silently disable a source.
+    for (const id of all) if (!seen.has(id)) out.push(id);
+    return out;
+  }
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
   function applySettings(next) {
     const prevRomanization = currentSettings.romanizationEnabled;
     const prevSize = currentSettings.size;
     const prevSimpleLyrics = currentSettings.simpleLyrics;
+    const prevJoinSyllables = currentSettings.joinSyllables;
     const prevAnimatedArt = currentSettings.animatedArt;
     // Only merge a plain object. `Object.assign` will happily spread a string or
     // an array by index, so a corrupted stored value would inject junk keys
@@ -1496,6 +1547,9 @@
       return Boolean(value);
     };
     currentSettings.size = clamp(finite(currentSettings.size, DEFAULT_SETTINGS.size), 0.75, 6.0);
+    // Source order is a user-editable list, so it is normalised on every apply:
+    // unknown ids dropped, duplicates dropped, missing sources appended.
+    currentSettings.sourceOrder = normalizeSourceOrder(currentSettings.sourceOrder);
     // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
     // is gone and the panel simply sits at the default -80px. PINNED rather than
     // merely defaulted, because a value stored back when the slider existed would
@@ -1561,6 +1615,10 @@
     currentSettings.simpleLyrics = booleanValue(
       currentSettings.simpleLyrics,
       DEFAULT_SETTINGS.simpleLyrics
+    );
+    currentSettings.joinSyllables = booleanValue(
+      currentSettings.joinSyllables,
+      DEFAULT_SETTINGS.joinSyllables
     );
     currentSettings.animatedArt = booleanValue(
       currentSettings.animatedArt,
@@ -1636,6 +1694,11 @@
     // property's -50% default and read as un-sung until it next changed state. A
     // rebuild puts every word back through the animator under the new mode.
     if (prevSimpleLyrics !== currentSettings.simpleLyrics && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+    // Join syllables flips makeWord between letterGroup (per-letter karaoke) and
+    // plain .word (whole-word fill), so the current lines must rebuild too.
+    if (prevJoinSyllables !== currentSettings.joinSyllables && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
   }
@@ -2052,19 +2115,21 @@
       position: fixed;
       top: 96px;
       right: 28px;
-      z-index: 2147483000;
-      width: 340px;
+      z-index: 2147483200;
+      width: 430px;
       max-width: calc(100vw - 32px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
       border-radius: 20px;
       border: 1px solid rgba(255,255,255,.12);
-      /* SOLID, like the marketplace panel. The old translucent + blurred shell
-         read as a different surface sitting next to it (AJ, 2026-10-01). The
-         inner top highlight is the same one the marketplace card uses. */
-      background: #0f1116;
-      box-shadow: 0 40px 120px -40px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15);
+      /* FROSTED GLASS on AJ's call (2026-10-19): a blurred translucent shell so
+         the panel floats over the lyrics instead of being a solid dark slab.
+         The inset top highlight still keeps a crisp top edge. */
+      background: rgba(16,18,24,.55);
+      -webkit-backdrop-filter: blur(24px) saturate(1.7);
+      backdrop-filter: blur(24px) saturate(1.7);
+      box-shadow: 0 40px 120px -40px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.15);
       color: #fff;
       /* The panel is appended to body, so inheriting gave it YTM's Roboto rather
          than the panel face. Same stack the marketplace uses. */
@@ -2175,6 +2240,217 @@
       color: rgba(244,241,238,.6);
       padding: 4px 2px 0;
     }
+    /* Grouped settings-list cards (AJ, 2026-10-19). Each concern lives in a
+       frosted inset panel with a title + comfortable rows; replaces the old flat
+       <hr>-separated stack. */
+    .ym-sl-options-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.09);
+    }
+    .ym-sl-options-group > .ym-sl-options-section-title {
+      padding: 0;
+      color: rgba(244,241,238,.5);
+      font-size: 10.5px;
+      letter-spacing: .09em;
+    }
+    .ym-sl-options-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ym-sl-options-row-actions {
+      flex-wrap: wrap;
+      row-gap: 8px;
+    }
+    .ym-sl-options-row .ym-sl-import {
+      flex: 0 0 auto;
+    }
+    /* Tabbed side-rail layout (AJ, 2026-10-19): vertical tab rail on the LEFT,
+       the active section's controls on the RIGHT, one panel visible at a time. */
+    .ym-sl-options-body.ym-sl-options-tabbed {
+      flex-direction: row;
+      align-items: stretch;
+      gap: 0;
+      padding: 0;
+    }
+    .ym-sl-options-rail {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      flex: 0 0 126px;
+      width: 126px;
+      padding: 12px 9px;
+      border-right: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.035);
+    }
+    .ym-sl-options-tab {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 10px;
+      padding: 9px 11px;
+      text-align: left;
+      font: inherit;
+      font-size: 12.5px;
+      line-height: 1.2;
+      color: rgba(255,255,255,.62);
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease;
+    }
+    .ym-sl-options-tab:hover { background: rgba(255,255,255,.07); color: #fff; }
+    .ym-sl-options-tab.active {
+      background: rgba(255,255,255,.13);
+      color: #fff;
+      font-weight: 600;
+    }
+    .ym-sl-options-panels {
+      position: relative;
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 120px;
+      transition: height .34s cubic-bezier(.34,1.4,.5,1);
+    }
+    .ym-sl-options-panel {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 6px 18px 18px;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(10px);
+      transition: opacity .24s ease, transform .24s ease, visibility 0s linear .24s;
+    }
+    /* Incoming panel is opaque instantly — its children do the spring (staggerIn);
+       the panel being left fades out via the base transition above. */
+    .ym-sl-options-panel.active {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition: opacity 0s, visibility 0s;
+    }
+    .ym-sl-options-panel-title {
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -.01em;
+      color: #f4f1ee;
+      padding: 14px 0 2px;
+    }
+    /* Custom dropdown (AJ, 2026-10-19): styled button + popup menu instead of a
+       native <select>, matching the frosted panel. */
+    .ym-sl-select { position: relative; }
+    .ym-sl-select-button {
+      appearance: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 128px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .ym-sl-select-button:hover { background: rgba(255,255,255,.13); }
+    .ym-sl-select.open .ym-sl-select-button { border-color: rgba(255,255,255,.35); }
+    .ym-sl-select-label { flex: 1 1 auto; white-space: nowrap; }
+    .ym-sl-select-caret {
+      flex: 0 0 auto;
+      width: 0;
+      height: 0;
+      margin-left: auto;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid rgba(255,255,255,.6);
+      transition: transform .2s ease, border-top-color .2s ease;
+    }
+    .ym-sl-select.open .ym-sl-select-caret {
+      transform: rotate(180deg);
+      border-top-color: #fff;
+    }
+    .ym-sl-select-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 2147483100;
+      min-width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(22,24,30,.92);
+      -webkit-backdrop-filter: blur(18px) saturate(1.6);
+      backdrop-filter: blur(18px) saturate(1.6);
+      box-shadow: 0 22px 55px -22px rgba(0,0,0,.75);
+    }
+    .ym-sl-select-menu.hidden { display: none; }
+    .ym-sl-select-option {
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: rgba(255,255,255,.82);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ym-sl-select-option:hover { background: rgba(255,255,255,.08); color: #fff; }
+    .ym-sl-select-option.selected { background: rgba(255,255,255,.14); color: #fff; font-weight: 600; }
+    /* Segmented control (pill row) — the cleaner replacement for the dropdown. */
+    .ym-sl-segmented {
+      display: inline-flex;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 11px;
+      background: rgba(0,0,0,.28);
+      border: 1px solid rgba(255,255,255,.14);
+    }
+    .ym-sl-segmented-option {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 14px;
+      font: inherit;
+      font-size: 12.5px;
+      line-height: 1.2;
+      color: rgba(255,255,255,.72);
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease;
+      white-space: nowrap;
+    }
+    .ym-sl-segmented-option:hover { color: #fff; }
+    .ym-sl-segmented-option.active {
+      background: rgba(255,255,255,.92);
+      color: #14161a;
+      font-weight: 600;
+    }
+    /* File tab: full-width segmented track so each pill lines up with the action
+       buttons below; Upload + Delete saved share a 2-col row at the same width. */
+    .ym-sl-options-panel .ym-sl-segmented { width: 100%; }
+    .ym-sl-options-panel .ym-sl-segmented-option { flex: 1 1 0; text-align: center; }
+    .ym-sl-options-file-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .ym-sl-options-file-actions .ym-sl-import {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
+    }
     .ym-sl-options-body .ym-sl-track { width: 100%; }
     /* The offset row is a wide horizontal rail; let it wrap and give the slider
        its own line so nothing overflows the 340px panel. */
@@ -2192,6 +2468,62 @@
     .ym-sl-options-body .ym-sl-cache-clear {
       align-self: flex-start;
     }
+    .ym-sl-cache-clear.hidden { display: none; }
+    /* Confirmation step for "Clear cache" (AJ, 2026-10-19): a red delete action
+       so the irreversible wipe is never a single accidental click. */
+    .ym-sl-cache-confirm {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 11px 12px;
+      border-radius: 12px;
+      background: rgba(229,72,77,.10);
+      border: 1px solid rgba(229,72,77,.30);
+    }
+    .ym-sl-cache-confirm.hidden { display: none; }
+    .ym-sl-cache-confirm-text {
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255,255,255,.82);
+    }
+    .ym-sl-cache-confirm-row {
+      display: flex;
+      gap: 10px;
+    }
+    .ym-sl-cache-delete {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 14px;
+      border: none;
+      border-radius: 10px;
+      background: #e5484d;
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ym-sl-cache-delete:hover { background: #d23b40; }
+    .ym-sl-cache-delete:disabled { opacity: .55; cursor: default; }
+    .ym-sl-trash-icon {
+      width: 16px;
+      height: 16px;
+      display: block;
+      fill: currentColor;
+    }
+    .ym-sl-cache-cancel {
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: transparent;
+      color: rgba(255,255,255,.8);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .ym-sl-cache-cancel:hover { background: rgba(255,255,255,.06); }
+    .ym-sl-cache-cancel:disabled { opacity: .5; cursor: default; }
     .ym-sl-export-actions {
       display: flex;
       flex-wrap: wrap;
@@ -2262,6 +2594,15 @@
         opacity .35s ease,
         padding .45s cubic-bezier(.22, .61, .36, 1);
       will-change: left, width, transform, opacity, padding;
+    }
+    /* AJ 2026-10-09: on entry the layout is applied while this class is present,
+       so the panes jump straight to their final geometry instead of sliding in
+       from the CSS default (the "side layout" cover-art flash). buildFullscreen
+       Controls drops the class via a double-rAF once the overlay has painted, so
+       layout cycling on the cycle button still animates normally. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-anim .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-no-anim .ym-sl-fs-lyrics {
+      transition: none;
     }
     .ym-sl-fs-media { z-index: 2; }
     .ym-sl-fs-lyrics { z-index: 3; }
@@ -2847,6 +3188,12 @@
       min-height: 40px;
       padding: 0;
       border: 0;
+      /* No focus ring. Chrome draws a default focus outline on click, which
+         appeared as a "circle border" behind the like/dislike buttons (AJ,
+         2026-10-08). These are fullscreen transport buttons with a dedicated
+         active pill, so the focus ring is redundant. */
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
       border-radius: 50%;
       position: relative;
       background: none;
@@ -2859,6 +3206,9 @@
       transition: transform .22s cubic-bezier(.34,1.56,.64,1),
         color .22s ease;
     }
+    .ym-sl-fs-player-controls button:focus,
+    .ym-sl-fs-player-controls button:focus-visible,
+    .ym-sl-fs-player-controls button:focus-within { outline: none; }
     .ym-sl-fs-player-controls button:hover {
       transform: scale(1.08);
       background: none;
@@ -2942,6 +3292,88 @@
     .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active::after,
     .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active::after {
       opacity: 1;
+    }
+    /* Like / Dislike are OUR OWN buttons. Inactive = outline thumb; active =
+       the GLYPH itself fills (CSS fills the path) — there is NO background pill
+       / circle highlight (AJ, 2026-10-08 evening: "take away the little circle
+       highlight"). Container-agnostic selectors so the rule works regardless of
+       which layer the button is parented to. */
+    .ym-sl-fs-player-like.active,
+    .ym-sl-fs-player-dislike.active {
+      background: none;
+      color: #fff;
+      box-shadow: none;
+    }
+    .ym-sl-fs-player-like.active:hover,
+    .ym-sl-fs-player-dislike.active:hover {
+      background: none;
+    }
+    /* Filled glyph when engaged: CSS fill overrides the path's presentation
+       fill="none", turning the outline thumb into a solid filled thumb. The
+       stroke stays currentColor (set by fsThumbSvg) so the edges read cleanly. */
+    .ym-sl-fs-player-like.active svg path,
+    .ym-sl-fs-player-dislike.active svg path {
+      fill: currentColor;
+    }
+    /* Edge placement: the buttons live in the CONTROLS LAYER (inset:0,
+       z-index 21) so they paint ABOVE the lyrics pane (z-index 3) instead of
+       being hidden behind it in side layout. JS (positionFsEdgeButtons) pins
+       them to the media pane's left/right edges and to the transport row's
+       vertical centre, so they sit on the same line as the controls. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge {
+      position: absolute;
+      z-index: 4;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
+      min-height: 44px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: none;
+      outline: none;
+      color: rgba(255, 255, 255, .88);
+      cursor: pointer;
+      pointer-events: auto;
+      box-shadow: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform .22s cubic-bezier(.34, 1.56, .64, 1), color .22s ease;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge:hover {
+      transform: scale(1.08);
+      color: #fff;
+      background: none;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge:active {
+      transform: scale(.92);
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-like--edge svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-dislike--edge svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+      pointer-events: none;
+    }
+    /* Cover-art-only songs: NO rating buttons at all (AJ, 2026-10-18). The
+       Apple Music stack already carries title, progress, transport and volume;
+       two more edge controls read as clutter, and there is no video edge to
+       anchor them to. Music videos keep them. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-player-dislike--edge {
+      display: none;
+    }
+    /* Video Background layout: the video IS the backdrop, so the edge rating
+       buttons would float over it with nothing to anchor to (AJ, 2026-10-19). */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-dislike--edge {
+      display: none;
     }
     /* offset rail (inside the options overlay) — keep the original look */
     .ym-sl-fs-control-offset input[type="range"] {
@@ -3566,7 +3998,13 @@
       display: flex;
       flex-direction: column;
       align-items: stretch;
-      gap: 12px;
+      /* No uniform gap: the transport chip owns the space BELOW it (see its
+         margin-bottom) so it can be optically centred between the seek bar and
+         the volume. The scrubber's time row sits ABOVE the chip and adds height
+         on that side, so a symmetric 12px gap left the transport ~12px low
+         (AJ, 2026-10-18). gap:0 + chip margin-bottom:24px keeps the same total
+         stack height while equalising the two distances. */
+      gap: 0;
       /* 18px below the title, matching FS_BAND_GAP: this offset IS the gap
          between the title/artist block and the progress bar, and AJ asked for
          it to match the cover-art -> title gap above (2026-10-03). */
@@ -3616,6 +4054,10 @@
       display: flex;
       justify-content: center;
       padding: 0;
+      /* The whole gap below the transport. Paired with gap:0 on the stack above,
+         this centres the transport between the seek bar and the volume even
+         though the time row adds height on the seek side (AJ, 2026-10-18). */
+      margin-bottom: 24px;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
       order: 3;
@@ -4294,6 +4736,14 @@
       background: #000;
     }
     .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
+    /* A not-ready animated cover must never occupy flex space. Two 583px squares
+       in the 960px pane row shove the static card to x=-65 and clip the whole
+       title/seek/transport stack (live-measured, AJ, 2026-10-18). This must
+       outrank the display:block in .ym-sl-fs-media > video.ym-sl-fs-art-video
+       (0,2,1), hence the same scope plus the :not() class (0,3,1). */
+    .ym-sl-fs-media > video.ym-sl-fs-art-video:not(.ym-sl-fs-art-video-ready) {
+      display: none;
+    }
     /* .ym-sl-fs-media / .ym-sl-fs-lyrics base position + z-index are set by
        the animated rules higher up. */
     .ym-sl-fs-lyrics {
@@ -4347,16 +4797,62 @@
       border-color: rgba(96,165,250,.6);
       color: #eaf2ff;
     }
+    /* Empty / failed state, styled after Spicy Lyrics' .LyricsNotice
+       (default.scss): a centred notice with a title-weight message and a pill
+       action, rather than the old small grey line. */
     .ym-sl-empty {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 14px;
-      padding: 28px 12px;
+      justify-content: safe center;
+      gap: 0;
+      padding: 2rem 8%;
       text-align: center;
+      animation: ym-sl-notice-in .35s cubic-bezier(.22,1,.36,1) both;
     }
-    .ym-sl-empty-msg { color: rgba(255,255,255,.72); }
-    .ym-sl-empty-search { min-height: 34px; padding: 0 16px; font-size: 12px; }
+    .ym-sl-empty-msg {
+      max-width: 34em;
+      font-size: 1.35em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+      text-wrap: balance;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-empty-body {
+      margin-top: .85em;
+      max-width: 34em;
+      font-size: .95em;
+      font-weight: 400;
+      line-height: 1.55;
+      color: rgba(255,255,255,.62);
+      text-wrap: pretty;
+    }
+    .ym-sl-empty-search {
+      margin-top: 1.6em;
+      display: inline-flex;
+      align-items: center;
+      gap: .5em;
+      height: 2.6em;
+      padding: 0 1.15em;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
+      color: rgba(255,255,255,.92);
+      font-size: .9em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .18s ease, transform .18s ease;
+    }
+    .ym-sl-empty-search:hover {
+      background: rgba(255,255,255,.14);
+      transform: translateY(-1px);
+    }
+    @keyframes ym-sl-notice-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
     /* Loading skeleton. Sized off --DefaultLyricsSize so it tracks the size
        slider: a real .line rule is font-size: var(--DefaultLyricsSize) at
        line-height 1.4 plus .12em block padding, i.e. ~1.64x, so a 0.6x bar with
@@ -4402,104 +4898,171 @@
       z-index: 30;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      padding: 12px;
-      border: 1px solid rgba(255,255,255,.16);
-      border-radius: 12px;
-      background: rgba(16,18,24,.96);
-      box-shadow: 0 12px 30px rgba(0,0,0,.5);
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      background: rgba(20,20,26,.97);
       pointer-events: auto;
+      animation: ym-sl-search-in .42s cubic-bezier(.32,.72,0,1) both;
     }
     .ym-sl-search.hidden { display: none !important; }
+    .ym-sl-search.closing {
+      animation: ym-sl-search-out .2s cubic-bezier(.4,0,1,1) both;
+      pointer-events: none;
+    }
+    @keyframes ym-sl-search-out {
+      from { opacity: 1; transform: none; filter: blur(0); }
+      to { opacity: 0; transform: translateY(6px) scale(.972); filter: blur(6px); }
+    }
+    @keyframes ym-sl-search-in {
+      from { opacity: 0; transform: translateY(10px) scale(.965); filter: blur(8px); }
+      to { opacity: 1; transform: none; filter: blur(0); }
+    }
     .ym-sl-search-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
     .ym-sl-search-title {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 700;
-      color: rgba(255,255,255,.92);
+      letter-spacing: -.01em;
+      color: rgba(255,255,255,.94);
     }
     .ym-sl-search-close {
       flex: 0 0 auto;
-      width: 24px;
-      height: 24px;
-      border: none;
-      border-radius: 6px;
-      background: rgba(255,255,255,.1);
-      color: rgba(255,255,255,.85);
+      width: 26px;
+      height: 26px;
+      border: 0;
+      border-radius: 8px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.7);
       font-size: 13px;
       line-height: 1;
       cursor: pointer;
+      transition: background .18s ease, color .18s ease, transform .18s ease;
     }
-    .ym-sl-search-close:hover { background: rgba(255,255,255,.18); }
-    .ym-sl-search-form { display: flex; gap: 6px; }
+    .ym-sl-search-close:hover {
+      background: rgba(255,255,255,.16);
+      color: #fff;
+      transform: scale(1.06);
+    }
+    .ym-sl-search-form { display: flex; gap: 8px; }
     .ym-sl-search-input {
       flex: 1 1 auto;
-      min-height: 30px;
-      padding: 0 10px;
-      border: 1px solid rgba(255,255,255,.16);
-      border-radius: 7px;
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 10px;
       background: rgba(255,255,255,.06);
-      color: rgba(255,255,255,.92);
+      color: rgba(255,255,255,.94);
       font: inherit;
-      font-size: 12px;
+      font-size: 12.5px;
+      transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
     }
-    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.45); }
+    .ym-sl-search-input:focus {
+      outline: none;
+      border-color: rgba(63,224,197,.55);
+      background: rgba(255,255,255,.09);
+      box-shadow: 0 0 0 3px rgba(63,224,197,.14);
+    }
+    .ym-sl-search-input::placeholder { color: rgba(255,255,255,.4); }
     .ym-sl-search-remember {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
       font-size: 11px;
-      color: rgba(255,255,255,.7);
+      color: rgba(255,255,255,.62);
       cursor: pointer;
       user-select: none;
     }
     .ym-sl-search-status {
       min-height: 14px;
       font-size: 11px;
-      color: rgba(255,255,255,.6);
+      color: rgba(255,255,255,.55);
     }
+    .ym-sl-search-foot {
+      font-size: 10.5px;
+      line-height: 1.4;
+      letter-spacing: .01em;
+      color: rgba(255,140,140,.82);
+    }
+    .ym-sl-search-foot:empty { display: none; }
     .ym-sl-search-results {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      max-height: 240px;
+      gap: 6px;
+      max-height: 250px;
       overflow-y: auto;
       margin: 0;
-      padding: 0;
+      padding: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,.2) transparent;
     }
+    .ym-sl-search-results::-webkit-scrollbar { width: 6px; }
+    .ym-sl-search-results::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,.18);
+      border-radius: 3px;
+    }
+    /* Each row rises + unblurs in, staggered down the list. --r-op carries the
+       per-state opacity so .no-sync can stay dim without the animation's
+       fill-mode overriding it. */
     .ym-sl-search-result {
+      --r-op: 1;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 1px;
+      gap: 2px;
       text-align: left;
-      padding: 7px 9px;
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 8px;
-      background: rgba(255,255,255,.05);
-      color: rgba(255,255,255,.9);
+      padding: 9px 11px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px;
+      background: rgba(255,255,255,.045);
+      color: rgba(255,255,255,.92);
       font: inherit;
       cursor: pointer;
-      transition: background .12s ease;
+      opacity: var(--r-op);
+      animation: ym-sl-result-in .44s cubic-bezier(.34,1.3,.5,1) both;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
     }
-    .ym-sl-search-result:hover { background: rgba(96,165,250,.2); }
+    .ym-sl-search-result:nth-child(2) { animation-delay: .04s; }
+    .ym-sl-search-result:nth-child(3) { animation-delay: .08s; }
+    .ym-sl-search-result:nth-child(4) { animation-delay: .12s; }
+    .ym-sl-search-result:nth-child(5) { animation-delay: .16s; }
+    .ym-sl-search-result:nth-child(6) { animation-delay: .2s; }
+    .ym-sl-search-result:nth-child(n+7) { animation-delay: .24s; }
+    @keyframes ym-sl-result-in {
+      from { opacity: 0; transform: translateY(9px); filter: blur(5px); }
+      to { opacity: var(--r-op, 1); transform: none; filter: blur(0); }
+    }
+    .ym-sl-search-result:hover {
+      background: rgba(255,255,255,.08);
+      border-color: rgba(63,224,197,.38);
+      transform: translateX(2px);
+    }
     .ym-sl-search-result.no-sync {
-      opacity: .42;
+      --r-op: .42;
       cursor: not-allowed;
       background: rgba(255,255,255,.03);
     }
-    .ym-sl-search-result.no-sync:hover { background: rgba(255,255,255,.03); }
-    .ym-sl-search-result.no-sync-available {
-      opacity: .62;
-      cursor: pointer;
-      background: rgba(255,255,255,.04);
+    .ym-sl-search-result.no-sync:hover {
+      background: rgba(255,255,255,.03);
+      border-color: rgba(255,255,255,.08);
+      transform: none;
     }
-    .ym-sl-search-result.no-sync-available:hover { background: rgba(96,165,250,.2); }
-    .ym-sl-search-name { font-size: 12px; font-weight: 600; }
-    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.6); }
+    .ym-sl-search-result.no-sync-available {
+      --r-op: .62;
+      cursor: pointer;
+    }
+    .ym-sl-search-result.no-sync-available:hover {
+      background: rgba(255,255,255,.08);
+      border-color: rgba(63,224,197,.38);
+      transform: translateX(2px);
+    }
+    .ym-sl-search-name { font-size: 12.5px; font-weight: 600; }
+    .ym-sl-search-meta { font-size: 11px; color: rgba(255,255,255,.55); }
     .ym-sl-jump {
       position: absolute;
       right: 18px;
@@ -4906,6 +5469,11 @@
     }
     .ym-sl-mv-sync-chip.ym-sl-fading {
       opacity: 0;
+    }
+    /* Source warning (lrc.red) — same pill, nudged down so it can coexist with
+       the music-video sync chip instead of covering it (AJ, 2026-10-19). */
+    .ym-sl-source-chip {
+      top: 40px;
     }
     .ym-sl-mv-sync-chip-timer {
       position: absolute;
@@ -5439,12 +6007,13 @@
       --gradient-alpha-end: 1;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-empty {
-      width: min(90%, 300px);
+      width: min(92%, 34em);
       margin: auto;
-      color: rgba(255,255,255,.55);
-      font-size: 13px;
+      color: inherit;
+      font-size: 14px;
       line-height: 1.5;
       text-align: center;
+      padding: 2rem 6%;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
       margin: 48px 4px 22px;
@@ -5610,6 +6179,60 @@
     #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
       color: rgba(255,255,255,.85);
       font-weight: 600;
+    }
+    /* Provider name as a link (lrc.red / Unison / LRCLIB) — keeps the same
+       weight and colour, underlines only on hover. */
+    #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name {
+      text-decoration: none;
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name:hover {
+      text-decoration: underline;
+    }
+    /* Machine-aligned sources (lrc.red) get a persistent red warning pill —
+       same family as the transient chip above the lyrics, but it stays. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      width: fit-content;
+      padding: 5px 12px 5px 10px;
+      border-radius: 999px;
+      background: rgba(229, 72, 77, .14);
+      border: 1px solid rgba(229, 72, 77, .42);
+      color: rgba(255, 255, 255, .9);
+      font-size: 12px;
+      letter-spacing: .01em;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn-icon {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      display: block;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn .ym-sl-provider-label {
+      color: rgba(255, 255, 255, .72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-warn .ym-sl-provider-name {
+      color: #ffffff;
+    }
+    /* Pill + explanation as one block: the block owns the top margin, so the
+       pill sits tight above its note. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 7px;
+      margin-top: 22px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-block .ym-sl-provider-warn {
+      margin-top: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-note {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .42);
+      max-width: 42ch;
     }
     /* Tighter leading when the provider is followed by a person row, and when
        two person rows stack (uploader then maker) — otherwise the three
@@ -5953,6 +6576,36 @@
     fontLinkEl.rel = "stylesheet";
     fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
     document.head.appendChild(fontLinkEl);
+    // Segmented control (AJ, 2026-10-19): a compact row of pill buttons for a small
+    // set of choices — cleaner than a dropdown for 2-3 options. Exposes `.value`
+    // (getter) + `.setValue()` so callers that read `el.value` keep working.
+    const buildSegmentedControl = (config) => {
+      const options = config.options || [];
+      let current = config.value != null ? config.value : (options[0] ? options[0].value : "");
+      const root = h("div", { class: "ym-sl-segmented" + (config.class ? " " + config.class : "") });
+      const els = options.map((option) => {
+        const el = h("button", {
+          class: "ym-sl-segmented-option" + (option.value === current ? " active" : ""),
+          type: "button",
+          "data-value": option.value,
+          text: option.label,
+        });
+        el.addEventListener("click", () => {
+          if (current === option.value) return;
+          current = option.value;
+          els.forEach((x) => x.classList.toggle("active", x.getAttribute("data-value") === current));
+          if (config.onChange) config.onChange(current);
+        });
+        root.appendChild(el);
+        return el;
+      });
+      Object.defineProperty(root, "value", { get() { return current; } });
+      root.setValue = (value) => {
+        current = value;
+        els.forEach((x) => x.classList.toggle("active", x.getAttribute("data-value") === current));
+      };
+      return root;
+    };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
     const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
     const importButton = h("button", {
@@ -5962,15 +6615,14 @@
       "aria-label": "Import TTML lyrics",
       text: "Upload",
     });
-    const importMode = h("select", {
-      class: "ym-sl-import-mode",
-      title: "Choose how long this TTML should be used",
+    const importMode = buildSegmentedControl({
       "aria-label": "TTML import duration",
+      value: "permanent",
+      options: [
+        { value: "permanent", label: "Permanent" },
+        { value: "temporary", label: "Temporary" },
+      ],
     });
-    importMode.append(
-      h("option", { value: "temporary", text: "Temporary" }),
-      h("option", { value: "permanent", text: "Permanent", selected: true })
-    );
     jumpButton = h("button", {
       class: "ym-sl-jump hidden",
       type: "button",
@@ -5994,16 +6646,22 @@
 
     const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
     const videoOffsetLabel = h("span", { text: "Offset" });
-    const offsetScope = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
-    offsetScope.append(
-      h("option", { value: "video", text: "Video" }),
-      h("option", { value: "song", text: "Song" })
-    );
-    offsetScope.value = editingOffsetMode;
+    // "Video vs Song" offset-scope picker removed (AJ, 2026-10-19):
+    // recomputeActiveOffsetMode() already auto-switches the control between the
+    // video/song slot by track type (music video vs audio-only), so the manual
+    // override was redundant. The read-only .ym-sl-offset-applied badge still
+    // shows which slot is active.
+    // (+/- 60s each way — the clamp in setVideoOffsetMs enforces it.)
+    // Offset range is +/- 60s — a full minute each way, raised from +/- 30s.
+    // The SAME limit is declared in three places and they all have to agree:
+    // here, the fullscreen pair in 08-fullscreen-controls.jsfrag, and the clamp
+    // in setVideoOffsetMs (12-track-offset-sync.jsfrag). The clamp is the one
+    // that actually ENFORCES it, so changing only the sliders would silently cap
+    // the value back to 30s.
     const videoOffsetRange = h("input", {
       type: "range",
-      min: "-30000",
-      max: "30000",
+      min: "-60000",
+      max: "60000",
       step: "100",
       value: "0",
       "aria-label": "Lyric offset",
@@ -6012,25 +6670,21 @@
       type: "number",
       class: "ym-sl-offset-number",
       step: "0.1",
-      min: "-30",
-      max: "30",
+      min: "-60",
+      max: "60",
       value: "0",
       title: "Offset in seconds (typed)",
       "aria-label": "Lyric offset in seconds",
     });
     const videoOffsetValue = h("span", { class: "ym-sl-video-offset-value", text: "0.0s" });
     const offsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
-    videoOffsetWrap.append(videoOffsetLabel, offsetScope, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
+    videoOffsetWrap.append(videoOffsetLabel, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
     videoOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
     });
     videoOffsetNumber.addEventListener("input", () => {
       const seconds = parseFloat(videoOffsetNumber.value);
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
-    });
-    offsetScope.addEventListener("change", () => {
-      editingOffsetMode = offsetScope.value;
-      refreshVideoOffsetControl();
     });
 
     const optionsButton = h("button", {
@@ -6094,74 +6748,11 @@
     });
     deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
     optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
-    /* ---- MV pause re-sync section -------------------------------------------
-       Sits between the Offset controls and the TTML controls: it is a timing
-       control, so it belongs next to the other one rather than under file tools. */
-    const pauseDivider = h("hr", { class: "ym-sl-options-divider" });
-    const pauseTitle = h("div", { class: "ym-sl-options-section-title", text: "Pause sync" });
-    const pauseSection = h("div", { class: "ym-sl-options-section ym-sl-pause-section" });
-    const pausePick = h("button", {
-      class: "ym-sl-import ym-sl-pause-pick",
-      type: "button",
-      "aria-label": "Set pause sync point",
-      text: "Set pause point",
-    });
-    pausePick.addEventListener("click", () => enterPausePickMode());
-    const pauseEditor = h("div", { class: "ym-sl-pause-editor hidden" });
-    const pauseLineLabel = h("div", { class: "ym-sl-pause-line" });
-    const pauseRange = h("input", {
-      type: "range",
-      class: "ym-sl-pause-range",
-      min: String(PAUSE_SYNC_MIN),
-      max: String(PAUSE_SYNC_MAX),
-      step: String(PAUSE_SYNC_STEP),
-      value: "0",
-      "aria-label": "Pause sync offset",
-    });
-    const pauseNumber = h("input", {
-      type: "number",
-      class: "ym-sl-pause-number",
-      step: "0.1",
-      value: "0",
-      "aria-label": "Pause sync offset in seconds",
-    });
-    const pauseValue = h("span", { class: "ym-sl-pause-value", text: "+0.0s" });
-    const pauseClear = h("button", {
-      class: "ym-sl-import ym-sl-pause-clear",
-      type: "button",
-      "aria-label": "Clear pause sync point",
-      text: "Clear",
-    });
-    pauseClear.addEventListener("click", () => clearPauseSync());
-    pauseRange.addEventListener("input", () => setPauseSyncOffset(pauseRange.value, false));
-    pauseRange.addEventListener("change", () => setPauseSyncOffset(pauseRange.value, true));
-    pauseNumber.addEventListener("input", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, false));
-    pauseNumber.addEventListener("change", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, true));
-    const pauseRow1 = h("div", { class: "ym-sl-pause-row" }, pauseRange);
-    const pauseRow2 = h("div", { class: "ym-sl-pause-row" }, pauseNumber, pauseValue, pauseClear);
-    pauseEditor.append(pauseLineLabel, pauseRow1, pauseRow2);
-    pauseSection.append(pausePick, pauseEditor);
-    pauseUi = {
-      root: pauseSection,
-      pick: pausePick,
-      editor: pauseEditor,
-      line: pauseLineLabel,
-      range: pauseRange,
-      number: pauseNumber,
-      value: pauseValue,
-    };
-
-    // Banner shown on the lyrics panel while a line is being picked.
-    pauseBanner = h("div", { class: "ym-sl-pause-banner hidden" });
-    pauseBannerText = h("span", { class: "ym-sl-pause-banner-text" });
-    const pauseBannerCancel = h("button", {
-      class: "ym-sl-pause-cancel",
-      type: "button",
-      text: "Cancel",
-      "aria-label": "Cancel pause sync selection",
-    });
-    pauseBannerCancel.addEventListener("click", () => exitPausePickMode());
-    pauseBanner.append(pauseBannerText, pauseBannerCancel);
+    /* MV pause re-sync REMOVED entirely on AJ's call (2026-10-19): the section,
+       the "Set pause point" picker, its editor, and the pick banner are all gone
+       from the panel. The low-level offset machinery in 12-track-offset-sync is
+       left in place but dormant — nothing calls enterPausePickMode() now, and
+       every pauseUi/pauseBanner consumer is null-safe. */
 
     // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
     // exposes an explicit purge so a stale or wrong match can be cleared without
@@ -6177,9 +6768,62 @@
       "aria-label": "Clear Spicy Lyrics cache",
       text: "Clear cache",
     });
-    cacheClear.addEventListener("click", async () => {
+    // The button wipes the cache instantly and irreversibly, so gate it behind an
+    // explicit confirmation: clicking "Clear cache" reveals an "Are you sure?" row
+    // with a RED delete action (trash icon) + a Cancel. The user expected a
+    // confirm step here and was surprised it fired immediately (AJ, 2026-10-19).
+    const cacheConfirm = h("div", { class: "ym-sl-cache-confirm hidden" });
+    const cacheConfirmText = h("div", {
+      class: "ym-sl-cache-confirm-text",
+      text: "Clear all cached lyrics? This cannot be undone.",
+    });
+    const cacheConfirmRow = h("div", { class: "ym-sl-cache-confirm-row" });
+    const cacheDelete = h("button", {
+      class: "ym-sl-cache-delete",
+      type: "button",
+      "aria-label": "Delete cached lyrics",
+      title: "Delete cached lyrics",
+    });
+    // Trash-can icon (SVG, white on the red button via currentColor).
+    const trashNS = "http://www.w3.org/2000/svg";
+    const trashSvg = document.createElementNS(trashNS, "svg");
+    trashSvg.setAttribute("viewBox", "0 0 24 24");
+    trashSvg.setAttribute("class", "ym-sl-trash-icon");
+    trashSvg.setAttribute("aria-hidden", "true");
+    trashSvg.setAttribute("focusable", "false");
+    const trashPath = document.createElementNS(trashNS, "path");
+    trashPath.setAttribute("d", "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z");
+    trashPath.setAttribute("fill", "currentColor");
+    trashSvg.appendChild(trashPath);
+    cacheDelete.append(trashSvg, document.createTextNode("Delete"));
+    const cacheCancel = h("button", {
+      class: "ym-sl-cache-cancel",
+      type: "button",
+      text: "Cancel",
+      "aria-label": "Cancel clearing the cache",
+    });
+    cacheConfirmRow.append(cacheDelete, cacheCancel);
+    cacheConfirm.append(cacheConfirmText, cacheConfirmRow);
+
+    function showCacheConfirm() {
+      cacheClear.classList.add("hidden");
+      cacheConfirm.classList.remove("hidden");
+      cacheDelete.focus();
+    }
+    function hideCacheConfirm() {
+      cacheConfirm.classList.add("hidden");
+      cacheClear.classList.remove("hidden");
+    }
+    cacheClear.addEventListener("click", () => {
       if (cacheClear.disabled) return;
-      cacheClear.disabled = true;
+      showCacheConfirm();
+    });
+    cacheCancel.addEventListener("click", () => hideCacheConfirm());
+    cacheDelete.addEventListener("click", async () => {
+      if (cacheDelete.disabled) return;
+      cacheDelete.disabled = true;
+      cacheCancel.disabled = true;
+      cacheStatus.textContent = "Clearing…";
       try {
         const count = await spicyCacheEntryCount();
         await clearSpicyLyricsCache();
@@ -6190,22 +6834,143 @@
         cacheStatus.textContent = "Could not clear the cache.";
         console.warn("[SpicyLyrics] clear cache failed:", error);
       }
-      cacheClear.disabled = false;
+      cacheDelete.disabled = false;
+      cacheCancel.disabled = false;
+      hideCacheConfirm();
     });
-    cacheSection.append(cacheStatus, cacheClear);
+    cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    const optionsBody = h("div", { class: "ym-sl-options-body" });
-    optionsBody.append(
-      optionsTop,
-      pauseDivider, pauseTitle, pauseSection,
-      optionsDivider, optionsTtmlTitle, optionsBottom,
-      cacheDivider, cacheTitle, cacheSection
+    // ---- Options body: TABBED SIDE-RAIL (AJ, 2026-10-19) ------------------------
+    // A vertical tab rail on the LEFT, the selected section's controls on the
+    // RIGHT, one panel visible at a time. Reuses the addon settings panel's clean
+    // spring — opacity + rise + a touch of blur, staggered per child — on open and
+    // on every tab switch.
+    const optionsBody = h("div", { class: "ym-sl-options-body ym-sl-options-tabbed" });
+    const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
+    const optionsPanels = h("div", { class: "ym-sl-options-panels" });
+
+    const panelNowPlaying = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Now playing" }),
+      trackEl
     );
+    const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
+      videoOffsetWrap
+    );
+    const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
+      importMode,
+      h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
+      exportActions
+    );
+    const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
+      cacheSection
+    );
+
+    const optionSections = [
+      { label: "Playing", panel: panelNowPlaying },
+      { label: "Sync", panel: panelSync },
+      { label: "File", panel: panelFile },
+      { label: "Cache", panel: panelCache },
+    ];
+
+    const optionsMotionOK = () =>
+      !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    // Panels absolutely overlap inside a fixed-height stack so switching fades the
+    // old panel out, springs the new one in, and animates the container HEIGHT to
+    // the new panel's size — no abrupt jump when a taller tab (e.g. File) opens.
+    let panelsHeightRaf = 0;
+    let panelsHeightEmptyTries = 0;
+    const syncPanelsHeight = () => {
+      const active = optionSections.find((section) => section.panel.classList.contains("active"));
+      if (!active) return;
+      const next = active.panel.offsetHeight;
+      if (next) {
+        panelsHeightEmptyTries = 0;
+        optionsPanels.style.height = Math.ceil(next) + "px";
+      } else if (panelsHeightEmptyTries < 8) {
+        // Not laid out yet (fonts still loading, or measured too early). Retry for a
+        // few frames instead of collapsing the stack to 0 and showing an EMPTY panel
+        // — the intermittent "no content" bug (AJ, 2026-10-19). The CSS min-height
+        // also floors it so it can never fully collapse.
+        panelsHeightEmptyTries++;
+        requestAnimationFrame(syncPanelsHeight);
+      }
+    };
+    const scheduleSyncPanelsHeight = () => {
+      if (panelsHeightRaf) return;
+      panelsHeightRaf = requestAnimationFrame(() => { panelsHeightRaf = 0; syncPanelsHeight(); });
+    };
+    if (window.ResizeObserver) {
+      // Keeps height in sync when a panel's content changes size after it is shown
+      // (cache status text, Export/Saved rows appearing, etc.).
+      const ro = new ResizeObserver(scheduleSyncPanelsHeight);
+      optionSections.forEach((section) => ro.observe(section.panel));
+    }
+    // SpicyLyrics font load reflows line/row heights — resync once it settles.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(scheduleSyncPanelsHeight).catch(() => {});
+    }
+    window.addEventListener("resize", scheduleSyncPanelsHeight);
+    // Same clean spring the addon settings panel uses (cubic-bezier(.34,1.4,.5,1)):
+    // opacity + rise + a touch of blur, staggered per child. fromLeft slides the
+    // rail in from the left; otherwise rows rise up with a blur.
+    const staggerIn = (container, fromLeft) => {
+      if (!container || !container.children || !optionsMotionOK()) return;
+      Array.from(container.children).forEach((el, i) => {
+        if (!el.animate) return;
+        el.animate(
+          fromLeft
+            ? [{ opacity: 0, transform: "translateX(-16px)" }, { opacity: 1, transform: "none" }]
+            : [{ opacity: 0, transform: "translateY(16px)", filter: "blur(7px)" },
+               { opacity: 1, transform: "none", filter: "blur(0px)" }],
+          { duration: 520, delay: 40 + i * 55, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+        );
+      });
+    };
+
+    const optionTabs = optionSections.map((section, index) => {
+      const tab = h("button", {
+        class: "ym-sl-options-tab" + (index === 0 ? " active" : ""),
+        type: "button",
+        role: "tab",
+        "aria-selected": index === 0 ? "true" : "false",
+        text: section.label,
+      });
+      if (index === 0) section.panel.classList.add("active");
+      optionsPanels.appendChild(section.panel);
+      tab.addEventListener("click", () => {
+        if (tab.classList.contains("active")) return;
+        optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
+        tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        optionSections.forEach((s) => s.panel.classList.remove("active"));
+        section.panel.classList.add("active");
+        syncPanelsHeight(); // animate container height to the new panel
+        staggerIn(section.panel, false); // clean spring on the newly shown panel
+      });
+      optionsRail.appendChild(tab);
+      return tab;
+    });
+
+    optionsBody.append(optionsRail, optionsPanels);
     optionsOverlay.append(optionsHeader, optionsBody);
+    // Size the stack to the default active panel (rAF so fonts/content settle).
+    scheduleSyncPanelsHeight();
+    // Entrance choreography used by the Options button (below).
+    optionsOverlay._staggerOpen = () => {
+      syncPanelsHeight();
+      staggerIn(optionsRail, true);
+      staggerIn(optionSections[0].panel, false);
+    };
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
       optionsOverlay.classList.toggle("hidden");
-      if (opening) refreshPermanentDeleteState();
+      if (opening) {
+        refreshPermanentDeleteState();
+        if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
+      }
     });
     optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
     optionsOverlay._exportActions = exportActions;
@@ -6225,7 +6990,7 @@
     scrollContainer.appendChild(linesRoot);
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
-    panelEl.append(tools, fileInput, lyricsContainer, jumpButton, pauseBanner);
+    panelEl.append(tools, fileInput, lyricsContainer, jumpButton);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -6264,8 +7029,9 @@
     const renderer = document.querySelector("#tab-renderer");
     const host = renderer || (bar && bar.parentElement);
     // Never yank the panel back into the YTM tab while fullscreen is active —
-    // it currently lives inside the fullscreen overlay.
-    if (!host || !panelEl || fsActive) return;
+    // it currently lives inside the fullscreen overlay. Same while the NPV
+    // snippet has docked it into its own rail.
+    if (!host || !panelEl || fsActive || externalHostActive) return;
     panelHost = host;
     if (panelEl.parentElement !== host) host.appendChild(panelEl);
   }
@@ -6967,6 +7733,12 @@
       fsPlayerPlayButton.setAttribute("aria-label", playState === "play" ? "Play" : "Pause");
     }
     syncFullscreenModeButtons();
+    refreshFsRatingState();
+    // Re-pin the edge Like / Dislike every tick so a layout swap (side <-> cover /
+    // MV) that moves the media pane or the transport chip still lands the buttons
+    // correctly. positionFsEdgeButtons() re-reads both rects, so it is a no-op
+    // unless something actually moved.
+    positionFsEdgeButtons();
   }
 
   /* ---- shuffle / repeat mirroring -----------------------------------------
@@ -7070,6 +7842,16 @@
     { tag: "rect", attrs: { x: "3", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
     { tag: "rect", attrs: { x: "14", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
   ];
+  // Sliders/adjust icon — reads as "options" (AJ, 2026-10-19). Opens the SAME
+  // tabbed options overlay the normal panel uses, so fullscreen has it too.
+  const FS_ICON_OPTIONS = [
+    { tag: "line", attrs: { x1: "4", y1: "6", x2: "20", y2: "6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "9", cy: "6", r: "2.4", fill: "currentColor" } },
+    { tag: "line", attrs: { x1: "4", y1: "12", x2: "20", y2: "12", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "15", cy: "12", r: "2.4", fill: "currentColor" } },
+    { tag: "line", attrs: { x1: "4", y1: "18", x2: "20", y2: "18", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "circle", attrs: { cx: "7", cy: "18", r: "2.4", fill: "currentColor" } },
+  ];
   // Solid-fill Spicy icons for the transport chip (Prev / Play / Pause /
   // Next). The path data is byte-for-byte from Icons.ts; only the wrapping
   // <svg> viewBox is normalised so the chip's square buttons can render it
@@ -7153,6 +7935,188 @@
     return svg;
   }
 
+  /* ---- like / dislike buttons in fullscreen --------------------------------
+     AJ (2026-10-08, evening): drop the YTM-native mirroring entirely. The old
+     build cloned YTM's icon and mirrored its like-status every 500ms, which
+     flickered and showed a permanently-filled thumb (YTM's aria-pressed is
+     unreliable). These buttons are now 100% OURS: our own glyph, our own state,
+     our own persistence. We STILL fire YTM's real rating (updateLikeStatus) as a
+     best-effort sync so the like persists to the YouTube account, but our visual
+     state is the sole source of truth and never reads YTM's renderer for display.
+
+     State lives in window.localStorage keyed by the current videoId (the `v` URL
+     param — available in the page world, unlike chrome.storage). On video change
+     the buttons re-seed from that saved map; a one-time seed from YTM's
+     like-status lets a like made on the native bar show up once. No per-tick YTM
+     reads, so no flicker. */
+
+  const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
+  let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
+  let fsCurrentFsVideoId = null;            // last videoId we painted for
+  let fsEdgeObserver = null;                // ResizeObserver that re-pins the edge buttons
+
+  function loadFsRatings() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(FS_RATINGS_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === "object" ? obj : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function saveFsRatings() {
+    try {
+      if (window.localStorage) window.localStorage.setItem(FS_RATINGS_KEY, JSON.stringify(fsRatings));
+    } catch (_) {}
+  }
+  function getCurrentFsVideoId() {
+    try {
+      const v = new URLSearchParams(window.location.search).get("v");
+      return v || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function getFsRating(videoId) {
+    if (!videoId) return null;
+    return fsRatings[videoId] || null;      // "like" | "dislike" | null
+  }
+
+  // Pin the Like / Dislike to the MEDIA PANE's left/right edges, but on the
+  // CONTROLS ROW's vertical centre (AJ, 2026-10-18).
+  //
+  // The buttons live in .ym-sl-fs-player-controls (inset:0 over the overlay,
+  // z-index 21) rather than inside .ym-sl-fs-media. Two reasons:
+  //   1. .ym-sl-fs-media is z-index 2 and .ym-sl-fs-lyrics is z-index 3, so a
+  //      button parented to the media is painted UNDER the lyrics pane and the
+  //      dislike disappeared behind the lyrics in side layout (AJ's report).
+  //      The controls layer is above everything.
+  //   2. The controls layer is a full-overlay layer, so we can compute BOTH the
+  //      media's horizontal edges and the transport chip's vertical centre in
+  //      the same coordinate space.
+  //
+  // Horizontal: media pane edges (so they track cover art / MV width).
+  // Vertical:   the play chip's centre (so they sit on the same line as the
+  //             transport controls, not floating at the video's mid-height).
+  function positionFsEdgeButtons() {
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
+    const layer = fsPlayerControls;
+    const media = document.querySelector(".ym-sl-fs-media");
+    if (!layer || !media) return;
+    const lc = layer.getBoundingClientRect();
+    const mc = media.getBoundingClientRect();
+    if (!lc.width || !lc.height || !mc.width) return;
+    const pad = 14, bW = 44, bH = 44;
+    const left = mc.left - lc.left + pad;
+    const right = mc.right - lc.left - pad - bW;
+    // Vertical: centre on the transport chip. Its rect is valid even while the
+    // chip is faded out (opacity does not affect layout). Fall back to the
+    // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
+    const chip = layer.querySelector(".ym-sl-fs-play-chip");
+    let top;
+    if (chip) {
+      const cc = chip.getBoundingClientRect();
+      top = cc.top - lc.top + cc.height / 2 - bH / 2;
+    } else {
+      top = lc.height - 46 - bH / 2;
+    }
+    for (const btn of [fsPlayerLikeButton, fsPlayerDislikeButton]) {
+      btn.style.position = "absolute";
+      btn.style.top = top + "px";
+    }
+    fsPlayerLikeButton.style.left = left + "px";
+    fsPlayerDislikeButton.style.left = right + "px";
+  }
+
+  // Our OWN thumb glyph: outline by default (fill:none, stroke:currentColor).
+  // CSS fills it when .active (see 05-styles.jsfrag). Not cloned from YTM.
+  function fsThumbSvg(kind) {
+    const d = kind === "like"
+      ? "M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"
+      : "M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2h-1zm4 0v12h4V3h-4z";
+    return fsSvgIcon(
+      [{ tag: "path", attrs: { d, fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linejoin": "round", "stroke-linecap": "round" } }],
+      "0 0 24 24"
+    );
+  }
+
+  // YTM renderer — used ONLY for the best-effort real-rating sync, never for our
+  // visual state. updateLikeStatus is the only way to rate without firing a DOM
+  // click (which would trigger smooth-motion's emoji particles).
+  function getYtmLikeRenderer() {
+    const bar = document.querySelector("ytmusic-player-bar");
+    if (!bar) return null;
+    return bar.querySelector("ytmusic-like-button-renderer") || null;
+  }
+  function getYtmLikeStatus() {
+    // Reliable, label-independent (INDIFFERENT / LIKE / DISLIKE). Used only to
+    // converge YTM to our state and for the one-time seed — NOT as our truth.
+    const renderer = getYtmLikeRenderer();
+    if (!renderer) return "INDIFFERENT";
+    const attr = renderer.getAttribute("like-status");
+    if (attr) return attr.toUpperCase();
+    const prop = renderer.likeStatus;
+    if (prop) return String(prop).toUpperCase();
+    return "INDIFFERENT";
+  }
+
+  function applyFsRatingToButtons(videoId) {
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
+    const state = getFsRating(videoId);
+    const likeOn = state === "like";
+    const dislikeOn = state === "dislike";
+    fsPlayerLikeButton.classList.toggle("active", likeOn);
+    fsPlayerLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
+    fsPlayerDislikeButton.classList.toggle("active", dislikeOn);
+    fsPlayerDislikeButton.setAttribute("aria-pressed", dislikeOn ? "true" : "false");
+  }
+
+  // Best-effort: converge YTM's REAL like to our state. Our visual never waits on
+  // this. NOTE: disliking on YTM advances the queue (native YTM behaviour) — that
+  // is expected when syncing a real dislike.
+  function syncFsRatingToYtm(target) {
+    const renderer = getYtmLikeRenderer();
+    if (!renderer || typeof renderer.updateLikeStatus !== "function") return;
+    const current = getYtmLikeStatus();
+    try {
+      if (target === "like" && current !== "LIKE") renderer.updateLikeStatus("LIKE");
+      else if (target === "dislike" && current !== "DISLIKE") renderer.updateLikeStatus("DISLIKE");
+      else if (target === null && (current === "LIKE" || current === "DISLIKE")) renderer.updateLikeStatus(current);
+    } catch (_) { /* visual state is authoritative; ignore YTM sync failure */ }
+  }
+
+  function clickFsRating(kind) {
+    const videoId = getCurrentFsVideoId();
+    if (!videoId) return;
+    const current = getFsRating(videoId);
+    // Toggle: pressing the active one clears it; pressing the other switches.
+    const newState = current === kind ? null : kind;
+    if (newState === null) delete fsRatings[videoId];
+    else fsRatings[videoId] = newState;
+    saveFsRatings();
+    applyFsRatingToButtons(videoId);
+    syncFsRatingToYtm(newState);
+  }
+
+  // Called on the 500ms tick AND on build. Only does work when the video changes:
+  // re-seed our buttons from saved state (one-time seed from YTM for videos we
+  // haven't rated ourselves). No per-tick YTM reads, so no flicker.
+  function refreshFsRatingState() {
+    const videoId = getCurrentFsVideoId();
+    if (!videoId) return;
+    if (videoId !== fsCurrentFsVideoId) {
+      fsCurrentFsVideoId = videoId;
+      if (fsRatings[videoId] === undefined) {
+        const yt = getYtmLikeStatus();
+        if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+      }
+      applyFsRatingToButtons(videoId);
+    }
+  }
+  // (Like/Dislike handlers are defined above: clickFsRating() and
+  // refreshFsRatingState(). The old YTM-mirroring functions were removed
+  // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+
   function buildFullscreenControls() {
     if (!fsOverlay || fsControls) return;
     const exit = h(
@@ -7189,12 +8153,14 @@
       h("option", { value: "song", text: "Song" })
     );
     offsetScopeFs.value = editingOffsetMode;
+    // +/- 60s, kept in step with the options panel (06-panel-ui.jsfrag) and the
+    // clamp in 12-track-offset-sync.jsfrag.
     fsOffsetRange = h("input", {
-      type: "range", min: "-30000", max: "30000", step: "100",
+      type: "range", min: "-60000", max: "60000", step: "100",
       value: "0", "aria-label": "Lyric offset",
     });
     const fsOffsetNumber = h("input", {
-      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-30", max: "30",
+      type: "number", class: "ym-sl-offset-number", step: "0.1", min: "-60", max: "60",
       value: "0", "aria-label": "Lyric offset in seconds", title: "Offset in seconds (typed)",
     });
     fsOffsetValue = h("span", { class: "ym-sl-fs-control-offset-value", text: "0.0s" });
@@ -7215,11 +8181,32 @@
       h("span", { class: "ym-sl-fs-btn-label", text: "Hide lyrics" }),
       fsSvgIcon(FS_ICON_LYRICS),
     );
-    // Options gear removed (AJ 2026-09-27). The offset rail stays reachable
-    // from the normal panel; fullscreen chrome is now just Exit / Layout cycle
-    // / Hide lyrics. offsetWrap (built above) is now a local unused variable -
-    // left in place to keep this diff focused.
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLayoutSelect, fsLyricsToggle);
+    // Options button (AJ, 2026-10-19): fullscreen now reuses the SAME tabbed
+    // options overlay as the normal panel (it is a <body> child floated at a higher
+    // z-index), so no duplicate FS overlay is needed. offsetWrap (built above) stays
+    // a local unused variable; the overlay's Sync tab carries the offset.
+    fsOptionsButton = h(
+      "button",
+      {
+        type: "button",
+        class: "ym-sl-fs-icon-btn ym-sl-fs-options-btn",
+        title: "Options",
+        "aria-label": "Open lyrics options",
+      },
+      h("span", { class: "ym-sl-fs-btn-label", text: "Options" }),
+      fsSvgIcon(FS_ICON_OPTIONS),
+    );
+    fsOptionsButton.addEventListener("click", () => {
+      const overlay = document.querySelector(".ym-sl-options-overlay");
+      if (!overlay) return;
+      const opening = overlay.classList.contains("hidden");
+      overlay.classList.toggle("hidden");
+      if (opening && overlay._staggerOpen) overlay._staggerOpen();
+    });
+    // Order: Exit (left) · Hide lyrics · Layout · Options (right). Cycling the
+    // layout must never sit next to Exit, or a mis-click exits fullscreen
+    // (AJ, 2026-10-19).
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLyricsToggle, fsLayoutSelect, fsOptionsButton);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -7235,6 +8222,22 @@
     const repeatButton = h("button", { class: "ym-sl-fs-player-repeat", type: "button", title: "Repeat", "aria-label": "Repeat", "aria-pressed": "false" }, fsSvgIcon(FS_ICON_REPEAT, "0 0 24 24"));
     fsPlayerShuffleButton = shuffleButton;
     fsPlayerRepeatButton = repeatButton;
+    // Like / Dislike sit on the MEDIA PANE's left/right edges, but on the
+    // CONTROLS ROW's vertical centre (AJ, 2026-10-18). They are appended into
+    // .ym-sl-fs-player-controls (z-index 21) so they paint above the lyrics
+    // pane; positionFsEdgeButtons() computes the media's horizontal edges and
+    // the transport chip's vertical centre. These are our OWN buttons (see the
+    // like/dislike section): our own glyph, our own state, our own persistence.
+    // The click fires YTM's real rating as a best-effort sync, but our visual
+    // state is the source of truth and never reads YTM's renderer. Our glyph is
+    // drawn here (outline; CSS fills it when .active).
+    const likeButton = h("button", { class: "ym-sl-fs-player-like ym-sl-fs-player-like--edge", type: "button", title: "Like", "aria-label": "Like", "aria-pressed": "false" }, fsThumbSvg("like"));
+    const dislikeButton = h("button", { class: "ym-sl-fs-player-dislike ym-sl-fs-player-dislike--edge", type: "button", title: "Dislike", "aria-label": "Dislike", "aria-pressed": "false" }, fsThumbSvg("dislike"));
+    fsPlayerLikeButton = likeButton;
+    fsPlayerDislikeButton = dislikeButton;
+    // Seed our OWN rating state for this video (one-time seed from saved map / YTM,
+    // then paint the buttons). Our visual state is authoritative — no YTM mirroring.
+    refreshFsRatingState();
     playButton.dataset.playState = "pause";
     fsPlayerSeekRange = h("input", {
       class: "ym-sl-fs-player-seek",
@@ -7279,6 +8282,41 @@
     fsPlayerPlayButton = playButton;
     fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
     fsOverlay.append(fsControls, fsPlayerControls);
+    // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
+    // The media is z-index 2 and the lyrics pane is z-index 3, so a button
+    // parented to the media was painted UNDER the lyrics and the dislike
+    // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
+    // is above both; positionFsEdgeButtons() then pins them to the media's
+    // horizontal edges and the transport row's vertical centre.
+    const fsMedia = document.querySelector(".ym-sl-fs-media");
+    fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
+      .forEach((n) => n.remove());
+    fsPlayerControls.appendChild(likeButton);
+    fsPlayerControls.appendChild(dislikeButton);
+    // Bootstrap transient (AJ 2026-10-08): the media/lyrics panes settle from a
+    // stale side layout + stale art over ~1s while native fullscreen opens. Fade
+    // them in over the existing .35s opacity transition instead of snapping them
+    // on, so that flash is hidden behind the fade. The rating buttons live in the
+    // controls layer now, so this fade does not affect their positioning.
+    if (fsMediaHost) fsMediaHost.style.opacity = "0";
+    if (fsLyricsHost) fsLyricsHost.style.opacity = "0";
+    // Double rAF: paint opacity:0 first, then (a) drop ym-sl-fs-no-anim so the
+    // panes' .35s opacity transition is live, (b) clear opacity so they fade in,
+    // and (c) re-pin the edge buttons once the final layout has actually been
+    // laid out. positionFsEdgeButtons() reads the pane's own box, which is valid
+    // here whether or not the cover image has decoded yet.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
+      if (fsMediaHost) fsMediaHost.style.opacity = "";
+      if (fsLyricsHost) fsLyricsHost.style.opacity = "";
+      positionFsEdgeButtons();
+    }));
+    positionFsEdgeButtons();
+    if (fsEdgeObserver) { try { fsEdgeObserver.disconnect(); } catch (_) {} }
+    if (fsMedia && typeof ResizeObserver !== "undefined") {
+      fsEdgeObserver = new ResizeObserver(() => positionFsEdgeButtons());
+      fsEdgeObserver.observe(fsMedia);
+    }
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
     exit.addEventListener("click", exitFullscreenMode);
@@ -7287,6 +8325,8 @@
     nextButton.addEventListener("click", () => clickPlayerButton("next"));
     shuffleButton.addEventListener("click", () => clickPlayerButton("shuffle"));
     repeatButton.addEventListener("click", () => clickPlayerButton("repeat"));
+    likeButton.addEventListener("click", () => clickFsRating("like"));
+    dislikeButton.addEventListener("click", () => clickFsRating("dislike"));
     // Single source of truth for the custom slider: writes the fill (via
     // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
     function applyFullscreenVolume(v) {
@@ -7679,15 +8719,16 @@
     }
     fsKawarpCanvas = null;
     fsKawarpArtUrl = "";
+    fsKawarpVideoEl = null;
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
-  async function startFullscreenKawarp(artUrl) {
-    if (!fsOverlay) return;
+  async function startFullscreenKawarp(artUrl, videoEl) {
+    if (!fsOverlay) return false;
     // Gate on the Dynamic add-on: its handshake object is our signal that the
     // page-wide Kawarp exists, and we take the backdrop over from it.
     const dyn = window.__ymAuroraDynamic;
-    if (!dyn || typeof dyn.suspend !== "function") return;
+    if (!dyn || typeof dyn.suspend !== "function") return false;
     // Defensive: never stack a second canvas. Every canvas is inserted as
     // fsOverlay.firstChild, so a restart that left the old one in place put the
     // stale canvas LATER in document order - where it painted over the new art.
@@ -7703,17 +8744,32 @@
     }
     try {
       const Kawarp = await getKawarpConstructor();
-      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return;
+      if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return false;
       sizeFullscreenKawarp();
       fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
-      if (artUrl) {
+      if (videoEl) {
+        // Music videos: feed the LIVE <video> so the backdrop reacts to the
+        // picture instead of a heavily blurred + dimmed copy of it (AJ,
+        // 2026-10-19). Kawarp samples a small colour map, so this is far
+        // cheaper than the old full-viewport canvas blur.
+        await fsKawarp.loadVideo(videoEl, {
+          sampleWidth: 72,
+          sampleHeight: 128,
+          smoothing: 120,
+          frameRate: 30,
+        });
+        fsKawarpVideoEl = videoEl;
+        fsKawarpArtUrl = "";
+      } else if (artUrl) {
         await fsKawarp.loadImage(artUrl);
         fsKawarpArtUrl = artUrl;
+        fsKawarpVideoEl = null;
       }
-      if (seq !== fsKawarpSeq) return;
+      if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
+      return true;
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
@@ -7726,10 +8782,33 @@
       }
       fsKawarpCanvas = null;
       fsKawarpActive = false;
+      fsKawarpVideoEl = null;
+      return false;
     }
   }
 
+  // Swap the backdrop source of an ALREADY running Kawarp (no restart: a second
+  // canvas would stack and the older one would paint over the new source).
+  function syncFullscreenKawarpVideo(videoEl) {
+    if (!fsKawarpActive || !fsKawarp || !videoEl || videoEl === fsKawarpVideoEl) return;
+    fsKawarpVideoEl = videoEl;
+    fsKawarpArtUrl = "";
+    try {
+      fsKawarp.loadVideo(videoEl, {
+        sampleWidth: 72,
+        sampleHeight: 128,
+        smoothing: 120,
+        frameRate: 30,
+      });
+    } catch (_) {}
+  }
+
   function syncFullscreenKawarpArt(artUrl) {
+    // Never replace a LIVE video feed with a still. The 2s artwork refresh used
+    // to do exactly that, so a music video's backdrop froze on the first frame
+    // it had sampled (AJ, 2026-10-19). The video path owns the instance until
+    // stopFullscreenKawarp() clears fsKawarpVideoEl.
+    if (fsKawarpVideoEl) return;
     if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
     fsKawarpArtUrl = artUrl;
     try { fsKawarp.loadImage(artUrl); } catch (_) {}
@@ -7767,10 +8846,19 @@
   function applyStaticVideoBackdrop() {
     if (!fsActive || !fsOverlay || !fsSavedVideo) return;
     const raw = getRawVideoTitle();
-    // "Prefer Kawarp for music videos" (Aurora Bloom, cross-add-on) forces
-    // Kawarp for EVERY MV; otherwise only still uploads (Official Audio /
-    // Lyric Video) hand the backdrop over to Kawarp. The choice is part of the
-    // key, so flipping the setting re-runs the swap on the next call.
+    // Music videos now ALWAYS use Kawarp fed by the live video: it replaces the
+    // old full-viewport blurred/dimmed canvas copy, which was both heavier and
+    // visually muddier (AJ, 2026-10-19).
+    const liveVideo = fsSavedVideo.node
+      ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
+      : null;
+    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" ? liveVideo : null;
+    if (videoNode) {
+      if (fsKawarpActive) syncFullscreenKawarpVideo(videoNode);
+      else startFullscreenKawarp("", videoNode);
+      return;
+    }
+    // No video element: fall back to the artwork-backed backdrop.
     const wantKawarp = !!currentSettings.preferKawarpAlways || FS_STATIC_VIDEO_RE.test(raw);
     const key = (wantKawarp ? "kawarp|" : "canvas|") + raw;
     if (key === fsStaticVideoKey) return;
@@ -8279,7 +9367,19 @@
     if (fsArtVideo.parentElement !== target) target.appendChild(fsArtVideo);
     if (inFs) {
       // The fullscreen stylesheet owns the geometry.
+      //
+      // PRESERVE the inline `display`. Assigning cssText replaces the WHOLE
+      // inline style, which used to erase the `display:none` that keeps a
+      // not-yet-ready (or missed) video OUT of the pane's flex row. With it
+      // gone, the video became a second 583px square beside the static card:
+      // two squares in a 960px row shoved the cover art to x=-65, so the
+      // title/seek/transport anchored to it were clipped on the left
+      // (live-measured: img x=-65, video x=518, AJ 2026-10-18).
+      // Visibility of the video is owned by attachAnimatedArt/hideAnimatedArt;
+      // this function only owns its HOME and GEOMETRY.
+      const keepDisplay = fsArtVideo.style.display;
       fsArtVideo.style.cssText = "background:transparent;";
+      fsArtVideo.style.display = keepDisplay;
     } else {
       fsArtVideo.style.cssText =
         "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" +
@@ -8345,6 +9445,9 @@
     if (fsArtImg) fsArtImg.style.display = "";
     // The ready class is gone, so this restores the player view's own cover too.
     placeArtVideo();
+    // The static card is back in layout — republish so the band anchors to the
+    // ART box again instead of a stale value (AJ, 2026-10-18).
+    publishFsBandVars();
   }
 
   // Full removal: drop the video element + its hls instance entirely. Used when
@@ -8360,6 +9463,8 @@
     fsArtVideoLoadingKey = "";
     if (fsArtImg) fsArtImg.style.display = "";
     setInlineCoverHidden(false); // the player view gets its own cover back
+    // Static card is laid out again — re-anchor the band to the ART box.
+    publishFsBandVars();
   }
 
   // A CACHED animated cover is about to load, so do NOT show the static YTM cover
@@ -8391,6 +9496,13 @@
         if (fsArtImg) fsArtImg.style.display = "none";
         // Player view: hide YTM's own cover now that the animated one is up.
         placeArtVideo();
+        // REPUBLISH the band now that a real art box exists again. While the
+        // stream loaded, suppressStaticCardForAnimated() had the static card at
+        // display:none and the video was not ready, so publishFsBandVars()
+        // skipped the art box and left --ym-sl-fs-art-left/width unset. The CSS
+        // then fell back to the WIDER pane box, shifting the title + controls
+        // left and clipping them (AJ, 2026-10-18, intermittent after a skip).
+        publishFsBandVars();
         const p = video.play();
         if (p && p.catch) p.catch(() => {}); // autoplay may be deferred; ignore
       };
@@ -8617,8 +9729,19 @@
     // the hls engine down and hides the video until the new manifest parses, which
     // flickered the cover back to YTM's own art every few seconds
     // (AJ, 2026-10-03).
-    if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.isConnected))) {
+    //
+    // Gate on the READY class, not isConnected: hideAnimatedArt() removes the
+    // class and display:none's the element but leaves fsArtVideoKey set, so an
+    // isConnected check kept taking this branch after a miss and re-hid the
+    // static card, leaving the pane blank. A detached-but-ready element keeps
+    // the class, so the re-home case is still covered (AJ, 2026-10-18).
+    if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")))) {
       placeArtVideo();
+      // Re-anchor the band to the art box. This path is reached on every 2s
+      // reconcile tick while a stream is already playing, so it doubles as the
+      // catch-all that repairs a stale --ym-sl-fs-art-left/width after a skip
+      // (AJ, 2026-10-18).
+      publishFsBandVars();
       // Re-assert the static card's hide: the MV -> song transition can null
       // fsArtImg (the player-bar artwork briefly still reads as the MV's own
       // i.ytimg thumbnail, so reconcile's thumbnail branch drops the card),
@@ -8806,6 +9929,13 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
+    // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
+    // applying the entry layout to them animates them sliding in from the CSS
+    // default (side) — a visible "side layout" flash on cover-art entry. Hold
+    // transitions off until the first paint, then drop the class (the double-rAF
+    // in buildFullscreenControls does the actual removal so the opacity fade is
+    // live too). Layout cycling on the cycle button keeps animating normally.
+    fsOverlay.classList.add("ym-sl-fs-no-anim");
     // Overlay title ("Artist Track"). Built here rather than inside
     // buildFullscreenControls() because it is not a control: it belongs to the
     // overlay surface and must exist independently of the chrome row.
@@ -8903,19 +10033,25 @@
       };
       fsOverlay.classList.add("ym-sl-fs-has-video");
 
-      // Ambient blurred backdrop: a low-res duplicate of the live video that
-      // the CSS blurs + dims to fill the entire overlay. The sharp video sits
-      // on top in fsMediaHost, so the empty letterbox space and the area
-      // behind the lyrics both get the blurred ambient fill.
+      // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
+      // low-res blurred/dimmed copy of the video, which cost a full-viewport
+      // canvas blur every frame and looked muddier (AJ, 2026-10-19). The 2D
+      // canvas is created but left blank; it only starts drawing if Kawarp is
+      // unavailable (no WebGL / Dynamic add-on off).
       fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
       fsBgCtx = fsBgCanvas.getContext("2d", { alpha: false });
       fsOverlay.insertBefore(fsBgCanvas, fsMediaHost);
       fsBgLastDrawAt = 0;
-      // Defer the first draw + loop start until the canvas is laid out so
-      // clientWidth/clientHeight are valid for sizing.
-      requestAnimationFrame(() => {
-        drawBgFrame();
-        startBgDrawLoop();
+      // findPlayerVideo() returns the <video> itself, not a container — querying
+      // a video inside a video returns null, which silently started Kawarp with
+      // no source at all (AJ, 2026-10-19).
+      const liveVideoEl = video.tagName === "VIDEO" ? video : video.querySelector("video");
+      startFullscreenKawarp("", liveVideoEl).then((ok) => {
+        if (ok || !fsActive) return;
+        requestAnimationFrame(() => {
+          drawBgFrame();
+          startBgDrawLoop();
+        });
       });
 
       fsMediaHost.appendChild(video);
@@ -9172,6 +10308,8 @@
     fsPlayerPlayButton = null;
     fsPlayerShuffleButton = null;
     fsPlayerRepeatButton = null;
+    fsPlayerLikeButton = null;
+    fsPlayerDislikeButton = null;
     fsPlayerVolumeRange = null;
     fsPlayerSeekRange = null;
     fsTimeCurrent = null;
@@ -9355,7 +10493,8 @@
   function setPanel(on) {
     // While fullscreen is up, the lyrics panel is owned by the overlay. Ignore
     // tab-driven visibility changes so the lyrics can't be hidden underneath us.
-    if (fsActive) return;
+    // Same while the NPV snippet owns the panel.
+    if (fsActive || externalHostActive) return;
     panelVisible = on;
     // Hide YTM's own tab content and show Aurora's panel in its place. The native
     // tab bar (and its #selectionBar) are left entirely to YTM.
@@ -9367,6 +10506,67 @@
       syncTrackLyrics();
     }
   }
+
+  /* ---- external host (NPV dock) ----
+     Lets the Now Playing snippet MOVE the already-rendered panel (the very same
+     #ym-sl-panel node, same renderer, no second engine) into its own rail and
+     back. While docked: the tab-driven visibility state is parked (like
+     fullscreen does), the render loop is forced on so the lyrics keep syncing,
+     and mountPanel() is blocked from reclaiming the node on YTM re-renders. */
+  function setExternalHost(host, reveal) {
+    if (!panelEl || fsActive) return false;
+    if (host) {
+      if (externalHostActive && panelEl.parentElement === host) return true;
+      if (!externalHostActive) {
+        externalHostSavedVisible = panelVisible;
+        externalHostActive = true;
+      }
+      if (panelEl.parentElement !== host) host.appendChild(panelEl);
+      panelEl.classList.remove("hidden");
+      panelVisible = true;
+      // The panel left #tab-renderer, so its native children can show again.
+      syncNativePanel(false);
+      refreshTrack();
+      syncTrackLyrics();
+      return true;
+    }
+    if (!externalHostActive) return false;
+    externalHostActive = false;
+    // `reveal` forces the panel visible on return. Needed when the host gives it
+    // back BECAUSE the user opened the Lyrics tab: without it the panel restores
+    // to its pre-dock state (usually hidden), so the tab falls back to YTM's own
+    // lyrics instead of ours (AJ, 2026-10-19).
+    panelVisible = reveal === true ? true : externalHostSavedVisible === true;
+    externalHostSavedVisible = null;
+    // Put the panel back where the tab system expects it (#tab-renderer, or
+    // <body> if the watch page — and with it the tab — is gone right now;
+    // mountTab() will re-mount it into the tab when the page returns).
+    const tabRenderer = document.querySelector("#tab-renderer");
+    if (tabRenderer) {
+      if (panelEl.parentElement !== tabRenderer) tabRenderer.appendChild(panelEl);
+    } else if (!panelEl.parentElement || !panelEl.parentElement.isConnected) {
+      document.body.appendChild(panelEl);
+    }
+    panelEl.classList.toggle("hidden", !panelVisible);
+    syncNativePanel(panelVisible);
+    if (panelVisible) {
+      refreshTrack();
+      syncTrackLyrics();
+    }
+    return true;
+  }
+
+  // Expose the dock API for page-world snippets. YTMod is created by
+  // public-api.js, which may load after this script — retry briefly.
+  function exposeExternalHost() {
+    if (!window.YTMod) {
+      window.setTimeout(exposeExternalHost, 200);
+      return;
+    }
+    window.YTMod.lyrics = window.YTMod.lyrics || {};
+    window.YTMod.lyrics.setExternalHost = setExternalHost;
+  }
+  exposeExternalHost();
 
   /**
    * Paint the fullscreen overlay title.
@@ -9808,7 +11008,10 @@
   function setVideoOffsetMs(value, save) {
     const numeric = Number(value);
     const ms = Number.isFinite(numeric)
-      ? clamp(Math.round(numeric / 100) * 100, -30000, 30000)
+      // +/- 60s. This clamp is what actually ENFORCES the offset limit — the
+      // sliders in 06-panel-ui.jsfrag and 08-fullscreen-controls.jsfrag only
+      // advertise it. Keep all three in step.
+      ? clamp(Math.round(numeric / 100) * 100, -60000, 60000)
       : 0;
     if (editingOffsetMode === "video") offsetVideoMs = ms;
     else offsetSongMs = ms;
@@ -10088,7 +11291,11 @@
   }
 
   const NO_LYRICS_MESSAGE = "No lyrics found.";
-  const LOAD_FAILED_MESSAGE = "Could not load lyrics. Try again later or import a TTML file.";
+  const LOAD_FAILED_MESSAGE = "Lyrics didn't load.";
+  // Why the last lookup ended in an error, shown in the search panel footer.
+  // "no lyrics" is self-explanatory; a failed fetch is almost always rate
+  // limiting, so it gets an explicit ERR line instead.
+  let lastLyricsError = "";
 
   function showLyricsMessage(message) {
     // A message means the lookup is OVER, so the fullscreen loading spinner has to
@@ -10096,6 +11303,12 @@
     // forever, because only the success paths ever called hideFsSpinner()
     // (AJ, 2026-10-01).
     hideFsSpinner();
+    lastLyricsError = message === LOAD_FAILED_MESSAGE ? "rate" : "";
+    if (searchPanelEl && searchPanelEl._foot) {
+      searchPanelEl._foot.textContent = lastLyricsError
+        ? "ERR: rate limited — try again in a couple of minutes."
+        : "";
+    }
     // Fullscreen Video Background keeps the lyrics panel hidden until the first
     // line actually plays (see the intro-dim rules), so a track with NO lyrics
     // produced no feedback at all there — no panel, no message, nothing
@@ -10112,6 +11325,12 @@
     if (lineScrollEl) lineScrollEl.classList.add("offline");
     const empty = h("div", { class: "ym-sl-empty" });
     empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
+    // Spicy-style body line: tells the user the Search button looks on LRCLIB,
+    // which is the actual escape hatch when auto-sync finds nothing.
+    empty.appendChild(h("div", {
+      class: "ym-sl-empty-body",
+      text: "Search LRCLIB to pull in synced lyrics for this track.",
+    }));
     // Surface a Search button under the empty-state message — that's the
     // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
     const emptySearch = h("button", {
@@ -10511,8 +11730,6 @@
     scrollGlideLastWhole = null;
     scrollGlideReconciles = 0;
     setScrollFraction(0);
-    // Release the compositor promotion the glide held (see startScrollGlide).
-    if (lineScrollEl) lineScrollEl.style.willChange = "";
   }
 
   // Start or retarget the glide. The spring is REUSED so its velocity carries
@@ -10531,12 +11748,12 @@
     scrollGlideGoal = clampedGoal;
     scrollGlide.SetGoal(clampedGoal);
     scrollGlideReconciles = 0;
-    // Promote for the duration of the glide. The sub-pixel fraction rewrites the
-    // scroller's transform every frame, and the scroller ALSO carries the lyrics
-    // mask — without promotion each write re-rasterises the masked content. Held
-    // only while gliding, released in stopScrollGlide (per the standing rule that
-    // will-change is never left on permanently).
-    lineScrollEl.style.willChange = "transform";
+    // NOTE: no will-change here on purpose. Promoting the SCROLLER puts every
+    // glyph inside it onto a composited layer, and Chromium drops LCD sub-pixel
+    // text antialiasing on composited layers — the words render a hair differently
+    // and read as shifting left while the glide runs, snapping back the moment the
+    // promotion is released (AJ, 2026-10-07). The sub-pixel carry still works
+    // without it; the @property registration is what carries the perf.
     scrollGlideActive = true;
   }
 
@@ -11357,9 +12574,68 @@
     );
   }
 
-  /** Title strings worth trying: stripped first, then as YTM reported it. */
-  function listenbrainzTitleVariants(title) {
-    return variantList(stripParensLoose(title), title);
+  /* Uploader-styled titles never match a catalogue. The live console showed
+     queries like "more than life ft. glaive (Official Music Video) (feat.
+     glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
+     exclusive" — those miss MusicBrainz, ListenBrainz AND Deezer every time.
+     Strip the noise before querying anything (AJ, 2026-10-19). */
+  const TITLE_NOISE_RE =
+    /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;
+  // Bracketed text that describes a DIFFERENT RECORDING must survive: dropping
+  // "(Remix)" would query the original and fetch the wrong ISRC/timing.
+  const TITLE_VERSION_RE =
+    /\b(remix|re-?mix|live|acoustic|instrumental|sped\s*up|slowed|reverb|nightcore|demo|edit|version|cover|orchestral)\b/i;
+
+  function cleanSearchTitle(title, artist) {
+    let s = String(title || "");
+    // "Song | Channel" — everything after the pipe is uploader branding.
+    s = s.split("|")[0];
+    // Bracketed qualifiers: drop (Official Video) / [Lyrics / AMV], keep
+    // (Remix) / (Live) / (Acoustic) because those are different recordings.
+    s = s.replace(/[\(\[]\s*([^\)\]]*)[\)\]]/g, (match, inner) =>
+      TITLE_VERSION_RE.test(inner) ? match : " "
+    );
+    s = s.replace(/\{[^}]*\}/g, " ");
+    // YTM sometimes truncates a title mid-bracket: "Song (Official ...".
+    s = s.replace(/[\(\[]\s*[^\)\]]*$/, " ");
+    // Inline feature credits: "Song ft. X" / "Song feat. X".
+    s = s.replace(/\s+(?:ft|feat|featuring)\.?\s+.*$/i, " ");
+    s = s.replace(TITLE_NOISE_RE, " ");
+    s = s.replace(/\s*[-–—]\s*$/, " ");
+    // "Artist - Song" -> "Song" when the prefix is the artist we already know.
+    const dash = /^(.+?)\s*[-–—]\s*(.+)$/.exec(s);
+    if (dash && artist) {
+      const left = dash[1].toLowerCase().replace(/\s+/g, " ").trim();
+      const known = String(artist).toLowerCase().replace(/\s+/g, " ").trim();
+      if (known && (left === known || known.indexOf(left) !== -1 || left.indexOf(known) !== -1)) {
+        s = dash[2];
+      }
+    }
+    return s.replace(/\s{2,}/g, " ").trim();
+  }
+
+  /** Title strings worth trying: cleaned first, then stripped, then raw. */
+  function listenbrainzTitleVariants(title, artist) {
+    const cleaned = cleanSearchTitle(title, artist);
+    return variantList(cleaned, stripParensLoose(title), title);
+  }
+
+  /* YTM's player bar renders a title with the uploader noise already removed —
+     the raw videoDetails.title still carries "(Official Music Video)". That
+     makes the bar text the best canonical string available without a catalogue
+     lookup, and Spicy is the source we most want to hit (AJ, 2026-10-19). */
+  function playerBarTitle() {
+    const selectors = [
+      "ytmusic-player-bar .title",
+      "ytmusic-player-bar #song-title",
+      "ytmusic-player-bar yt-formatted-string.title",
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      const text = el && el.textContent ? el.textContent.trim() : "";
+      if (text) return text;
+    }
+    return "";
   }
 
   /**
@@ -11474,7 +12750,7 @@
     if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
     try {
       const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        track.title,
+        cleanSearchTitle(track.title, track.artist),
         track.artist,
         track.album,
         track.durationMs
@@ -11515,7 +12791,12 @@
 
     const artist = (track && track.artist) || "";
     const album = (track && track.album) || "";
-    const titles = listenbrainzTitleVariants(title);
+    const titles = listenbrainzTitleVariants(title, artist);
+    // Prefer the player bar's already-cleaned title when it says something new.
+    const barTitle = cleanSearchTitle(playerBarTitle(), artist);
+    if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
+      titles.unshift(barTitle);
+    }
     const artists = listenbrainzArtistVariants(artist, title);
     // Try the album YTM gave us first, then the loose empty form. YTM's album
     // string is often close enough to tighten the match, and when it isn't the
@@ -11933,6 +13214,229 @@
     return parsed;
   }
 
+  /* ---- lrc.red (AJ, 2026-10-19) -----------------------------------------
+     Static file host keyed by ISRC — no search endpoint, no auth, no key:
+       https://lrc.red/s/{ISRC}.ttml   word-level Apple-style TTML
+       https://lrc.red/s/{ISRC}.lrc    line-level fallback
+       https://lrc.red/s/{ISRC}.json   metadata
+     CORS is `access-control-allow-origin: *`, so the page can fetch it
+     directly. The hard part is the ISRC: YTM exposes it only sometimes, so a
+     MusicBrainz recording lookup is the fallback (MB search results already
+     carry `isrcs`, no extra `inc` needed).
+     Their docs ask for credit when the API is proxied — passing "lrc.red" as
+     the provider label satisfies that through the normal credits footer. */
+  const LRC_RED_BASE = "https://lrc.red/s/";
+  const LRC_RED_ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{2}\d{5}$/;
+  const lrcRedCache = new Map(); // isrc -> { ttml?, lrc? }
+  const lrcRedIsrcCache = new Map(); // track key -> isrc
+  // A dead lrc.red origin (Cloudflare 522) hangs until the network gives up,
+  // which made track changes feel frozen. Bound it, and after a failure skip
+  // the source entirely for a while instead of paying the timeout per track.
+  const LRC_RED_TIMEOUT_MS = 4000;
+  const LRC_RED_COOLDOWN_MS = 5 * 60 * 1000;
+  let lrcRedCooldownUntil = 0;
+
+  function lrcRedSignal(trackSignal) {
+    try {
+      if (
+        typeof AbortSignal !== "undefined" &&
+        typeof AbortSignal.any === "function" &&
+        typeof AbortSignal.timeout === "function"
+      ) {
+        return AbortSignal.any([trackSignal, AbortSignal.timeout(LRC_RED_TIMEOUT_MS)]);
+      }
+    } catch (_) {}
+    return trackSignal;
+  }
+
+  function normalizeIsrc(value) {
+    const compact = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return LRC_RED_ISRC_RE.test(compact) ? compact : "";
+  }
+
+  // Score a Deezer search hit against the track. Title dominates; artist and
+  // duration break ties (Deezer lists remixes/live versions separately, and
+  // picking the wrong one would fetch the wrong ISRC).
+  function deezerIsrcScore(candidate, track) {
+    const norm = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const candidateTitle = norm(candidate && candidate.title);
+    const trackTitle = norm(track && track.title);
+    if (!candidateTitle || !trackTitle) return 0;
+    let score = 0;
+    if (candidateTitle === trackTitle) score += 60;
+    else if (candidateTitle.indexOf(trackTitle) !== -1 || trackTitle.indexOf(candidateTitle) !== -1) score += 30;
+    else return 0;
+    const candidateArtist = norm(candidate.artist && candidate.artist.name);
+    const trackArtist = norm(track && track.artist);
+    if (candidateArtist && trackArtist) {
+      if (candidateArtist === trackArtist) score += 30;
+      else if (candidateArtist.indexOf(trackArtist) !== -1 || trackArtist.indexOf(candidateArtist) !== -1) score += 15;
+    }
+    const candidateDuration = Number(candidate.duration);
+    const trackDuration = Number(track && track.durationMs) / 1000;
+    if (candidateDuration > 0 && trackDuration > 0) {
+      const delta = Math.abs(candidateDuration - trackDuration);
+      if (delta <= 2) score += 25;
+      else if (delta <= 5) score += 12;
+      else if (delta > 15) score -= 20;
+    }
+    return score;
+  }
+
+  // ISRC for this track. YTM exposes none (verified against /player and /next),
+  // so: Deezer first — it carries new releases on release day and returns
+  // `isrc` on every hit — then MusicBrainz for older catalogue where Deezer
+  // misses (AJ, 2026-10-19).
+  async function resolveLrcRedIsrc(track, controller, key) {
+    const direct = normalizeIsrc(track && track.isrc);
+    if (direct) return direct;
+    const memo = lrcRedIsrcCache.get(key);
+    if (memo) return memo;
+    if (controller.signal.aborted || key !== currentTrackKey) return "";
+
+    if (window.YTMod && typeof window.YTMod.fetchDeezerTracks === "function") {
+      try {
+        // Cleaned title: Deezer's catalogue uses canonical names, not the
+        // uploader's "X (Official Video) [Lyrics]" styling.
+        const response = await window.YTMod.fetchDeezerTracks(
+          cleanSearchTitle(track.title, track.artist),
+          track.artist,
+          track.album
+        );
+        if (controller.signal.aborted || key !== currentTrackKey) return "";
+        if (response && response.ok && response.data && Array.isArray(response.data.data)) {
+          const best = response.data.data
+            .map((candidate) => ({ candidate, score: deezerIsrcScore(candidate, track) }))
+            .filter((entry) => entry.score >= 60 && normalizeIsrc(entry.candidate.isrc))
+            .sort((a, b) => b.score - a.score)[0];
+          if (best) {
+            const isrc = normalizeIsrc(best.candidate.isrc);
+            lrcRedIsrcCache.set(key, isrc);
+            console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via Deezer (score ${best.score}).`);
+            return isrc;
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return "";
+        console.warn("[SpicyLyrics] lrc.red: Deezer ISRC lookup failed:", error && error.message);
+      }
+    }
+
+    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") return "";
+    if (controller.signal.aborted || key !== currentTrackKey) return "";
+    try {
+      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
+        cleanSearchTitle(track.title, track.artist),
+        track.artist,
+        track.album,
+        track.durationMs
+      );
+      if (controller.signal.aborted || key !== currentTrackKey) return "";
+      if (!response || !response.ok || !response.data || !Array.isArray(response.data.recordings)) return "";
+      const best = response.data.recordings
+        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
+        .filter((candidate) =>
+          candidate.score > 0 &&
+          Array.isArray(candidate.recording.isrcs) &&
+          candidate.recording.isrcs.length
+        )
+        .sort((a, b) => b.score - a.score)[0];
+      const isrc = best ? normalizeIsrc(best.recording.isrcs[0]) : "";
+      if (!isrc) {
+        console.warn(`[SpicyLyrics] lrc.red: no ISRC for "${track.title}" from Deezer or MusicBrainz.`);
+        return "";
+      }
+      lrcRedIsrcCache.set(key, isrc);
+      console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via MusicBrainz (score ${best.score}).`);
+      return isrc;
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.warn("[SpicyLyrics] lrc.red: MusicBrainz ISRC lookup failed:", error && error.message);
+      }
+      return "";
+    }
+  }
+
+  async function fetchLrcRedLyrics(track, controller, key) {
+    const isrc = await resolveLrcRedIsrc(track, controller, key);
+    if (!isrc) return null;
+    const cached = lrcRedCache.get(isrc);
+    if (cached) return cached;
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    // Origin known to be unreachable right now — skip without paying the
+    // timeout again on this track (AJ, 2026-10-19).
+    if (Date.now() < lrcRedCooldownUntil) return null;
+    const result = {};
+    let unreachable = false;
+    // TTML first (word-level); LRC only if the TTML entry does not exist.
+    for (const ext of ["ttml", "lrc"]) {
+      try {
+        const response = await fetch(`${LRC_RED_BASE}${isrc}.${ext}`, {
+          headers: { Accept: ext === "ttml" ? "application/ttml+xml" : "text/plain" },
+          credentials: "omit",
+          signal: lrcRedSignal(controller.signal),
+        });
+        if (!response.ok) continue; // 404 -> try the next format
+        const text = await response.text();
+        if (!text || text.length < 40) continue;
+        // A 200 with an HTML body is Cloudflare's interstitial, not lyrics.
+        if (ext === "ttml" && text.indexOf("<tt") === -1) continue;
+        result[ext] = text;
+        break;
+      } catch (error) {
+        if (controller.signal.aborted) return null;
+        // A THROW here is not an HTTP status: it is CORS / DNS / a Cloudflare
+        // 522 page (which carries no Access-Control-Allow-Origin, so the
+        // browser reports it as a CORS failure), or our own timeout. The second
+        // extension would fail the same way, so stop instead of waiting twice.
+        unreachable = true;
+        break;
+      }
+    }
+    if (unreachable) {
+      lrcRedCooldownUntil = Date.now() + LRC_RED_COOLDOWN_MS;
+      console.warn(
+        `[SpicyLyrics] lrc.red is unreachable (CORS/522/timeout) — skipping it for ` +
+        `${Math.round(LRC_RED_COOLDOWN_MS / 60000)} min so playback is not delayed.`
+      );
+      return null;
+    }
+    if (!result.ttml && !result.lrc) {
+      console.log(`[SpicyLyrics] lrc.red: no lyrics for ISRC ${isrc}.`);
+      return null;
+    }
+    lrcRedCache.set(isrc, result);
+    console.log(`[SpicyLyrics] lrc.red: fetched ${result.ttml ? "TTML" : "LRC"} for ${isrc}.`);
+    return result;
+  }
+
+  // Does this TTML carry real per-WORD timing (Apple/Spicy <span ttm:role="x-word">
+  // structure, or lrc.red's Word mode)? Line-only TTML (lrc:timing="Line", plain <p>
+  // text) has NO word timing — rendering it through the karaoke path makes every
+  // line light at once, so it is shown as static auto-scroll instead (AJ, 2026-10-19).
+  function ttmlHasWordTiming(xml) {
+    const s = String(xml || "");
+    if (/lrc:timing\s*=\s*["']Word["']/i.test(s)) return true;
+    if (/<span\b[^>]*\bttm:role\s*=\s*["']x-word["']/i.test(s)) return true;
+    return /<span\b/i.test(s) && /\bbegin\s*=/.test(s);
+  }
+  // Flattens a line-level TTML to plain text (one <p> -> one line) for the static path.
+  function ttmlPlainText(xml) {
+    const s = String(xml || "");
+    const lines = [];
+    const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+    let m;
+    while ((m = re.exec(s))) {
+      const text = decodeEntities(m[1].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+      if (text) lines.push(text);
+    }
+    return lines.join("\n");
+  }
+  // A synced LRC line is prefixed with a [mm:ss(.xx)] timestamp; plain lyrics are not.
+  function isSyncedLRC(text) {
+    return /\[\s*\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\s*\]/.test(String(text || ""));
+  }
+
   async function fetchLRCLyrics(track, key) {
     const requestId = ++trackRequestSeq;
     if (activeTrackAbort) activeTrackAbort.abort();
@@ -11942,126 +13446,190 @@
     // Skeleton rather than a text message: this covers the network wait AND the
     // synchronous DOM build that follows it (see showLyricsSkeleton).
     showLyricsSkeleton();
-    try {
-      const spicyResult = await fetchSpicyLyrics(track, key, controller);
-      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) {
-        // Silence here was a real dead end: the TTML was fetched and parsed, then
-        // dropped on the floor with no output, which reads as "the fetch failed".
-        console.warn(`[SpicyLyrics] discarding the Spicy result — ${
-          controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
-        return;
-      }
-      if (spicyResult && spicyResult.ttml) {
-        // Attribution + songwriters ride along with the API result; stash them
-        // before loadTTML so the credits footer can render them.
-        pendingSpicyCredits = {
-          // The whole attribution object, not just the uploader: the footer
-          // needs the provider (every source) and the maker (community syncs).
-          attribution: spicyResult.attribution || null,
-          songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
-        };
-        if (loadTTML(spicyResult.ttml, "external")) {
-          console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
-          return;
+
+    const stale = () =>
+      controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey;
+
+    /* Each source is a runner that returns true when it produced lyrics (or
+       when the request went stale). The resolver walks them in the order the
+       user set in the add-on's settings — "Source order" — instead of a
+       hard-coded sequence (AJ, 2026-10-19). Runners never show a terminal
+       "no lyrics" message themselves; the tail of this function does, so a
+       source that misses early cannot flash a message before the next one
+       has had its turn. */
+    const runners = {
+      spicy: async () => {
+        try {
+          const spicyResult = await fetchSpicyLyrics(track, key, controller);
+          if (stale()) {
+            // Silence here was a real dead end: the TTML was fetched and parsed,
+            // then dropped on the floor with no output, which reads as "the fetch
+            // failed".
+            console.warn(`[SpicyLyrics] discarding the Spicy result — ${
+              controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
+            return true;
+          }
+          if (spicyResult && spicyResult.ttml) {
+            // Attribution + songwriters ride along with the API result; stash them
+            // before loadTTML so the credits footer can render them.
+            pendingSpicyCredits = {
+              attribution: spicyResult.attribution || null,
+              songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
+            };
+            if (loadTTML(spicyResult.ttml, "external")) {
+              console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            console.warn("[SpicyLyrics] API returned TTML we could not parse; trying the next source.");
+          } else {
+            console.warn("[SpicyLyrics] no Spicy TTML for this track; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] lookup failed; trying the next source:", error);
         }
-        pendingSpicyCredits = null;
-        console.warn("[SpicyLyrics] API returned TTML we could not parse; falling back to Unison/LRCLIB.");
-      } else {
-        console.warn("[SpicyLyrics] no Spicy TTML for this track; falling back to Unison/LRCLIB.");
-      }
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      console.warn("[SpicyLyrics] lookup failed; falling back to Unison/LRCLIB:", error);
-    }
-    try {
-      const unisonData = await fetchUnisonLyrics(track, key, controller);
-      if (controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey) return;
-      if (unisonData && unisonData.format === "ttml") {
-        if (loadTTML(unisonData.lyrics, "external", "Unison")) return;
-        console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; falling back to LRCLIB.");
-      }
-      if (unisonData && unisonData.format === "lrc") {
-        if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return;
-        console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; falling back to LRCLIB.");
-      }
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      console.warn("[SpicyLyrics] Unison lookup failed; falling back to LRCLIB:", error);
-    }
+        return false;
+      },
 
-    const cached = lrclibCache.get(key);
-    if (cached) {
-      lrclibCache.delete(key);
-      lrclibCache.set(key, cached);
-      loadLRCLyrics(cached, track.durationMs);
-      return;
-    }
-    const persisted = getLyricsPersistent(key);
-    if (persisted) {
-      lrclibCache.set(key, persisted);
-      loadLRCLyrics(persisted, track.durationMs);
-      return;
-    }
-
-    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
-      showLyricsMessage("Could not load lyrics. Reload Aurora Lyrics and try again.");
-      return;
-    }
-    const params = new URLSearchParams();
-    params.set("track_name", track.title);
-    if (track.artist) params.set("artist_name", track.artist);
-    if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
-      params.set("duration", String(Math.round(track.durationMs / 1000)));
-    }
-
-    try {
-      const response = await window.YTMod.fetchLRCLIB(
-        `${LRCLIB_API}?${params.toString()}`
-      );
-      if (!response.ok && response.status !== 404) {
-        throw new Error("LRCLIB returned HTTP " + response.status);
-      }
-      let data = response.ok ? response.data : null;
-
-      if (!data || !data.syncedLyrics) {
-        const searchParams = new URLSearchParams({
-          q: [track.title, track.artist].filter(Boolean).join(" "),
-        });
-        if (controller.signal.aborted ||
-            requestId !== trackRequestSeq ||
-            key !== currentTrackKey) return;
-        const searchResponse = await window.YTMod.fetchLRCLIB(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
-        );
-        if (!searchResponse.ok) {
-          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+      "lrc.red": async () => {
+        try {
+          const lrcRed = await fetchLrcRedLyrics(track, controller, key);
+          if (stale()) return true;
+          if (lrcRed && lrcRed.ttml) {
+            let ok = false;
+            if (ttmlHasWordTiming(lrcRed.ttml)) {
+              // Word-level TTML -> normal word-by-word karaoke.
+              ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
+              if (ok) console.log("[SpicyLyrics] TTML rendered from lrc.red.");
+            } else {
+              // Line-level-only TTML: no per-word timing. The karaoke/line fill
+              // reads as every line lighting at once, so present it as STATIC
+              // auto-scroll instead (AJ, 2026-10-19).
+              ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
+            }
+            if (ok) {
+              showSourceNotice("lrc.red lyrics may be slightly out of sync");
+              return true;
+            }
+            console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
+          }
+          if (lrcRed && lrcRed.lrc) {
+            // A plain (untimestamped) .lrc piling on one line is the "all fire at
+            // once" bug — feed it through the STATIC path, not syncedLyrics.
+            const payload = isSyncedLRC(lrcRed.lrc)
+              ? { syncedLyrics: lrcRed.lrc }
+              : { plainLyrics: lrcRed.lrc };
+            if (loadLRCLyrics(payload, track.durationMs, "lrc.red")) {
+              showSourceNotice("lrc.red lyrics may be slightly out of sync");
+              return true;
+            }
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] lrc.red lookup failed; trying the next source:", error);
         }
-        // Prefer a synced match; fall back to a plain (unsynced) match so the
-        // panel shows lyrics automatically instead of "No lyrics found"
-        // (AJ, 2026-09-18). Both are scored against the current track on the
-        // same search response — no second request.
-        data = selectLRCLIBResult(searchResponse.data, track)
-          || selectLRCLIBPlainResult(searchResponse.data, track);
-      }
+        return false;
+      },
 
-      if (controller.signal.aborted ||
-          requestId !== trackRequestSeq ||
-          key !== currentTrackKey) return;
-      // Accept either a synced or a plain match. Only give up when there is no
-      // usable lyrics object at all.
-      if (!data || (!data.syncedLyrics && !data.plainLyrics)) {
-        showLyricsMessage(NO_LYRICS_MESSAGE);
-        return;
-      }
-      cacheLRCLyrics(key, data);
-      cacheLyricsPersistent(key, data);
-      loadLRCLyrics(data, track.durationMs);
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
-      console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
-      showLyricsMessage(LOAD_FAILED_MESSAGE);
+      unison: async () => {
+        try {
+          const unisonData = await fetchUnisonLyrics(track, key, controller);
+          if (stale()) return true;
+          if (unisonData && unisonData.format === "ttml") {
+            if (loadTTML(unisonData.lyrics, "external", "Unison")) return true;
+            console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; trying the next source.");
+          }
+          if (unisonData && unisonData.format === "lrc") {
+            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return true;
+            console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[SpicyLyrics] Unison lookup failed; trying the next source:", error);
+        }
+        return false;
+      },
+
+      lrclib: async () => {
+        const cached = lrclibCache.get(key);
+        if (cached) {
+          lrclibCache.delete(key);
+          lrclibCache.set(key, cached);
+          loadLRCLyrics(cached, track.durationMs);
+          return true;
+        }
+        const persisted = getLyricsPersistent(key);
+        if (persisted) {
+          lrclibCache.set(key, persisted);
+          loadLRCLyrics(persisted, track.durationMs);
+          return true;
+        }
+
+        if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return false;
+        const params = new URLSearchParams();
+        params.set("track_name", track.title);
+        if (track.artist) params.set("artist_name", track.artist);
+        if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+          params.set("duration", String(Math.round(track.durationMs / 1000)));
+        }
+
+        try {
+          const response = await window.YTMod.fetchLRCLIB(
+            `${LRCLIB_API}?${params.toString()}`
+          );
+          if (!response.ok && response.status !== 404) {
+            throw new Error("LRCLIB returned HTTP " + response.status);
+          }
+          let data = response.ok ? response.data : null;
+
+          if (!data || !data.syncedLyrics) {
+            const searchParams = new URLSearchParams({
+              q: [track.title, track.artist].filter(Boolean).join(" "),
+            });
+            if (stale()) return true;
+            const searchResponse = await window.YTMod.fetchLRCLIB(
+              `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+            );
+            if (!searchResponse.ok) {
+              throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+            }
+            // Prefer a synced match; fall back to a plain (unsynced) match so the
+            // panel shows lyrics automatically instead of "No lyrics found"
+            // (AJ, 2026-09-18). Both are scored against the current track on the
+            // same search response — no second request.
+            data = selectLRCLIBResult(searchResponse.data, track)
+              || selectLRCLIBPlainResult(searchResponse.data, track);
+          }
+
+          if (stale()) return true;
+          // Accept either a synced or a plain match. Only give up when there is no
+          // usable lyrics object at all.
+          if (!data || (!data.syncedLyrics && !data.plainLyrics)) return false;
+          cacheLRCLyrics(key, data);
+          cacheLyricsPersistent(key, data);
+          loadLRCLyrics(data, track.durationMs);
+          return true;
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          if (stale()) return true;
+          console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
+          return false;
+        }
+      },
+    };
+
+    // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
+    // was removed. Spicy Lyrics wins when both it and lrc.red carry the track;
+    // lrc.red is next for new releases; Unison + LRCLIB are last-resort fallbacks.
+    const order = ["spicy", "lrc.red", "unison", "lrclib"];
+    for (const id of order) {
+      const runner = runners[id];
+      if (!runner) continue;
+      if (await runner()) return;
+      if (stale()) return;
     }
+    showLyricsMessage(NO_LYRICS_MESSAGE);
   }
 
   /* ===================== next-track prefetch ===================== */
@@ -12169,11 +13737,22 @@
       "aria-label": "Search results",
     });
 
-    panel.append(head, form, rememberRow, status, results);
+    const foot = h("div", { class: "ym-sl-search-foot", role: "note" });
+
+    panel.append(head, form, rememberRow, status, results, foot);
     panel._input = input;
     panel._remember = remember;
     panel._status = status;
     panel._results = results;
+    panel._foot = foot;
+
+    // Click anywhere outside the sheet (or its Search trigger) to dismiss it.
+    document.addEventListener("pointerdown", (event) => {
+      if (panel.classList.contains("hidden") || panel.classList.contains("closing")) return;
+      if (panel.contains(event.target)) return;
+      if (event.target.closest && event.target.closest(".ym-sl-empty-search")) return;
+      closeSearchPanelAnimated();
+    }, true);
 
     closeBtn.addEventListener("click", () => toggleSearchPanel(false));
     form.addEventListener("submit", (event) => {
@@ -12186,6 +13765,25 @@
     return panel;
   }
 
+  function closeSearchPanelAnimated() {
+    const panel = searchPanelEl;
+    if (!panel || panel.classList.contains("hidden") || panel.classList.contains("closing")) return;
+    if (searchAbortController) {
+      searchAbortController.abort();
+      searchAbortController = null;
+    }
+    panel.classList.add("closing");
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      panel.classList.remove("closing");
+      panel.classList.add("hidden");
+    };
+    panel.addEventListener("animationend", finish, { once: true });
+    window.setTimeout(finish, 280);
+  }
+
   function toggleSearchPanel(force) {
     const panel = ensureSearchPanel();
     const show = force == null ? panel.classList.contains("hidden") : !!force;
@@ -12194,15 +13792,14 @@
       panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
       panel._results.replaceChildren();
       panel._status.textContent = "";
-      panel.classList.remove("hidden");
+      panel._foot.textContent = lastLyricsError
+        ? "ERR: rate limited — try again in a couple of minutes."
+        : "";
+      panel.classList.remove("hidden", "closing");
       panel._input.focus();
       panel._input.select();
     } else {
-      panel.classList.add("hidden");
-      if (searchAbortController) {
-        searchAbortController.abort();
-        searchAbortController = null;
-      }
+      closeSearchPanelAnimated();
     }
   }
 
@@ -12285,7 +13882,7 @@
     toggleSearchPanel(false);
   }
 
-  async function syncTrackLyrics() {
+  async function syncTrackLyrics(force) {
     const track = getCurrentTrack();
     const key = getTrackKey(track);
     if (!key) return;
@@ -12340,7 +13937,7 @@
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
-    if (savedTTML) {
+    if (!force && savedTTML) {
       if (loadTTML(savedTTML, "external")) return;
       try {
         await removePermanentTTML(key);
@@ -12573,12 +14170,18 @@
     // the gradient sweeps across the line as one unit, which is what line-synced
     // lyrics are supposed to look like. Word-by-word karaoke is the Syllable
     // body's job, and those words are short enough to stay plain words too.
-    const letterCapable =
+    let letterCapable =
       !lineTimed &&
       !suppressKaraoke &&
       !word.DisableLetterAnimation &&
       !word.disableLetterAnimation &&
       isLetterCapable(word.Text, duration);
+    // Join syllables (AJ, 2026-10-19): paint every word as ONE whole-word fill
+    // instead of a per-letter karaoke group, so a word lights up whole with no
+    // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
+    // plain-.word path keeps its own scale/glow/gradient springs, so it still
+    // animates, just as a single unit.
+    if (currentSettings.joinSyllables) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -12625,15 +14228,48 @@
   }
 
   function appendWords(lineElement, lineModel, words, background, noKaraoke) {
+    // Join syllables (AJ, 2026-10-19): a logical word is a run of syllable tokens
+    // glued by IsPartOfWord. Left alone each token fills in sequence, so a word
+    // reads as separate syllables. When the setting is on, collapse every run into
+    // ONE word spanning the whole run (merged text + merged time window) so it
+    // fills as a single unit. OFF by default, so the per-syllable karaoke and the
+    // .word-group wrapping are unchanged unless the user opts in.
+    let renderWords = words;
+    if (currentSettings.joinSyllables && Array.isArray(words) && words.length) {
+      const joined = [];
+      for (const word of words) {
+        const open = joined[joined.length - 1];
+        if (open && open.__joining) {
+          // Extend the open word: append this token's text and let it run to the
+          // token's end. Keep the run open only while this token still glues
+          // forward (a joined word never carries a trailing PartOfWord class).
+          open.Text = (open.Text || "") + (word.Text || "");
+          open.EndTime = word.EndTime;
+          open.__joining = !!word.IsPartOfWord;
+        } else {
+          joined.push({
+            Text: word.Text,
+            StartTime: word.StartTime,
+            EndTime: word.EndTime,
+            IsPartOfWord: false,
+            DisableLetterAnimation: word.DisableLetterAnimation,
+            disableLetterAnimation: word.disableLetterAnimation,
+            __joining: !!word.IsPartOfWord,
+          });
+        }
+      }
+      joined.forEach((w) => { delete w.__joining; });
+      renderWords = joined;
+    }
     let currentWordGroup = null;
-    words.forEach((word, wordIndex) => {
-      const wordModel = makeWord(word, wordIndex === words.length - 1, lineModel.LineTimed, noKaraoke);
+    renderWords.forEach((word, wordIndex) => {
+      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke);
       if (background) wordModel.BGWord = true;
       if (background) {
         wordModel.BGWord = true;
         wordModel.HTMLElement.classList.add("bg-word");
       }
-      const previous = words[wordIndex - 1];
+      const previous = renderWords[wordIndex - 1];
       const belongsToGroupedWord =
         word.IsPartOfWord || (previous && previous.IsPartOfWord && currentWordGroup);
 
@@ -12716,11 +14352,72 @@
 
   // "Lyrics provided by <provider>" — every API source owes this one, so it is
   // plain text and never conditional on a person existing.
+  // lrc.red's docs explicitly ask for credit; a link is the strongest form of it
+  // and lets the user check the source (AJ, 2026-10-19).
+  const PROVIDER_URLS = {
+    "lrc.red": "https://lrc.red",
+    "Unison": "https://unison.boidu.dev/",
+    "LRCLIB": "https://lrclib.net/",
+  };
+  // Sources whose timing is machine-aligned rather than hand-synced get the
+  // warning treatment: red pill + triangle. Persistent, unlike the transient
+  // chip above the lyrics (AJ, 2026-10-19).
+  const PROVIDER_WARN = { "lrc.red": true };
+
+  // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
+  function buildProviderWarnIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-provider-warn-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const tri = document.createElementNS(NS, "path");
+    tri.setAttribute("d", "M12 2.6 22.6 21.2H1.4Z");
+    tri.setAttribute("fill", "#e5484d");
+    const bar = document.createElementNS(NS, "rect");
+    bar.setAttribute("x", "11.05");
+    bar.setAttribute("y", "8.3");
+    bar.setAttribute("width", "1.9");
+    bar.setAttribute("height", "6.5");
+    bar.setAttribute("rx", "0.95");
+    bar.setAttribute("fill", "#ffffff");
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", "12");
+    dot.setAttribute("cy", "17.5");
+    dot.setAttribute("r", "1.15");
+    dot.setAttribute("fill", "#ffffff");
+    svg.append(tri, bar, dot);
+    return svg;
+  }
+
   function buildProviderRow(provider) {
-    const row = h("div", { class: "ym-sl-provider" });
+    const warn = !!PROVIDER_WARN[provider];
+    const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
+    if (warn) row.appendChild(buildProviderWarnIcon());
     row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
-    row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
-    return row;
+    const url = PROVIDER_URLS[provider] || "";
+    if (url) {
+      row.appendChild(h("a", {
+        class: "ym-sl-provider-name",
+        href: url,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: provider,
+      }));
+    } else {
+      row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
+    }
+    if (!warn) return row;
+    // Explain WHY it is flagged, so the red pill is not just alarm without
+    // context. Static — it lives as long as the lyrics do (AJ, 2026-10-19).
+    return h("div", { class: "ym-sl-provider-block" },
+      row,
+      h("div", {
+        class: "ym-sl-provider-note",
+        text: "Timing may have felt off — this source aligns the lyrics automatically.",
+      })
+    );
   }
 
   // RGB <-> HSL, used only to push the two sampled colours apart when the avatar
@@ -14137,7 +15834,13 @@
     // (Upstream Spicy Lyrics does the same with ProcessedPosition =
     // Position + PositionOffset, and is explicit that Status follows the real
     // position.)
-    const scrollLeadMs = currentSettings.scrollLeadEnabled ? currentSettings.scrollLeadMs : 0;
+    // While the panel is docked in the NPV's compact lyrics box, look-ahead
+    // centering pushes the ACTIVE line into the top quarter (only ~4 lines fit,
+    // so the box reads top-heavy with a dead band below). Center the active
+    // line there instead; the tall Lyrics tab keeps its normal look-ahead.
+    const scrollLeadMs = !externalHostActive && currentSettings.scrollLeadEnabled
+      ? currentSettings.scrollLeadMs
+      : 0;
     const scrollIndex = scrollLeadMs > 0
       ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
       : activeIndex;
@@ -14339,6 +16042,41 @@
     if (mvSyncChip) { mvSyncChip.remove(); mvSyncChip = null; }
   }
 
+  /* Source warning chip — same component as the music-video one above, used
+     when the lyrics came from a source whose timing is machine-aligned rather
+     than hand-synced (lrc.red). Reusing .ym-sl-mv-sync-chip keeps one visual
+     language and inherits the shrinking timer bar for free (AJ, 2026-10-19). */
+  let sourceChip = null;
+  let sourceChipFadeTimer = 0;
+  let sourceChipRemoveTimer = 0;
+  const SOURCE_NOTICE_MS = 6500;
+  const SOURCE_FADE_MS = 450;
+
+  function removeSourceChip() {
+    if (sourceChip) { sourceChip.remove(); sourceChip = null; }
+  }
+
+  function showSourceNotice(text) {
+    if (!panelEl || !text) return;
+    if (sourceChipFadeTimer) { clearTimeout(sourceChipFadeTimer); sourceChipFadeTimer = 0; }
+    if (sourceChipRemoveTimer) { clearTimeout(sourceChipRemoveTimer); sourceChipRemoveTimer = 0; }
+    removeSourceChip();
+    sourceChip = h("div", { class: "ym-sl-mv-sync-chip ym-sl-source-chip" },
+      h("span", { text }),
+      h("span", { class: "ym-sl-mv-sync-chip-timer" })
+    );
+    panelEl.appendChild(sourceChip);
+    sourceChipFadeTimer = setTimeout(() => {
+      sourceChipFadeTimer = 0;
+      if (!sourceChip) return;
+      sourceChip.classList.add("ym-sl-fading");
+      sourceChipRemoveTimer = setTimeout(() => {
+        sourceChipRemoveTimer = 0;
+        removeSourceChip();
+      }, SOURCE_FADE_MS);
+    }, SOURCE_NOTICE_MS);
+  }
+
   function syncMvSyncNotice() {
     if (!panelEl) return;
     const video = findPlayerVideo();
@@ -14411,6 +16149,23 @@
   // window listener forever, so repeated toggles stack up closures that all react
   // to every ytmod-ext message.
   let messageListenerAttached = false;
+
+  // Re-run the resolver for whatever track is playing right now. syncTrackLyrics()
+  // early-returns when the key is unchanged, so we clear currentTrackKey first to
+  // force it past that guard. Used when the lyrics SOURCE ORDER changes: the cached
+  // result came from the old priority, so we want a fresh resolve under the new one
+  // (AJ, 2026-10-19).
+  function reresolveCurrentTrackLyrics() {
+    const track = getCurrentTrack();
+    if (!track) return;
+    const key = getTrackKey(track);
+    if (!key) return;
+    currentTrackKey = "";
+    try { syncTrackLyrics(true); } catch (e) {
+      console.warn("[Aurora Lyrics] re-resolve after source-order change failed:", e);
+    }
+  }
+
   function handleHostMessage(event) {
     const data = event.data;
     if (!data) return;
@@ -14434,7 +16189,16 @@
     }
     if (data.id !== EXT_ID) return;
     if (data.type === "ytmod-settings") {
+      // A source-order change means the cached lyrics came from the OLD priority,
+      // so re-resolve the current track once under the new order. The panel only
+      // posts settings on close (see content.js pendingOrderPost), so this fires
+      // at most once per edit session, never on every drag nudge (AJ, 2026-10-19).
+      const prevOrder = Array.isArray(currentSettings.sourceOrder)
+        ? currentSettings.sourceOrder.join(",") : "";
+      const nextOrder = data.settings && Array.isArray(data.settings.sourceOrder)
+        ? data.settings.sourceOrder.join(",") : prevOrder;
       applySettings(data.settings);
+      if (nextOrder !== prevOrder) reresolveCurrentTrackLyrics();
       return;
     }
     if (data.type !== "ytmod-ext") return;

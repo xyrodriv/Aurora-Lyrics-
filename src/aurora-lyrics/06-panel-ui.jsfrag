@@ -129,6 +129,36 @@
     fontLinkEl.rel = "stylesheet";
     fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
     document.head.appendChild(fontLinkEl);
+    // Segmented control (AJ, 2026-10-19): a compact row of pill buttons for a small
+    // set of choices — cleaner than a dropdown for 2-3 options. Exposes `.value`
+    // (getter) + `.setValue()` so callers that read `el.value` keep working.
+    const buildSegmentedControl = (config) => {
+      const options = config.options || [];
+      let current = config.value != null ? config.value : (options[0] ? options[0].value : "");
+      const root = h("div", { class: "ym-sl-segmented" + (config.class ? " " + config.class : "") });
+      const els = options.map((option) => {
+        const el = h("button", {
+          class: "ym-sl-segmented-option" + (option.value === current ? " active" : ""),
+          type: "button",
+          "data-value": option.value,
+          text: option.label,
+        });
+        el.addEventListener("click", () => {
+          if (current === option.value) return;
+          current = option.value;
+          els.forEach((x) => x.classList.toggle("active", x.getAttribute("data-value") === current));
+          if (config.onChange) config.onChange(current);
+        });
+        root.appendChild(el);
+        return el;
+      });
+      Object.defineProperty(root, "value", { get() { return current; } });
+      root.setValue = (value) => {
+        current = value;
+        els.forEach((x) => x.classList.toggle("active", x.getAttribute("data-value") === current));
+      };
+      return root;
+    };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
     const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
     const importButton = h("button", {
@@ -138,15 +168,14 @@
       "aria-label": "Import TTML lyrics",
       text: "Upload",
     });
-    const importMode = h("select", {
-      class: "ym-sl-import-mode",
-      title: "Choose how long this TTML should be used",
+    const importMode = buildSegmentedControl({
       "aria-label": "TTML import duration",
+      value: "permanent",
+      options: [
+        { value: "permanent", label: "Permanent" },
+        { value: "temporary", label: "Temporary" },
+      ],
     });
-    importMode.append(
-      h("option", { value: "temporary", text: "Temporary" }),
-      h("option", { value: "permanent", text: "Permanent", selected: true })
-    );
     jumpButton = h("button", {
       class: "ym-sl-jump hidden",
       type: "button",
@@ -170,16 +199,22 @@
 
     const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
     const videoOffsetLabel = h("span", { text: "Offset" });
-    const offsetScope = h("select", { class: "ym-sl-offset-scope", title: "Apply offset to", "aria-label": "Offset applies to" });
-    offsetScope.append(
-      h("option", { value: "video", text: "Video" }),
-      h("option", { value: "song", text: "Song" })
-    );
-    offsetScope.value = editingOffsetMode;
+    // "Video vs Song" offset-scope picker removed (AJ, 2026-10-19):
+    // recomputeActiveOffsetMode() already auto-switches the control between the
+    // video/song slot by track type (music video vs audio-only), so the manual
+    // override was redundant. The read-only .ym-sl-offset-applied badge still
+    // shows which slot is active.
+    // (+/- 60s each way — the clamp in setVideoOffsetMs enforces it.)
+    // Offset range is +/- 60s — a full minute each way, raised from +/- 30s.
+    // The SAME limit is declared in three places and they all have to agree:
+    // here, the fullscreen pair in 08-fullscreen-controls.jsfrag, and the clamp
+    // in setVideoOffsetMs (12-track-offset-sync.jsfrag). The clamp is the one
+    // that actually ENFORCES it, so changing only the sliders would silently cap
+    // the value back to 30s.
     const videoOffsetRange = h("input", {
       type: "range",
-      min: "-30000",
-      max: "30000",
+      min: "-60000",
+      max: "60000",
       step: "100",
       value: "0",
       "aria-label": "Lyric offset",
@@ -188,25 +223,21 @@
       type: "number",
       class: "ym-sl-offset-number",
       step: "0.1",
-      min: "-30",
-      max: "30",
+      min: "-60",
+      max: "60",
       value: "0",
       title: "Offset in seconds (typed)",
       "aria-label": "Lyric offset in seconds",
     });
     const videoOffsetValue = h("span", { class: "ym-sl-video-offset-value", text: "0.0s" });
     const offsetApplied = h("span", { class: "ym-sl-offset-applied", text: "video" });
-    videoOffsetWrap.append(videoOffsetLabel, offsetScope, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
+    videoOffsetWrap.append(videoOffsetLabel, videoOffsetRange, videoOffsetNumber, videoOffsetValue, offsetApplied);
     videoOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
     });
     videoOffsetNumber.addEventListener("input", () => {
       const seconds = parseFloat(videoOffsetNumber.value);
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
-    });
-    offsetScope.addEventListener("change", () => {
-      editingOffsetMode = offsetScope.value;
-      refreshVideoOffsetControl();
     });
 
     const optionsButton = h("button", {
@@ -270,74 +301,11 @@
     });
     deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
     optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
-    /* ---- MV pause re-sync section -------------------------------------------
-       Sits between the Offset controls and the TTML controls: it is a timing
-       control, so it belongs next to the other one rather than under file tools. */
-    const pauseDivider = h("hr", { class: "ym-sl-options-divider" });
-    const pauseTitle = h("div", { class: "ym-sl-options-section-title", text: "Pause sync" });
-    const pauseSection = h("div", { class: "ym-sl-options-section ym-sl-pause-section" });
-    const pausePick = h("button", {
-      class: "ym-sl-import ym-sl-pause-pick",
-      type: "button",
-      "aria-label": "Set pause sync point",
-      text: "Set pause point",
-    });
-    pausePick.addEventListener("click", () => enterPausePickMode());
-    const pauseEditor = h("div", { class: "ym-sl-pause-editor hidden" });
-    const pauseLineLabel = h("div", { class: "ym-sl-pause-line" });
-    const pauseRange = h("input", {
-      type: "range",
-      class: "ym-sl-pause-range",
-      min: String(PAUSE_SYNC_MIN),
-      max: String(PAUSE_SYNC_MAX),
-      step: String(PAUSE_SYNC_STEP),
-      value: "0",
-      "aria-label": "Pause sync offset",
-    });
-    const pauseNumber = h("input", {
-      type: "number",
-      class: "ym-sl-pause-number",
-      step: "0.1",
-      value: "0",
-      "aria-label": "Pause sync offset in seconds",
-    });
-    const pauseValue = h("span", { class: "ym-sl-pause-value", text: "+0.0s" });
-    const pauseClear = h("button", {
-      class: "ym-sl-import ym-sl-pause-clear",
-      type: "button",
-      "aria-label": "Clear pause sync point",
-      text: "Clear",
-    });
-    pauseClear.addEventListener("click", () => clearPauseSync());
-    pauseRange.addEventListener("input", () => setPauseSyncOffset(pauseRange.value, false));
-    pauseRange.addEventListener("change", () => setPauseSyncOffset(pauseRange.value, true));
-    pauseNumber.addEventListener("input", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, false));
-    pauseNumber.addEventListener("change", () => setPauseSyncOffset(Number(pauseNumber.value) * 1000, true));
-    const pauseRow1 = h("div", { class: "ym-sl-pause-row" }, pauseRange);
-    const pauseRow2 = h("div", { class: "ym-sl-pause-row" }, pauseNumber, pauseValue, pauseClear);
-    pauseEditor.append(pauseLineLabel, pauseRow1, pauseRow2);
-    pauseSection.append(pausePick, pauseEditor);
-    pauseUi = {
-      root: pauseSection,
-      pick: pausePick,
-      editor: pauseEditor,
-      line: pauseLineLabel,
-      range: pauseRange,
-      number: pauseNumber,
-      value: pauseValue,
-    };
-
-    // Banner shown on the lyrics panel while a line is being picked.
-    pauseBanner = h("div", { class: "ym-sl-pause-banner hidden" });
-    pauseBannerText = h("span", { class: "ym-sl-pause-banner-text" });
-    const pauseBannerCancel = h("button", {
-      class: "ym-sl-pause-cancel",
-      type: "button",
-      text: "Cancel",
-      "aria-label": "Cancel pause sync selection",
-    });
-    pauseBannerCancel.addEventListener("click", () => exitPausePickMode());
-    pauseBanner.append(pauseBannerText, pauseBannerCancel);
+    /* MV pause re-sync REMOVED entirely on AJ's call (2026-10-19): the section,
+       the "Set pause point" picker, its editor, and the pick banner are all gone
+       from the panel. The low-level offset machinery in 12-track-offset-sync is
+       left in place but dormant — nothing calls enterPausePickMode() now, and
+       every pauseUi/pauseBanner consumer is null-safe. */
 
     // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
     // exposes an explicit purge so a stale or wrong match can be cleared without
@@ -353,9 +321,62 @@
       "aria-label": "Clear Spicy Lyrics cache",
       text: "Clear cache",
     });
-    cacheClear.addEventListener("click", async () => {
+    // The button wipes the cache instantly and irreversibly, so gate it behind an
+    // explicit confirmation: clicking "Clear cache" reveals an "Are you sure?" row
+    // with a RED delete action (trash icon) + a Cancel. The user expected a
+    // confirm step here and was surprised it fired immediately (AJ, 2026-10-19).
+    const cacheConfirm = h("div", { class: "ym-sl-cache-confirm hidden" });
+    const cacheConfirmText = h("div", {
+      class: "ym-sl-cache-confirm-text",
+      text: "Clear all cached lyrics? This cannot be undone.",
+    });
+    const cacheConfirmRow = h("div", { class: "ym-sl-cache-confirm-row" });
+    const cacheDelete = h("button", {
+      class: "ym-sl-cache-delete",
+      type: "button",
+      "aria-label": "Delete cached lyrics",
+      title: "Delete cached lyrics",
+    });
+    // Trash-can icon (SVG, white on the red button via currentColor).
+    const trashNS = "http://www.w3.org/2000/svg";
+    const trashSvg = document.createElementNS(trashNS, "svg");
+    trashSvg.setAttribute("viewBox", "0 0 24 24");
+    trashSvg.setAttribute("class", "ym-sl-trash-icon");
+    trashSvg.setAttribute("aria-hidden", "true");
+    trashSvg.setAttribute("focusable", "false");
+    const trashPath = document.createElementNS(trashNS, "path");
+    trashPath.setAttribute("d", "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z");
+    trashPath.setAttribute("fill", "currentColor");
+    trashSvg.appendChild(trashPath);
+    cacheDelete.append(trashSvg, document.createTextNode("Delete"));
+    const cacheCancel = h("button", {
+      class: "ym-sl-cache-cancel",
+      type: "button",
+      text: "Cancel",
+      "aria-label": "Cancel clearing the cache",
+    });
+    cacheConfirmRow.append(cacheDelete, cacheCancel);
+    cacheConfirm.append(cacheConfirmText, cacheConfirmRow);
+
+    function showCacheConfirm() {
+      cacheClear.classList.add("hidden");
+      cacheConfirm.classList.remove("hidden");
+      cacheDelete.focus();
+    }
+    function hideCacheConfirm() {
+      cacheConfirm.classList.add("hidden");
+      cacheClear.classList.remove("hidden");
+    }
+    cacheClear.addEventListener("click", () => {
       if (cacheClear.disabled) return;
-      cacheClear.disabled = true;
+      showCacheConfirm();
+    });
+    cacheCancel.addEventListener("click", () => hideCacheConfirm());
+    cacheDelete.addEventListener("click", async () => {
+      if (cacheDelete.disabled) return;
+      cacheDelete.disabled = true;
+      cacheCancel.disabled = true;
+      cacheStatus.textContent = "Clearing…";
       try {
         const count = await spicyCacheEntryCount();
         await clearSpicyLyricsCache();
@@ -366,22 +387,143 @@
         cacheStatus.textContent = "Could not clear the cache.";
         console.warn("[SpicyLyrics] clear cache failed:", error);
       }
-      cacheClear.disabled = false;
+      cacheDelete.disabled = false;
+      cacheCancel.disabled = false;
+      hideCacheConfirm();
     });
-    cacheSection.append(cacheStatus, cacheClear);
+    cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    const optionsBody = h("div", { class: "ym-sl-options-body" });
-    optionsBody.append(
-      optionsTop,
-      pauseDivider, pauseTitle, pauseSection,
-      optionsDivider, optionsTtmlTitle, optionsBottom,
-      cacheDivider, cacheTitle, cacheSection
+    // ---- Options body: TABBED SIDE-RAIL (AJ, 2026-10-19) ------------------------
+    // A vertical tab rail on the LEFT, the selected section's controls on the
+    // RIGHT, one panel visible at a time. Reuses the addon settings panel's clean
+    // spring — opacity + rise + a touch of blur, staggered per child — on open and
+    // on every tab switch.
+    const optionsBody = h("div", { class: "ym-sl-options-body ym-sl-options-tabbed" });
+    const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
+    const optionsPanels = h("div", { class: "ym-sl-options-panels" });
+
+    const panelNowPlaying = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Now playing" }),
+      trackEl
     );
+    const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
+      videoOffsetWrap
+    );
+    const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
+      importMode,
+      h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
+      exportActions
+    );
+    const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
+      h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
+      cacheSection
+    );
+
+    const optionSections = [
+      { label: "Playing", panel: panelNowPlaying },
+      { label: "Sync", panel: panelSync },
+      { label: "File", panel: panelFile },
+      { label: "Cache", panel: panelCache },
+    ];
+
+    const optionsMotionOK = () =>
+      !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    // Panels absolutely overlap inside a fixed-height stack so switching fades the
+    // old panel out, springs the new one in, and animates the container HEIGHT to
+    // the new panel's size — no abrupt jump when a taller tab (e.g. File) opens.
+    let panelsHeightRaf = 0;
+    let panelsHeightEmptyTries = 0;
+    const syncPanelsHeight = () => {
+      const active = optionSections.find((section) => section.panel.classList.contains("active"));
+      if (!active) return;
+      const next = active.panel.offsetHeight;
+      if (next) {
+        panelsHeightEmptyTries = 0;
+        optionsPanels.style.height = Math.ceil(next) + "px";
+      } else if (panelsHeightEmptyTries < 8) {
+        // Not laid out yet (fonts still loading, or measured too early). Retry for a
+        // few frames instead of collapsing the stack to 0 and showing an EMPTY panel
+        // — the intermittent "no content" bug (AJ, 2026-10-19). The CSS min-height
+        // also floors it so it can never fully collapse.
+        panelsHeightEmptyTries++;
+        requestAnimationFrame(syncPanelsHeight);
+      }
+    };
+    const scheduleSyncPanelsHeight = () => {
+      if (panelsHeightRaf) return;
+      panelsHeightRaf = requestAnimationFrame(() => { panelsHeightRaf = 0; syncPanelsHeight(); });
+    };
+    if (window.ResizeObserver) {
+      // Keeps height in sync when a panel's content changes size after it is shown
+      // (cache status text, Export/Saved rows appearing, etc.).
+      const ro = new ResizeObserver(scheduleSyncPanelsHeight);
+      optionSections.forEach((section) => ro.observe(section.panel));
+    }
+    // SpicyLyrics font load reflows line/row heights — resync once it settles.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(scheduleSyncPanelsHeight).catch(() => {});
+    }
+    window.addEventListener("resize", scheduleSyncPanelsHeight);
+    // Same clean spring the addon settings panel uses (cubic-bezier(.34,1.4,.5,1)):
+    // opacity + rise + a touch of blur, staggered per child. fromLeft slides the
+    // rail in from the left; otherwise rows rise up with a blur.
+    const staggerIn = (container, fromLeft) => {
+      if (!container || !container.children || !optionsMotionOK()) return;
+      Array.from(container.children).forEach((el, i) => {
+        if (!el.animate) return;
+        el.animate(
+          fromLeft
+            ? [{ opacity: 0, transform: "translateX(-16px)" }, { opacity: 1, transform: "none" }]
+            : [{ opacity: 0, transform: "translateY(16px)", filter: "blur(7px)" },
+               { opacity: 1, transform: "none", filter: "blur(0px)" }],
+          { duration: 520, delay: 40 + i * 55, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+        );
+      });
+    };
+
+    const optionTabs = optionSections.map((section, index) => {
+      const tab = h("button", {
+        class: "ym-sl-options-tab" + (index === 0 ? " active" : ""),
+        type: "button",
+        role: "tab",
+        "aria-selected": index === 0 ? "true" : "false",
+        text: section.label,
+      });
+      if (index === 0) section.panel.classList.add("active");
+      optionsPanels.appendChild(section.panel);
+      tab.addEventListener("click", () => {
+        if (tab.classList.contains("active")) return;
+        optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
+        tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        optionSections.forEach((s) => s.panel.classList.remove("active"));
+        section.panel.classList.add("active");
+        syncPanelsHeight(); // animate container height to the new panel
+        staggerIn(section.panel, false); // clean spring on the newly shown panel
+      });
+      optionsRail.appendChild(tab);
+      return tab;
+    });
+
+    optionsBody.append(optionsRail, optionsPanels);
     optionsOverlay.append(optionsHeader, optionsBody);
+    // Size the stack to the default active panel (rAF so fonts/content settle).
+    scheduleSyncPanelsHeight();
+    // Entrance choreography used by the Options button (below).
+    optionsOverlay._staggerOpen = () => {
+      syncPanelsHeight();
+      staggerIn(optionsRail, true);
+      staggerIn(optionSections[0].panel, false);
+    };
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
       optionsOverlay.classList.toggle("hidden");
-      if (opening) refreshPermanentDeleteState();
+      if (opening) {
+        refreshPermanentDeleteState();
+        if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
+      }
     });
     optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
     optionsOverlay._exportActions = exportActions;
@@ -401,7 +543,7 @@
     scrollContainer.appendChild(linesRoot);
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
-    panelEl.append(tools, fileInput, lyricsContainer, jumpButton, pauseBanner);
+    panelEl.append(tools, fileInput, lyricsContainer, jumpButton);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -440,8 +582,9 @@
     const renderer = document.querySelector("#tab-renderer");
     const host = renderer || (bar && bar.parentElement);
     // Never yank the panel back into the YTM tab while fullscreen is active —
-    // it currently lives inside the fullscreen overlay.
-    if (!host || !panelEl || fsActive) return;
+    // it currently lives inside the fullscreen overlay. Same while the NPV
+    // snippet has docked it into its own rail.
+    if (!host || !panelEl || fsActive || externalHostActive) return;
     panelHost = host;
     if (panelEl.parentElement !== host) host.appendChild(panelEl);
   }

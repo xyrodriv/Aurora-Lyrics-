@@ -51,6 +51,7 @@
 
   let pageBgRoot = null;
   let pageBgHost = null;
+  let pageBarBlur = null;
   let pageDivider = null;
   let pageScrollHandler = null;
   let rootObserver = null;
@@ -96,7 +97,6 @@
       background: transparent !important;
       --ytmusic-app-background: transparent !important;
       --ytmusic-player-page-background: transparent !important;
-      --ytmusic-player-bar-background: transparent !important;
       --ytmusic-nav-bar-background: transparent !important;
       --ytmusic-general-background-a: transparent !important;
       --ytmusic-general-background-b: transparent !important;
@@ -174,14 +174,68 @@
       background-color: transparent !important;
       background-image: none !important;
     }
+    /* The player-bar backdrop blur lives on a SEPARATE fixed layer
+       (.ym-dynamic-bar-blur) that sits BEHIND the player bar (z-index:3, below
+       the bar's z-index:4 interactive layer). We deliberately do NOT put
+       backdrop-filter on YTM's own #player-bar-background: it is position:fixed,
+       full-width and shares z-index:4 with ytmusic-player-bar, so a filter there
+       overlaps the bar's interactive controls and disturbs Chromium's compositor
+       — YTM mis-measures the bar width (false narrow mode -> the "More player
+       controls" arrow appears on a wide screen) AND the expand-button's mouseout
+       is never delivered, leaving #expanding-menu stuck open (AJ-confirmed
+       2026-10-07). Keep this element transparent + click-through only. */
     .ym-dynamic-page-bg-root #player-bar-background {
-      background: rgba(6,6,10,.22) !important;
-      background-color: rgba(6,6,10,.22) !important;
+      background: transparent !important;
+      background-color: transparent !important;
       background-image: none !important;
+      pointer-events: none !important;
+    }
+    .ym-dynamic-bar-blur {
+      position: fixed !important;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 72px;
+      z-index: 3 !important;
+      pointer-events: none;
+      background: rgba(6,6,10,.22);
       -webkit-backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
       backdrop-filter: blur(28px) saturate(1.45) brightness(.94);
       border-top: 1px solid rgba(255,255,255,.1);
       box-shadow: 0 -10px 30px rgba(0,0,0,.12);
+    }
+    /* The expanding menu (the popup the player-bar arrow reveals) picks up
+       YTM's flat opaque bar background, which reads as a dark slab behind the
+       controls. Make it frosted glass instead, matching the nav-bar treatment.
+       The arrow is then hidden WHILE its menu is open rather than relying on the
+       panel covering it, so the panel can stay light without the arrow showing
+       through — and hiding it is what native LOOKS like anyway. The arrow must
+       stay hit-testable: opacity does not affect hit-testing, so the hover that
+       holds the menu open survives. Do NOT add pointer-events:none here, or the
+       menu would slam shut the instant the arrow vanished, flickering. */
+    .ym-dynamic-page-bg-root #expanding-menu {
+      background: rgba(6, 6, 10, .42) !important;
+      background-color: rgba(6, 6, 10, .42) !important;
+      -webkit-backdrop-filter: blur(26px) saturate(1.4) brightness(.96);
+      backdrop-filter: blur(26px) saturate(1.4) brightness(.96);
+      border-radius: 8px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, .22);
+    }
+    .ym-dynamic-page-bg-root .expand-button[aria-expanded="true"] {
+      opacity: 0 !important;
+    }
+    /* The injected add-on icons live at the far right of the same row, past the
+       menu's right edge, so they would sit out beside YTM's revealed internal
+       controls instead of making way for them. Hide them for as long as the menu
+       is open. opacity (not display) keeps the row's geometry stable — collapsing
+       it would reflow the bar every time the menu opens and closes. Dropping
+       pointer-events is safe here UNLIKE on the arrow: the menu is held open by
+       hovering the ARROW, not by hovering these icons. */
+    .ym-dynamic-page-bg-root
+      #right-controls:has(.expand-button[aria-expanded="true"])
+      .ym-pb-carousel {
+      opacity: 0 !important;
+      pointer-events: none;
     }
     .ym-dynamic-page-bg-root.ym-dynamic-topbar-scrolled #nav-bar-background {
       background: rgba(6,6,10,.22) !important;
@@ -331,18 +385,13 @@
       -webkit-backdrop-filter: none !important;
       backdrop-filter: none !important;
     }
-    .ym-dynamic-page-bg-root.ym-dynamic-song-mode ytmusic-player-bar {
-      left: 0 !important;
-      right: 0 !important;
-      width: auto !important;
-      background: transparent !important;
-      background-color: transparent !important;
-      background-image: none !important;
-    }
+    /* Do NOT pin width/left/right here. YTM's player bar is position:fixed and
+       already full-width; forcing width:auto !important is unnecessary and was
+       (wrongly) suspected of breaking the bar's collapse. The real stuck-arrow
+       cause was #player-bar-background intercepting pointer events — see that
+       rule. The transparent background below is all the Dynamic theme needs. */
+    .ym-dynamic-page-bg-root.ym-dynamic-song-mode ytmusic-player-bar,
     .ym-dynamic-page-bg-root.ym-dynamic-home-mode ytmusic-player-bar {
-      left: 0 !important;
-      right: 0 !important;
-      width: auto !important;
       background: transparent !important;
       background-color: transparent !important;
       background-image: none !important;
@@ -541,6 +590,56 @@
     syncKawarpPlaybackState();
   }
 
+  // The <video> actually showing a picture right now. YTM keeps several around
+  // (song video, MV player, hover previews), so filter by readiness, playback
+  // and a sane on-screen size.
+  function findPlayingVideo() {
+    // #ym-npv is the Now Playing rail: while it is open on a non-song page it
+    // PARKS YTM's live player inside its own art slot, so the video is no
+    // longer under any of the YTM containers below. Without this selector the
+    // page-wide Kawarp fell back to the still artwork (AJ, 2026-10-19).
+    const nodes = document.querySelectorAll(
+      "ytmusic-player-page video, #song-video video, ytmusic-player video, #ym-npv video"
+    );
+    for (const v of nodes) {
+      if (!v || v.readyState < 2 || !v.videoWidth) continue;
+      if (v.paused) continue;
+      const rect = v.getBoundingClientRect();
+      if (rect.width < 120 || rect.height < 60) continue;
+      return v;
+    }
+    return null;
+  }
+
+  let followingVideo = null;
+
+  // Keeps the backdrop on the live video while one is playing, and hands it
+  // back to the artwork the moment it stops (track change, MV -> audio).
+  function syncVideoFeed() {
+    if (!kawarpInstance || kawarpSuspended) return;
+    const v = findPlayingVideo();
+    if (v) {
+      if (followingVideo !== v) {
+        try {
+          kawarpInstance.loadVideo(v, {
+            sampleWidth: 72,
+            sampleHeight: 128,
+            smoothing: 120,
+            frameRate: 30,
+          });
+          followingVideo = v;
+          kawarpArtworkUrl = "";
+        } catch (e) {}
+      }
+      return;
+    }
+    if (followingVideo) {
+      followingVideo = null;
+      try { kawarpInstance.unloadVideo(); } catch (e) {}
+      if (requestedKawarpArtworkUrl) updateKawarpBackground({ artworkUrl: requestedKawarpArtworkUrl });
+    }
+  }
+
   async function updateKawarpBackground(track) {
     const artworkUrl = track && track.artworkUrl ? track.artworkUrl : "";
     requestedKawarpArtworkUrl = artworkUrl;
@@ -564,7 +663,26 @@
       ) return;
       sizeKawarpCanvas();
       if (!kawarpInstance) kawarpInstance = new Kawarp(kawarpCanvas, KAWARP_OPTIONS);
+      // Music videos: feed the live <video> so the backdrop moves with the
+      // picture instead of sitting on a still. Kawarp samples a small colour
+      // map, so this stays cheap. Audio tracks fall through to loadImage.
+      const playingVideo = findPlayingVideo();
+      if (playingVideo) {
+        try {
+          kawarpInstance.loadVideo(playingVideo, {
+            sampleWidth: 72,
+            sampleHeight: 128,
+            smoothing: 120,
+            frameRate: 30,
+          });
+          kawarpArtworkUrl = ""; // force a cover reload once the video is gone
+          syncKawarpPlaybackState();
+          kawarpCanvas.classList.add("ready");
+          return;
+        } catch (e) {}
+      }
       if (sourceUrl !== kawarpArtworkUrl) {
+        try { kawarpInstance.unloadVideo(); } catch (e) {}
         await kawarpInstance.loadImage(sourceUrl);
         if (requestId !== kawarpRequestSeq || artworkUrl !== requestedKawarpArtworkUrl) {
           if (requestedKawarpArtworkUrl) updateKawarpBackground({ artworkUrl: requestedKawarpArtworkUrl });
@@ -613,6 +731,10 @@
     pageBgHost.append(kawarpCanvas, shade, pageDivider);
 
     document.body.appendChild(pageBgHost);
+    pageBarBlur = document.createElement("div");
+    pageBarBlur.className = "ym-dynamic-bar-blur";
+    pageBarBlur.setAttribute("aria-hidden", "true");
+    document.body.appendChild(pageBarBlur);
     mountPageBackground();
     if (typeof ResizeObserver === "function") {
       resizeObserver = new ResizeObserver(() => sizeKawarpCanvas());
@@ -631,7 +753,13 @@
     // Page-world handshake for the Synced Lyrics fullscreen backdrop: its
     // presence also signals "Dynamic is active", which gates the fullscreen
     // Kawarp. Removed in teardown so a disabled add-on leaves no trace.
-    window.__ymAuroraDynamic = { suspend: suspendKawarp, resume: resumeKawarp };
+    // getSettings() lets other add-ons (the NPV rail) render their own Kawarp
+    // with the SAME bloom settings instead of hard-coded values (AJ, 2026-10-19).
+    window.__ymAuroraDynamic = {
+      suspend: suspendKawarp,
+      resume: resumeKawarp,
+      getSettings: () => ({ ...currentSettings }),
+    };
 
     updateKawarpBackground(getCurrentTrack());
     startTick();
@@ -652,6 +780,7 @@
         updateKawarpBackground(track);
       }
       syncKawarpPlaybackState();
+      syncVideoFeed();
     }
   }
 
@@ -675,6 +804,8 @@
     pageDivider = null;
     kawarpArtworkUrl = "";
     requestedKawarpArtworkUrl = "";
+    if (pageBarBlur) pageBarBlur.remove();
+    pageBarBlur = null;
     if (pageBgHost) pageBgHost.remove();
     if (pageBgRoot) {
       pageBgRoot.classList.remove(

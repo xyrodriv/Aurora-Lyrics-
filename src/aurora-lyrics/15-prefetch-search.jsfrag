@@ -103,11 +103,22 @@
       "aria-label": "Search results",
     });
 
-    panel.append(head, form, rememberRow, status, results);
+    const foot = h("div", { class: "ym-sl-search-foot", role: "note" });
+
+    panel.append(head, form, rememberRow, status, results, foot);
     panel._input = input;
     panel._remember = remember;
     panel._status = status;
     panel._results = results;
+    panel._foot = foot;
+
+    // Click anywhere outside the sheet (or its Search trigger) to dismiss it.
+    document.addEventListener("pointerdown", (event) => {
+      if (panel.classList.contains("hidden") || panel.classList.contains("closing")) return;
+      if (panel.contains(event.target)) return;
+      if (event.target.closest && event.target.closest(".ym-sl-empty-search")) return;
+      closeSearchPanelAnimated();
+    }, true);
 
     closeBtn.addEventListener("click", () => toggleSearchPanel(false));
     form.addEventListener("submit", (event) => {
@@ -120,6 +131,25 @@
     return panel;
   }
 
+  function closeSearchPanelAnimated() {
+    const panel = searchPanelEl;
+    if (!panel || panel.classList.contains("hidden") || panel.classList.contains("closing")) return;
+    if (searchAbortController) {
+      searchAbortController.abort();
+      searchAbortController = null;
+    }
+    panel.classList.add("closing");
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      panel.classList.remove("closing");
+      panel.classList.add("hidden");
+    };
+    panel.addEventListener("animationend", finish, { once: true });
+    window.setTimeout(finish, 280);
+  }
+
   function toggleSearchPanel(force) {
     const panel = ensureSearchPanel();
     const show = force == null ? panel.classList.contains("hidden") : !!force;
@@ -128,15 +158,14 @@
       panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
       panel._results.replaceChildren();
       panel._status.textContent = "";
-      panel.classList.remove("hidden");
+      panel._foot.textContent = lastLyricsError
+        ? "ERR: rate limited — try again in a couple of minutes."
+        : "";
+      panel.classList.remove("hidden", "closing");
       panel._input.focus();
       panel._input.select();
     } else {
-      panel.classList.add("hidden");
-      if (searchAbortController) {
-        searchAbortController.abort();
-        searchAbortController = null;
-      }
+      closeSearchPanelAnimated();
     }
   }
 
@@ -219,7 +248,7 @@
     toggleSearchPanel(false);
   }
 
-  async function syncTrackLyrics() {
+  async function syncTrackLyrics(force) {
     const track = getCurrentTrack();
     const key = getTrackKey(track);
     if (!key) return;
@@ -274,7 +303,7 @@
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
-    if (savedTTML) {
+    if (!force && savedTTML) {
       if (loadTTML(savedTTML, "external")) return;
       try {
         await removePermanentTTML(key);

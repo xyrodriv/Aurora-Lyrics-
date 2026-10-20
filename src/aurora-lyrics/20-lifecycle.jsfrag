@@ -5,6 +5,23 @@
   // window listener forever, so repeated toggles stack up closures that all react
   // to every ytmod-ext message.
   let messageListenerAttached = false;
+
+  // Re-run the resolver for whatever track is playing right now. syncTrackLyrics()
+  // early-returns when the key is unchanged, so we clear currentTrackKey first to
+  // force it past that guard. Used when the lyrics SOURCE ORDER changes: the cached
+  // result came from the old priority, so we want a fresh resolve under the new one
+  // (AJ, 2026-10-19).
+  function reresolveCurrentTrackLyrics() {
+    const track = getCurrentTrack();
+    if (!track) return;
+    const key = getTrackKey(track);
+    if (!key) return;
+    currentTrackKey = "";
+    try { syncTrackLyrics(true); } catch (e) {
+      console.warn("[Aurora Lyrics] re-resolve after source-order change failed:", e);
+    }
+  }
+
   function handleHostMessage(event) {
     const data = event.data;
     if (!data) return;
@@ -28,7 +45,16 @@
     }
     if (data.id !== EXT_ID) return;
     if (data.type === "ytmod-settings") {
+      // A source-order change means the cached lyrics came from the OLD priority,
+      // so re-resolve the current track once under the new order. The panel only
+      // posts settings on close (see content.js pendingOrderPost), so this fires
+      // at most once per edit session, never on every drag nudge (AJ, 2026-10-19).
+      const prevOrder = Array.isArray(currentSettings.sourceOrder)
+        ? currentSettings.sourceOrder.join(",") : "";
+      const nextOrder = data.settings && Array.isArray(data.settings.sourceOrder)
+        ? data.settings.sourceOrder.join(",") : prevOrder;
       applySettings(data.settings);
+      if (nextOrder !== prevOrder) reresolveCurrentTrackLyrics();
       return;
     }
     if (data.type !== "ytmod-ext") return;
