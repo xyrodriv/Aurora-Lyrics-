@@ -4440,6 +4440,26 @@ function syncLyricsDock() {
       return 0;
     };
 
+    // The reverse of forwardShift: next = k prepended + prev (a skip BACK).
+    // e.g. prev [B,C,D,E,F] + next [A,B,C,D,E] => 1 restored track.
+    const backwardShift = () => {
+      const prev = lastShownIds;
+      const next = shown.map((r) => r.videoId);
+      if (!prev.length || !next.length) return 0;
+      if (queueListEl.childElementCount !== prev.length) return 0;
+      for (let k = 1; k < next.length; k++) {
+        const head = next.slice(k);
+        const common = Math.min(head.length, prev.length);
+        if (!common) continue;
+        let ok = true;
+        for (let i = 0; i < common; i++) {
+          if (head[i] !== prev[i]) { ok = false; break; }
+        }
+        if (ok) return k;
+      }
+      return 0;
+    };
+
     const animateShift = (k) => {
       const rows = Array.from(queueListEl.children);
       const listRect = queueListEl.getBoundingClientRect();
@@ -4523,6 +4543,82 @@ function syncLyricsDock() {
       syncHeight();
     };
 
+    const animateBackShift = (k) => {
+      const rows = Array.from(queueListEl.children);
+      const listRect = queueListEl.getBoundingClientRect();
+      const oldTops = rows.map((r) => r.getBoundingClientRect().top);
+      const rowH = rows[0] ? rows[0].getBoundingClientRect().height + 2 : 16;
+
+      // Old rows that still fit once k restored tracks are prepended.
+      const keepCount = Math.min(rows.length, Math.max(0, shown.length - k));
+      const kept = rows.slice(0, keepCount);
+      const outgoing = rows.slice(keepCount);
+
+      // Prepend the restored tracks (reverse insert so shown[0] ends up first).
+      const topRows = shown.slice(0, k).map((r) => buildRow(r, false, 0));
+      for (let i = topRows.length - 1; i >= 0; i--) {
+        queueListEl.insertBefore(topRows[i], queueListEl.firstChild);
+      }
+
+      // Bottom rows that fell off the limit leave downward.
+      outgoing.forEach((row) => {
+        const top = row.getBoundingClientRect().top - listRect.top;
+        row.style.position = "absolute";
+        row.style.left = "8px";
+        row.style.right = "8px";
+        row.style.top = top + "px";
+        row.style.pointerEvents = "none";
+        row.style.zIndex = "1";
+        const anim = row.animate(
+          [
+            { opacity: 1, transform: "translateY(0)" },
+            { opacity: 0, transform: "translateY(" + Math.max(14, rowH * 0.7) + "px)" },
+          ],
+          { duration: 220, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+        );
+        anim.onfinish = () => { row.remove(); syncHeight(); };
+      });
+
+      // Kept old rows FLIP DOWN into their new slots.
+      kept.forEach((row, i) => {
+        const newTop = row.getBoundingClientRect().top;
+        const delta = oldTops[i] - newTop;
+        if (Math.abs(delta) > 0.5) {
+          row.animate(
+            [{ transform: "translateY(" + delta + "px)" }, { transform: "translateY(0)" }],
+            { duration: 380, easing: "cubic-bezier(.22,1,.36,1)" }
+          );
+        }
+      });
+
+      // Restored rows drop in from ABOVE.
+      topRows.forEach((row, i) => {
+        row.animate(
+          [
+            { opacity: 0, transform: "translateY(-16px) scale(.985)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 380, delay: i * 45, easing: "cubic-bezier(.2,.7,.3,1)", fill: "backwards" }
+        );
+      });
+
+      if (queueListEl.animate && !prefersReducedMotion()) {
+        queueListEl.animate(
+          [
+            { transform: "scale(1)" },
+            { transform: "scale(1.01)", offset: 0.45 },
+            { transform: "scale(1)" },
+          ],
+          { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" }
+        );
+      }
+
+      lastRenderedCount = shown.length;
+      lastShownIds = shown.map((r) => r.videoId);
+      syncMore();
+      syncHeight();
+    };
+
     // Fallback for a track change that is NOT a clean forward shift (reorder,
     // previous jump, wrapper renderers): slide the old rows out as overlays and
     // bring the new ones in from below. Still a transition, never a hard refresh.
@@ -4579,11 +4675,18 @@ function syncLyricsDock() {
     }
 
     const shift = forwardShift();
+    const back = shift > 0 ? 0 : backwardShift();
     const shrinking = shown.length < lastRenderedCount && queueListEl.childElementCount > 0;
 
     if (shift > 0) {
       if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
       animateShift(shift);
+      return;
+    }
+
+    if (back > 0) {
+      if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
+      animateBackShift(back);
       return;
     }
 
