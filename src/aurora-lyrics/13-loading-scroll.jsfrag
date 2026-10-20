@@ -676,8 +676,14 @@
     const rawXml = String(xml || "");
     let parsed = parseTTML(rawXml);
     // lrc.red ships syllable-level spans; join them into words unless the user
-    // turned the toggle off (AJ, 2026-10-20).
-    if (provider === "lrc.red" && currentSettings.joinLrcRedSyllables !== false) {
+    // turned the toggle off. Word-level files have no syllables to join, so
+    // skip them entirely (AJ, 2026-10-20).
+    const lrcRedWordTiming = /lrc:timing\s*=\s*["']Word["']/i.test(rawXml);
+    if (
+      provider === "lrc.red" &&
+      !lrcRedWordTiming &&
+      currentSettings.joinLrcRedSyllables !== false
+    ) {
       parsed = joinTTMLSyllables(parsed);
     }
     if (!parsed.length) {

@@ -1516,6 +1516,7 @@ return Kawarp;
   let metaPainted = false; // first paint skips the scroll-up delay (rises in instead)
   let collapsed = false;
   let npvCloseTimer = 0; // clears the ym-npv-closing class after the slide-out
+  let npvShiftTimer = 0; // scopes the page-content transition to the toggle
   let kawarpOn = true; // from the add-on's "Ambient background" setting
   let kawarpOffTimer = 0; // deferred teardown so the fade-out can finish
   let dragState = null;
@@ -2572,10 +2573,13 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   width: 18px;
   padding: 0;
   border: 0;
+  border-left: 1px solid rgba(255,255,255,.06);
   border-radius: 14px 0 0 14px;
-  background: linear-gradient(90deg, rgba(255,255,255,.22), rgba(255,255,255,.07));
+  /* OPAQUE black: the semi-transparent gradient let the Kawarp canvas and the
+     glass seam show through, which read as a grey line / colour leak. */
+  background: #000;
   color: rgba(255,255,255,.85);
-  box-shadow: -6px 0 20px rgba(0, 0, 0, .35);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, .55);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
@@ -2586,7 +2590,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   z-index: 2147483001;
 }
 #${ROOT_ID}[data-collapsed="true"] .ym-npv-edge { opacity: 1; pointer-events: auto; }
-#${ROOT_ID} .ym-npv-edge:hover { width: 24px; background: linear-gradient(90deg, rgba(255,255,255,.32), rgba(255,255,255,.12)); }
+#${ROOT_ID} .ym-npv-edge:hover { width: 24px; background: #000; border-left-color: rgba(255,255,255,.14); }
 #${ROOT_ID} .ym-npv-edge svg { width: 18px; height: 18px; display: block; pointer-events: none; }
 
 /* DOCKED RAIL — full-height right column. The nav bar, player bar and all
@@ -2635,6 +2639,20 @@ body.ym-npv-open #content.style-scope.ytmusic-app {
    reserves the space now. */
 body.ym-npv-open ytmusic-section-list-renderer {
   width: auto !important;
+}
+/* Page-content shift, scoped to the open/close toggle: the nav bar, player bar,
+   bands and #content glide left/right with the rail instead of snapping. */
+body.ym-npv-animating ytmusic-nav-bar,
+body.ym-npv-animating ytmusic-player-page,
+body.ym-npv-animating ytmusic-player-bar,
+body.ym-npv-animating #player-bar-background,
+body.ym-npv-animating #nav-bar-background,
+body.ym-npv-animating .ym-dynamic-bar-blur,
+body.ym-npv-animating ytmusic-app-layout > #content,
+body.ym-npv-animating #content.style-scope.ytmusic-app {
+  transition: right .38s cubic-bezier(.22,1,.36,1),
+    width .38s cubic-bezier(.22,1,.36,1),
+    left .38s cubic-bezier(.22,1,.36,1);
 }
 
 /* Resize handle: a thin strip on the left edge of the rail that the user
@@ -3593,6 +3611,15 @@ function syncLyricsDock() {
   }
 
   function applyCollapsed() {
+    // Let the page content on the left glide with the rail. The class is only
+    // present during the toggle so YouTube's own layout changes never animate.
+    document.body.classList.add("ym-npv-animating");
+    void document.body.offsetWidth;
+    if (npvShiftTimer) window.clearTimeout(npvShiftTimer);
+    npvShiftTimer = window.setTimeout(() => {
+      npvShiftTimer = 0;
+      document.body.classList.remove("ym-npv-animating");
+    }, 440);
     root.dataset.collapsed = String(collapsed);
     document.body.classList.toggle("ym-npv-open", !collapsed);
     edge.setAttribute("aria-expanded", String(!collapsed));

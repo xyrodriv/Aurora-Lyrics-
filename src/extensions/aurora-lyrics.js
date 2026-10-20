@@ -235,11 +235,17 @@
       }
       if (word.explicitPartOfWord != null) {
         word.isPartOfWord = /^(1|true|yes)$/i.test(word.explicitPartOfWord);
+        word.partOfWordExplicit = true;
       } else if (next) {
         const between = markup.slice(word.node.closeEnd, next.node.openStart);
         word.isPartOfWord = !/\s/.test(between);
+        // INFERRED, not declared. The join only trusts explicit markers: the
+        // inference says "no whitespace between the tags", which is also true
+        // for adjacent whole words and was merging entire lines (AJ, 2026-10-20).
+        word.partOfWordExplicit = false;
       } else {
         word.isPartOfWord = false;
+        word.partOfWordExplicit = false;
       }
     }
     for (const word of words) {
@@ -258,7 +264,17 @@
     const merged = [];
     for (const word of words || []) {
       const prev = merged[merged.length - 1];
-      if (word.isPartOfWord && prev) {
+      // Only EXPLICIT part-of-word markers merge. The whitespace-inferred flag
+      // is true for any two adjacent spans, including separate words, and was
+      // producing "don'twan na talkto" (AJ, 2026-10-20). A real space at either
+      // edge always wins.
+      const canJoin =
+        !!prev &&
+        word.isPartOfWord &&
+        word.partOfWordExplicit &&
+        !/\s$/.test(prev.text) &&
+        !/^\s/.test(word.text);
+      if (canJoin) {
         prev.text += word.text;
         prev.end = word.end;
         prev.timed = !!(prev.timed || word.timed);
@@ -269,11 +285,58 @@
     return merged;
   }
 
+  // Group spans by the line's OWN whitespace: a run of non-space characters is
+  // one word, so "Un"+"der" merges and " con" starts a new word. This follows
+  // the text instead of the tag adjacency (which is true for every adjacent
+  // span and was merging whole lines). Falls back to explicit markers when the
+  // line has no usable word boundary (CJK, or a single word).
+  function joinWordsByWhitespace(words) {
+    const list = words || [];
+    if (list.length < 2) return list;
+    let full = "";
+    const ranges = [];
+    for (const word of list) {
+      // The space between spans lives in hasSpaceBefore, NOT in the span text.
+      // Put it back so the tokenizer sees the real word boundary.
+      if (word.hasSpaceBefore && full.length) full += " ";
+      const start = full.length;
+      full += word.text;
+      ranges.push({ word, start, end: full.length });
+    }
+    const tokens = [];
+    const re = /\S+/g;
+    let match;
+    while ((match = re.exec(full))) {
+      tokens.push({ start: match.index, end: match.index + match[0].length });
+    }
+    if (tokens.length < 2) return joinPartOfWordRuns(list);
+    const out = [];
+    for (const token of tokens) {
+      const parts = [];
+      for (const range of ranges) {
+        if (range.end <= token.start || range.start >= token.end) continue;
+        const from = Math.max(0, token.start - range.start);
+        const to = Math.min(range.word.text.length, token.end - range.start);
+        const piece = range.word.text.slice(from, to);
+        if (piece) parts.push({ piece, word: range.word });
+      }
+      if (!parts.length) continue;
+      out.push(Object.assign({}, parts[0].word, {
+        text: parts.map((part) => part.piece).join(""),
+        start: parts[0].word.start,
+        end: parts[parts.length - 1].word.end,
+        timed: parts.some((part) => part.word.timed),
+        isPartOfWord: false,
+      }));
+    }
+    return out.length ? out : joinPartOfWordRuns(list);
+  }
+
   function joinTTMLSyllables(parsed) {
     return (parsed || []).map((line) => Object.assign({}, line, {
-      words: joinPartOfWordRuns(line.words),
+      words: joinWordsByWhitespace(line.words),
       background: (line.background || []).map((bg) => Object.assign({}, bg, {
-        words: joinPartOfWordRuns(bg.words),
+        words: joinWordsByWhitespace(bg.words),
       })),
     }));
   }
@@ -12208,8 +12271,14 @@
     const rawXml = String(xml || "");
     let parsed = parseTTML(rawXml);
     // lrc.red ships syllable-level spans; join them into words unless the user
-    // turned the toggle off (AJ, 2026-10-20).
-    if (provider === "lrc.red" && currentSettings.joinLrcRedSyllables !== false) {
+    // turned the toggle off. Word-level files have no syllables to join, so
+    // skip them entirely (AJ, 2026-10-20).
+    const lrcRedWordTiming = /lrc:timing\s*=\s*["']Word["']/i.test(rawXml);
+    if (
+      provider === "lrc.red" &&
+      !lrcRedWordTiming &&
+      currentSettings.joinLrcRedSyllables !== false
+    ) {
       parsed = joinTTMLSyllables(parsed);
     }
     if (!parsed.length) {
