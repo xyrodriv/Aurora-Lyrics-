@@ -409,11 +409,10 @@
   let customFontStyleEl = null;
   function applyCustomFont() {
     const css = currentSettings.customFont || "";
-    const scale = Number(currentSettings.customFontScale);
-    const appliedScale = Number.isFinite(scale) ? scale : DEFAULT_SETTINGS.customFontScale;
-    // Only re-touch the DOM when the effective font actually changed — applySettings
-    // runs on every control and this sits in its hot path.
-    const key = css + "|" + (css ? appliedScale : 0);
+    // The size slider is PREVIEW-ONLY (AJ, 2026-10-20): the lyrics already have
+    // their own Lyrics size setting, and letting the custom face carry a second
+    // size-adjust made the two fight. The face is always registered at 100%.
+    const key = css;
     if (key === appliedCustomFontKey) return;
     appliedCustomFontKey = key;
     if (!customFontStyleEl || !customFontStyleEl.isConnected) {
@@ -427,12 +426,13 @@
       // and the lyrics fall back to the system font (the "apply does nothing,
       // it just goes to the Windows font" bug, AJ 2026-10-20). Escape quotes so
       // a crafted URL can never break out of the descriptor. `format()` hints
-      // are optional; the browser sniffs from the URL. size-adjust is a
-      // percentage of the font's default advance width — 100% = as-is.
+      // are optional; the browser sniffs from the URL. Registered at 100% on
+      // purpose: the preview slider must NOT resize the real lyrics, which
+      // already have their own Lyrics size setting.
       const srcUrl = String(css).replace(/["\\]/g, "\\$&");
       customFontStyleEl.textContent =
         '@font-face{font-family:"ym-sl-custom-font";src:url("' + srcUrl +
-        '");font-display:swap;size-adjust:' + (appliedScale * 100).toFixed(0) + "%;}";
+        '");font-display:swap;size-adjust:100%;}';
       document.documentElement.style.setProperty("--ym-sl-lyric-font", '"ym-sl-custom-font"');
     } else {
       customFontStyleEl.textContent = "";

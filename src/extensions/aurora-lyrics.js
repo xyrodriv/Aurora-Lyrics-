@@ -1547,11 +1547,10 @@
   let customFontStyleEl = null;
   function applyCustomFont() {
     const css = currentSettings.customFont || "";
-    const scale = Number(currentSettings.customFontScale);
-    const appliedScale = Number.isFinite(scale) ? scale : DEFAULT_SETTINGS.customFontScale;
-    // Only re-touch the DOM when the effective font actually changed — applySettings
-    // runs on every control and this sits in its hot path.
-    const key = css + "|" + (css ? appliedScale : 0);
+    // The size slider is PREVIEW-ONLY (AJ, 2026-10-20): the lyrics already have
+    // their own Lyrics size setting, and letting the custom face carry a second
+    // size-adjust made the two fight. The face is always registered at 100%.
+    const key = css;
     if (key === appliedCustomFontKey) return;
     appliedCustomFontKey = key;
     if (!customFontStyleEl || !customFontStyleEl.isConnected) {
@@ -1565,12 +1564,13 @@
       // and the lyrics fall back to the system font (the "apply does nothing,
       // it just goes to the Windows font" bug, AJ 2026-10-20). Escape quotes so
       // a crafted URL can never break out of the descriptor. `format()` hints
-      // are optional; the browser sniffs from the URL. size-adjust is a
-      // percentage of the font's default advance width — 100% = as-is.
+      // are optional; the browser sniffs from the URL. Registered at 100% on
+      // purpose: the preview slider must NOT resize the real lyrics, which
+      // already have their own Lyrics size setting.
       const srcUrl = String(css).replace(/["\\]/g, "\\$&");
       customFontStyleEl.textContent =
         '@font-face{font-family:"ym-sl-custom-font";src:url("' + srcUrl +
-        '");font-display:swap;size-adjust:' + (appliedScale * 100).toFixed(0) + "%;}";
+        '");font-display:swap;size-adjust:100%;}';
       document.documentElement.style.setProperty("--ym-sl-lyric-font", '"ym-sl-custom-font"');
     } else {
       customFontStyleEl.textContent = "";
@@ -1821,7 +1821,10 @@
       overflow: hidden;
       background: transparent !important;
       color: #fff;
-      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
+      /* The panel's own chrome (credits, chips, buttons, the options overlay)
+         keeps the bundled face. The custom font is scoped to .LyricsContent
+         below, so it only reaches the lyric lines (AJ, 2026-10-20). */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       container-type: size;
@@ -3068,7 +3071,7 @@
          the shorthand RESETS font-variant-numeric, which would drop the
          tabular-nums below and make the clock twitch as the digits change.
          600 maps to the bundled LyricsSemibold face. */
-      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       font-weight: 600;
@@ -3822,7 +3825,7 @@
       color: #fff;
       /* Same family the lyrics themselves use, so the title reads as part of
          the same composition rather than as browser chrome. */
-      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       /* NO shadow (AJ, 2026-10-03). The credit sits in the dark band UNDER the
@@ -6244,6 +6247,12 @@
       margin-top: 22px;
       font-size: 13px;
       color: rgba(255,255,255,.5);
+      /* This credit lives INSIDE .LyricsContent, which carries the custom lyric
+         face. Pin it to the bundled font: the custom font is for the lyrics
+         themselves, not attribution (AJ, 2026-10-20). */
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
       color: rgba(255,255,255,.85);

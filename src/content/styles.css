@@ -2049,7 +2049,9 @@ ytmusic-player-bar .ym-pb-btn:active,
   border: 1px solid rgba(255,255,255,.09);
   transition: background .2s ease;
 }
-.ym-cfont-controls.is-default { background: rgba(255,255,255,.03); }
+/* Default mode shows only the switch + status; the upload/size card belongs to
+   Custom. (The hidden file input still works from a display:none parent.) */
+.ym-cfont-controls.is-default { display: none; }
 .ym-cfont-btn {
   appearance: none; cursor: pointer;
   font: inherit; font-size: 12.5px; font-weight: 600;
@@ -2131,17 +2133,24 @@ ytmusic-player-bar .ym-pb-btn:active,
 @property --cf-a-end { syntax: "<number>"; inherits: true; initial-value: .4; }
 @property --cf-glow { syntax: "<number>"; inherits: true; initial-value: 0; }
 @property --cf-p { syntax: "<percentage>"; inherits: false; initial-value: -20%; }
+@property --cf-deg { syntax: "<angle>"; inherits: true; initial-value: 90deg; }
 
 .ym-cfont-preview { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .ym-cfont-preview:not(.hidden) { animation: ym-cfont-pop .32s cubic-bezier(.22,.61,.36,1) both; }
 @media (max-width: 640px) { .ym-cfont-preview { grid-template-columns: 1fr; } }
+/* Frosted glass, matching the add-on panel's material rather than a flat card. */
 .ym-cfont-pane {
+  position: relative;
   border-radius: 16px; padding: 12px 14px 16px;
   background:
-    radial-gradient(130% 120% at 50% 0%, rgba(255,255,255,.055), transparent 60%),
-    #0b0c0e;
-  border: 1px solid rgba(255,255,255,.1);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    linear-gradient(160deg, rgba(255,255,255,.12), rgba(255,255,255,.04) 46%, rgba(255,255,255,.07));
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255,255,255,.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.24),
+    inset 0 -1px 0 rgba(255,255,255,.06),
+    0 18px 40px -26px rgba(0,0,0,.9);
 }
 .ym-cfont-pane-label {
   display: inline-block;
@@ -2181,6 +2190,9 @@ ytmusic-player-bar .ym-pb-btn:active,
 /* Only line-timed lines scale on the line itself; word-synced lines stay put
    and let the per-word springs carry the motion (same split as the renderer). */
 .ym-cfont-line.line-timed.Active { transform: scale(1.05); }
+/* Line-timed lyrics sweep TOP-TO-BOTTOM (the renderer sets 180deg for them);
+   word-synced lines keep the horizontal 90deg sweep. */
+.ym-cfont-line.line-timed { --cf-deg: 180deg; }
 .ym-cfont-line.Active { --cf-alpha: 1; --cf-a: .85; --cf-a-end: .5; }
 .ym-cfont-line.Sung { --cf-alpha: .497; --cf-a: .32; --cf-a-end: .32; }
 .ym-cfont-line .word {
@@ -2193,7 +2205,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   background-clip: text;
   -webkit-background-clip: text;
   background-image: linear-gradient(
-    90deg,
+    var(--cf-deg, 90deg),
     rgba(255,255,255, calc(var(--cf-a) * var(--cf-alpha))) var(--cf-p, -20%),
     rgba(255,255,255, calc(var(--cf-a-end) * var(--cf-alpha))) calc(var(--cf-p, -20%) + 20%)
   );

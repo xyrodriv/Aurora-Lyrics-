@@ -215,12 +215,19 @@
     const store = await getExtensionSettingsStore();
     const defaults = getExtensionDefaults(ext);
     const saved = store[ext.id] || {};
-    return Object.fromEntries(
+    const out = Object.fromEntries(
       Object.keys(defaults).map((key) => {
         const setting = ext.settings.find((item) => item.key === key);
         return [key, settingValue(setting, saved[key] == null ? defaults[key] : saved[key])];
       })
     );
+    // Keys outside the add-on catalog (the custom font block) have no `setting`
+    // descriptor, so the loop above drops them. Without this they vanish on the
+    // next open: the panel then claims "default font" while the lyrics still use
+    // the custom face, and Default can no longer clear it (AJ, 2026-10-20).
+    if (saved.customFont != null) out.customFont = saved.customFont;
+    if (saved.customFontScale != null) out.customFontScale = saved.customFontScale;
+    return out;
   };
   const saveExtensionSettings = (id, values) => {
     extensionSettingsWrite = extensionSettingsWrite.then(async () => {
@@ -1551,6 +1558,9 @@
   function buildCustomFontSection(ext, values, commit) {
     let appliedFont = typeof values.customFont === "string" ? values.customFont : "";
     let pendingFont = null;
+    // Which side of the Default/Custom switch the user picked. It can be Custom
+    // with no face staged yet (the upload controls should still be visible).
+    let customMode = !!appliedFont;
     const initialScale = Number(values.customFontScale);
     // 200% is the intended starting point for a freshly uploaded face (AJ).
     let scale = Number.isFinite(initialScale) && initialScale > 0 ? initialScale : 2;
@@ -1576,7 +1586,7 @@
     ));
     block.append(h("p", {
       class: "ym-cfont-desc",
-      text: "Upload a .ttf, .otf, .woff or .woff2. Both panes render with the real lyrics engine \u2014 line-synced on the left, word-synced on the right \u2014 before you apply it.",
+      text: "Upload a .ttf, .otf, .woff or .woff2. Both panes render with the real lyrics engine \u2014 line-synced on the left, word-synced on the right \u2014 before you apply it. The size slider only zooms this preview; the lyrics keep your Lyrics size setting.",
     }));
     // Default vs custom is a real SETTING, not just a Remove button: choosing
     // Default drops the custom face and keeps the size for later.
@@ -1603,7 +1613,7 @@
       },
     });
     const scaleWrap = h("div", { class: "ym-cfont-scale" },
-      h("span", { class: "ym-cfont-scale-label", text: "Size" }),
+      h("span", { class: "ym-cfont-scale-label", text: "Preview size" }),
       slider.el,
       scaleVal
     );
@@ -1611,7 +1621,7 @@
     controls.append(uploadBtn, scaleWrap, fileInput);
     const statusEl = h("div", { class: "ym-cfont-status" + (appliedFont ? " is-on" : "") });
     const paintStatus = () => {
-      const isCustom = !!appliedFont || !!pendingFont;
+      const isCustom = customMode || !!appliedFont || !!pendingFont;
       if (pendingFont) {
         statusEl.textContent = "Previewing your font \u2014 press Apply to use it.";
         statusEl.classList.add("is-pending");
@@ -1620,15 +1630,19 @@
         statusEl.textContent = "Using your custom font on the lyrics.";
         statusEl.classList.remove("is-pending");
         statusEl.classList.add("is-on");
+      } else if (isCustom) {
+        statusEl.textContent = "No custom font yet \u2014 upload one to get started.";
+        statusEl.classList.remove("is-pending", "is-on");
       } else {
         statusEl.textContent = "Using the default SpicyLyrics font.";
         statusEl.classList.remove("is-pending", "is-on");
       }
       defBtn.classList.toggle("active", !isCustom);
       cusBtn.classList.toggle("active", isCustom);
+      // Default mode hides the upload/size card entirely; it belongs to Custom.
       controls.classList.toggle("is-default", !isCustom);
       uploadBtn.textContent = appliedFont ? "Replace font" : "Upload font";
-      scaleWrap.classList.toggle("is-dim", !isCustom);
+      scaleWrap.classList.remove("is-dim");
     };
 
     const previewWrap = h("div", { class: "ym-cfont-preview hidden" });
@@ -1776,6 +1790,7 @@
             }
             previewFace = loaded;
             pendingFont = dataUrl;
+            customMode = true;
             renderPreview(family);
             previewActions.classList.remove("hidden");
             paintStatus();
@@ -1801,6 +1816,7 @@
       if (!pendingFont) return;
       appliedFont = pendingFont;
       pendingFont = null;
+      customMode = true;
       commit({ customFont: appliedFont, customFontScale: scale });
       paintStatus();
       showApplied();
@@ -1812,9 +1828,12 @@
       paintStatus();
       showApplied();
     });
-    // "Default" is the explicit revert setting: drop the face, keep the size.
+    // "Default" is the explicit revert setting. It ALWAYS posts the clear, even
+    // when the local state looks empty: a panel built before the persistence
+    // fix can still be showing "default" while a face is live, and one click
+    // must still be enough to get SpicyLyrics back (AJ, 2026-10-20).
     defBtn.addEventListener("click", () => {
-      if (!appliedFont && !pendingFont) return;
+      customMode = false;
       appliedFont = "";
       pendingFont = null;
       dropPreviewFace();
@@ -1825,10 +1844,10 @@
       paintStatus();
       toast("Using the default font");
     });
-    // "Custom" with nothing staged opens the picker instead of doing nothing.
+    // "Custom" reveals the upload/size card; it does not force the picker open.
     cusBtn.addEventListener("click", () => {
-      if (appliedFont || pendingFont) return;
-      fileInput.click();
+      customMode = true;
+      paintStatus();
     });
 
     block.append(controls, statusEl, previewWrap, previewActions);
@@ -1845,6 +1864,7 @@
     // "Reset to defaults" also drops the font; keep this block's local state in
     // sync with the settings object the reset just replaced.
     const reset = () => {
+      customMode = false;
       appliedFont = "";
       pendingFont = null;
       dropPreviewFace();
