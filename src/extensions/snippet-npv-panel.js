@@ -3419,7 +3419,11 @@ function syncLyricsDock() {
           };
         }
       }
-      if (animate) {
+      // Do NOT fade/rise the whole card when it came from the skeleton: the
+      // entrance animation plays OVER the shimmer, which made the skeleton look
+      // broken/flickery on a track switch. The skeleton itself is the transition
+      // (AJ, 2026-10-20).
+      if (animate && !isLoading) {
         // Restart the rise-in animation by removing the class, forcing reflow, then
         // re-adding it (a no-op re-add won't replay). Drop any leftover OUT class.
         artistCardEl.classList.remove("ym-npv-artist-out");
@@ -3451,7 +3455,9 @@ function syncLyricsDock() {
   function showArtistSkeleton() {
     if (!artistCardEl) return;
     const empty = artistCardEl.hidden || !artistCardEl.dataset.browseId;
-    artistCardEl.classList.remove("ym-npv-artist-out");
+    // Cancel any in-flight entrance/exit: the skeleton must render at full
+    // opacity, not inherit a half-faded card (AJ, 2026-10-20).
+    artistCardEl.classList.remove("ym-npv-artist-out", "ym-npv-artist-enter");
     artistCardEl.hidden = false;
     artistCardEl.setAttribute("data-loading", "true");
     if (empty) artistCardEl.setAttribute("data-skel-empty", "true");
