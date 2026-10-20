@@ -1962,3 +1962,149 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 .ym-report-btn:hover { background: #d23b40; }
 .ym-report-btn:active { transform: scale(.97); }
+
+/* ---- Aurora Lyrics: custom lyrics font (upload + renderer-accurate previews) ---- */
+.ym-cfont { margin-top: 18px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.1); }
+/* The panel only scopes .hidden to a few elements, so the native file input and
+   the Apply/Cancel row were leaking through. Scope it to this block. */
+.ym-cfont .hidden { display: none !important; }
+
+.ym-cfont-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ym-cfont-title { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+.ym-cfont-badge {
+  flex: 0 0 auto;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: rgba(255,255,255,.62);
+  padding: 4px 9px; border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.12);
+  white-space: nowrap;
+}
+.ym-cfont-desc { margin: 8px 0 14px; font-size: 12.5px; line-height: 1.55; color: rgba(255,255,255,.56); max-width: 64ch; }
+
+.ym-cfont-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 12px; border-radius: 14px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.09);
+}
+.ym-cfont-btn {
+  appearance: none; cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 600;
+  color: #fff; background: rgba(255,255,255,.09);
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 10px; padding: 8px 14px;
+  transition: background .16s ease, border-color .16s ease, transform .12s ease;
+}
+.ym-cfont-btn:hover { background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.26); }
+.ym-cfont-btn:active { transform: scale(.97); }
+.ym-cfont-remove { color: rgba(255,255,255,.82); }
+.ym-cfont-file { display: none !important; }
+
+.ym-cfont-scale {
+  display: flex; align-items: center; gap: 9px;
+  margin-left: auto;
+  font-size: 12px; color: rgba(255,255,255,.72);
+  transition: opacity .18s ease;
+}
+.ym-cfont-scale.is-dim { opacity: .5; }
+.ym-cfont-scale input[type="range"] { width: 132px; accent-color: #3fe0c5; cursor: pointer; }
+.ym-cfont-scale-val { min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; color: rgba(255,255,255,.5); }
+
+.ym-cfont-status {
+  margin-top: 10px; font-size: 12px; color: rgba(255,255,255,.5);
+  display: flex; align-items: center; gap: 7px;
+}
+.ym-cfont-status::before {
+  content: ""; flex: 0 0 auto;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: rgba(255,255,255,.35);
+}
+.ym-cfont-status.is-on { color: #3fe0c5; }
+.ym-cfont-status.is-on::before { background: #3fe0c5; box-shadow: 0 0 8px rgba(63,224,197,.8); }
+
+/* Preview: mirrors #ym-sl-panel.SpicyRenderer .line/.word — same flex line,
+   same gradient-clip paint, same -20%..100% sweep, same weight and spacing.
+   Registered properties so the per-frame writes stay valid and the line-state
+   fade can actually transition (custom properties are inert otherwise). */
+@property --cf-alpha { syntax: "<number>"; inherits: true; initial-value: .51; }
+@property --cf-a { syntax: "<number>"; inherits: true; initial-value: .4; }
+@property --cf-a-end { syntax: "<number>"; inherits: true; initial-value: .4; }
+@property --cf-glow { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --cf-p { syntax: "<percentage>"; inherits: false; initial-value: -20%; }
+
+.ym-cfont-preview { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .ym-cfont-preview { grid-template-columns: 1fr; } }
+.ym-cfont-pane {
+  border-radius: 16px; padding: 12px 14px 16px;
+  background:
+    radial-gradient(130% 120% at 50% 0%, rgba(255,255,255,.055), transparent 60%),
+    #0b0c0e;
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+}
+.ym-cfont-pane-label {
+  display: inline-block;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: rgba(255,255,255,.5);
+  padding: 3px 8px; border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  margin-bottom: 12px;
+}
+.ym-cfont-stage {
+  min-height: 112px;
+  display: flex; flex-direction: column; justify-content: center;
+  gap: .18em;
+}
+
+.ym-cfont-line {
+  --cf-alpha: .51;   /* line opacity (NotSung) */
+  --cf-a: .4;        /* gradient head */
+  --cf-a-end: .4;    /* gradient tail */
+  --cf-glow: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  padding-block: .12em;
+  font-family: var(--ym-cfont-family, var(--ym-sl-lyric-font, "SpicyLyrics")),
+    "SpicyLyrics", "Noto Sans Georgian", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  font-size: calc(1.32rem * var(--ym-cfont-scale, 1));
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0;
+  color: #fff;
+  transform-origin: left center;
+  transition: --cf-alpha .2s cubic-bezier(.61,1,.88,1),
+    transform .28s cubic-bezier(.22,.61,.36,1);
+}
+.ym-cfont-line.Active { --cf-alpha: 1; --cf-a: .85; --cf-a-end: .5; --cf-glow: .45; transform: scale(1.035); }
+.ym-cfont-line.Sung { --cf-alpha: .497; --cf-a: .32; --cf-a-end: .32; --cf-glow: 0; }
+.ym-cfont-line .word {
+  position: relative;
+  display: inline-block;
+  font-weight: 700;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+  background-image: linear-gradient(
+    90deg,
+    rgba(255,255,255, calc(var(--cf-a) * var(--cf-alpha))) var(--cf-p, -20%),
+    rgba(255,255,255, calc(var(--cf-a-end) * var(--cf-alpha))) calc(var(--cf-p, -20%) + 20%)
+  );
+  text-shadow: 0 0 4px rgba(255,255,255, calc(var(--cf-glow) * var(--cf-alpha)));
+}
+/* Mirrors the renderer's .letter.SpaceLetter: a real space element (a flex row
+   ignores whitespace-only text nodes) with a floor so it never collapses. The
+   gap lives HERE only — adding the renderer's .32ch ::after margin on top made
+   every gap read as a double space. */
+.ym-cfont-line .ym-cfont-space { white-space: pre; min-width: .3ch; }
+
+.ym-cfont-actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
+.ym-cfont-apply {
+  appearance: none; border: 0; border-radius: 10px; padding: 9px 16px;
+  font: inherit; font-size: 13px; font-weight: 600;
+  background: #3fe0c5; color: #0b0d10; cursor: pointer;
+  transition: filter .16s ease, transform .12s ease;
+}
+.ym-cfont-apply:hover { filter: brightness(1.08); }
+.ym-cfont-apply:active { transform: scale(.98); }

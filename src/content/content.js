@@ -1237,6 +1237,321 @@
     );
   }
 
+  /* ---- Aurora Lyrics: custom lyrics font (AJ, 2026-10-20) --------------------
+     Upload a font and preview how it reads in BOTH render modes before applying:
+       - line-synced : one whole-line fill (line-timed lyrics)
+       - word-synced : per-word fill (Syllable / word karaoke)
+     Both previews run off the same demo TTML on the same clock, so what you see is
+     what you get. Apply persists `customFont` (a data:/https: src, validated again
+     on the extension side) + `customFontScale` (a size-adjust %) via the usual
+     ext-settings channel. The extension registers the @font-face and points every
+     lyric font-family at `--ym-sl-lyric-font`. */
+  const CUSTOM_FONT_MIME = {
+    ttf: "font/ttf", otf: "font/otf", woff: "font/woff", woff2: "font/woff2",
+  };
+  // NORMAL pace (words ~250–450 ms) with deliberate imperfections: glued
+  // part-of-word pairs ("shi|ning", "to|night"), a couple of long words, and
+  // uneven gaps so the fill reads like a real track rather than a metronome.
+  const CUSTOM_FONT_DEMO_TTML = [
+    '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"',
+    '     xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xml:lang="en">',
+    '<body dur="10.20"><div begin="00:00.400" end="00:09.700">',
+    '<p begin="00:00.400" end="00:04.900" ttm:agent="v1">',
+    '<span begin="00:00.400" end="00:00.760" ttm:role="x-word">we</span>',
+    '<span begin="00:00.780" end="00:01.060" ttm:role="x-word">were</span>',
+    '<span begin="00:01.140" end="00:01.500" ttm:role="x-word">shi</span><span begin="00:01.500" end="00:01.880" ttm:role="x-word" itunes:part-of-word="1">ning</span>',
+    '<span begin="00:01.960" end="00:02.220" ttm:role="x-word">so</span>',
+    '<span begin="00:02.260" end="00:02.740" ttm:role="x-word">bright</span>',
+    '</p>',
+    '<p begin="00:05.100" end="00:09.700" ttm:agent="v1">',
+    '<span begin="00:05.100" end="00:05.520" ttm:role="x-word">un</span><span begin="00:05.520" end="00:05.980" ttm:role="x-word" itunes:part-of-word="1">der</span>',
+    '<span begin="00:06.040" end="00:06.420" ttm:role="x-word">ne</span><span begin="00:06.420" end="00:06.820" ttm:role="x-word" itunes:part-of-word="1">on</span>',
+    '<span begin="00:06.940" end="00:07.360" ttm:role="x-word">lights</span>',
+    '<span begin="00:07.420" end="00:07.820" ttm:role="x-word">to</span><span begin="00:07.820" end="00:08.200" ttm:role="x-word" itunes:part-of-word="1">night</span>',
+    '<span begin="00:08.420" end="00:09.020" ttm:role="x-word">a</span><span begin="00:09.020" end="00:09.700" ttm:role="x-word" itunes:part-of-word="1">gain</span>',
+    '</p></div></body></tt>',
+  ].join("");
+  const cfontTsToSec = (value) => {
+    const s = String(value == null ? "" : value).trim();
+    if (!s) return 0;
+    if (/^\d+(?:\.\d+)?s$/.test(s)) return parseFloat(s);
+    if (/^\d+(?:\.\d+)?m$/.test(s)) return parseFloat(s) * 60;
+    if (/^\d+(?:\.\d+)?h$/.test(s)) return parseFloat(s) * 3600;
+    const fields = s.split(":");
+    let secs = parseFloat(fields.pop());
+    if (fields.length && /^\d+$/.test(fields[fields.length - 1])) secs += parseInt(fields.pop(), 10) * 60;
+    if (fields.length && /^\d+$/.test(fields[fields.length - 1])) secs += parseInt(fields.pop(), 10) * 3600;
+    return Number.isFinite(secs) ? secs : 0;
+  };
+  const cfontParseDemo = (xml) => {
+    const lines = [];
+    const lineRe = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+    let m;
+    while ((m = lineRe.exec(xml))) {
+      const start = cfontTsToSec(/\bbegin="([^"]*)"/i.exec(m[1])?.[1]);
+      const end = cfontTsToSec(/\bend="([^"]*)"/i.exec(m[1])?.[1]);
+      const inner = m[2];
+      const words = [];
+      const wRe = /<span\b([^>]*)>([\s\S]*?)<\/span>/gi;
+      let wm;
+      let prevCloseEnd = -1;
+      while ((wm = wRe.exec(inner))) {
+        const text = wm[2].replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").trim();
+        if (!text) continue;
+        const wStart = cfontTsToSec(/\bbegin="([^"]*)"/i.exec(wm[1])?.[1]);
+        const wEnd = cfontTsToSec(/\bend="([^"]*)"/i.exec(wm[1])?.[1]);
+        // Apple TTML marks a syllable that CONTINUES the previous word with
+        // itunes:part-of-word="1". We cannot rely on literal whitespace between
+        // <span>s — the demo has none, and Apple strips it too — so the
+        // attribute is the source of truth: a part-of-word syllable glues to
+        // its neighbour (no space), every other syllable starts a new word.
+        // Relying on whitespace alone glued every word together ("wewere…").
+        const partOfWord = /\b(?:itunes:)?part-of-word="(?:1|true)"/i.test(wm[1]);
+        const spaceBefore = prevCloseEnd >= 0 && !partOfWord;
+        words.push({ text, start: wStart, end: wEnd, spaceBefore, partOfWord });
+        prevCloseEnd = wm.index + wm[0].length;
+      }
+      if (words.length) lines.push({ start, end, words });
+    }
+    return lines;
+  };
+  const cfontReadFile = (file) => new Promise((resolve, reject) => {
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    const mime = CUSTOM_FONT_MIME[ext];
+    if (!mime) return reject(new Error("Use a .ttf, .otf, .woff or .woff2 font"));
+    if (file.size > 8 * 1024 * 1024) return reject(new Error("Font file is too large (8 MB max)"));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read that file"));
+    reader.onload = () => {
+      // Re-wrap in a typed Blob so the data: URL carries a real font MIME — a lot
+      // of font files arrive with an empty `file.type` and would become
+      // `data:;base64`, which the extension's src sanitiser would reject.
+      const blob = new Blob([reader.result], { type: mime });
+      const asUrl = new FileReader();
+      asUrl.onerror = () => reject(new Error("Could not read that file"));
+      asUrl.onload = () => resolve({ name: file.name, dataUrl: String(asUrl.result) });
+      asUrl.readAsDataURL(blob);
+    };
+    reader.readAsArrayBuffer(file);
+  });
+  function buildCustomFontSection(ext, values, commit) {
+    let appliedFont = typeof values.customFont === "string" ? values.customFont : "";
+    let pendingFont = null;
+    const initialScale = Number(values.customFontScale);
+    let scale = Number.isFinite(initialScale) && initialScale > 0 ? initialScale : 1;
+    let raf = 0;
+    let t0 = 0;
+    let previewSeq = 0;
+    let previewFace = null;
+
+    const demoLines = cfontParseDemo(CUSTOM_FONT_DEMO_TTML);
+    const baseTime = demoLines.length ? demoLines[0].start : 0;
+    const endTime = demoLines.length ? demoLines[demoLines.length - 1].end : 1;
+    const durationMs = Math.max(1200, (endTime - baseTime) * 1000) + 700;
+
+    const block = h("div", { class: "ym-cfont" });
+    block.append(h("div", { class: "ym-cfont-head" },
+      h("div", { class: "ym-cfont-title", text: "Custom lyrics font" }),
+      h("span", { class: "ym-cfont-badge", text: "Live preview" })
+    ));
+    block.append(h("p", {
+      class: "ym-cfont-desc",
+      text: "Upload a .ttf, .otf, .woff or .woff2. Both panes render with the real lyrics engine \u2014 line-synced on the left, word-synced on the right \u2014 before you apply it.",
+    }));
+    const controls = h("div", { class: "ym-cfont-controls" });
+    const uploadBtn = h("button", { class: "ym-cfont-btn ym-cfont-upload", type: "button", text: appliedFont ? "Replace font" : "Upload font" });
+    const scaleInput = h("input", { type: "range", min: "0.5", max: "2", step: "0.05", value: String(scale), "aria-label": "Custom font size" });
+    const scaleVal = h("span", { class: "ym-cfont-scale-val", text: Math.round(scale * 100) + "%" });
+    const scaleWrap = h("label", { class: "ym-cfont-scale" },
+      h("span", { class: "ym-cfont-scale-label", text: "Size" }),
+      scaleInput,
+      scaleVal
+    );
+    const removeBtn = h("button", { class: "ym-cfont-btn ym-cfont-remove hidden", type: "button", text: "Remove" });
+    const fileInput = h("input", { type: "file", accept: ".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2", class: "ym-cfont-file" });
+    controls.append(uploadBtn, scaleWrap, removeBtn, fileInput);
+    const statusEl = h("div", { class: "ym-cfont-status" + (appliedFont ? " is-on" : "") });
+    const paintStatus = () => {
+      statusEl.textContent = appliedFont ? "Using your custom font on the lyrics." : "Using the default SpicyLyrics font.";
+      statusEl.classList.toggle("is-on", !!appliedFont);
+      removeBtn.classList.toggle("hidden", !appliedFont);
+      uploadBtn.textContent = appliedFont ? "Replace font" : "Upload font";
+      scaleWrap.classList.toggle("is-dim", !appliedFont && !pendingFont);
+    };
+
+    const previewWrap = h("div", { class: "ym-cfont-preview hidden" });
+    const applyBtn = h("button", { class: "ym-cfont-apply", type: "button", text: "Apply font" });
+    const cancelBtn = h("button", { class: "ym-cfont-btn", type: "button", text: "Cancel" });
+    const previewActions = h("div", { class: "ym-cfont-actions hidden" }, applyBtn, cancelBtn);
+
+    const stopLoop = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+
+    // The preview paints with the SAME model as the real renderer: every word
+    // owns its gradient position and travels -20% -> 100% across its own time
+    // window, while the line flips NotSung -> Active -> Sung. That is what makes
+    // the left (line) and right (word) panes read like the actual lyrics rather
+    // than a generic progress bar.
+    const paintSweep = (elapsedMs) => {
+      const rows = previewWrap.querySelectorAll(".ym-cfont-line");
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r];
+        const ls = Number(row.dataset.start);
+        const le = Number(row.dataset.end);
+        const state = elapsedMs < ls ? "NotSung" : elapsedMs > le ? "Sung" : "Active";
+        row.classList.toggle("NotSung", state === "NotSung");
+        row.classList.toggle("Active", state === "Active");
+        row.classList.toggle("Sung", state === "Sung");
+        const words = row.querySelectorAll(".word");
+        for (let i = 0; i < words.length; i++) {
+          const s = Number(words[i].dataset.start);
+          const e = Number(words[i].dataset.end);
+          const prog = elapsedMs <= s ? 0 : elapsedMs >= e ? 1 : (elapsedMs - s) / Math.max(1, e - s);
+          words[i].style.setProperty("--cf-p", (-20 + 120 * prog).toFixed(2) + "%");
+        }
+      }
+    };
+    const tick = (now) => {
+      if (!previewWrap.isConnected) { raf = 0; return; }
+      paintSweep(t0 ? (now - t0) % durationMs : 0);
+      raf = requestAnimationFrame(tick);
+    };
+    const startLoop = () => {
+      stopLoop();
+      if (reducedMotion()) { paintSweep(durationMs + 1); return; }
+      t0 = performance.now();
+      raf = requestAnimationFrame(tick);
+    };
+
+    const makeLine = (line, mode) => {
+      const row = h("div", { class: "ym-cfont-line" });
+      row.dataset.start = String((line.start - baseTime) * 1000);
+      row.dataset.end = String((line.end - baseTime) * 1000);
+      if (mode === "lsync") {
+        // Line-synced: one .word, one sweep across the whole line window.
+        const w = h("span", {
+          class: "word",
+          text: line.words.map((x, i) => (i && x.spaceBefore ? " " : "") + x.text).join(""),
+        });
+        w.dataset.start = row.dataset.start;
+        w.dataset.end = row.dataset.end;
+        row.append(w);
+      } else {
+        // Word-synced: one .word per syllable; PartOfWord glues continuations.
+        // A flex row drops whitespace-only text nodes, so the gap between words
+        // must be a real element (the renderer uses .letter.SpaceLetter for the
+        // same reason) — without it every word runs together ("ningso").
+        line.words.forEach((w) => {
+          if (w.spaceBefore) row.append(h("span", { class: "ym-cfont-space", text: " " }));
+          const el = h("span", { class: "word" + (w.partOfWord ? " PartOfWord" : ""), text: w.text });
+          el.dataset.start = String((w.start - baseTime) * 1000);
+          el.dataset.end = String((w.end - baseTime) * 1000);
+          row.append(el);
+        });
+      }
+      return row;
+    };
+    const renderPreview = (family) => {
+      previewWrap.replaceChildren();
+      [["lsync", "Line-synced"], ["wsync", "Word-synced"]].forEach(([mode, label]) => {
+        const pane = h("div", { class: "ym-cfont-pane" }, h("div", { class: "ym-cfont-pane-label", text: label }));
+        const stage = h("div", { class: "ym-cfont-stage" });
+        demoLines.forEach((line) => stage.append(makeLine(line, mode)));
+        pane.append(stage);
+        previewWrap.append(pane);
+      });
+      // A pending upload previews under its own temporary family; an applied
+      // font previews through --ym-sl-lyric-font — exactly what the lyrics use.
+      if (family) previewWrap.style.setProperty("--ym-cfont-family", '"' + family + '"');
+      else previewWrap.style.removeProperty("--ym-cfont-family");
+      previewWrap.style.setProperty("--ym-cfont-scale", String(scale));
+      previewWrap.classList.remove("hidden");
+      startLoop();
+    };
+
+    uploadBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = "";
+      if (!file) return;
+      cfontReadFile(file)
+        .then(({ dataUrl }) => {
+          // A fresh family per upload: reusing one name would leave the previous
+          // FontFace competing for the same family and the pane could keep the
+          // old glyphs after a "Replace".
+          const family = "ym-cfont-preview-" + (++previewSeq);
+          const face = new FontFace(family, 'url("' + dataUrl + '")');
+          return face.load().then((loaded) => {
+            if (document.fonts && document.fonts.add) {
+              if (previewFace) { try { document.fonts.delete(previewFace); } catch (e) { /* ignore */ } }
+              document.fonts.add(loaded);
+            }
+            previewFace = loaded;
+            pendingFont = dataUrl;
+            renderPreview(family);
+            previewActions.classList.remove("hidden");
+            paintStatus();
+          });
+        })
+        .catch((err) => toast(err && err.message ? err.message : "Could not read that font"));
+    });
+    scaleInput.addEventListener("input", () => {
+      scale = Number(scaleInput.value) || 1;
+      scaleVal.textContent = Math.round(scale * 100) + "%";
+      previewWrap.style.setProperty("--ym-cfont-scale", String(scale));
+      // An already-APPLIED font updates live (same as the other sliders); a
+      // preview-only change stays local until Apply.
+      if (appliedFont && !pendingFont) commit({ customFontScale: scale });
+    });
+
+    // Show the applied font's own preview (read-only). No pending file means the
+    // Apply/Cancel pair has nothing to act on, so it stays hidden.
+    const dropPreviewFace = () => {
+      if (previewFace && document.fonts) {
+        try { document.fonts.delete(previewFace); } catch (e) { /* ignore */ }
+      }
+      previewFace = null;
+    };
+    const showApplied = () => {
+      previewActions.classList.add("hidden");
+      if (appliedFont) renderPreview(null);
+      else { previewWrap.classList.add("hidden"); stopLoop(); }
+    };
+
+    applyBtn.addEventListener("click", () => {
+      if (!pendingFont) return;
+      appliedFont = pendingFont;
+      pendingFont = null;
+      commit({ customFont: appliedFont, customFontScale: scale });
+      paintStatus();
+      showApplied();
+      toast("Custom font applied");
+    });
+    cancelBtn.addEventListener("click", () => {
+      pendingFont = null;
+      dropPreviewFace();
+      paintStatus();
+      showApplied();
+    });
+    removeBtn.addEventListener("click", () => {
+      appliedFont = "";
+      pendingFont = null;
+      dropPreviewFace();
+      commit({ customFont: "" });
+      previewWrap.classList.add("hidden");
+      previewActions.classList.add("hidden");
+      stopLoop();
+      paintStatus();
+      toast("Font removed — back to the default");
+    });
+
+    block.append(controls, statusEl, previewWrap, previewActions);
+    paintStatus();
+    // An already-applied font shows its preview on open, so the section never
+    // looks empty after a reload.
+    if (appliedFont) showApplied();
+    return block;
+  }
+
   // ---- Report a problem (AJ, 2026-10-19) ------------------------------------
   // A red "Report a problem" button in every add-on's settings opens a frosted,
   // dimmed modal: pick an issue (or Other -> a textarea), then Send -> "Thanks for
@@ -1715,6 +2030,15 @@
       toast("Settings reset");
     });
     section.appendChild(reset);
+    if (ext.id === "ytmod-spicy-lyrics") {
+      // Its own block rather than a settings row: upload + previews + apply.
+      const commitFont = (patch) => {
+        Object.assign(values, patch);
+        postExtensionSettings(ext.id, patch);
+        saveExtensionSettings(ext.id, values);
+      };
+      section.appendChild(buildCustomFontSection(ext, values, commitFont));
+    }
     postExtensionSettings(ext.id, values);
     // Cascade the settings in with the SAME motion language the detail pane
     // uses when you switch add-ons, so a block that appears right after

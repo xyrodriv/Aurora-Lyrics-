@@ -1499,9 +1499,17 @@
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
-    // Which lyrics source is tried first. The user drags this order in the
-    // add-on's settings; the resolver walks it top to bottom
-    // (AJ, 2026-10-19).
+    // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
+    // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
+    // http:/host-relative URL is rejected server-side and downgraded here), e.g.
+    // `url(https://...) format("woff2")`. A scale multiplier on top lets a font
+    // nudge bigger/smaller without touching the size slider (AJ, 2026-10-20).
+    customFont: "",
+    customFontScale: 1.0,
+    // Which lyrics source is tried first. The resolver walks this list top to
+    // bottom and stops at the first source that has the track. (The user-facing
+    // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
+    // as the resolver fallback order.)
     sourceOrder: ["spicy", "lrc.red", "unison", "lrclib"],
   };
 
@@ -1525,6 +1533,48 @@
     return out;
   }
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
+
+  // ---- Custom lyrics font (AJ, 2026-10-20) -----------------------------------
+  // `customFont` is the src descriptor of a user-supplied @font-face (already
+  // sanitised in applySettings) or "" for the bundled SpicyLyrics face.
+  // `customFontScale` is baked into the @font-face as `size-adjust` so a swapped
+  // font lands near the built-in's optical size without nudging the size slider.
+  // The family is published through `--ym-sl-lyric-font`, which every lyric
+  // font-family rule reads first and falls back to SpicyLyrics when unset.
+  let appliedCustomFontKey = "";
+  let customFontStyleEl = null;
+  function applyCustomFont() {
+    const css = currentSettings.customFont || "";
+    const scale = Number(currentSettings.customFontScale);
+    const appliedScale = Number.isFinite(scale) ? scale : DEFAULT_SETTINGS.customFontScale;
+    // Only re-touch the DOM when the effective font actually changed — applySettings
+    // runs on every control and this sits in its hot path.
+    const key = css + "|" + (css ? appliedScale : 0);
+    if (key === appliedCustomFontKey) return;
+    appliedCustomFontKey = key;
+    if (!customFontStyleEl || !customFontStyleEl.isConnected) {
+      customFontStyleEl = document.createElement("style");
+      customFontStyleEl.id = "ym-sl-custom-font";
+      document.head.appendChild(customFontStyleEl);
+    }
+    if (css) {
+      // `src` MUST be a url()/local() function — a bare data:/https: token is an
+      // invalid descriptor, so the browser silently drops the whole @font-face
+      // and the lyrics fall back to the system font (the "apply does nothing,
+      // it just goes to the Windows font" bug, AJ 2026-10-20). Escape quotes so
+      // a crafted URL can never break out of the descriptor. `format()` hints
+      // are optional; the browser sniffs from the URL. size-adjust is a
+      // percentage of the font's default advance width — 100% = as-is.
+      const srcUrl = String(css).replace(/["\\]/g, "\\$&");
+      customFontStyleEl.textContent =
+        '@font-face{font-family:"ym-sl-custom-font";src:url("' + srcUrl +
+        '");font-display:swap;size-adjust:' + (appliedScale * 100).toFixed(0) + "%;}";
+      document.documentElement.style.setProperty("--ym-sl-lyric-font", '"ym-sl-custom-font"');
+    } else {
+      customFontStyleEl.textContent = "";
+      document.documentElement.style.removeProperty("--ym-sl-lyric-font");
+    }
+  }
 
   function applySettings(next) {
     const prevRomanization = currentSettings.romanizationEnabled;
@@ -1620,6 +1670,22 @@
       currentSettings.joinSyllables,
       DEFAULT_SETTINGS.joinSyllables
     );
+    // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
+    // a base64 data: URL whose MIME is a real font type. Anything else — a stale
+    // relative path, javascript:, an SVG (which can smuggle markup) — is dropped
+    // to "" so we keep the bundled SpicyLyrics face instead of a broken @font-face.
+    {
+      const rawFont = typeof currentSettings.customFont === "string" ? currentSettings.customFont.trim() : "";
+      currentSettings.customFont =
+        (/^https:\/\/\S+$/.test(rawFont) ||
+          /^data:(?:font\/[\w.+-]+|application\/(?:font-[\w.+-]+|x-font-[\w.+-]+|octet-stream)|application\/vnd\.ms-fontobject);base64,[A-Za-z0-9+/=]+$/i.test(rawFont))
+          ? rawFont
+          : "";
+      const cfsRaw = Number(currentSettings.customFontScale);
+      currentSettings.customFontScale = Number.isFinite(cfsRaw)
+        ? clamp(cfsRaw, 0.5, 2.0)
+        : DEFAULT_SETTINGS.customFontScale;
+    }
     currentSettings.animatedArt = booleanValue(
       currentSettings.animatedArt,
       DEFAULT_SETTINGS.animatedArt
@@ -1628,6 +1694,7 @@
     // get gentler, non-bouncing variants. Re-point them on every settings pass so
     // the toggle lands without a reload.
     applySimpleLyricsSplines();
+    applyCustomFont();
     // The published kit holds a SNAPSHOT of the spline objects, and
     // applySimpleLyricsSplines REPLACES them — so a consumer (the PiP) would keep
     // the NORMAL-mode curves, which is why its Apple Music style motion kept
@@ -1752,7 +1819,7 @@
       overflow: hidden;
       background: transparent !important;
       color: #fff;
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       container-type: size;
@@ -2999,7 +3066,7 @@
          the shorthand RESETS font-variant-numeric, which would drop the
          tabular-nums below and make the clock twitch as the digits change.
          600 maps to the bundled LyricsSemibold face. */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       font-weight: 600;
@@ -3753,7 +3820,7 @@
       color: #fff;
       /* Same family the lyrics themselves use, so the title reads as part of
          the same composition rather than as browser chrome. */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       /* NO shadow (AJ, 2026-10-03). The credit sits in the dark band UNDER the
@@ -5414,7 +5481,7 @@
       scroll-behavior: smooth;
       font-size: var(--DefaultLyricsSize) !important;
       font-weight: 700;
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif !important;
       font-kerning: normal;

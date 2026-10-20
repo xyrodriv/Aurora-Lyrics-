@@ -11,7 +11,7 @@
       overflow: hidden;
       background: transparent !important;
       color: #fff;
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       container-type: size;
@@ -1258,7 +1258,7 @@
          the shorthand RESETS font-variant-numeric, which would drop the
          tabular-nums below and make the clock twitch as the digits change.
          600 maps to the bundled LyricsSemibold face. */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       font-weight: 600;
@@ -2012,7 +2012,7 @@
       color: #fff;
       /* Same family the lyrics themselves use, so the title reads as part of
          the same composition rather than as browser chrome. */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       /* NO shadow (AJ, 2026-10-03). The credit sits in the dark band UNDER the
@@ -3673,7 +3673,7 @@
       scroll-behavior: smooth;
       font-size: var(--DefaultLyricsSize) !important;
       font-weight: 700;
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+      font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif !important;
       font-kerning: normal;
