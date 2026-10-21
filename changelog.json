@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.84",
+      "date": "2026-10-21",
+      "title": "AMLL engine runs under YouTube's Trusted Types policy",
+      "features": [],
+      "fixes": [
+        "Fixed the AMLL engine mounting but never rendering a frame. music.youtube.com enforces a Trusted Types CSP (require-trusted-types-for 'script'), so the engine's innerHTML assignments threw \"This document requires 'TrustedHTML' assignment\" inside DomLyricPlayer.update(), which aborted the drive loop and dropped back to the built-in renderer. All six innerHTML clears in the vendored engine now use replaceChildren(), which is not a Trusted Types sink",
+        "A single failed frame no longer disables the engine for the rest of the session - drive errors are retried and only fall back after roughly a second of continuous failure"
+      ]
+    },
+    {
       "version": "0.5.83",
       "date": "2026-10-21",
       "title": "The real AMLL engine actually loads now",

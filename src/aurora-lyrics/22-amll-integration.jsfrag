@@ -26,6 +26,7 @@
   let amllCssInjected = false;
   let amllLastFrameTime = 0;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
+  let amllDriveErrors = 0;             // consecutive update() failures; 0 = healthy
 
   const AMLL_ENGINE_CSS = `.amll-lyric-player {
   width: 100%;
@@ -497,6 +498,7 @@ body.amll-active #ym-sl-amll-host { display: block; }
     // early return would otherwise leave the latch stuck for the whole session.
     amllFailed = false;
     amllEnginePromise = null;
+    amllDriveErrors = 0;
     if (!amllActive && !amllReady) return;
     amllGen++;                               // invalidate any in-flight activation
     amllActive = false;
@@ -603,9 +605,20 @@ body.amll-active #ym-sl-amll-host { display: block; }
       }
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
+      amllDriveErrors = 0;
     } catch (e) {
-      console.warn("[AuroraLyrics] AMLL drive failed; falling back.", e);
-      amllFailed = true;
-      amllHide();
+      // A drive failure is per-frame, so do NOT tear the engine down on the
+      // first one: a single hiccup (a half-built line, a mid-track line swap)
+      // would otherwise drop Simple lyrics into the fallback for the rest of
+      // the session. Retry, and only give up after ~1s of solid failures.
+      amllDriveErrors++;
+      if (amllDriveErrors === 1) {
+        console.warn("[AuroraLyrics] AMLL drive failed; retrying.", e);
+      }
+      if (amllDriveErrors > 60) {
+        console.warn("[AuroraLyrics] AMLL drive failed repeatedly; falling back.", e);
+        amllFailed = true;
+        amllHide();
+      }
     }
   }

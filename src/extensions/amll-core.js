@@ -6568,7 +6568,7 @@ var LineBalancer = class {
     if (fullText.trim().length === 0) return;
     this.executeLineBalance(containerWidth, {
       resetDOM: () => {
-        this.mainElement.innerHTML = "";
+        this.mainElement.replaceChildren(); // Aurora patch: innerHTML="" trips YouTube's Trusted Types CSP
         this.mainElement.textContent = fullText;
       },
       buildChildInfos: () => {
@@ -6595,7 +6595,7 @@ var LineBalancer = class {
         };
       },
       applyBreaks: (breaks, childInfos) => {
-        this.mainElement.innerHTML = "";
+        this.mainElement.replaceChildren(); // Aurora patch: Trusted Types
         const breakSet = new Set(breaks);
         const fragment = document.createDocumentFragment();
         for (let i = 0; i < childInfos.length; i++) {
@@ -7259,7 +7259,7 @@ var LyricLineEl = class extends LyricLineBase {
       return;
     }
     const chunkedWords = chunkAndSplitLyricWords(this.lyricLine.words);
-    main.innerHTML = "";
+    main.replaceChildren(); // Aurora patch: Trusted Types
     for (const chunk of chunkedWords) this.buildWord(chunk, main);
     this.setSubLinesText(trans, roman);
   }
@@ -7475,9 +7475,13 @@ var LyricLineEl = class extends LyricLineBase {
     const main = this.element.children[0];
     const trans = this.element.children[1];
     const roman = this.element.children[2];
-    if (main) main.innerHTML = "";
-    if (trans) trans.innerHTML = "";
-    if (roman) roman.innerHTML = "";
+    // Aurora patch: replaceChildren() instead of innerHTML="" — music.youtube.com
+    // enforces `require-trusted-types-for 'script'`, so every innerHTML write
+    // throws "This document requires 'TrustedHTML' assignment" and aborts
+    // DomLyricPlayer.update(). replaceChildren() is not a Trusted Types sink.
+    if (main) main.replaceChildren();
+    if (trans) trans.replaceChildren();
+    if (roman) roman.replaceChildren();
   }
   dispose() {
     this.disposeElements();
