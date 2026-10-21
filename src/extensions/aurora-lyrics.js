@@ -17284,6 +17284,7 @@
   let amllWasPlaying = false;
   let amllCssInjected = false;
   let amllLastFrameTime = 0;
+  let amllLastDumpTime = 0;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
   let amllDriveErrors = 0;             // consecutive update() failures; 0 = healthy
 
@@ -17911,6 +17912,28 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         bg: !!l.isBG,
         w: l.words.map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
       }));
+      // What the ENGINE currently has as its active line, plus the word count
+      // it actually built and the float animations it created for them. This is
+      // the only way to tell "the words were never built" from "the animations
+      // were built but parked".
+      let eng = null;
+      try {
+        const groups = amllPlayer.currentLyricGroups || [];
+        const g = groups.find((x) => x && x.isActive) || null;
+        if (g && g.mainLine) {
+          const ln = g.mainLine.getLine();
+          const words = g.mainLine.splittedWords || [];
+          eng = {
+            groups: groups.length,
+            s: Math.round(ln.startTime),
+            e: Math.round(ln.endTime),
+            words: words.length,
+            anims: words.reduce((n, w) => n + ((w.elementAnimations || []).length), 0),
+            w: (ln.words || []).map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
+            built: !!g.mainLine.built,
+          };
+        }
+      } catch (e) {}
       if (amllHost) {
         amllHost.dataset.debug = JSON.stringify({
           active,
@@ -17921,6 +17944,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
           hostConnected: !!(amllHost && amllHost.isConnected),
           hostRect: amllHost ? (() => { const r = amllHost.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
+          eng,
           lines: slice,
         });
       }
@@ -18107,6 +18131,12 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // Every frame, not only while playing: enable() also parks the word
       // animations at the right positions when the media is paused.
       amllKickActiveLine();
+      // Refresh the diagnostic a few times a second so it reflects the line that
+      // is active right now, not just the one loaded at the last track change.
+      if (amllLastContent && now - amllLastDumpTime > 400) {
+        amllLastDumpTime = now;
+        amllDumpDebug(amllLastContent);
+      }
       amllDriveErrors = 0;
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
