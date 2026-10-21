@@ -66,6 +66,13 @@
   // from this script's own extension URL because the page world cannot fetch
   // chrome-extension:// resources by bare name.
   const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
+  // Bundled AMLL engine (the real @applemusic-like-lyrics DomLyricPlayer). Same
+  // resolution rule as Kawarp: this script runs in the PAGE world, where
+  // chrome.runtime does not exist, so chrome.runtime.getURL() throws and the
+  // engine silently falls back. document.currentScript.src already points at
+  // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
+  // relative URL is all we need.
+  const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
   // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
   // the page-wide one. animationSpeed is overridden per playback state.
   const FS_KAWARP_OPTIONS = {

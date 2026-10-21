@@ -66,6 +66,13 @@
   // from this script's own extension URL because the page world cannot fetch
   // chrome-extension:// resources by bare name.
   const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
+  // Bundled AMLL engine (the real @applemusic-like-lyrics DomLyricPlayer). Same
+  // resolution rule as Kawarp: this script runs in the PAGE world, where
+  // chrome.runtime does not exist, so chrome.runtime.getURL() throws and the
+  // engine silently falls back. document.currentScript.src already points at
+  // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
+  // relative URL is all we need.
+  const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
   // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
   // the page-wide one. animationSpeed is overridden per playback state.
   const FS_KAWARP_OPTIONS = {
@@ -17667,13 +17674,14 @@ body.amll-active #ym-sl-amll-host { display: block; }
       // keyword, so the parser treats it as the start of an import declaration /
       // dynamic-import call and throws "Cannot use import statement outside a
       // module", killing the WHOLE classic-script bundle (panel included).
-      // Dynamic import is always available in MV3 Chrome; a failure surfaces
-      // from the await below and is caught by amllActivate's try/catch.
-      const url = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
-        ? chrome.runtime.getURL("src/extensions/amll-core.js")
-        : "";
-      if (!url) throw new Error("extension URL unavailable");
-      const mod = await import(/* @vite-ignore */ url);
+      //
+      // Use AMLL_CORE_URL (resolved from document.currentScript.src), NOT
+      // chrome.runtime.getURL: this bundle runs in the page's MAIN world where
+      // chrome.runtime is undefined, so getURL() throws "extension URL
+      // unavailable" and the engine silently falls back to the built-in
+      // renderer — which looks like "same as before, just without the glow".
+      if (!AMLL_CORE_URL) throw new Error("AMLL: module URL unavailable");
+      const mod = await import(/* @vite-ignore */ AMLL_CORE_URL);
       if (!mod || typeof mod.LyricPlayer !== "function") {
         throw new Error("AMLL: LyricPlayer export missing");
       }
@@ -17685,7 +17693,7 @@ body.amll-active #ym-sl-amll-host { display: block; }
   async function amllActivate() {
     if (amllActive) { amllShow(); return; }
     amllActive = true;
-    if (amllFailed) return;
+    if (amllFailed) { amllActive = false; return; }
     const myGen = ++amllGen;
     try {
       amllInjectCss();
@@ -17724,6 +17732,10 @@ body.amll-active #ym-sl-amll-host { display: block; }
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL engine failed to load; using built-in Simple renderer.", e);
       amllFailed = true;
+      // Leave the built-in renderer visible: amllActive drives the body class
+      // that HIDES .VirtualLyricsContainer, so it must be cleared on failure or
+      // the fallback would render into a hidden node.
+      amllActive = false;
       amllReady = false;
       amllHide();
       if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
@@ -17733,6 +17745,12 @@ body.amll-active #ym-sl-amll-host { display: block; }
   }
 
   function amllDeactivate() {
+    // Always clear the failure latch and the cached import promise, so switching
+    // the mode back on retries. This must happen BEFORE the early return below:
+    // after a failed activation amllActive/amllReady are both false, and the
+    // early return would otherwise leave the latch stuck for the whole session.
+    amllFailed = false;
+    amllEnginePromise = null;
     if (!amllActive && !amllReady) return;
     amllGen++;                               // invalidate any in-flight activation
     amllActive = false;

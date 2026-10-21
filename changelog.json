@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.83",
+      "date": "2026-10-21",
+      "title": "The real AMLL engine actually loads now",
+      "features": [],
+      "fixes": [
+        "Fixed Simple lyrics silently running Aurora's built-in fallback renderer instead of the real AMLL engine - which looked like \"the old animation, just without the glow\". The loader resolved amll-core.js with chrome.runtime.getURL(), but the bundle runs in the page's MAIN world where chrome.runtime is undefined, so it threw \"extension URL unavailable\" and fell back every time. It now resolves the module from document.currentScript.src, the same way the Kawarp module already does",
+        "A failed engine load no longer leaves the panel in a half-active state that could hide the built-in lyrics; the failure latch also clears when the mode is switched off, so a transient load error retries instead of wedging the fallback for the whole session"
+      ]
+    },
+    {
       "version": "0.5.82",
       "date": "2026-10-21",
       "title": "Lyrics panel mounts again in every mode",
