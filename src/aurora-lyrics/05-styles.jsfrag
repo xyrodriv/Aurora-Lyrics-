@@ -4158,34 +4158,45 @@
       inherits: false;
       initial-value: 0px;
     }
-    /* Simple lyrics (Apple Music style): the spring factories are stubbed and the
-       splines are swapped in JS (see createWordSprings and
-       applySimpleLyricsSplines), and the LINE-TRANSITION feel below is ported from
-       AMLL. The gradient sweep is deliberately still the normal karaoke one — an
-       earlier attempt redirected --gradient-position at a registered custom
-       property and it broke the active-line highlight and the scroll. */
-    /* NOT(.line-timed):NOT(.static) — Simple lyrics is a WORD-SYNCED feature.
-       Line-synced (LRC-style, LineTimed) and unsynced lyrics fill as whole lines,
-       so the per-line AMLL motion would just blur and dim them for no benefit.
-       AJ, 2026-10-01: dont make it target line by line lyrics only ttml word by word. */
+    /* Simple lyrics — Apple Music / AMLL style. The spring factories are stubbed
+       and the splines swapped in JS (applySimpleLyricsSplines). The look is the
+       AMLL preview renderer: a per-word white gradient sweep on the active line,
+       the active line scaled up with a soft white halo, and depth dimming (lines
+       fade AND recede with distance from the active line, injected per-line as
+       --ym-sl-line-alpha / --amll-depth-scale in animate()). Word-synced only —
+       line-timed and static lines fill as whole blocks, so the AMLL line motion
+       would just blur them. AJ: make simple lyrics the apple music style. */
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line) {
       transition:
         transform .5s cubic-bezier(.22, .61, .36, 1),
-        filter .4s ease,
         --ym-sl-line-alpha .4s cubic-bezier(.61, 1, .88, 1),
         --ym-sl-entry-shadow-alpha .4s cubic-bezier(.61, 1, .88, 1);
+      /* AMLL uses a larger, more confident lyric size. */
+      --font-size: calc(var(--DefaultLyricsSize) * 1.08);
+      /* Per-line scale set in animate() by distance from the active line, so the
+         stack recedes like AMLL as it scrolls instead of sitting flat. */
+      transform: scale(var(--amll-depth-scale, 1));
+      transform-origin: left center;
     }
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Active {
-      transform: translateY(0);
-      filter: blur(0);
+      --ym-sl-line-alpha: 1;
     }
-    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Sung {
-      transform: translateY(-.05em);
-      filter: blur(1px);
+    /* AMLL bloom: a layered white glow behind the gradient-clipped glyphs of the
+       ACTIVE line only — not the whole field. Scoped to .Active so neighbouring
+       lines stay crisp and dim. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .word,
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .letter {
+      text-shadow:
+        0 0 4px rgba(255,255,255,.55),
+        0 0 14px rgba(255,255,255,.35),
+        0 0 32px rgba(255,255,255,.18);
     }
+    /* Depth lines: no blur — AMLL keeps them still and dims them by opacity. The
+       exact opacity/scale per distance is injected in animate(); the state
+       classes supply the floor when a line is far away. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Sung,
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).NotSung {
-      transform: translateY(.06em);
-      filter: blur(1.2px);
+      filter: none;
     }
     /* Only the leaf text elements (.word/.letter) carry the gradient clip.
        Putting background-clip:text on the .letterGroup wrapper clips its child

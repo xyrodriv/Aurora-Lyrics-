@@ -482,7 +482,10 @@
     // centering pushes the ACTIVE line into the top quarter (only ~4 lines fit,
     // so the box reads top-heavy with a dead band below). Center the active
     // line there instead; the tall Lyrics tab keeps its normal look-ahead.
-    const scrollLeadMs = !externalHostActive && currentSettings.scrollLeadEnabled
+    // Simple lyrics (Apple Music / AMLL style): drop the look-ahead so the active
+    // line centres exactly as it starts playing, like AMLL, instead of gliding in
+    // early. Normal mode keeps its lead.
+    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !currentSettings.simpleLyrics)
       ? currentSettings.scrollLeadMs
       : 0;
     const scrollIndex = scrollLeadMs > 0
@@ -562,12 +565,25 @@
       // into the active word glow. Zeroing it on this frame caused a visible
       // dim-then-bright dip on both lead and background vocals. Other lines still
       // update when the active line changes; gaps preserve their last value.
-      if (activeLineChanged && activeIndex >= 0 && lineState !== "Active") {
+      if (activeLineChanged && activeIndex >= 0) {
         const distance = Math.abs(index - activeIndex);
-        const blur = distance === 0
-          ? 0
-          : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
-        setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        if (currentSettings.simpleLyrics && !line.HTMLElement.classList.contains("bg-line")) {
+          // AMLL depth: the active line is full and scaled up, neighbours fade and
+          // recede with distance so the panel reads as a stack of lines flowing
+          // past, not flat text scrolling. Injected inline so it overrides the
+          // state-class alpha only while Simple Lyrics is on; cleared on toggle-off
+          // (see clearSimpleLyricsDepth in 04-state-settings.jsfrag). Background
+          // vocals keep their own dimming.
+          const depthAlpha = distance === 0 ? 1 : Math.max(0.3, 1 - distance * 0.22);
+          const depthScale = distance === 0 ? 1.04 : Math.max(0.94, 1 - distance * 0.015);
+          setStyleIfChanged(line.HTMLElement, "--ym-sl-line-alpha", String(depthAlpha), 0.02);
+          setStyleIfChanged(line.HTMLElement, "--amll-depth-scale", String(depthScale), 0.01);
+        } else if (lineState !== "Active") {
+          const blur = distance === 0
+            ? 0
+            : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
+          setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        }
       }
 
       // Scan only lines that can actually be moving: the active line, a line

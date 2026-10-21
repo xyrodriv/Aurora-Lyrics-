@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.79",
+      "date": "2026-10-21",
+      "title": "Simple lyrics is now the Apple Music / AMLL style",
+      "features": [
+        "Simple lyrics mode now renders like the AMLL (Apple Music Like Lyrics) preview: white lyric text that blooms over the backdrop via mix-blend-mode plus-lighter, a per-word white gradient sweep on the active line, the active line scaled up with a soft white halo, and lines that fade with distance from the one playing",
+        "Background vocals keep their own dimmer, smaller treatment inside Simple lyrics, and the Spicy Lyrics font is used throughout"
+      ],
+      "fixes": []
+    },
+    {
       "version": "0.5.78",
       "date": "2026-10-21",
       "title": "Music-video to cover no longer lags",

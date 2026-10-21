@@ -640,6 +640,17 @@
     // covers the fullscreen overlay, which reparents the panel but leaves body
     // alone, so the mode follows the lyrics into fullscreen for free.
     document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
+    // When Simple Lyrics is switched OFF, drop the per-line depth alpha that
+    // animate() injected while it was on, so normal mode's state-class alpha
+    // (NotSung/Sung/Active) takes over again instead of a stale inline value.
+    if (!currentSettings.simpleLyrics && prevSimpleLyrics) {
+      for (const ln of modelLines) {
+        if (ln.HTMLElement) {
+          ln.HTMLElement.style.removeProperty("--ym-sl-line-alpha");
+          ln.HTMLElement.style.removeProperty("--amll-depth-scale");
+        }
+      }
+    }
     // Turning Smooth Scrolling off mid-glide hands the move off to the instant
     // path (upstream does the same — their $smoothScrolling listener calls
     // _handOffSmoothScroll). Stopping here means the glide cannot keep steering

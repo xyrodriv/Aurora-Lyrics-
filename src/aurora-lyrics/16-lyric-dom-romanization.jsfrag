@@ -237,7 +237,10 @@
     // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
-    if (joinApplies(background)) letterCapable = false;
+    // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
+    // per-letter "wavy" karaoke group either — AMLL fills the whole word with one
+    // clean gradient sweep. Force the plain-.word path so long words match AMLL.
+    if (joinApplies(background) || currentSettings.simpleLyrics) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });

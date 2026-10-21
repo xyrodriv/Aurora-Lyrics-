@@ -1869,6 +1869,17 @@
     // covers the fullscreen overlay, which reparents the panel but leaves body
     // alone, so the mode follows the lyrics into fullscreen for free.
     document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
+    // When Simple Lyrics is switched OFF, drop the per-line depth alpha that
+    // animate() injected while it was on, so normal mode's state-class alpha
+    // (NotSung/Sung/Active) takes over again instead of a stale inline value.
+    if (!currentSettings.simpleLyrics && prevSimpleLyrics) {
+      for (const ln of modelLines) {
+        if (ln.HTMLElement) {
+          ln.HTMLElement.style.removeProperty("--ym-sl-line-alpha");
+          ln.HTMLElement.style.removeProperty("--amll-depth-scale");
+        }
+      }
+    }
     // Turning Smooth Scrolling off mid-glide hands the move off to the instant
     // path (upstream does the same — their $smoothScrolling listener calls
     // _handOffSmoothScroll). Stopping here means the glide cannot keep steering
@@ -6119,34 +6130,45 @@
       inherits: false;
       initial-value: 0px;
     }
-    /* Simple lyrics (Apple Music style): the spring factories are stubbed and the
-       splines are swapped in JS (see createWordSprings and
-       applySimpleLyricsSplines), and the LINE-TRANSITION feel below is ported from
-       AMLL. The gradient sweep is deliberately still the normal karaoke one — an
-       earlier attempt redirected --gradient-position at a registered custom
-       property and it broke the active-line highlight and the scroll. */
-    /* NOT(.line-timed):NOT(.static) — Simple lyrics is a WORD-SYNCED feature.
-       Line-synced (LRC-style, LineTimed) and unsynced lyrics fill as whole lines,
-       so the per-line AMLL motion would just blur and dim them for no benefit.
-       AJ, 2026-10-01: dont make it target line by line lyrics only ttml word by word. */
+    /* Simple lyrics — Apple Music / AMLL style. The spring factories are stubbed
+       and the splines swapped in JS (applySimpleLyricsSplines). The look is the
+       AMLL preview renderer: a per-word white gradient sweep on the active line,
+       the active line scaled up with a soft white halo, and depth dimming (lines
+       fade AND recede with distance from the active line, injected per-line as
+       --ym-sl-line-alpha / --amll-depth-scale in animate()). Word-synced only —
+       line-timed and static lines fill as whole blocks, so the AMLL line motion
+       would just blur them. AJ: make simple lyrics the apple music style. */
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line) {
       transition:
         transform .5s cubic-bezier(.22, .61, .36, 1),
-        filter .4s ease,
         --ym-sl-line-alpha .4s cubic-bezier(.61, 1, .88, 1),
         --ym-sl-entry-shadow-alpha .4s cubic-bezier(.61, 1, .88, 1);
+      /* AMLL uses a larger, more confident lyric size. */
+      --font-size: calc(var(--DefaultLyricsSize) * 1.08);
+      /* Per-line scale set in animate() by distance from the active line, so the
+         stack recedes like AMLL as it scrolls instead of sitting flat. */
+      transform: scale(var(--amll-depth-scale, 1));
+      transform-origin: left center;
     }
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Active {
-      transform: translateY(0);
-      filter: blur(0);
+      --ym-sl-line-alpha: 1;
     }
-    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Sung {
-      transform: translateY(-.05em);
-      filter: blur(1px);
+    /* AMLL bloom: a layered white glow behind the gradient-clipped glyphs of the
+       ACTIVE line only — not the whole field. Scoped to .Active so neighbouring
+       lines stay crisp and dim. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .word,
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .letter {
+      text-shadow:
+        0 0 4px rgba(255,255,255,.55),
+        0 0 14px rgba(255,255,255,.35),
+        0 0 32px rgba(255,255,255,.18);
     }
+    /* Depth lines: no blur — AMLL keeps them still and dims them by opacity. The
+       exact opacity/scale per distance is injected in animate(); the state
+       classes supply the floor when a line is far away. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Sung,
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).NotSung {
-      transform: translateY(.06em);
-      filter: blur(1.2px);
+      filter: none;
     }
     /* Only the leaf text elements (.word/.letter) carry the gradient clip.
        Putting background-clip:text on the .letterGroup wrapper clips its child
@@ -15073,7 +15095,10 @@
     // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
-    if (joinApplies(background)) letterCapable = false;
+    // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
+    // per-letter "wavy" karaoke group either — AMLL fills the whole word with one
+    // clean gradient sweep. Force the plain-.word path so long words match AMLL.
+    if (joinApplies(background) || currentSettings.simpleLyrics) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -16732,7 +16757,10 @@
     // centering pushes the ACTIVE line into the top quarter (only ~4 lines fit,
     // so the box reads top-heavy with a dead band below). Center the active
     // line there instead; the tall Lyrics tab keeps its normal look-ahead.
-    const scrollLeadMs = !externalHostActive && currentSettings.scrollLeadEnabled
+    // Simple lyrics (Apple Music / AMLL style): drop the look-ahead so the active
+    // line centres exactly as it starts playing, like AMLL, instead of gliding in
+    // early. Normal mode keeps its lead.
+    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !currentSettings.simpleLyrics)
       ? currentSettings.scrollLeadMs
       : 0;
     const scrollIndex = scrollLeadMs > 0
@@ -16812,12 +16840,25 @@
       // into the active word glow. Zeroing it on this frame caused a visible
       // dim-then-bright dip on both lead and background vocals. Other lines still
       // update when the active line changes; gaps preserve their last value.
-      if (activeLineChanged && activeIndex >= 0 && lineState !== "Active") {
+      if (activeLineChanged && activeIndex >= 0) {
         const distance = Math.abs(index - activeIndex);
-        const blur = distance === 0
-          ? 0
-          : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
-        setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        if (currentSettings.simpleLyrics && !line.HTMLElement.classList.contains("bg-line")) {
+          // AMLL depth: the active line is full and scaled up, neighbours fade and
+          // recede with distance so the panel reads as a stack of lines flowing
+          // past, not flat text scrolling. Injected inline so it overrides the
+          // state-class alpha only while Simple Lyrics is on; cleared on toggle-off
+          // (see clearSimpleLyricsDepth in 04-state-settings.jsfrag). Background
+          // vocals keep their own dimming.
+          const depthAlpha = distance === 0 ? 1 : Math.max(0.3, 1 - distance * 0.22);
+          const depthScale = distance === 0 ? 1.04 : Math.max(0.94, 1 - distance * 0.015);
+          setStyleIfChanged(line.HTMLElement, "--ym-sl-line-alpha", String(depthAlpha), 0.02);
+          setStyleIfChanged(line.HTMLElement, "--amll-depth-scale", String(depthScale), 0.01);
+        } else if (lineState !== "Active") {
+          const blur = distance === 0
+            ? 0
+            : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
+          setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        }
       }
 
       // Scan only lines that can actually be moving: the active line, a line
