@@ -457,10 +457,30 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 /* Credits footer (Written By / provided by / Uploaded by / Made by) goes into the
    engine's own bottom-line slot, so it scrolls with the lyrics as the last block
    - the same behaviour as the built-in renderer. The engine watches that element
-   with a MutationObserver and re-lays-out when its content changes. */
+   with a MutationObserver and re-lays-out when its content changes.
+   The engine treats that slot as a distant lyric line, so it would otherwise
+   inherit the deepest blur, the dimmest mask alphas and the lyric line's own
+   negative margins - override all of it so the credits read as plain text. */
+#ym-sl-amll-host .FmKaba_bottomLine,
+#ym-sl-amll-host .FmKaba_bottomLineWrapper,
 #ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
-  position: static;
-  pointer-events: auto;
+  filter: none !important;
+  opacity: 1 !important;
+}
+#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
+  --bright-mask-alpha: 1;
+  --dark-mask-alpha: 1;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits > * {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+#ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
+#ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
+  margin: 0 !important;
+  padding: 0 !important;
 }
 `;
 
