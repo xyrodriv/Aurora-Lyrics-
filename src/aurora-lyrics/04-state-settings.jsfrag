@@ -70,6 +70,13 @@
   // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
   // fullscreen exit.
   let fsChromeFadeHealTimer = 0;
+  // Timestamp of the last fsChromeFadeOut, so fsChromeFadeIn can enforce a minimum
+  // visible hold (see FS_CHROME_FADE_MIN_MS). Without it an MV -> MV-style instant
+  // media-ready wipes the chrome-out class the same tick it was added and the
+  // dissolve is never seen (AJ, 2026-10-21).
+  let fsChromeFadeOutAt = 0;
+  // Deferred restore handle for the minimum-hold above; cleared on fullscreen exit.
+  let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;

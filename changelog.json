@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.76",
+      "date": "2026-10-21",
+      "title": "The fullscreen fade actually shows now",
+      "features": [],
+      "fixes": [
+        "The control dissolve on a music-video <-> cover-art skip now has a minimum visible hold, so it can no longer be cancelled the instant the next video is ready - the controls fade out and back in every time, instead of only sometimes"
+      ]
+    },
+    {
       "version": "0.5.75",
       "date": "2026-10-21",
       "title": "A cleaner fullscreen fade",

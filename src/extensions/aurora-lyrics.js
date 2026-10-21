@@ -1299,6 +1299,13 @@
   // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
   // fullscreen exit.
   let fsChromeFadeHealTimer = 0;
+  // Timestamp of the last fsChromeFadeOut, so fsChromeFadeIn can enforce a minimum
+  // visible hold (see FS_CHROME_FADE_MIN_MS). Without it an MV -> MV-style instant
+  // media-ready wipes the chrome-out class the same tick it was added and the
+  // dissolve is never seen (AJ, 2026-10-21).
+  let fsChromeFadeOutAt = 0;
+  // Deferred restore handle for the minimum-hold above; cleared on fullscreen exit.
+  let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;
@@ -9667,6 +9674,13 @@
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
   const FS_VIDEO_ZERO_DEBOUNCE_MS = 700;
+  // Minimum time the chrome must stay dissolved on a mode change before it is
+  // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
+  // ready (which on a cover -> MV skip is the same tick the fade-out started), and
+  // without this floor the class is removed before it paints — so the dissolve is
+  // invisible. A touch above the .22s fade-out so the out always completes (AJ,
+  // 2026-10-21).
+  const FS_CHROME_FADE_MIN_MS = 280;
   const FS_VIDEO_READY_MAX_MS = 8000;
   const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
@@ -9727,6 +9741,7 @@
   function fsChromeFadeOut() {
     if (!fsOverlay || fsChromeFading) return;
     fsChromeFading = true;
+    fsChromeFadeOutAt = performance.now();
     fsOverlay.classList.add("ym-sl-fs-chrome-out");
     if (fsChromeFadeHealTimer) clearTimeout(fsChromeFadeHealTimer);
     fsChromeFadeHealTimer = window.setTimeout(() => {
@@ -9740,7 +9755,22 @@
 
   function fsChromeFadeIn() {
     if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
+    if (fsChromeFadeHoldTimer) { clearTimeout(fsChromeFadeHoldTimer); fsChromeFadeHoldTimer = 0; }
     if (!fsOverlay || !fsChromeFading) return;
+    // Minimum visible hold: if the media was ready the same tick the fade-out
+    // started (the cover -> MV case, where awaitFsVideoReady resolves before a
+    // frame paints), do not restore yet — defer so the dissolve actually reads.
+    const wait = FS_CHROME_FADE_MIN_MS - (performance.now() - fsChromeFadeOutAt);
+    if (wait > 0) {
+      fsChromeFadeHoldTimer = window.setTimeout(() => {
+        fsChromeFadeHoldTimer = 0;
+        if (fsActive && fsChromeFading && fsOverlay) {
+          fsChromeFading = false;
+          fsOverlay.classList.remove("ym-sl-fs-chrome-out");
+        }
+      }, wait);
+      return;
+    }
     fsChromeFading = false;
     fsOverlay.classList.remove("ym-sl-fs-chrome-out");
   }
@@ -10935,6 +10965,8 @@
     // Drop the chrome-heal watchdog too, or it would fire against a removed overlay
     // on the next entry (the timer re-arms itself on the next fade-out anyway).
     if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
+    // Same for the minimum-hold deferred restore (FS_CHROME_FADE_MIN_MS).
+    if (fsChromeFadeHoldTimer) { clearTimeout(fsChromeFadeHoldTimer); fsChromeFadeHoldTimer = 0; }
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
     // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;

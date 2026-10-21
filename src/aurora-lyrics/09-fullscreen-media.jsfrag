@@ -607,6 +607,13 @@
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
   const FS_VIDEO_ZERO_DEBOUNCE_MS = 700;
+  // Minimum time the chrome must stay dissolved on a mode change before it is
+  // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
+  // ready (which on a cover -> MV skip is the same tick the fade-out started), and
+  // without this floor the class is removed before it paints — so the dissolve is
+  // invisible. A touch above the .22s fade-out so the out always completes (AJ,
+  // 2026-10-21).
+  const FS_CHROME_FADE_MIN_MS = 280;
   const FS_VIDEO_READY_MAX_MS = 8000;
   const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
@@ -667,6 +674,7 @@
   function fsChromeFadeOut() {
     if (!fsOverlay || fsChromeFading) return;
     fsChromeFading = true;
+    fsChromeFadeOutAt = performance.now();
     fsOverlay.classList.add("ym-sl-fs-chrome-out");
     if (fsChromeFadeHealTimer) clearTimeout(fsChromeFadeHealTimer);
     fsChromeFadeHealTimer = window.setTimeout(() => {
@@ -680,7 +688,22 @@
 
   function fsChromeFadeIn() {
     if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
+    if (fsChromeFadeHoldTimer) { clearTimeout(fsChromeFadeHoldTimer); fsChromeFadeHoldTimer = 0; }
     if (!fsOverlay || !fsChromeFading) return;
+    // Minimum visible hold: if the media was ready the same tick the fade-out
+    // started (the cover -> MV case, where awaitFsVideoReady resolves before a
+    // frame paints), do not restore yet — defer so the dissolve actually reads.
+    const wait = FS_CHROME_FADE_MIN_MS - (performance.now() - fsChromeFadeOutAt);
+    if (wait > 0) {
+      fsChromeFadeHoldTimer = window.setTimeout(() => {
+        fsChromeFadeHoldTimer = 0;
+        if (fsActive && fsChromeFading && fsOverlay) {
+          fsChromeFading = false;
+          fsOverlay.classList.remove("ym-sl-fs-chrome-out");
+        }
+      }, wait);
+      return;
+    }
     fsChromeFading = false;
     fsOverlay.classList.remove("ym-sl-fs-chrome-out");
   }
