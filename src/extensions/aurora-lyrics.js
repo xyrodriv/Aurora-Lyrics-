@@ -17755,6 +17755,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
       player.getElement().style.height = "100%";
       amllHost.appendChild(player.getElement());
+      amllSeedEngineSize();
 
       amllPlayer = player;
       amllReady = true;
@@ -17799,6 +17800,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllReady = false;
     amllWasPlaying = false;
     amllPrevTime = 0;
+    if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
     amllHost = null;
   }
@@ -17936,6 +17938,47 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       amllFailed = true;
       amllHide();
     }
+  }
+
+  // The engine derives its virtual viewport from a ResizeObserver it attaches to
+  // its own element inside the constructor - i.e. while that element is still
+  // detached - so the first callback reports 0x0 and, as observed live, nothing
+  // ever corrects it. A zero viewport is worse than it sounds:
+  //   defaultLineHeight = size[1] / 5        -> 0
+  //   isInRenderRange() bails on viewportHeight <= 0
+  //   => commitChanges() returns early for EVERY line
+  //   => no transform, no scale, no opacity is ever written
+  // The panel still draws and the karaoke fill still sweeps (both are written
+  // from show()/update(), not commitChanges), which is exactly why it looks
+  // "rendered but lifeless". Seed the size from the host we actually control and
+  // keep it in sync ourselves instead of trusting that observer.
+  let amllSizeObserver = null;
+  function amllSeedEngineSize() {
+    if (!amllPlayer || !amllHost) return;
+    try {
+      const rect = amllHost.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        amllPlayer.size[0] = rect.width;
+        amllPlayer.size[1] = rect.height;
+      }
+    } catch (e) {}
+    if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} }
+    amllSizeObserver = new ResizeObserver((entries) => {
+      if (!amllPlayer) return;
+      const last = entries[entries.length - 1];
+      if (!last) return;
+      const w = last.contentRect.width;
+      const h = last.contentRect.height;
+      if (w <= 0 || h <= 0) return;
+      if (amllPlayer.size[0] === w && amllPlayer.size[1] === h) return;
+      amllPlayer.size[0] = w;
+      amllPlayer.size[1] = h;
+      // Lines that were never measured still carry the old default height, and
+      // the engine's own layout pass has to run again with the real viewport.
+      try { amllPlayer.layoutCalculator.updateUnmeasuredHeights(amllPlayer.defaultLineHeight); } catch (e) {}
+      try { if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("resize"); } catch (e) {}
+    });
+    try { amllSizeObserver.observe(amllHost); } catch (e) {}
   }
 
   function amllMediaIsPlaying() {

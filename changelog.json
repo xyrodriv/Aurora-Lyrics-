@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.89",
+      "date": "2026-10-21",
+      "title": "AMLL: the engine finally gets a real viewport, so the animations run",
+      "features": [],
+      "fixes": [
+        "Fixed Simple lyrics rendering but never animating - no scale, no word bounce, no background-vocal slide, no spring glide. The engine was reporting its own viewport size as 0x0 because it attaches its ResizeObserver to its root element inside the constructor, while that element is still detached, and nothing ever corrected it. A zero viewport zeroes the default line height and makes the engine's in-render-range check bail for every line, so it never committed a single transform - while the karaoke fill kept working because that is written from a different code path. The size is now seeded from the host we control and kept in sync by our own observer"
+      ]
+    },
+    {
       "version": "0.5.88",
       "date": "2026-10-21",
       "title": "Diagnostic build for the missing AMLL animations",
