@@ -18118,6 +18118,27 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     return amllSizeSeeded;
   }
 
+  // The engine must be driven every frame, but Aurora's own loop gates on
+  // panelVisible/modelLines before it ever reaches amllDrive() - and when that
+  // gate closes the engine stops being fed entirely. That froze the karaoke fill
+  // (--amll-player-time stuck at 0) and parked every word animation, because
+  // setCurrentTime() is what makes the engine highlight a new line and run
+  // enable() on it. Live measurement: drives === 3 over a whole track.
+  // Run our own loop so the engine is fed regardless of Aurora's render state.
+  let amllRaf = 0;
+  function amllStartOwnLoop() {
+    if (amllRaf) return;
+    const step = () => {
+      amllRaf = requestAnimationFrame(step);
+      try {
+        if (!amllActive || !amllReady || !amllPlayer) return;
+        if (!window.YTMod || !window.YTMod.player) return;
+        const pos = window.YTMod.player.getPositionMs();
+        if (Number.isFinite(pos)) amllDrive(pos);
+      } catch (e) {}
+    };
+    amllRaf = requestAnimationFrame(step);
+  }
   function amllStopOwnLoop() {
     if (amllRaf) cancelAnimationFrame(amllRaf);
     amllRaf = 0;
