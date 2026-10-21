@@ -454,22 +454,12 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
-/* Credits footer (Written By / provided by / Uploaded by / Made by). The same
-   markup Aurora uses for the built-in renderer. It lives in normal flow at the
-   bottom of the host rather than floating over the lyrics, so it reads as the
-   last block under all the lyric lines. */
-#ym-sl-amll-host {
-  display: flex;
-  flex-direction: column;
-}
-#ym-sl-amll-host .amll-lyric-player {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-#ym-sl-amll-host .ym-sl-credits {
+/* Credits footer (Written By / provided by / Uploaded by / Made by) goes into the
+   engine's own bottom-line slot, so it scrolls with the lyrics as the last block
+   - the same behaviour as the built-in renderer. The engine watches that element
+   with a MutationObserver and re-lays-out when its content changes. */
+#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
   position: static;
-  flex: 0 0 auto;
-  z-index: 6;
   pointer-events: auto;
 }
 `;
@@ -575,8 +565,10 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // only a buffer: lines inside the viewport are unaffected, so the look
       // does not change.
       player.setOverscanPx(150);
-      // Height comes from the flex layout (flex:1 1 auto) so the credits footer can
-      // sit below it in normal flow.
+      // The host is inset:0 of .LyricsContainer, so the player element fills it.
+      // The credits footer goes in the engine's own bottom-line slot, so this
+      // stays a plain full-height fill.
+      player.getElement().style.height = "100%";
       amllHost.appendChild(player.getElement());
       // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
       // bails on a missing player, so seeding first was a silent no-op.
@@ -757,7 +749,14 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     try {
       const names = (typeof currentSongwriters !== "undefined" && currentSongwriters) ? currentSongwriters : [];
       amllCreditsEl = buildCreditsFooter(names);
-      amllHost.appendChild(amllCreditsEl);
+      // The engine's bottom-line slot, not the host: it is laid out as the last
+      // item of the scrollable content, so the credits sit under all the lyrics
+      // exactly like the built-in renderer. Appending (rather than setting
+      // innerHTML) also trips the engine's MutationObserver, which resets the
+      // bottom line's position and re-runs layout.
+      let slot = null;
+      try { slot = amllPlayer.getBottomLineElement(); } catch (e) {}
+      (slot || amllHost).appendChild(amllCreditsEl);
     } catch (e) {}
   }
 
