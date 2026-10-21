@@ -18222,6 +18222,19 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     try {
       const groups = amllPlayer.currentLyricGroups || [];
       const t = amllPlayer.getCurrentTime();
+      // Work out the scroll target ONCE, before retiring anything. Retiring
+      // line-by-line and re-targeting on each one made the camera walk forward
+      // a line per frame, which read as "scrolls too far" - especially after a
+      // seek, when several finished lines are all still enabled.
+      let targetIdx = -1;
+      for (let i = 0; i < groups.length; i++) {
+        try {
+          const ln = groups[i].mainLine.getLine();
+          if (ln.startTime > t) { targetIdx = i; break; }
+          if (t >= ln.startTime && t <= ln.endTime) { targetIdx = i; break; }
+        } catch (err) {}
+      }
+      let retired = false;
       for (const group of groups) {
         if (!group || !group.mainLine) continue;
         let s = -1;
@@ -18237,31 +18250,23 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         if (!enabled) continue;
         amllCallMaybeAsync(group.mainLine.disable, group.mainLine);
         if (group.bgLine) amllCallMaybeAsync(group.bgLine.disable, group.bgLine);
-        // Retiring the line is not enough on its own: the engine derives its
-        // scroll target from the earliest still-highlighted group, and it only
-        // drops a finished group from that set when the NEXT line starts. So the
-        // camera kept aiming at the line we just retired and never advanced to
-        // the upcoming one. Drop it from the highlight set and point the
-        // snapshot at the next line, then force a layout pass so the springs
-        // retarget.
         try {
-          const idx = groups.indexOf(group);
           const tc = amllPlayer.timelineController;
-          if (tc && idx !== -1) {
-            if (tc.highlightedGroupsSet && typeof tc.highlightedGroupsSet.delete === "function") {
-              tc.highlightedGroupsSet.delete(idx);
-            }
-            if (tc.snapshot) {
-              let nextIdx = -1;
-              for (let i = idx + 1; i < groups.length; i++) {
-                try {
-                  if (groups[i].mainLine.getLine().startTime > t) { nextIdx = i; break; }
-                } catch (err) {}
-              }
-              if (nextIdx !== -1) tc.snapshot.scrollToIndex = nextIdx;
-            }
+          const idx = groups.indexOf(group);
+          if (tc && idx !== -1 && tc.highlightedGroupsSet &&
+              typeof tc.highlightedGroupsSet.delete === "function") {
+            tc.highlightedGroupsSet.delete(idx);
           }
-          if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("playback-tick");
+        } catch (err) {}
+        retired = true;
+      }
+      if (retired && targetIdx !== -1) {
+        try {
+          const tc = amllPlayer.timelineController;
+          if (tc && tc.snapshot && tc.snapshot.scrollToIndex !== targetIdx) {
+            tc.snapshot.scrollToIndex = targetIdx;
+            if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("playback-tick");
+          }
         } catch (err) {}
       }
     } catch (e) {}

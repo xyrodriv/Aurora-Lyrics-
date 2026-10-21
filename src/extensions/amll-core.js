@@ -6774,7 +6774,13 @@ function matrix4ToCSS(m, fractionDigits = 4) {
   const format = (n, _) => n.toFixed(fractionDigits);
   return `matrix3d(${m.map(format).join(", ")})`;
 }
-var ANIMATION_FRAME_QUANTITY = 32;
+// Aurora patch: 32 -> 12. Each emphasised character gets a glow AND a float
+// animation, each built from this many keyframes, so a 7-character word was
+// generating 7 * 2 * 32 = 448 keyframes. That is the dominant per-frame cost on
+// word-by-word lyrics and it scales with how many long words a song has, which
+// is why some parts of a track felt like 20fps and others 50. The easing is a
+// smooth bezier, so 12 samples are visually indistinguishable.
+var ANIMATION_FRAME_QUANTITY = 12;
 var norNum = (min2, max2) => (x) => clamp01((x - min2) / (max2 - min2));
 var EMP_EASING_MID = 0.5;
 var beginNum = norNum(0, EMP_EASING_MID);
