@@ -17715,13 +17715,20 @@ body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: n
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 /* Credits footer (Written By / provided by / Uploaded by / Made by). The same
-   markup Aurora uses for the built-in renderer, pinned over the bottom of the
-   engine's scroll area so it is always reachable. */
+   markup Aurora uses for the built-in renderer. It lives in normal flow at the
+   bottom of the host rather than floating over the lyrics, so it reads as the
+   last block under all the lyric lines. */
+#ym-sl-amll-host {
+  display: flex;
+  flex-direction: column;
+}
+#ym-sl-amll-host .amll-lyric-player {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 #ym-sl-amll-host .ym-sl-credits {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  position: static;
+  flex: 0 0 auto;
   z-index: 6;
   pointer-events: auto;
 }
@@ -17828,7 +17835,8 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // only a buffer: lines inside the viewport are unaffected, so the look
       // does not change.
       player.setOverscanPx(150);
-      player.getElement().style.height = "100%";
+      // Height comes from the flex layout (flex:1 1 auto) so the credits footer can
+      // sit below it in normal flow.
       amllHost.appendChild(player.getElement());
       // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
       // bails on a missing player, so seeding first was a silent no-op.
@@ -18157,7 +18165,13 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         if (!el || el === amllHost) return;
         const groups = amllPlayer.currentLyricGroups || [];
         for (const group of groups) {
-          if (!group || group.element !== el || !group.mainLine) continue;
+          // Compare against the LINE element, not group.element: the group's own
+          // element is the .FmKaba_lyricLineWrapper that WRAPS the line, so
+          // matching on it never succeeded and every click fell through.
+          if (!group || !group.mainLine) continue;
+          let lineEl = null;
+          try { lineEl = group.mainLine.getElement(); } catch (err) {}
+          if (lineEl !== el) continue;
           const ln = group.mainLine.getLine();
           const at = Number(ln.startTime);
           if (!Number.isFinite(at) || at < 0) return;
