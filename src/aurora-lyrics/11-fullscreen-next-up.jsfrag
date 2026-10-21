@@ -99,14 +99,9 @@
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       // Apply (or remove) the marquee now that the text is in the DOM and
-      // measurable. Done BEFORE publishFsBandVars() so the band's measured
-      // title-h reflects the (now stable) one-line height.
+      // measurable. No band re-measure follows: the chip no longer stacks off the
+      // title's height (AJ, 2026-10-20).
       updateFsTitleMarquee();
-      // The title's height decides where the chip starts, so re-measure after
-      // the text swap (this forces a sync layout, which is fine once per track).
-      // Done while the title is faded out, but it is still laid out, so the
-      // measurement is valid.
-      publishFsBandVars();
     };
     if (fsTitleSwapTimer) {
       window.clearTimeout(fsTitleSwapTimer);
@@ -182,80 +177,54 @@
     const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
-    if (stack) {
-      if (vol.parentElement !== chip.parentElement) {
-        chip.parentElement.appendChild(vol);
+    const column = chip.parentElement;
+    const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
+      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+    // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
+    // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
+    // only way the gaps stay equal: as a separate absolutely-positioned element
+    // the gap under the title depended on the column's CONTENT height, which CSS
+    // cannot subtract from a `bottom`.
+    if (side) {
+      if (fsTitleEl && fsTitleEl.parentElement !== column) {
+        column.insertBefore(fsTitleEl, column.firstChild);
       }
+    } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
+      // Back to an overlay child for background / lyrics-only.
+      fsOverlay.appendChild(fsTitleEl);
+    }
+    // The volume only leaves the scrubber for the cover-art column, which wants it
+    // on its own row under the transport.
+    const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
+    if (coverSide) {
+      if (vol.parentElement !== column) column.appendChild(vol);
     } else if (vol.parentElement !== scrubber) {
       scrubber.appendChild(vol);
     }
   }
 
-  // The rect of whichever cover-art element is currently VISIBLE. The static
-  // card is display:none while the animated stream plays, and a display:none
-  // getBoundingClientRect is all zeros — so band anchoring must pick the live
-  // element rather than always fsArtImg. (Measuring the hidden card silently
-  // fell back to the pane bottom and dropped the whole band ~100px,
-  // AJ, 2026-10-03.) Both elements share the same box, so the swap moment
-  // needs no re-publish.
-  function visibleFsArtRect() {
-    if (fsArtVideo && fsArtVideo.isConnected &&
-      fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")) {
-      const r = fsArtVideo.getBoundingClientRect();
-      if (r.height) return r;
-    }
-    if (fsArtImg && fsArtImg.isConnected) {
-      const r = fsArtImg.getBoundingClientRect();
-      if (r.height) return r;
-    }
-    return null;
-  }
-
-  function publishFsBandVars() {
+  // STATIC CHROME STRUCTURE (AJ, 2026-10-20).
+  // The measured band publisher that used to live here is GONE: it wrote
+  // --ym-sl-fs-band-top / -title-h / -art-left / -art-width / -pane-left /
+  // -pane-width from the media's live rect, and every write moved the controls.
+  // Positions are fixed lengths in 05-styles.jsfrag now. The only thing still
+  // needed here is the volume group's HOME, which differs per composition:
+  // the cover-art column wants it on its own row, every other layout keeps it
+  // on the scrubber. Called on a mode change only - never on a timer, because
+  // re-parenting a node is a real DOM move and must not happen mid-track.
+  let fsChromeRepinTimers = [];
+  function syncFsChromeStructure() {
     stackFsChrome();
-    if (!fsOverlay || !fsMediaHost) return;
-    // No video guard any more: the cover-art side layout anchors its title /
-    // chip / scrubber off the SAME band (see the top-anchored no-video rules), so
-    // the band has to be published for cover art too — otherwise the stack has
-    // no shared property to transition and snaps (AJ, 2026-09-28).
-    const paneRect = fsMediaHost.getBoundingClientRect();
-    // A pre-layout read returns 0; skip rather than publish a bogus anchor.
-    if (!paneRect.height) return;
-    // Cover art: anchor the band to the ARTWORK's own bottom edge, not the
-    // full-height pane, so the title + controls sit right under the centred art
-    // rather than at the pane's much lower bottom (AJ, 2026-10-03). Measure the
-    // VISIBLE artwork (animated <video> when ready, else the static card).
-    let bandBottom = paneRect.bottom;
-    if (!fsOverlay.classList.contains("ym-sl-fs-has-video")) {
-      const artRect = visibleFsArtRect();
-      if (artRect) bandBottom = artRect.bottom;
-    }
-    fsOverlay.style.setProperty("--ym-sl-fs-band-top", Math.round(bandBottom + FS_BAND_GAP) + "px");
-    // The scrubber spans the MEDIA PANE, not the overlay (AJ, 2026-10-01). The
-    // pane's width is derived from the video's aspect ratio against the available
-    // height, so NO percentage of the overlay can track it: the old
-    // left:4% / width:50% only ever lined up when the pane happened to be half
-    // the overlay at 4% in. Publish the pane's own horizontal box instead,
-    // measured off the same rect as the band so the two cannot disagree.
-    const overlayRect = fsOverlay.getBoundingClientRect();
-    if (overlayRect.width) {
-      fsOverlay.style.setProperty("--ym-sl-fs-pane-left", Math.round(paneRect.left - overlayRect.left) + "px");
-      fsOverlay.style.setProperty("--ym-sl-fs-pane-width", Math.round(paneRect.width) + "px");
-    }
-    // Cover art: publish the ARTWORK's own box so the Apple Music stack under it
-    // matches the art's width, not the wider media pane (AJ, 2026-10-03).
-    if (!fsOverlay.classList.contains("ym-sl-fs-has-video") && overlayRect.width) {
-      const artRect = visibleFsArtRect();
-      if (artRect && artRect.width) {
-        fsOverlay.style.setProperty("--ym-sl-fs-art-left", Math.round(artRect.left - overlayRect.left) + "px");
-        fsOverlay.style.setProperty("--ym-sl-fs-art-width", Math.round(artRect.width) + "px");
-      }
-    }
-    if (fsTitleEl) {
-      const titleH = fsTitleEl.getBoundingClientRect().height;
-      if (titleH > 0) {
-        fsOverlay.style.setProperty("--ym-sl-fs-title-h", Math.round(titleH) + "px");
-      }
-    }
+    positionFsEdgeButtons();
+    // The layout can settle a beat AFTER the classes flip — the pane's aspect
+    // ratio only arrives with the video's metadata. The Like/Dislike buttons are
+    // pinned from the transport chip's measured offset, so without these retries
+    // they can stay where the chip USED to be, which put them on top of the video
+    // (measured live: button at y 725-769, video spanning 270-810, AJ 2026-10-21).
+    // Two bounded retries, cancelled on every call so they cannot pile up.
+    fsChromeRepinTimers.forEach((t) => window.clearTimeout(t));
+    fsChromeRepinTimers = [150, 600].map((ms) => window.setTimeout(() => {
+      if (fsActive) positionFsEdgeButtons();
+    }, ms));
   }
 

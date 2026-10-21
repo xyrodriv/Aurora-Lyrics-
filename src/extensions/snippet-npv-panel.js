@@ -1500,6 +1500,13 @@ return Kawarp;
   // width bottoms out — so you can hold at WIDTH_MIN freely and only collapse
   // by flinging the cursor to the edge (AJ, 2026-10-19).
   const COLLAPSE_EDGE_MARGIN = 20;
+  // Collapsed peek, in px. PEEK_W is the sliver that stays on screen and is also
+  // the amount the page content is docked away from the right edge, so the tab
+  // never floats on top of it. PEEK_W_HOVER is the widened peek while the tab is
+  // hovered. Published to CSS as --ym-npv-peek / --ym-npv-peek-hover (see build())
+  // so the tab width, the frame transform and the page offset cannot drift apart.
+  const PEEK_W = 18;
+  const PEEK_W_HOVER = 24;
 
   let armed = false;
   let poll = 0;
@@ -1515,6 +1522,7 @@ return Kawarp;
   let lastKey = "";
   let metaPainted = false; // first paint skips the scroll-up delay (rises in instead)
   let collapsed = false;
+  let npvWidth = WIDTH_DEFAULT; // last applied rail width (see applyWidth)
   let npvCloseTimer = 0; // clears the ym-npv-closing class after the slide-out
   let npvShiftTimer = 0; // scopes the page-content transition to the toggle
   let kawarpOn = true; // from the add-on's "Ambient background" setting
@@ -1690,7 +1698,7 @@ return Kawarp;
   transition: transform .32s cubic-bezier(.22,1,.36,1);
   animation: ym-npv-in .3s cubic-bezier(.22,1,.36,1);
 }
-#${ROOT_ID}[data-collapsed="true"] .ym-npv-frame { transform: translateX(calc(100% - 18px)); }
+#${ROOT_ID}[data-collapsed="true"] .ym-npv-frame { transform: translateX(calc(100% - var(--ym-npv-peek, 18px))); }
 /* Seam width: how far the card is inset over the straight black backing.
    Tune the width here; the card keeps its own 14px corners. */
 #${ROOT_ID} .ym-npv-frame { --ym-npv-seam: 8px; }
@@ -1703,7 +1711,7 @@ return Kawarp;
 @keyframes ym-npv-slide-in {
   /* Start from the COLLAPSED position so expanding is a full slide out of the
      edge, mirroring the close (AJ, 2026-10-20). */
-  from { transform: translateX(calc(100% - 18px)); opacity: 0; filter: blur(7px); }
+  from { transform: translateX(calc(100% - var(--ym-npv-peek, 18px))); opacity: 0; filter: blur(7px); }
   to   { transform: none; opacity: 1; filter: blur(0); }
 }
 /* Close motion: the rail slides out with a short blur while its content sinks,
@@ -1713,7 +1721,7 @@ return Kawarp;
 }
 @keyframes ym-npv-slide-out {
   from { transform: none; opacity: 1; filter: blur(0); }
-  to   { transform: translateX(calc(100% - 18px)); opacity: .85; filter: blur(4px); }
+  to   { transform: translateX(calc(100% - var(--ym-npv-peek, 18px))); opacity: .85; filter: blur(4px); }
 }
 #${ROOT_ID} .ym-npv-closing .ym-npv-panel > * {
   animation: ym-npv-sink .3s cubic-bezier(.4,0,.2,1) both;
@@ -1748,7 +1756,9 @@ return Kawarp;
   /* Same radius as the plate: the gap between the two arcs is the band, and it
      curves with the card instead of running straight past the corner. */
   border-radius: 14px 0 0 14px;
-  box-shadow: -2px 0 24px rgba(0, 0, 0, 0.28);
+  /* NO box-shadow (AJ, 2026-10-20): the rail is DOCKED — the page content is
+     shifted beside it, not underneath it — so a left-cast shadow read as a drop
+     shadow floating over the content. */
   pointer-events: none;
 }
 /* Kawarp canvas: the video-reactive backdrop. Sits above the matte glass (which
@@ -2566,11 +2576,18 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 /* Collapsed edge: a thicker, rounded tab at the screen edge so the rail is
    clearly discoverable, with a larger chevron (AJ, 2026-10-20). */
 #${ROOT_ID} .ym-npv-edge {
-  position: fixed;
-  right: 0;
+  /* Anchored to the FRAME's left edge, not the viewport (AJ, 2026-10-20). The
+     frame carries the collapse transform, so the tab now rides the rail's leading
+     edge out and back, instead of standing still at the screen edge while the
+     rail fades in underneath it. */
+  position: absolute;
+  left: 0;
   top: 0;
   bottom: 0;
-  width: 18px;
+  /* Peek width is owned by JS (PEEK_W / PEEK_W_HOVER) and published as these two
+     vars so the tab, the frame's collapsed transform and the page offset can
+     never drift apart. */
+  width: var(--ym-npv-peek, 18px);
   padding: 0;
   border: 0;
   border-left: 1px solid rgba(255,255,255,.06);
@@ -2579,34 +2596,63 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
      glass seam show through, which read as a grey line / colour leak. */
   background: #000;
   color: rgba(255,255,255,.85);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, .55);
+  /* NO box-shadow (AJ, 2026-10-20) — see the card rule above. */
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transition: opacity .22s ease, width .22s ease, background .22s ease;
+  /* Expanding: keep the tab visible while the rail slides away, THEN fade — the
+     delay is the whole point, so the fade no longer races the slide
+     (AJ, 2026-10-20). */
+  transition: opacity .16s ease .24s, width .22s ease, background .22s ease;
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 2147483001;
 }
-#${ROOT_ID}[data-collapsed="true"] .ym-npv-edge { opacity: 1; pointer-events: auto; }
-#${ROOT_ID} .ym-npv-edge:hover { width: 24px; background: #000; border-left-color: rgba(255,255,255,.14); }
+#${ROOT_ID}[data-collapsed="true"] .ym-npv-edge {
+  opacity: 1;
+  pointer-events: auto;
+  /* Collapsing: appear early so the tab is visible for the whole slide. */
+  transition: opacity .16s ease .04s, width .22s ease, background .22s ease;
+}
+#${ROOT_ID} .ym-npv-edge:hover {
+  width: var(--ym-npv-peek-hover, 24px);
+  background: #000;
+  border-left-color: rgba(255,255,255,.14);
+}
+/* Hovering the tab widens the peek, so the frame has to follow or the extra 6px
+   would sit on top of the content the offset just reserved room for. */
+#${ROOT_ID}:has(.ym-npv-edge:hover)[data-collapsed="true"] .ym-npv-frame {
+  transform: translateX(calc(100% - var(--ym-npv-peek-hover, 24px)));
+}
 #${ROOT_ID} .ym-npv-edge svg { width: 18px; height: 18px; display: block; pointer-events: none; }
 
 /* DOCKED RAIL — full-height right column. The nav bar, player bar and all
    page content shift LEFT of the rail: the bottom bar (song + controls) ends
    at the rail's left edge instead of sliding under it, and the nav's right
-   icons stay clear of the rail's top. */
-body.ym-npv-open ytmusic-nav-bar {
-  right: var(--ym-npv-w) !important;
+   icons stay clear of the rail's top.
+
+   The shift comes from --ym-npv-offset, NOT --ym-npv-w, and that distinction is
+   the whole fix (AJ, 2026-10-20):
+     open      -> the rail width, var(--ym-npv-w)
+     collapsed -> PEEK_W (18px), the sliver that stays on screen
+     hover     -> PEEK_W_HOVER (24px) while the collapsed tab is hovered
+   --ym-npv-offset is ALWAYS a length, so right/width stay animatable in both
+   states. Previously the collapsed state simply DROPPED this class, so right
+   fell back from 420px to YouTube's own value — and px -> auto is not a
+   transitionable pair, which is why the page snapped instead of gliding.
+   Collapsed also reserves the peek width, so the tab no longer floats on top of
+   the page content. */
+body.ym-npv-docked ytmusic-nav-bar {
+  right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
-body.ym-npv-open ytmusic-player-page {
-  right: var(--ym-npv-w) !important;
+body.ym-npv-docked ytmusic-player-page {
+  right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
-body.ym-npv-open ytmusic-player-bar {
-  right: var(--ym-npv-w) !important;
+body.ym-npv-docked ytmusic-player-bar {
+  right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
 /* YTM paints the nav + player bar BACKGROUNDS as fixed full-width bands
@@ -2615,44 +2661,67 @@ body.ym-npv-open ytmusic-player-bar {
    translucent rail. The Dynamic theme adds its own full-width frosted layer
    (.ym-dynamic-bar-blur, fixed 0->viewport with a 1px top border — THE stray
    line at bar level); shift it with the rest. */
-body.ym-npv-open #player-bar-background,
-body.ym-npv-open #nav-bar-background {
+body.ym-npv-docked #player-bar-background,
+body.ym-npv-docked #nav-bar-background {
   left: 0 !important;
-  right: var(--ym-npv-w) !important;
+  right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
-body.ym-npv-open .ym-dynamic-bar-blur {
-  right: var(--ym-npv-w) !important;
+body.ym-npv-docked .ym-dynamic-bar-blur {
+  right: var(--ym-npv-offset, 0px) !important;
 }
 /* The APP-level #content only. A bare id selector also matched the inner
    content divs inside ytmusic-item-thumbnail-overlay-renderer, which are the
    boxes that position each card's play button — narrowing those pushed every
    play triangle to the left, by exactly the rail width. */
-body.ym-npv-open ytmusic-app-layout > #content,
-body.ym-npv-open #content.style-scope.ytmusic-app {
-  width: calc(100% - var(--ym-npv-w)) !important;
+body.ym-npv-docked ytmusic-app-layout > #content,
+body.ym-npv-docked #content.style-scope.ytmusic-app {
+  width: calc(100% - var(--ym-npv-offset, 0px)) !important;
 }
 /* The home feed lives INSIDE #content, which is already narrowed above. Giving
    ytmusic-section-list-renderer its own right margin subtracted the rail width
    a SECOND time, so the feed drifted left and its right edge was clipped — and
    the wider the rail, the worse it got. #content is the only element that
    reserves the space now. */
-body.ym-npv-open ytmusic-section-list-renderer {
+body.ym-npv-docked ytmusic-section-list-renderer {
   width: auto !important;
 }
 /* Page-content shift, scoped to the open/close toggle: the nav bar, player bar,
-   bands and #content glide left/right with the rail instead of snapping. */
+   bands and #content glide left/right with the rail instead of snapping.
+
+   PERF (AJ, 2026-10-20): this is the one genuinely expensive animation in the
+   add-on. Animating right/width is not compositable — the browser re-lays-out
+   the WHOLE feed on every frame, so a 380ms glide was ~23 full reflows of #content.
+   Two changes cut the cost a lot without changing how it looks:
+     1. .ym-dynamic-bar-blur is NO LONGER animated. It is a full-width fixed
+        layer with filter: blur(), so every frame forced a blur re-render on top
+        of the reflow. It now snaps with the layout; the bars still glide.
+     2. Duration 380ms -> 220ms, so ~13 reflows instead of ~23.
+   If it still hitches on a large feed, the honest fix is to stop animating
+   #content entirely — a reflow cannot be made cheap, only shorter. */
 body.ym-npv-animating ytmusic-nav-bar,
 body.ym-npv-animating ytmusic-player-page,
 body.ym-npv-animating ytmusic-player-bar,
 body.ym-npv-animating #player-bar-background,
 body.ym-npv-animating #nav-bar-background,
-body.ym-npv-animating .ym-dynamic-bar-blur,
 body.ym-npv-animating ytmusic-app-layout > #content,
 body.ym-npv-animating #content.style-scope.ytmusic-app {
-  transition: right .38s cubic-bezier(.22,1,.36,1),
-    width .38s cubic-bezier(.22,1,.36,1),
-    left .38s cubic-bezier(.22,1,.36,1);
+  transition: right .22s cubic-bezier(.22,1,.36,1),
+    width .22s cubic-bezier(.22,1,.36,1),
+    left .22s cubic-bezier(.22,1,.36,1);
+}
+/* #player-page needs its OWN, more specific rule. YouTube declares
+   transition: transform .3s on it from a two-class selector
+   (ytmusic-player-page.style-scope.ytmusic-app), which OUTRANKS the shared rule
+   above — so right snapped while the player bar (whose rule is weaker) glided,
+   and the tab strip + cover art inside it jumped instead of following.
+   The id in the selector wins the specificity fight, and transform is repeated in
+   the list with YouTube's own 0.3s curve so the guide's slide keeps its timing. */
+body.ym-npv-animating ytmusic-player-page#player-page {
+  transition: right .22s cubic-bezier(.22,1,.36,1),
+    width .22s cubic-bezier(.22,1,.36,1),
+    left .22s cubic-bezier(.22,1,.36,1),
+    transform .3s cubic-bezier(.2,0,.6,1);
 }
 
 /* Resize handle: a thin strip on the left edge of the rail that the user
@@ -2752,7 +2821,42 @@ body.ym-npv-animating #content.style-scope.ytmusic-app {
     // video doesn't collapse on narrow viewports).
     const cap = Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, (window.innerWidth || 1200) - 280));
     w = Math.max(WIDTH_MIN, Math.min(cap, w));
+    npvWidth = w;
     document.body.style.setProperty("--ym-npv-w", w + "px");
+    // The dock offset is its own variable, so it must be re-published here or a
+    // resize drag would move the rail without moving the page with it. No
+    // animation during a drag: the content has to track the cursor exactly.
+    if (!collapsed) applyNpvOffset(false);
+  }
+
+  /* ---- page dock offset ------------------------------------------------------
+     One variable owns how far the YTM chrome is pushed away from the right edge.
+     It is ALWAYS a length, which is what makes the open/close glide work: the old
+     model dropped the dock class when collapsed, so `right` fell back to
+     YouTube's own value and px -> auto cannot be transitioned (the snap AJ saw).
+     Collapsed it holds the peek width, so the tab sits BESIDE the content instead
+     of hovering over it. */
+  function beginNpvShift() {
+    // The transition is scoped to these toggles so YouTube's own layout changes
+    // (guide collapse, route swaps) never animate.
+    document.body.classList.add("ym-npv-animating");
+    void document.body.offsetWidth;
+    if (npvShiftTimer) window.clearTimeout(npvShiftTimer);
+    npvShiftTimer = window.setTimeout(() => {
+      npvShiftTimer = 0;
+      document.body.classList.remove("ym-npv-animating");
+    }, 280); // just past the .22s transition
+  }
+
+  function applyNpvOffset(animate) {
+    // Deliberately ignores the hover peek now (AJ, 2026-10-20). Changing the dock
+    // offset re-lays-out the entire feed, and hover fires constantly — a 6px
+    // reflow on every mouseover was the worst value-per-cost item in the add-on.
+    // The tab still widens and the rail edge still follows on hover (both are
+    // composited); only the PAGE stops tracking those 6px.
+    const w = collapsed ? PEEK_W : npvWidth;
+    if (animate) beginNpvShift();
+    document.body.style.setProperty("--ym-npv-offset", w + "px");
   }
 
   function currentVideoId() {
@@ -3293,9 +3397,16 @@ function syncLyricsDock() {
       const sb = h.subscriptionButton || {};
       const subR = sb.subscribeButtonRenderer || (sb.params ? sb : null);
       // Subscriber count (display only — the subscribe button was removed, AJ 2026-10-19).
-      const subs = subR
+      const rawSubs = subR
         ? (subR.subscriberCountText && (subR.subscriberCountText.simpleText || runsText(subR.subscriberCountText))) || ""
         : "";
+      // YouTube is inconsistent here: channel pages usually give "1.2M subscribers",
+      // but artist channels often give a bare "1.2M". Add the word only when it is
+      // missing, so the line never reads as a naked number under the monthly
+      // audience (AJ, 2026-10-21).
+      const subs = rawSubs && !/subscriber/i.test(rawSubs)
+        ? rawSubs + " subscribers"
+        : rawSubs;
       return {
         name: runsText(h.title),
         monthly: runsText(h.monthlyListenerCount),
@@ -3611,17 +3722,14 @@ function syncLyricsDock() {
   }
 
   function applyCollapsed() {
-    // Let the page content on the left glide with the rail. The class is only
-    // present during the toggle so YouTube's own layout changes never animate.
-    document.body.classList.add("ym-npv-animating");
-    void document.body.offsetWidth;
-    if (npvShiftTimer) window.clearTimeout(npvShiftTimer);
-    npvShiftTimer = window.setTimeout(() => {
-      npvShiftTimer = 0;
-      document.body.classList.remove("ym-npv-animating");
-    }, 440);
     root.dataset.collapsed = String(collapsed);
-    document.body.classList.toggle("ym-npv-open", !collapsed);
+    // ALWAYS docked while the snippet is mounted; --ym-npv-offset decides how far
+    // the page is pushed (rail width when open, peek width when collapsed).
+    // Dropping this class instead — the old behaviour — made `right` fall back to
+    // YouTube's own value, and px -> auto is not transitionable, hence the snap.
+    document.body.classList.add("ym-npv-docked");
+    // Glides the page content with the rail instead of snapping.
+    applyNpvOffset(true);
     edge.setAttribute("aria-expanded", String(!collapsed));
     const frameEl = root.querySelector(".ym-npv-frame");
     if (frameEl) {
@@ -4162,8 +4270,19 @@ function syncLyricsDock() {
       collapsed = false;
       applyCollapsed();
     });
+    // Hover peek is CSS-only now (see the :has() rule on .ym-npv-edge). It used to
+    // also push the page 6px, which cost a full feed reflow per mouseover — removed
+    // for performance (AJ, 2026-10-20). The tab and the rail edge still respond.
 
-    root = h("div", { id: ROOT_ID, "data-collapsed": "false" }, frame, resizeHandle, edge);
+    // The tab lives INSIDE the frame so it inherits the collapse transform and
+    // rides the rail's leading edge (see the .ym-npv-edge rule). Appended last so
+    // it paints above the glass and the panel.
+    frame.appendChild(edge);
+    root = h("div", { id: ROOT_ID, "data-collapsed": "false" }, frame, resizeHandle);
+    // Publish the peek widths so the tab width, the frame's collapsed transform and
+    // the page dock offset all read the same numbers. JS owns the constants.
+    root.style.setProperty("--ym-npv-peek", PEEK_W + "px");
+    root.style.setProperty("--ym-npv-peek-hover", PEEK_W_HOVER + "px");
     (document.body || document.documentElement).appendChild(root);
     setupResize();
     applyCollapsed();
@@ -4902,6 +5021,13 @@ function syncLyricsDock() {
     if (!armed) return;
     armed = false;
     if (poll) { window.clearInterval(poll); poll = 0; }
+    // This one was never cleared (found 2026-10-20): startNpvShadeLoop() creates a
+    // 700ms interval and nothing released it, so disabling the add-on left a timer
+    // and its closure alive for the life of the tab. It no longer threw because
+    // updateNpvShade() early-returns on !lyricsSlotEl, but it still woke the main
+    // thread forever. Nulling it also lets a re-arm start a fresh loop instead of
+    // silently depending on the stale one.
+    if (npvShadeTimer) { window.clearInterval(npvShadeTimer); npvShadeTimer = null; }
     if (queuePaintTimer) { window.clearTimeout(queuePaintTimer); queuePaintTimer = 0; }
     if (kawarpOffTimer) { window.clearTimeout(kawarpOffTimer); kawarpOffTimer = 0; }
     if (bgResizeObserver) { bgResizeObserver.disconnect(); bgResizeObserver = null; }
@@ -4917,7 +5043,8 @@ function syncLyricsDock() {
     savedVideo = null;
     floatHostEl = null;
     floatHostPrevVis = "";
-    document.body.classList.remove("ym-npv-open");
+    document.body.classList.remove("ym-npv-docked");
+    npvWidth = WIDTH_DEFAULT;
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
     if (root && root.parentElement) root.parentElement.removeChild(root);
@@ -4931,6 +5058,7 @@ function syncLyricsDock() {
     dragState = null;
     lastKey = "";
     document.body.style.removeProperty("--ym-npv-w");
+    document.body.style.removeProperty("--ym-npv-offset");
     console.log(TAG, "torn down");
   }
 

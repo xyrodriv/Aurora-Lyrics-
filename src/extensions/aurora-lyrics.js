@@ -1265,6 +1265,36 @@
   let fsLyricsHost = null;
   let fsSavedVideo = null; // { node, parent, next }
   let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
+  // True while the OLD cover card is deliberately kept on screen across a
+  // cover -> music-video swap, so the cut has something to cut FROM (AJ,
+  // 2026-10-20). Cleared the moment the video is revealed, so the 2s reconcile
+  // can resume tearing stray cards down.
+  let fsHoldCoverCard = false;
+  // ---- track-change media dissolve (AJ, 2026-10-20) ----------------------
+  // ONE opacity value on the media host drives every transition: fade out on the
+  // track change, fade back in when the incoming media can paint. Deliberately
+  // sequential (out -> in), not a crossfade, so it works identically for
+  // cover->cover, cover->MV, MV->cover and MV->MV (where there is no swap at
+  // all — the same <video> is reused).
+  let fsMediaFadingOut = false;
+  let fsMediaFadeOutAt = 0;
+  let fsMediaFadeTimer = 0;
+  // Hard ceiling on how long the media may stay dissolved. Whatever the incoming
+  // media does (no artwork URL, a broken image, a stalled stream), the pane comes
+  // back — a dark pane is worse than a late one.
+  let fsMediaFadeSafetyTimer = 0;
+  // Which track the dissolve was last started for, plus when. Dedupes the two
+  // signals that can both report the same skip (see fsMaybeFadeForTrackChange).
+  let fsFadeTrackId = "";
+  let fsFadeAt = 0;
+  // When findPlayerVideo() first reported videoWidth 0 while a video was still
+  // attached. Debounces "the source is reloading" against "this is an audio
+  // track" (musicVideoType is NOT available on this build — probe confirmed).
+  let fsVideoZeroSince = 0;
+  // True while the CHROME (credit + transport + scrubber) is dissolved for a
+  // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
+  // chrome completely still (AJ, 2026-10-21).
+  let fsChromeFading = false;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;
@@ -1380,9 +1410,9 @@
   // so it draws once per real video frame and cannot outrun the source.
   const FS_BG_RENDER_FPS = 60;
   const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
-  // Gap between the bottom of the centred MV pane and the top of the title.
-  // Used by publishFsBandVars() to compute --ym-sl-fs-band-top.
-  const FS_BAND_GAP = 18;
+  // NOTE (AJ, 2026-10-20): FS_BAND_GAP was removed with the measured band anchor.
+  // Chrome positions are fixed lengths in 05-styles.jsfrag now, so nothing needs
+  // the old 18px pane-to-title gap as a variable.
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
   // Shade sampling geometry. The sample covers the FULL lyric band: from the
   // left edge of the shade/lyric region, bottom to top, through to the right
@@ -1590,6 +1620,12 @@
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
+    // Whether the whole-word join above also applies to BACKGROUND-vocal lines.
+    // ON by default, which is the historical behaviour (bg lines joined too);
+    // turning it off keeps per-syllable karaoke on the bg lines while the lead
+    // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
+    // ON — joinApplies() checks the master switch first.
+    joinBgSyllables: true,
     // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
     // those runs into words at PARSE time so the fill/glow covers the whole
     // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
@@ -1771,6 +1807,10 @@
     currentSettings.joinLrcRedSyllables = booleanValue(
       currentSettings.joinLrcRedSyllables,
       DEFAULT_SETTINGS.joinLrcRedSyllables
+    );
+    currentSettings.joinBgSyllables = booleanValue(
+      currentSettings.joinBgSyllables,
+      DEFAULT_SETTINGS.joinBgSyllables
     );
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale
@@ -2322,6 +2362,20 @@
       pointer-events: none;
       transform: translateY(-8px) scale(.97);
     }
+    /* ⭐ A closed overlay was still INTERACTIVE (AJ, 2026-10-20). visibility:hidden
+       on a parent does NOT beat a child that sets visibility:visible, and
+       pointer-events:none does not block a child that sets pointer-events:auto —
+       and .ym-sl-options-panel.active sets BOTH. So the
+       active tab's slider and toggles stayed clickable while invisible, swallowing
+       hover over the lyrics underneath and changing the offset at random.
+       These selectors carry the extra class specifically to out-rank .active. */
+    .ym-sl-options-overlay.hidden .ym-sl-options-panel,
+    .ym-sl-fs-options-overlay.hidden .ym-sl-options-panel,
+    .ym-sl-options-overlay.hidden .ym-sl-options-panel.active,
+    .ym-sl-fs-options-overlay.hidden .ym-sl-options-panel.active {
+      visibility: hidden;
+      pointer-events: none;
+    }
     .ym-sl-options-overlay,
     .ym-sl-fs-options-overlay {
       opacity: 1;
@@ -2712,30 +2766,17 @@
     /* Fullscreen overlay is always block; media + lyrics are absolute so
        layout changes (side / background / lyrics-only) animate via CSS
        transitions instead of snapping. */
-    /* Registered so the band anchor can ANIMATE. publishFsBandVars() measures
-       the media pane and writes --ym-sl-fs-band-top / --ym-sl-fs-title-h; the
-       title, chip and scrubber are positioned with calc() off them. When a new
-       music video changes the pane's aspect ratio, the whole stack has to glide
-       to the new anchor — but an UNREGISTERED custom property flips instantly.
-       That is why the first reposition looked smooth (the pane's own width
-       transition carried it) and every later one snapped (AJ, 2026-09-28).
-       Registering them as <length> makes the transition below work; if a browser
-       lacks @property the values simply flip as before. */
-    @property --ym-sl-fs-band-top {
-      syntax: "<length>";
-      inherits: true;
-      initial-value: 828px;
-    }
-    @property --ym-sl-fs-title-h {
-      syntax: "<length>";
-      inherits: true;
-      initial-value: 26px;
-    }
-    .ym-sl-fs-overlay {
-      transition:
-        --ym-sl-fs-band-top .35s cubic-bezier(.22,.61,.36,1),
-        --ym-sl-fs-title-h .35s cubic-bezier(.22,.61,.36,1);
-    }
+    /* ⭐ STATIC CHROME MODEL (AJ, 2026-10-20).
+       The title / transport chip / scrubber used to be positioned from
+       --ym-sl-fs-band-top and --ym-sl-fs-title-h, both measured in JS off the
+       media pane's live rect and both transitioned over .35s. That made the
+       whole stack chase the media: every aspect-ratio change, every art swap and
+       every video-metadata arrival moved the anchor, so the controls drifted and
+       then settled ("moves a lot, then goes back to normal", AJ 2026-10-20).
+       The band vars, their @property registrations and the transition on them
+       are GONE. Every chrome position is now a fixed CSS length below, identical
+       on every track. Nothing measures the media to place the controls any more.
+       Animations are being rebuilt from this static base. */
     .ym-sl-fs-overlay {
       position: fixed;
       inset: 0;
@@ -3008,13 +3049,28 @@
       inset: 0;
       z-index: 21;
       pointer-events: none;
-      /* Fades with the media pane on a video <-> cover-art swap; see
-         .ym-sl-fs-swapping at the end of this block. */
-      transition: opacity .3s ease;
+      /* The fade-IN of a mode change. .14s out / .26s in — the out is quicker so
+         the restructure happens while the layer is already nearly invisible. */
+      transition: opacity .26s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-player-controls {
       opacity: 1;
       pointer-events: none;
+    }
+    /* ===== chrome dissolve on a MODE CHANGE (AJ, 2026-10-21) ================
+       Between cover and MV the whole control column restructures — the credit
+       moves from under the artwork to under the video, the transport changes from
+       a spread row to a centred one, the volume changes rows. None of that can be
+       interpolated, so the column fades out, the swap happens while it is
+       invisible, and it fades back in with the media.
+       MV -> MV never gets this class: nothing restructures, so the chrome must
+       stay perfectly still and only the media dissolves.
+       MUST stay AFTER the .ym-sl-fs-idle rule above: same specificity (0,3,0), so
+       source order decides — and the idle rule forces opacity 1, which is the
+       state the overlay is in most of the time. */
+    .ym-sl-fs-overlay.ym-sl-fs-chrome-out .ym-sl-fs-player-controls {
+      opacity: 0;
+      transition: opacity .14s ease;
     }
     /* Floating play chip (prev / play / next + volume), centered just above the
        scrubber.
@@ -3047,9 +3103,7 @@
       opacity: 0;
       pointer-events: auto;
       transition: opacity .22s ease, background-color .3s ease,
-        transform .35s cubic-bezier(.22,.61,.36,1),
-        top .35s cubic-bezier(.22,.61,.36,1),
-        bottom .35s cubic-bezier(.22,.61,.36,1);
+        transform .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-play-chip,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-play-chip {
@@ -3154,8 +3208,7 @@
       padding: 0 18px;
       pointer-events: auto;
       opacity: 0;
-      transition: opacity .25s ease, background-color .3s ease,
-        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+      transition: opacity .25s ease, background-color .3s ease;
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-scrubber,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-scrubber {
@@ -3608,9 +3661,7 @@
       pointer-events: none;
       transform: translateY(-8px);
       transition: opacity .18s ease, background-color .3s ease,
-        transform .35s cubic-bezier(.22,.61,.36,1),
-        left .35s cubic-bezier(.22,.61,.36,1), right .35s cubic-bezier(.22,.61,.36,1),
-        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+        transform .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
@@ -3938,12 +3989,10 @@
       transform: translateX(-50%) translateY(6px);
       animation: ym-sl-fs-title-in .34s cubic-bezier(.22,.61,.36,1) .08s forwards;
       /* Crossfade on a track change - see .ym-sl-fs-title-leaving below.
-         bottom/top are transitioned so the title glides when the media band
-         moves (a different MV aspect ratio changes --ym-sl-fs-band-top) instead
-         of snapping (AJ, 2026-09-28). */
+         NO top/bottom here (AJ, 2026-10-20): the position is static now, and
+         transitioning it was what made the credit glide after the media. */
       transition: opacity .24s ease, transform .24s ease,
         font-size .35s cubic-bezier(.22,.61,.36,1),
-        bottom .35s cubic-bezier(.22,.61,.36,1), top .35s cubic-bezier(.22,.61,.36,1),
         filter .3s ease;
     }
     .ym-sl-fs-title-artist { font-weight: 800; }
@@ -4107,9 +4156,23 @@
        left-aligned column under the artwork, spanning its width. Scoped to
        NO-VIDEO side mode; music videos keep their own layout (AJ, 2026-10-03). */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
-      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      /* FLOW ITEM, not an overlay child (AJ, 2026-10-21). stackFsChrome() moves
+         the credit INTO .ym-sl-fs-player-controls for this layout, so the block
+         is one column: art -> 16px -> title -> 14px -> seek -> transport ->
+         volume. That is what makes "title directly under the art, controls
+         directly under the title" exact — as a separate absolutely-positioned
+         element its gap to the controls depended on the column's unknown content
+         height. */
+      position: static;
+      order: 0;
+      left: auto;
+      bottom: auto;
+      width: auto;
       max-width: none;
+      /* MUST match the 16px the column is offset from the artwork's bottom edge
+         (see .ym-sl-fs-player-controls), or the two gaps read as different by a
+         couple of pixels — which AJ spotted immediately (2026-10-21). */
+      margin: 0 0 16px;
       text-align: left;
       /* Explicit, viewport-relative size so it scales on smaller monitors. */
       font-size: clamp(20px, 2.9vh, 36px);
@@ -4177,14 +4240,23 @@
          (AJ, 2026-10-18). gap:0 + chip margin-bottom:24px keeps the same total
          stack height while equalising the two distances. */
       gap: 0;
-      /* 18px below the title, matching FS_BAND_GAP: this offset IS the gap
-         between the title/artist block and the progress bar, and AJ asked for
-         it to match the cover-art -> title gap above (2026-10-03). */
-      top: calc(var(--ym-sl-fs-band-top, 0px) + var(--ym-sl-fs-title-h, 0px) + 18px);
+      /* STATIC (AJ, 2026-10-20): pinned to the bottom of the overlay instead of
+         being stacked off the measured band + title height. 18px matches the
+         old gap to the scrubber, so the column composition is unchanged — it
+         just no longer moves when the artwork changes size. */
+      /* Anchored to the ARTWORK's bottom edge, not the overlay's (AJ, 2026-10-21).
+         The art is 54vh tall, centred in a pane that stops 218px above the bottom
+         and nudged down 4vh, so its bottom edge is at
+             (100% - 218px) / 2 + 31vh
+         The block then flows DOWN from 16px below it. 218px mirrors the pane's
+         own bottom: 218px rule — if that changes, change it here too.
+         Width/left are the art's box: min(50%, 54vh) starting at
+         27% - min(25%, 27vh) (27% is the column midpoint). */
+      top: calc((100% - 218px) / 2 + 31vh + 16px);
       bottom: auto;
-      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
+      left: calc(27% - min(25%, 27vh));
       right: auto;
-      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      width: min(50%, 54vh);
       height: auto;
     }
     /* order: progress+times, then the transport chip, then the volume. */
@@ -4229,7 +4301,7 @@
       /* The whole gap below the transport. Paired with gap:0 on the stack above,
          this centres the transport between the seek bar and the volume even
          though the time row adds height on the seek side (AJ, 2026-10-18). */
-      margin-bottom: 24px;
+      margin-bottom: 16px;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
       order: 3;
@@ -4416,12 +4488,20 @@
        left/width further down (.ym-sl-fs-play-chip), which already outranked
        this rule. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      left: calc(var(--ym-sl-fs-pane-left, 2%) + var(--ym-sl-fs-pane-width, 50%) / 2);
+      /* 27% = the midpoint of the fixed 2% / 50% media column (2 + 50/2).
+         STATIC (AJ, 2026-10-20) — it used to be derived from the measured pane
+         box, so it re-centred itself whenever the pane's reported width moved. */
+      left: 27%;
       max-width: 50%;
     }
-    /* No-video: hero title, cover art sits directly above it. */
+    /* No-video: hero title, cover art sits directly above it.
+       210px clears the bottom-anchored control column (seek row + transport +
+       volume, height is content-driven) and keeps the art -> title gap at ~64px.
+       Tuned DOWN from 190px + a 14px column in one pass for "slightly more
+       compact" (AJ, 2026-10-21): title up 20, column up 10, transport->volume
+       gap 24 -> 16. These three numbers are the whole vertical rhythm. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
-      bottom: 160px;
+      bottom: 210px;
       font-size: 42px;
       line-height: 1.1;
       letter-spacing: -.015em;
@@ -4429,30 +4509,28 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
       bottom: 74px;
     }
-    /* Music video: smaller caption under the video pane. */
+    /* Music video: smaller caption under the video pane. The POSITION comes from
+       the flow block further down (the whole chrome is one column anchored to the
+       video's bottom edge), so no bottom offset here. */
     .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
-      bottom: 150px;
       font-size: 22px;
       line-height: 1.2;
       letter-spacing: 0;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
-      bottom: 72px;
-    }
     @media (max-height: 700px) {
+      /* Same stacking ORDER as the full-size rules above (title, then chip, then
+         scrubber), just compressed. The previous values were written for the old
+         measured band, where the chip sat below the title by construction — kept
+         as-is they overlapped once the positions became fixed (AJ, 2026-10-20). */
       .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
-        bottom: 136px;
+        bottom: 176px;
         font-size: 32px;
       }
       .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
-        bottom: 64px;
+        bottom: 66px;
       }
       .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
-        bottom: 128px;
         font-size: 18px;
-      }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
-        bottom: 62px;
       }
     }
     /* Lyrics-only has no media under the title, so the "hero title at the
@@ -4617,6 +4695,24 @@
     .ym-sl-fs-media {
       transition: opacity .25s ease;
     }
+    /* ===== track-change dissolve (AJ, 2026-10-21) ==========================
+       ⭐ Fading ONLY .ym-sl-fs-media was invisible for music videos. The ambient
+       backdrop behind it (Kawarp / the blurred-video canvas) is a blurred copy of
+       the SAME frame, so dropping the sharp layer to opacity 0 just revealed a
+       blurry version of itself — it read as "music videos don't fade at all".
+       The backdrop fades WITH the media now, so the pane genuinely goes dark
+       between tracks and the incoming one fades up into place.
+       This is a class, not an inline opacity, on purpose: the OUT is .22s, while
+       the IN falls back to each element's own transition (media .25s, Kawarp
+       .6s), which is exactly the asymmetry we want and cannot express with a
+       single inline value. */
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-kawarp,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-bg-canvas,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-bg-img {
+      opacity: 0;
+      transition: opacity .22s ease;
+    }
     /* Music videos: the hero on the left is the unblurred live video (the
        clone behind supplies the blurred light). Remove any softening filter
        so the left video stays crisp. */
@@ -4634,6 +4730,16 @@
        read too large beside the lyrics (AJ, 2026-10-03). Music videos are a
        <video>, and this <img> is only created for cover-art tracks, so MVs are
        untouched by this rule. */
+    /* Two cover arts for the first second of fullscreen (AJ, 2026-10-20). The
+       static card is shown while the animated art loads — deliberately, so the
+       pane is never blank — and the card is only REMOVED once the video has been
+       attached, which is what left both visible at once. Hide the card the moment
+       a READY art video exists in the pane, so it crossfades instead of
+       double-exposing. :has() keeps this pure CSS: no extra JS timing to desync. */
+    .ym-sl-fs-media:has(> video.ym-sl-fs-art-video.ym-sl-fs-art-video-ready) > img {
+      opacity: 0;
+      transition: opacity .3s ease;
+    }
     .ym-sl-fs-media > img,
     .ym-sl-fs-media > video.ym-sl-fs-art-video {
       display: block;
@@ -4727,30 +4833,110 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
       max-height: 100%;
     }
-    /* CENTRE the cover inside the shortened pane. It used to be bottom-aligned so
-       the title sat directly under it; now that the art is smaller, centring it
-       reads better, and the title / controls follow the ART's own bottom edge
-       instead of the pane's (see publishFsBandVars, AJ 2026-10-03). */
+    /* CENTRE the cover inside the shortened pane. The title / controls are at
+       fixed offsets from the overlay bottom (AJ, 2026-10-20), so they no longer
+       follow the art's bottom edge. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
       align-items: center;
     }
-    /* Both variants: the scrubber spans the MEDIA PANE, not the overlay centre,
-       so it sits exactly under the cover art / video. --ym-sl-fs-pane-left and
-       --ym-sl-fs-pane-width are measured off the pane's own rect by
-       publishFsBandVars(); a percentage CANNOT work here, because the pane's
-       width comes from the video's aspect ratio against the available height
-       (AJ, 2026-10-01). box-sizing MUST be border-box: this rule is content-box
-       by default, so the base padding of 0 18px used to ADD 36px and push the
-       bar 36px past the video's right edge — which is why it never lined up.
-       transform must be reset because the no-video pill base centres itself
-       with translateX(-50%), which would drag a pane-anchored bar off the pane. */
+    /* Both variants: the scrubber spans the MEDIA COLUMN, not the overlay centre,
+       so it sits exactly under the cover art / video. STATIC (AJ, 2026-10-20):
+       the column is a fixed 2% / 50% box, so the bar reads those numbers directly
+       instead of the measured pane rect. box-sizing MUST be border-box: this rule
+       is content-box by default, so the base padding of 0 18px used to ADD 36px
+       and push the bar 36px past the video's right edge. transform must be reset
+       because the no-video pill base centres itself with translateX(-50%), which
+       would drag a column-anchored bar off the column. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      left: var(--ym-sl-fs-pane-left, 4%);
+      left: 2%;
       right: auto;
-      width: var(--ym-sl-fs-pane-width, 50%);
+      width: 50%;
       box-sizing: border-box;
       transform: none;
-      bottom: 24px;
+      bottom: auto;
+      /* NO side padding: the base rule's 0 18px inset the row from the video's
+         edges by 18px each side, so the seek bar never lined up with the pane
+         (AJ, 2026-10-21: "same length as the video"). The row now spans the pane
+         exactly and the time labels sit flush against its edges. */
+      padding: 0;
+    }
+
+    /* ===== MV side layout: ONE flow under the video (AJ, 2026-10-21) ========
+       Credit, transport and scrubber are a single flex column starting 20px below
+       the VIDEO's bottom edge, not the viewport's. The pane is 50% wide, centred,
+       and aspect-ratio'd, so its bottom edge is
+           50% + 25vw / var(--ym-sl-fs-video-ratio)
+       That is why the ratio is published as a NUMBER: CSS can divide by a number
+       but not by a "1920 / 960" token. Anchoring to the viewport instead is what
+       made the gap under the video change with its shape.
+       LIMIT: max-height clamps very tall videos, so for those the real bottom
+       edge is higher than this formula and the gap grows. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      display: flex;
+      flex-direction: column;
+      /* STRETCH, not center, and the column IS the media column (2% / 50%). A
+         full-width column with align-items:center centred the transport and the
+         scrubber on the SCREEN while the title sat under the video — two
+         different axes (AJ, 2026-10-21). */
+      align-items: stretch;
+      justify-content: flex-start;
+      top: calc(50% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
+      bottom: auto;
+      left: 2%;
+      right: auto;
+      width: 50%;
+      height: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      position: static;
+      order: 0;
+      left: auto;
+      bottom: auto;
+      width: auto;
+      max-width: none;
+      /* 20px, matching the column's 20px offset from the video's bottom edge. It
+         looked BIGGER than the top gap because the chip below carried 10px of
+         vertical padding, which added to the space without appearing in either
+         number — the chip's padding is 0 now, so both gaps are honestly 20px. */
+      margin: 0 0 20px;
+      text-align: center;
+      transform: none;
+      /* ⭐ MUST swap the KEYFRAMES, not just the property. The base entrance
+         animation bakes translateX(-50%) into every frame and ends with a
+         forwards fill, so it keeps forcing the shift forever and outranks a
+         plain transform: none — that is why the caption sat 480px to the left
+         (measured: box x -442 with translateX(-480), AJ 2026-10-21). The -l
+         variant is the same rise without the translate. */
+      animation-name: ym-sl-fs-title-in-l;
+    }
+    /* Same for the leave animation, which also carries translateX(-50%). */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+      animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      position: static;
+      order: 1;
+      left: auto;
+      bottom: auto;
+      width: auto;
+      margin: 0 0 16px;
+      transform: none;
+      /* No vertical padding: it added 10px to the gap ABOVE the transport (which
+         is what made that gap read wider than the one under the video) and
+         inflated the row the edge buttons centre on. The buttons carry their own
+         hit area. */
+      padding: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      position: static;
+      order: 2;
+      left: auto;
+      right: auto;
+      bottom: auto;
+      width: auto;
+      margin: 0;
+      transform: none;
+      padding: 0;
     }
     /* The SEPARATOR sits dead under the title (AJ, 2026-10-01). The chip spans the
        pane and lays out as 1fr / auto / 1fr: the transport is pushed to the END of
@@ -4763,8 +4949,8 @@
        minmax(0, 1fr) not plain 1fr: a plain 1fr keeps an auto minimum, so a wide
        volume would widen its own column and drag the divider off centre. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      left: var(--ym-sl-fs-pane-left, 4%);
-      width: var(--ym-sl-fs-pane-width, 50%);
+      left: 2%;
+      width: 50%;
       max-width: none;
       transform: none;
       display: grid;
@@ -4877,22 +5063,18 @@
       z-index: 1;
       pointer-events: none;
     }
-    /* Cover-card crossfade (2026-09-28). Without the loading class the sharp
-       cover card painted the OLD decoded image during the window between the
-       fullscreen track-refresh tick setting a new src and the browser
-       finishing the new decode — meanwhile Kawarp had already loaded the
-       new art and was rendering it, so the pane briefly showed two different
-       covers at once. Adding the .ym-sl-fs-art-loading class on every src
-       swap (set by setFsArtSrc) drops the card to opacity 0 for the decode,
-       and removing it on the img's load event fades it back to opacity 1 —
-       by which point Kawarp also has the new art, so the two reveal
-       together. */
+    /* Cover card. It has NO opacity animation of its own any more (AJ,
+       2026-10-21). It used to carry a .ym-sl-fs-art-loading modifier that
+       dropped it to 0 while a new src decoded, to stop the sharp OLD bitmap
+       showing next to the new Kawarp backdrop. That modifier was a second
+       opacity animation fighting the track-change dissolve, and reconcile can
+       re-set the src up to 2s after a skip — outside any dissolve window — so
+       the card blinked by itself. The dissolve now covers every track change
+       (the pane is dark while the art swaps), and outside a track change the
+       src only changes between resolution variants of the SAME artwork, so the
+       old bitmap is never the wrong cover. */
     .ym-sl-fs-art {
       opacity: 1;
-      transition: opacity .28s ease;
-    }
-    .ym-sl-fs-art.ym-sl-fs-art-loading {
-      opacity: 0;
     }
     /* Animated Apple Music cover (m8tec HLS stream, played via hls.js). It
        shares the cover-card box with the static <img> and only ONE shows at a
@@ -4908,6 +5090,24 @@
       background: #000;
     }
     .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
+    /* SAFETY NET (AJ, 2026-10-20). YTM's player SIZES any <video> living inside
+       #player as if it were its own media element: it writes inline
+       inset: 140px 0 0; width: 637px; height: 358px onto our animated art video,
+       letterboxing a 16:9 stream inside the SQUARE #song-image and exposing
+       #player's own #606060 background above and below — the grey box.
+       !important is REQUIRED here: an inline style normally beats a stylesheet, and
+       !important in CSS is the only thing that outranks a non-important inline
+       declaration. Without it the geometry holds only until YTM's next sizing pass,
+       which is why switching tabs appeared to "fix" it (that re-runs
+       placeArtVideo(), which rewrites the style) and why it came back afterwards. */
+    #player video.ym-sl-fs-art-video {
+      position: absolute !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      border-radius: inherit;
+    }
     /* A not-ready animated cover must never occupy flex space. Two 583px squares
        in the 960px pane row shove the static card to x=-65 and clip the whole
        title/seek/transport stack (live-measured, AJ, 2026-10-18). This must
@@ -6514,9 +6714,8 @@
     /* The redesigned fullscreen controls are layout-agnostic: the chrome lives
        top-right (see .ym-sl-fs-controls at the top of this block) and the play
        chip + scrubber sit inside the full-size .ym-sl-fs-player-controls layer
-       (see .ym-sl-fs-player-controls above). In the side layouts they are
-       anchored to the media pane's bottom edge instead of the overlay's, via
-       --ym-sl-fs-band-top (see the MV side layout block at the end).
+       (see .ym-sl-fs-player-controls above). In the side layouts every position
+       is a FIXED length — nothing is measured off the media any more.
        The legacy per-layout repositioning that used to live here pushed the
        chrome to bottom-center and shrank the player-controls anchor to content
        width, which squeezed the play chip into the bottom-left corner on the
@@ -6533,51 +6732,14 @@
       }
     }
 
-    /* ===== MV side layout: hang the band off the video, not the screen =====
-       The pane is centred and sized to the video's aspect ratio, so its bottom
-       edge moves with the video. Anchoring the title + chrome to the overlay
-       bottom left a 94px hole under a 16:9 video (AJ: "it has too much space"),
-       and made the spacing depend on the video's shape. --ym-sl-fs-band-top is
-       published in px by publishFsBandVars(); these rules stack the title, the
-       transport chip and the scrubber directly beneath it, 18px under the
-       video and 12px apart. Fallbacks are the 16:9 / 1080p values so the first
-       paint before the video reports its size is still sensible.
-       The chip is a fixed 70px tall (50px play button + 2 x 10px padding).
-       These selectors carry the full :not() chain (specificity 0,5,0) so they
-       beat the per-variant bottom rules and the short-viewport media queries,
-       which is why bottom is reset to auto here. */
-    /* Cover-art side layout: the SAME top-anchored stack as the music-video case
-       below, so the title / chip / scrubber change ONE property (top) between
-       the two modes and can therefore TRANSITION. The old rules anchored them
-       with bottom: 160 / 74 / 24px, and bottom(auto) <-> top(length) is not
-       animatable — that is why the whole stack snapped on every MV <-> cover
-       swap (AJ, 2026-09-28). The values land within a few px of the old ones,
-       because the cover pane's bottom (100% - 218px) is what feeds
-       --ym-sl-fs-band-top. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      top: var(--ym-sl-fs-band-top, 828px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      top: var(--ym-sl-fs-band-top, 828px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
-      bottom: auto;
-    }
+    /* ===== STATIC SIDE STACK (AJ, 2026-10-20) =============================
+       Every control position is a fixed length. This block used to re-anchor the
+       title, chip and scrubber to --ym-sl-fs-band-top (measured from the media's
+       live rect and transitioned over .35s), which is what made the controls
+       drift on every aspect-ratio change, art swap and metadata arrival.
+       The base rules above already carry the static bottom values
+       (title 170/150, chip 74/72), so nothing is overridden here — the measured
+       system is simply gone. Animations are rebuilt from this base. */
 
     /* ===== side + lyrics-only: transport chip + scrubber never hide ========
        AJ wants the transport chip and the scrubber permanently visible in the
@@ -6598,35 +6760,13 @@
       pointer-events: auto;
     }
 
-    /* ===== media-mode swap crossfade =====================================
-       syncFsVideoMode() hides the media pane while it swaps a music video for
-       cover art (or back). The CHROME changes geometry in the same beat - the
-       title re-anchors and the transport / scrubber / volume restructure - and
-       none of that is interpolatable: auto <-> length widths, centred <-> left
-       alignment, static <-> absolute, grid <-> flex internals. So the chrome
-       cannot glide to its new home; it has to fade with the pane, exactly like
-       the pane already does. This class is the chrome half of that crossfade;
-       the pane half is the inline opacity syncFsVideoMode() sets.
-       The title fades via FILTER, not opacity: its entrance animation ends on
-       a forwards fill that outranks a plain opacity declaration, so an opacity
-       fade would simply never run (the same reason .ym-sl-fs-title-leaving
-       swaps in a whole animation). filter is not touched by those keyframes. */
-    /* ASYMMETRIC on purpose: the fade-OUT is .12s, the fade-IN stays .3s.
-       The downward move is driven by --ym-sl-fs-band-top, which the overlay
-       transitions over .35s, so at .3s the controls were still a good fraction
-       opaque while already travelling - it read as "move down, sit there, then
-       fade" (AJ, 2026-10-03). They now vanish before the travel is perceptible.
-       A transition declared HERE is the AFTER-CHANGE style for the class add, so
-       it governs the OUT direction only; removing the class falls back to the
-       slower base transition, which is what the reveal uses. */
-    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-title {
-      filter: opacity(0);
-      transition: filter .12s ease;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-player-controls {
-      opacity: 0;
-      transition: opacity .12s ease;
-    }
+    /* ===== media-mode swap: NO CROSSFADE (AJ, 2026-10-20) ==================
+       The .ym-sl-fs-swapping class and its two rules (title filter fade +
+       player-controls opacity fade) are REMOVED. syncFsVideoMode() no longer
+       hides the pane either, so a cover <-> music-video switch is a hard cut:
+       the outgoing image stays up until the incoming one can paint (the cover
+       card is held until the video is ready), then both swap in one frame.
+       Nothing to fade, nothing to time. */
   `;
 
   function findTabBar() {
@@ -7058,6 +7198,10 @@
       { label: "File", panel: panelFile },
       { label: "Cache", panel: panelCache },
     ];
+    // Options opens on Sync rather than Playing (AJ, 2026-10-20): Sync is what the
+    // panel is opened for (offset + pause sync), so defaulting to Playing made
+    // every visit start with a click. Index into optionSections above.
+    const DEFAULT_OPTION_TAB = 1;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -7116,13 +7260,13 @@
 
     const optionTabs = optionSections.map((section, index) => {
       const tab = h("button", {
-        class: "ym-sl-options-tab" + (index === 0 ? " active" : ""),
+        class: "ym-sl-options-tab" + (index === DEFAULT_OPTION_TAB ? " active" : ""),
         type: "button",
         role: "tab",
-        "aria-selected": index === 0 ? "true" : "false",
+        "aria-selected": index === DEFAULT_OPTION_TAB ? "true" : "false",
         text: section.label,
       });
-      if (index === 0) section.panel.classList.add("active");
+      if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
       optionsPanels.appendChild(section.panel);
       tab.addEventListener("click", () => {
         if (tab.classList.contains("active")) return;
@@ -7146,7 +7290,7 @@
     optionsOverlay._staggerOpen = () => {
       syncPanelsHeight();
       staggerIn(optionsRail, true);
-      staggerIn(optionSections[0].panel, false);
+      staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
     };
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
@@ -7514,10 +7658,20 @@
       const ar = v.videoWidth + " / " + v.videoHeight;
       if (fsOverlay.style.getPropertyValue("--ym-sl-fs-video-ar") !== ar) {
         fsOverlay.style.setProperty("--ym-sl-fs-video-ar", ar);
-        // The pane's height (and therefore the band anchor) just changed, but
-        // the new aspect-ratio has not been laid out yet, so measure on the
-        // next frame instead of reading a stale rect.
-        requestAnimationFrame(publishFsBandVars);
+        // ⭐ A plain NUMBER alongside the ratio (AJ, 2026-10-21). CSS can divide
+        // by a number but NOT by a "1920 / 960" token, so without this the chrome
+        // could not be anchored to the video's bottom edge — it had to be
+        // bottom-anchored to the viewport, which is why the gap under the video
+        // changed with its aspect ratio. The pane is 50% wide and centred, so its
+        // bottom edge is `50% + 25vw / ratio`.
+        if (v.videoWidth > 0 && v.videoHeight > 0) {
+          fsOverlay.style.setProperty(
+            "--ym-sl-fs-video-ratio",
+            String(v.videoWidth / v.videoHeight)
+          );
+        }
+        // No re-measure here any more (AJ, 2026-10-20): the chrome positions are
+        // fixed lengths, so a new aspect ratio only resizes the pane itself.
       }
     }
     const targetW = Math.max(2, Math.round(fsBgCanvas.clientWidth / 6));
@@ -7708,6 +7862,11 @@
     fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
     // Keep the opt-in MV-shade class in step with the setting on entry/switches.
     syncFsMvShadeClass();
+    // The volume group's home and the edge buttons follow the composition, so
+    // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
+    // are static — this only moves the volume node between the chip and the
+    // scrubber row, and re-pins the two edge buttons.
+    syncFsChromeStructure();
     if (fsLayoutSelect) {
       // Now a button rather than a <select>, so the mode rides on the dataset
       // instead of .value, and the tooltip is refreshed so the announced
@@ -7918,11 +8077,11 @@
     }
     syncFullscreenModeButtons();
     refreshFsRatingState();
-    // Re-pin the edge Like / Dislike every tick so a layout swap (side <-> cover /
-    // MV) that moves the media pane or the transport chip still lands the buttons
-    // correctly. positionFsEdgeButtons() re-reads both rects, so it is a no-op
-    // unless something actually moved.
-    positionFsEdgeButtons();
+    // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
+    // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
+    // so there is nothing to chase; re-pinning was itself a source of the
+    // "controls move a lot" behaviour. They are positioned once on entry and once
+    // per mode change (syncFsChromeStructure).
   }
 
   /* ---- shuffle / repeat mirroring -----------------------------------------
@@ -8137,7 +8296,6 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
-  let fsEdgeObserver = null;                // ResizeObserver that re-pins the edge buttons
 
   function loadFsRatings() {
     try {
@@ -8182,6 +8340,19 @@
   // Horizontal: media pane edges (so they track cover art / MV width).
   // Vertical:   the play chip's centre (so they sit on the same line as the
   //             transport controls, not floating at the video's mid-height).
+  // Sum of offsetTop from `node` up to `ancestor`, in LAYOUT space. Returns null
+  // when `ancestor` is not in the offsetParent chain, so the caller can fall back
+  // to rect maths. Used to measure past an in-flight transform.
+  function offsetWithin(node, ancestor) {
+    let y = 0;
+    let el = node;
+    while (el && el !== ancestor) {
+      y += el.offsetTop || 0;
+      el = el.offsetParent;
+    }
+    return el === ancestor ? y : null;
+  }
+
   function positionFsEdgeButtons() {
     if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     const layer = fsPlayerControls;
@@ -8196,11 +8367,24 @@
     // Vertical: centre on the transport chip. Its rect is valid even while the
     // chip is faded out (opacity does not affect layout). Fall back to the
     // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
+    //
+    // ⭐ LAYOUT offsets, not getBoundingClientRect (AJ, 2026-10-20). The chip
+    // animates with a TRANSFORM during fullscreen entry and on track change, and
+    // a rect includes that transform — so measuring mid-animation pinned the
+    // buttons to a half-slid position ("sometimes random, sometimes lower") until
+    // something re-ran this several seconds later. offsetTop is transform-free.
     const chip = layer.querySelector(".ym-sl-fs-play-chip");
     let top;
     if (chip) {
-      const cc = chip.getBoundingClientRect();
-      top = cc.top - lc.top + cc.height / 2 - bH / 2;
+      const rel = offsetWithin(chip, layer);
+      top = rel === null
+        // Not in the offsetParent chain of the layer (some intermediate positioned
+        // wrapper): fall back to the rects, which is still correct at rest.
+        ? (() => {
+            const cc = chip.getBoundingClientRect();
+            return cc.top - lc.top + cc.height / 2 - bH / 2;
+          })()
+        : rel + chip.offsetHeight / 2 - bH / 2;
     } else {
       top = lc.height - 46 - bH / 2;
     }
@@ -8472,7 +8656,6 @@
     // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
     // is above both; positionFsEdgeButtons() then pins them to the media's
     // horizontal edges and the transport row's vertical centre.
-    const fsMedia = document.querySelector(".ym-sl-fs-media");
     fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
       .forEach((n) => n.remove());
     fsPlayerControls.appendChild(likeButton);
@@ -8482,25 +8665,28 @@
     // them in over the existing .35s opacity transition instead of snapping them
     // on, so that flash is hidden behind the fade. The rating buttons live in the
     // controls layer now, so this fade does not affect their positioning.
-    if (fsMediaHost) fsMediaHost.style.opacity = "0";
+    if (fsMediaHost) {
+      // Route the entry through the same dissolve as a track change, but with the
+      // "out" already considered finished so the fade-in starts immediately.
+      fsMediaFadingOut = true;
+      fsMediaFadeOutAt = 0;
+      if (fsOverlay) fsOverlay.classList.add("ym-sl-fs-dissolving");
+    }
     if (fsLyricsHost) fsLyricsHost.style.opacity = "0";
     // Double rAF: paint opacity:0 first, then (a) drop ym-sl-fs-no-anim so the
-    // panes' .35s opacity transition is live, (b) clear opacity so they fade in,
-    // and (c) re-pin the edge buttons once the final layout has actually been
-    // laid out. positionFsEdgeButtons() reads the pane's own box, which is valid
-    // here whether or not the cover image has decoded yet.
+    // panes' transitions are live, (b) fade the media back in, and (c) home the
+    // chrome once the final layout has actually been laid out.
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
-      if (fsMediaHost) fsMediaHost.style.opacity = "";
+      if (fsMediaHost) fsFadeInMedia();
       if (fsLyricsHost) fsLyricsHost.style.opacity = "";
-      positionFsEdgeButtons();
+      syncFsChromeStructure();
     }));
-    positionFsEdgeButtons();
-    if (fsEdgeObserver) { try { fsEdgeObserver.disconnect(); } catch (_) {} }
-    if (fsMedia && typeof ResizeObserver !== "undefined") {
-      fsEdgeObserver = new ResizeObserver(() => positionFsEdgeButtons());
-      fsEdgeObserver.observe(fsMedia);
-    }
+    syncFsChromeStructure();
+    // The ResizeObserver that re-pinned the edge buttons whenever the media
+    // resized is REMOVED (AJ, 2026-10-20). It fired repeatedly while the pane
+    // animated its width, which slid the buttons along with it — one of the
+    // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
     exit.addEventListener("click", exitFullscreenMode);
@@ -9083,26 +9269,98 @@
   // Swap the fullscreen backdrop between music-video mode and cover-art mode
   // when the track changes mid-fullscreen (no-MV -> MV or vice versa).
   // enterFullscreenMode() decides once at entry; this catches the transitions.
-  // The swap is wrapped in a fade: fsMediaHost opacity goes to 0 (the .25s
-  // CSS transition on .ym-sl-fs-media handles the animation), the DOM swap
-  // runs, then opacity clears so it transitions back to 1 — replaces the
-  // snap AJ reported (2026-09-16). A guard timer prevents re-entry while a
-  // swap is already in flight.
+  // A guard timer prevents re-entry while a swap is already in flight.
+  //
+  // ===== INTENT vs READINESS (AJ, 2026-10-20) ==============================
+  // This used to key off findPlayerVideo(), which requires videoWidth > 0 — a
+  // READINESS test. On an MV -> audio skip YTM's recycled <video> keeps its old
+  // dimensions for a beat, so the detach could not fire until the new (audio)
+  // media reset them; on a cover -> MV skip it could not fire until the new
+  // video decoded. Both directions therefore waited, and the 2s tick was the
+  // only thing that re-checked. The player response's musicVideoType answers the
+  // INTENT question the moment the new track's response lands, so the mode is
+  // decided immediately and readiness is only used for the attach path.
+
+  // Last decisive answer. During a skip the player response can be briefly
+  // unavailable AND the recycled <video> reports videoWidth 0 at the same time —
+  // that pair used to read as "this track is audio", so the video was detached
+  // mid-reload. That is what made the CONTROLS restack into the cover-art
+  // arrangement between two music videos and then snap back (AJ, 2026-10-21).
+  // Holding the previous answer until a new one arrives makes the mode decision
+  // stable across a reload. Reset on fullscreen exit.
+  let fsLastKnownHasVideo = null;
+
+  function trackHasVideoByType() {
+    try {
+      const p = document.querySelector("ytmusic-player");
+      const resp = p && p.getPlayerResponse && p.getPlayerResponse();
+      const vd = resp && resp.videoDetails;
+      const type = vd && vd.musicVideoType;
+      // MUSIC_VIDEO_TYPE_ATV = album track (audio only). OMV / UGC / anything
+      // else that is present means there is a video to show.
+      if (typeof type === "string" && type) {
+        fsLastKnownHasVideo = type !== "MUSIC_VIDEO_TYPE_ATV";
+        return fsLastKnownHasVideo;
+      }
+    } catch (_) {}
+    // Unknown right now (mid-skip, older response shape, podcast): keep the last
+    // decision instead of letting a transient state flip the layout.
+    return fsLastKnownHasVideo;
+  }
+
   function syncFsVideoMode() {
     if (!fsActive || !fsMediaHost) return;
     if (fsVideoModeSwapTimer) return; // a swap is already in flight
     const liveVideo = findPlayerVideo();
     const hasAttached = !!fsSavedVideo;
-    if (liveVideo && hasAttached) return;
-    if (!liveVideo && !hasAttached) return;
+    const byType = trackHasVideoByType();
+    const wantVideo = byType === null ? !!liveVideo : byType;
+    // The recycled element reports videoWidth 0 for a beat on EVERY source
+    // change, so a single zero read must not be taken as "this track is audio".
+    if (liveVideo) fsVideoZeroSince = 0;
+    if (wantVideo && hasAttached) {
+      // MV -> MV: YTM reuses the SAME <video>, so there is no swap to perform —
+      // only its source changed. The media still has to fade back in, and it may
+      // only do so once the NEW stream is actually presenting frames.
+      if (fsMediaFadingOut) awaitFsVideoReady(fsSavedVideo.node);
+      return;
+    }
+    if (!wantVideo && !hasAttached) {
+      // A previous skip may have flipped the layout optimistically (below) and
+      // then been overtaken by an audio track. Drop the class or the pane would
+      // stay in video geometry with nothing in it.
+      if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video")) {
+        fsOverlay.classList.remove("ym-sl-fs-has-video");
+        syncFsChromeStructure();
+      }
+      return;
+    }
+    // Attaching still needs a real, decoded element; detaching does not.
+    if (wantVideo && !liveVideo) {
+      // ⭐ INTENT FIRST (AJ, 2026-10-20). Flip the LAYOUT to video geometry the
+      // moment the track is KNOWN to have a video — not when its element is
+      // decodable. Without this the pane stayed in cover geometry (tall, ~960x862)
+      // for the whole load window, so the new video first appeared in a tall
+      // cover-art-shaped box and then snapped to its real aspect ratio: exactly
+      // the "it shows in the cover art format, then as a regular video" AJ
+      // reported. Readiness is handled separately (the video stays at opacity 0
+      // until frames advance), so this cannot show a stale frame.
+      if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
+        fsOverlay.classList.add("ym-sl-fs-has-video");
+        syncFsChromeStructure();
+      }
+      // The new MV's <video> is not decodable yet. Poll for it instead of leaving
+      // the attach to the 2s refresh tick — THAT tick was the visible delay on a
+      // cover -> MV skip. Bounded, and it stops the moment the intent changes.
+      retryVideoModeUntilReady();
+      return;
+    }
 
-    fsMediaHost.style.opacity = "0";
-    // Fade the chrome in lockstep (see .ym-sl-fs-swapping). The pane fades out
-    // here and back in via revealFsMediaPaneNow(); the chrome has no such
-    // inline mechanism, so the class carries it through the same window.
-    fsOverlay.classList.add("ym-sl-fs-swapping");
-    // Timestamp for the settle gate that decides when the pane may come back.
-    fsMediaSwapAt = performance.now();
+    // Reaching this point means a REAL mode change (every no-op case returned
+    // above), so the chrome dissolves out first and the swap happens while it is
+    // invisible. The delay below is the chrome fade, not the media fade — the
+    // media is already dark for 220ms, so this costs nothing perceptible.
+    fsChromeFadeOut();
     fsVideoModeSwapTimer = setTimeout(() => {
       fsVideoModeSwapTimer = 0;
       // Guard each separately: touching fsMediaHost.style when fsMediaHost is
@@ -9114,8 +9372,22 @@
       // Re-read state inside the timer (the interval could have ticked again).
       const lv = findPlayerVideo();
       const ha = !!fsSavedVideo;
-      if (lv && ha) { revealFsMediaPaneNow(); return; }
-      if (lv && !ha) {
+      // ⚠️ `trackHasVideoByType()` is effectively always null on this YTM build —
+      // a probe confirmed `getPlayerResponse()` returns nothing, so there is no
+      // videoDetails and no musicVideoType. `want` therefore means "the <video>
+      // has dimensions", which is why the debounce below exists.
+      const byTypeNow = trackHasVideoByType();
+      const want = byTypeNow === null ? !!lv : byTypeNow;
+      if (want && ha) { revealFsMediaPaneNow(); return; }
+      if (!want && !ha) { revealFsMediaPaneNow(); return; }
+      if (want && !lv) {
+        // The element lost its dimensions between the call and this timer. Do NOT
+        // fade back in — the pane would show the backdrop with no video. Keep the
+        // dissolve parked and poll instead.
+        retryVideoModeUntilReady();
+        return;
+      }
+      if (want && !ha) {
         // Attach the live video (mirrors enterFullscreenMode).
         fsSavedVideo = {
           node: lv,
@@ -9124,6 +9396,8 @@
           cssText: lv.style.cssText,
         };
         fsOverlay.classList.add("ym-sl-fs-has-video");
+        // The mode changed, so the volume group's home may have to change with it.
+        syncFsChromeStructure();
         // Defensive: drop any stale canvas before creating a new one so a repeated
         // attach can never leave two ambient backdrops stacked.
         if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -9150,8 +9424,13 @@
         lv.style.setProperty("object-fit", "cover", "important");
         lv.style.setProperty("background", "transparent", "important");
         try { lv.play().catch(() => {}); } catch (_) {}
-        if (fsArtImg && fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
-        fsArtImg = null;
+        // The static card STAYS (AJ, 2026-10-20): removing it here left the pane
+        // empty for the whole video-ready wait. It is now the outgoing image the
+        // cut happens FROM — awaitFsVideoReady()'s finish() removes it at the same
+        // moment the video is revealed, so the swap is one hard cut.
+        // fsHoldCoverCard stops the 2s reconcile from tearing the card down while
+        // that wait is still running (it would re-open the gap we just closed).
+        fsHoldCoverCard = true;
         // An MV owns the pane now, so the animated HLS cover must go ENTIRELY.
         // It is a flex child of the same pane, and left in place it kept its
         // 583px of flow space beside the video — the pane's geometry (and the
@@ -9165,11 +9444,23 @@
         // revealing it here showed a SQUARE card with the old art's shape
         // (AJ, 2026-09-28). awaitFsVideoReady() reveals the pane and the video
         // together, once frames are actually advancing.
+        // Hidden until frames advance (the ready gate below), but with NO
+        // transition: the reveal is a cut, not a fade (AJ, 2026-10-20).
         lv.style.setProperty("opacity", "0", "important");
-        lv.style.setProperty("transition", "opacity .35s ease", "important");
         awaitFsVideoReady(lv);
         return;
-      } else if (!lv && ha) {
+      } else if (!want && ha) {
+        if (byTypeNow === null) {
+          // No type signal on this build, so `want` is only !!lv. Debounce: a
+          // zero videoWidth that has lasted less than FS_VIDEO_ZERO_DEBOUNCE_MS
+          // is a RELOAD, not an audio track. Without this, MV -> MV detached the
+          // video mid-skip, which dropped has-video and restacked the controls.
+          if (!fsVideoZeroSince) fsVideoZeroSince = performance.now();
+          if (performance.now() - fsVideoZeroSince < FS_VIDEO_ZERO_DEBOUNCE_MS) {
+            retryVideoModeUntilReady();
+            return;
+          }
+        }
         // Detach the stale video and fall back to cover art.
         const saved = fsSavedVideo;
         // Stop the draw loop FIRST, while fsSavedVideo is still set:
@@ -9196,6 +9487,8 @@
         }
         fsSavedVideo = null;
         fsOverlay.classList.remove("ym-sl-fs-has-video");
+        // The mode changed, so the volume group's home may have to change with it.
+        syncFsChromeStructure();
         // Drop the video's aspect ratio too — it is stale the instant the video
         // goes, and leaving it behind kept the pane on the MV's shape (it still
         // read 1920/1080 at the cover reveal).
@@ -9224,22 +9517,115 @@
           // second one here left the pane showing the cover twice, side by side
           // (AJ, 2026-09-28).
           const img = ensureFsArtImg();
+          // instant = no decode fade: this is a mode swap, so the card must
+          // appear in the same frame the video leaves (AJ, 2026-10-20).
           if (img) setFsArtSrc(img, hiResArt(artUrl));
         }
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
-        // Re-publish the band NOW. The pane's geometry just changed, and waiting
-        // for the 2s tick left the title on the OLD (video) anchor, so it
-        // overlapped the cover art until the tick moved it down (AJ, 2026-09-28).
-        // Deferred a frame so the new layout is measurable, and the band's own
-        // transition then carries the stack to the right place before the pane
-        // reveal finishes.
-        requestAnimationFrame(publishFsBandVars);
+        // No band re-publish (AJ, 2026-10-20): the chrome sits at fixed offsets,
+        // so a pane geometry change no longer has to move it.
       }
-      // Fade back in, once the new geometry has settled. (The MV attach path
-      // returns above and reveals the pane itself, once the video is actually
-      // producing frames.)
-      revealFsMediaPane();
+      // Fade back in. The MV attach path returns above and reveals once frames
+      // present. The COVER path waits for the new image to decode — its onload
+      // calls fsFadeInMedia — with a fallback timer so a missing or broken
+      // artwork URL can never leave the pane dark.
+      if (fsMediaFadingOut) {
+        window.setTimeout(() => { if (fsActive) fsFadeInMedia(); }, 420);
+      }
     }, FS_MEDIA_SWAP_MS);
+  }
+
+  // ===== event-driven track detection (AJ, 2026-10-20) =====================
+  // ⭐ The track watcher that calls refreshTrack() -> syncFsVideoMode() lives in
+  // housekeeping(), which runs on a 500ms INTERVAL. That interval was the last
+  // real source of the cover -> MV delay: the skip had to wait up to half a
+  // second before the mode was even evaluated, by which time the new video was
+  // already attached and the pane had been sitting in the previous layout.
+  //
+  // YTM's recycled <video> tells us sooner:
+  //   emptied / loadstart  -> the source was torn down (skip has begun)
+  //   loadedmetadata       -> the NEW stream is decodable (videoWidth is valid)
+  // Media events do not bubble, so they are captured at the document level.
+  // Both handlers are no-ops unless fullscreen is open.
+  let fsMediaWatchersOn = false;
+
+  function isFsPlayerVideo(node) {
+    if (!node || node.tagName !== "VIDEO") return false;
+    // Our own animated cover art is a <video> too — never treat it as the player.
+    if (node.classList && node.classList.contains("ym-sl-fs-art-video")) return false;
+    if (fsSavedVideo && node === fsSavedVideo.node) return true;
+    // Once reparented the node leaves ytmusic-player, so the container test is
+    // only the pre-attach case.
+    return !!(node.closest && (node.closest("ytmusic-player") || node.closest("#movie_player")));
+  }
+
+  function handleFsMediaEvent(event) {
+    if (!fsActive || !isFsPlayerVideo(event.target)) return;
+    if (event.type === "loadedmetadata") {
+      // Decodable now — evaluate immediately so the attach does not wait a tick.
+      syncFsVideoMode();
+      return;
+    }
+    // emptied / loadstart: a source was torn down and a new one is loading. This
+    // is ONE of the two track-change signals (see fsMaybeFadeForTrackChange); it
+    // is the fast one for cover -> *, and the LATE one for MV -> cover.
+    // Pass the CURRENT id, not "": an id match is a stronger dedupe than the time
+    // window, so a late loadstart from our own re-attach can never fade twice.
+    fsMaybeFadeForTrackChange("");
+    // The player response may still describe the OLD track, so give it a couple
+    // of frames before asking which mode this track wants. reconcileFsMediaArt()
+    // runs here too so a COVER -> COVER skip swaps the artwork on the same beat
+    // instead of waiting for the 500ms housekeeping pass (AJ, 2026-10-20).
+    window.setTimeout(() => {
+      if (!fsActive) return;
+      syncFsVideoMode();
+      reconcileFsMediaArt();
+    }, 80);
+  }
+
+  function startFsMediaWatchers() {
+    if (fsMediaWatchersOn) return;
+    fsMediaWatchersOn = true;
+    document.addEventListener("emptied", handleFsMediaEvent, true);
+    document.addEventListener("loadstart", handleFsMediaEvent, true);
+    document.addEventListener("loadedmetadata", handleFsMediaEvent, true);
+    // Seed so entering fullscreen mid-song never fades the media out.
+    fsFadeAt = 0;
+    // ⚠️ The videoId poll that used to live here is GONE. The probe proved
+    // `getPlayerResponse()` returns null on this build (vdKeys=NONE), so the id
+    // was always "" and the poll could never detect a change — it was 8Hz of
+    // nothing. The media events (emptied / loadstart) are the real signal and
+    // they DO fire at skip time, including on an MV -> cover skip.
+  }
+
+  function stopFsMediaWatchers() {
+    if (!fsMediaWatchersOn) return;
+    fsMediaWatchersOn = false;
+    document.removeEventListener("emptied", handleFsMediaEvent, true);
+    document.removeEventListener("loadstart", handleFsMediaEvent, true);
+    document.removeEventListener("loadedmetadata", handleFsMediaEvent, true);
+  }
+
+  // Short poll for a pending MV attach. syncFsVideoMode() can only attach once
+  // findPlayerVideo() reports real dimensions, and that happens when the NEW
+  // stream's metadata lands — anywhere from ~80ms to over a second after the
+  // skip. Leaving that to the 2s refresh tick is what made cover -> MV feel
+  // slow (AJ, 2026-10-20). 60ms cadence, 5s ceiling, and it stops the instant
+  // the intent stops being "video".
+  let fsVideoWaitTimer = 0;
+  function retryVideoModeUntilReady() {
+    if (fsVideoWaitTimer) return;
+    const deadline = performance.now() + 5000;
+    const tick = () => {
+      fsVideoWaitTimer = 0;
+      if (!fsActive || !fsOverlay) return;
+      syncFsVideoMode();
+      if (fsSavedVideo) return;                    // attached — done
+      if (performance.now() >= deadline) return;    // give the 2s tick the rest
+      if (trackHasVideoByType() === false) return;  // track changed to audio
+      fsVideoWaitTimer = window.setTimeout(tick, 60);
+    };
+    fsVideoWaitTimer = window.setTimeout(tick, 60);
   }
 
   // ---- music-video ready gate -------------------------------------------
@@ -9256,42 +9642,150 @@
   // passes FS_SPINNER_DELAY_MS. FS_VIDEO_READY_MAX_MS is the hard cap so it can
   // never get stuck.
   //
-  // FS_MEDIA_SWAP_MS matches the .ym-sl-fs-media opacity transition (.35s), so
-  // the outgoing card finishes fading before the DOM swap removes it.
-  const FS_MEDIA_SWAP_MS = 350;
+  // 350 -> 60 -> 140. Originally the media fade duration; then a couple of frames
+  // for the DOM to settle. Now it must also outlast the CHROME fade (.14s) so the
+  // control column is invisible when it restructures (AJ, 2026-10-21). The media
+  // dissolve is 220ms, so the swap still happens inside the dark window and costs
+  // nothing perceptible.
+  const FS_MEDIA_SWAP_MS = 140;
+  // How long a zero videoWidth must persist before it is read as "audio track".
+  // A source change zeroes it for a beat; an audio track keeps it at 0.
+  const FS_VIDEO_ZERO_DEBOUNCE_MS = 400;
   const FS_VIDEO_READY_MAX_MS = 8000;
-  const FS_VIDEO_READY_POLL_MS = 150;
+  const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
   let fsVideoSpinnerEl = null;
 
-  // The pane's geometry — its width, plus the aspect ratio the JS publishes via
-  // --ym-sl-fs-video-ar — and the backdrop layers all take a beat to settle after
-  // a media-mode swap, so revealing the pane immediately showed a
-  // half-transitioned box: the cover cropped into the video's 16:9 frame with the
-  // old blurred backdrop still behind it, and the pane still square on the way
-  // into an MV (AJ, 2026-09-28). Every swap now holds the pane hidden for at
-  // least this long.
-  const FS_MEDIA_SETTLE_MS = 800;
-  let fsMediaSwapAt = 0;
-  let fsPaneRevealSeq = 0;
+  // FS_MEDIA_SETTLE_MS / fsMediaSwapAt / fsPaneRevealSeq are GONE (AJ,
+  // 2026-10-20): they existed to hold the pane hidden until its geometry had
+  // animated, and the geometry is static now. The media is revealed by the
+  // track-change dissolve instead.
 
-  function revealFsMediaPaneNow() {
-    if (!fsMediaHost) return;
-    fsMediaHost.style.opacity = "";
-    // Drop the chrome half of the swap crossfade with the pane half.
-    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-swapping");
+  // ===== track-change media dissolve (AJ, 2026-10-20) ====================
+  // "When the song ends fade the video out, then when the next song starts fade
+  // it back in" — and the same for every combination of cover art / music video.
+  //
+  // The opacity lives on the media HOST, not on the <video>/<img>, so these two
+  // functions cover all four cases. MV -> MV has no swap at all (YTM reuses the
+  // element, only the source changes), so an element-level fade could not work.
+  // The backdrop (Kawarp / bg canvas) is a SIBLING of the host, so the media
+  // dissolves to the blurred backdrop rather than to black.
+  //
+  // Sequential by design (out, then in) rather than a crossfade: a crossfade
+  // needs both media on screen at once, and on a mode swap they share one pane.
+  const FS_MEDIA_FADE_OUT_MS = 220;
+
+  // Silent diagnostic (no console noise): keeps the last few dissolves on the
+  // overlay as a data attribute so the sequence can be read straight off the DOM
+  // with a selector inspect. Costs one attribute write per fade.
+  function fsNoteDissolve(kind) {
+    try {
+      if (!fsOverlay) return;
+      const prev = fsOverlay.getAttribute("data-ym-dissolve") || "";
+      const next = (prev + " " + kind + "@" + Math.round(performance.now())).slice(-160);
+      fsOverlay.setAttribute("data-ym-dissolve", next);
+    } catch (_) {}
   }
 
-  // Reveal the pane, but never sooner than FS_MEDIA_SETTLE_MS after the swap
-  // began, so the new geometry and backdrop have landed.
+  // ===== chrome dissolve, MODE CHANGES ONLY (AJ, 2026-10-21) ==============
+  // Between the cover and MV layouts the whole control column restructures: the
+  // credit moves from under the artwork to under the video, the transport swaps
+  // between a centred row and a spread row, and the volume changes rows. None of
+  // that is interpolatable, so it fades out, the swap happens while it is
+  // invisible, and it fades back in with the media.
+  // MV -> MV does NOT go through here — nothing restructures, so the chrome must
+  // stay perfectly still while only the media dissolves.
+  function fsChromeFadeOut() {
+    if (!fsOverlay) return;
+    fsChromeFading = true;
+    fsOverlay.classList.add("ym-sl-fs-chrome-out");
+  }
+
+  function fsChromeFadeIn() {
+    if (!fsOverlay || !fsChromeFading) return;
+    fsChromeFading = false;
+    fsOverlay.classList.remove("ym-sl-fs-chrome-out");
+  }
+
+  function fsFadeOutMedia() {
+    if (!fsOverlay) return;
+    fsMediaFadingOut = true;
+    fsMediaFadeOutAt = performance.now();
+    if (fsMediaFadeTimer) { clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
+    // The class fades the media AND its ambient backdrop together — see the
+    // .ym-sl-fs-dissolving rules in 05-styles. Fading the media alone was
+    // invisible on music videos, because the backdrop is a blurred copy of the
+    // same frame.
+    fsOverlay.classList.add("ym-sl-fs-dissolving");
+    fsNoteDissolve("out");
+    // Safety net: never leave the pane dissolved. 1.5s is longer than a normal
+    // image decode or video-metadata load, so it only fires on a real failure.
+    if (fsMediaFadeSafetyTimer) clearTimeout(fsMediaFadeSafetyTimer);
+    fsMediaFadeSafetyTimer = setTimeout(() => {
+      fsMediaFadeSafetyTimer = 0;
+      if (fsActive) fsFadeInMedia();
+    }, 1500);
+  }
+
+  function fsFadeInMedia() {
+    if (!fsOverlay || !fsMediaFadingOut) return;
+    fsMediaFadingOut = false;
+    if (fsMediaFadeSafetyTimer) { clearTimeout(fsMediaFadeSafetyTimer); fsMediaFadeSafetyTimer = 0; }
+    // Never cut the fade-out short: if the incoming media is ready before the
+    // 220ms out has elapsed, wait out the remainder so the dip always completes
+    // instead of bouncing back from half opacity.
+    const wait = Math.max(0, FS_MEDIA_FADE_OUT_MS - (performance.now() - fsMediaFadeOutAt));
+    if (fsMediaFadeTimer) { clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
+    const run = () => {
+      if (!fsOverlay || fsMediaFadingOut) return;
+      // Removing the class lets each layer return to its own natural opacity via
+      // its own transition (media .25s, Kawarp .6s) — no inline values to clean up.
+      fsOverlay.classList.remove("ym-sl-fs-dissolving");
+      fsNoteDissolve("in");
+      // No-op unless a mode change faded the chrome out.
+      fsChromeFadeIn();
+    };
+    if (wait > 0) fsMediaFadeTimer = setTimeout(run, wait);
+    else run();
+  }
+
+  // ---- one fade-out per track change ------------------------------------
+  // Two independent signals report a skip and they do NOT agree on timing:
+  //  - a media event (emptied / loadstart) fires when YTM reloads the <video>.
+  //    On a COVER -> * skip that is immediate. On an MV -> COVER skip the element
+  //    is not reloaded until WE restore it, so the first event lands AFTER the new
+  //    cover is already on screen — which is exactly the "cover shows first, then
+  //    disappears, then fades in" AJ reported (2026-10-20).
+  //  - the player response's videoId changes on every skip, immediately.
+  // Both funnel through here, and only ONE fade-out is allowed per track change.
+  const FS_MEDIA_FADE_DEDUPE_MS = 1200;
+
+  function fsMaybeFadeForTrackChange(id) {
+    if (id && id === fsFadeTrackId) return; // same track — nothing to do
+    const now = performance.now();
+    if (now - fsFadeAt < FS_MEDIA_FADE_DEDUPE_MS) {
+      // Already dissolving for this change. Remember the id so the second signal
+      // cannot start a second fade on top of the one in flight.
+      if (id) fsFadeTrackId = id;
+      return;
+    }
+    fsFadeAt = now;
+    if (id) fsFadeTrackId = id;
+    fsFadeOutMedia();
+  }
+
+  function revealFsMediaPaneNow() {
+    // Every "the pane may come back" path funnels through the dissolve now; if
+    // no fade-out is pending this is a no-op.
+    fsFadeInMedia();
+  }
+
+  // Kept as the call-site name, but no longer gated on FS_MEDIA_SETTLE_MS: that
+  // gate existed to let the pane's geometry transition finish before revealing,
+  // and the geometry is static now. Holding the fade-in for it added up to 800ms
+  // of black between the outgoing and incoming media (AJ, 2026-10-20).
   function revealFsMediaPane() {
-    const wait = Math.max(0, FS_MEDIA_SETTLE_MS - (performance.now() - fsMediaSwapAt));
-    const seq = ++fsPaneRevealSeq;
-    if (wait <= 0) { revealFsMediaPaneNow(); return; }
-    window.setTimeout(() => {
-      if (seq !== fsPaneRevealSeq) return;
-      revealFsMediaPaneNow();
-    }, wait);
+    revealFsMediaPaneNow();
   }
 
   // Dedicated to the video-ready wait: same look as the loading spinner but a
@@ -9314,24 +9808,32 @@
   // spinner can never linger over a later track.
   function cancelFsVideoReady() {
     fsVideoReadySeq++;
+    // The held card is released with the wait — reconcile owns it again.
+    fsHoldCoverCard = false;
     hideFsVideoSpinner();
   }
 
   function awaitFsVideoReady(video) {
     const seq = ++fsVideoReadySeq;
     hideFsVideoSpinner();
-    if (!fsActive || !video) { revealFsMediaPane(); return; }
+    if (!fsActive || !video) { fsHoldCoverCard = false; revealFsMediaPane(); return; }
     let spinnerTimer = 0;
     let pollTimer = 0;
     let giveUpTimer = 0;
-    let lastTime = video.currentTime;
+    const startedAt = performance.now();
+    let lastTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     let progressed = false;
     let done = false;
+    let frameHandle = 0;
     function cleanup() {
       done = true;
       if (spinnerTimer) { window.clearTimeout(spinnerTimer); spinnerTimer = 0; }
       if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
       if (giveUpTimer) { window.clearTimeout(giveUpTimer); giveUpTimer = 0; }
+      if (frameHandle && typeof video.cancelVideoFrameCallback === "function") {
+        try { video.cancelVideoFrameCallback(frameHandle); } catch (_) {}
+        frameHandle = 0;
+      }
       video.removeEventListener("playing", check);
       video.removeEventListener("timeupdate", check);
       video.removeEventListener("seeked", check);
@@ -9340,15 +9842,56 @@
       if (done || seq !== fsVideoReadySeq) return;
       cleanup();
       hideFsVideoSpinner();
+      // HARD CUT (AJ, 2026-10-20): the outgoing cover card is removed in the SAME
+      // frame the video becomes visible, so there is no cross-dissolve and no
+      // empty pane in between. Guarded on the video actually living in the pane,
+      // because the give-up timer can fire after a teardown.
+      if (video.parentElement === fsMediaHost) {
+        if (fsArtImg && fsArtImg.parentElement === fsMediaHost) {
+          fsMediaHost.removeChild(fsArtImg);
+        }
+        fsArtImg = null;
+        fsHoldCoverCard = false;
+      }
       video.style.setProperty("opacity", "1", "important");
       revealFsMediaPane();
     }
     function check() {
       if (done || seq !== fsVideoReadySeq) return;
       const t = video.currentTime;
+      // A recycled element reports NaN until the NEW stream has metadata. Letting
+      // that reach lastTime poisoned every later comparison, so the gate could
+      // only be satisfied by the 8s give-up timer (AJ, 2026-10-20).
+      if (!Number.isFinite(t)) return;
+      // A NEW SOURCE resets the clock. MV -> MV keeps the same element, so
+      // currentTime jumps back to ~0 — without this the gate kept comparing
+      // against the OLD track's position and could never be satisfied.
+      if (t < lastTime - 1) { lastTime = t; progressed = false; return; }
       if (t > lastTime + 0.02) progressed = true;
       lastTime = t;
-      if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) finish();
+      if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) { finish(); return; }
+      // PAUSED SKIP (AJ, 2026-10-20): a paused video never advances, so the
+      // progress test above can never pass and the pane would stay dissolved to
+      // the backdrop until the 8s give-up. A paused element with metadata already
+      // has its frame decoded, so show it after a short grace.
+      if (video.paused && video.readyState >= 2 && video.videoWidth > 0 &&
+          performance.now() - startedAt > 400) finish();
+    }
+    // ⭐ Frame-accurate detection (AJ, 2026-10-20). timeupdate is throttled to
+    // ~4Hz and the poll is one timer tick, so both can sit on an already-ready
+    // video for a whole interval — that interval is the "the video is hidden"
+    // delay on cover -> MV. requestVideoFrameCallback fires on the next PRESENTED
+    // frame (~16ms at 60fps), which is exactly the moment the new content is on
+    // screen. Falls back silently where the API is missing (the poll still runs).
+    function watchFrames() {
+      if (done || seq !== fsVideoReadySeq) return;
+      if (typeof video.requestVideoFrameCallback !== "function") return;
+      frameHandle = video.requestVideoFrameCallback(() => {
+        frameHandle = 0;
+        if (done || seq !== fsVideoReadySeq) return;
+        check();
+        watchFrames();
+      });
     }
     function poll() {
       if (done || seq !== fsVideoReadySeq) return;
@@ -9360,6 +9903,7 @@
     video.addEventListener("playing", check);
     video.addEventListener("timeupdate", check);
     video.addEventListener("seeked", check);
+    watchFrames(); // frame-accurate; the poll below is only the backstop
     poll(); // timeupdate is throttled, so poll as the backstop
     spinnerTimer = window.setTimeout(() => {
       spinnerTimer = 0;
@@ -9402,27 +9946,28 @@
   // reveal together. fsArtImgSeq invalidates stale onloads when src changes
   // mid-decode; the timeout is the belt that prevents a hung decode from
   // stranding the card at opacity:0.
+  // ⭐ NO PER-CARD FADE AT ALL (AJ, 2026-10-21). This used to toggle
+  // `.ym-sl-fs-art-loading` (card opacity 0 -> 1 over .28s) to hide the old
+  // bitmap while the new one decoded. That was a SECOND opacity animation
+  // competing with the host dissolve, and reconcile can re-set the src
+  // (bar thumbnail -> real artwork) up to 2s after a skip — outside any
+  // "recently faded" window — so the card blinked on its own. That blink is the
+  // "cover art flashes for some ms" AJ kept seeing.
+  // The dissolve owns every reveal now. The browser keeps painting the previous
+  // bitmap until the new one decodes, and outside a track change that bitmap is
+  // the SAME artwork (a resolution variant), so nothing wrong is ever shown.
   function setFsArtSrc(img, src) {
     if (!img || !src) return;
-    if (img.getAttribute("src") === src && !img.classList.contains("ym-sl-fs-art-loading")) return;
+    if (img.getAttribute("src") === src) return;
     const seq = ++fsArtImgSeq;
-    img.classList.add("ym-sl-fs-art-loading");
-    const reveal = () => {
-      if (seq !== fsArtImgSeq) return;
-      img.classList.remove("ym-sl-fs-art-loading");
-    };
-    img.onload = () => reveal();
-    img.onerror = () => reveal();
+    // The card is revealed by the host dissolve; this only drives its fade-in.
+    const reveal = () => { if (seq === fsArtImgSeq) fsFadeInMedia(); };
+    img.onload = reveal;
+    img.onerror = reveal;
     img.setAttribute("src", src);
-    // A cached image may already be complete at the moment we set src, in
-    // which case onload fires later but rAF covers the same-frame gap.
-    if (img.complete && img.naturalWidth > 0) {
-      requestAnimationFrame(reveal);
-    }
-    setTimeout(() => {
-      if (seq !== fsArtImgSeq) return;
-      if (img.complete) img.classList.remove("ym-sl-fs-art-loading");
-    }, 1500);
+    // A cached image can already be complete here; onload still fires, but rAF
+    // covers the same-frame gap so a cached cover does not wait a task.
+    if (img.complete && img.naturalWidth > 0) requestAnimationFrame(reveal);
   }
 
   // The pane must hold at most ONE sharp cover card. Two code paths can create
@@ -9549,7 +10094,20 @@
     const target = inFs ? fsMediaHost : (artInlineHost() || ensureArtWarmHost());
     if (!target) return;
     if (fsArtVideo.parentElement !== target) target.appendChild(fsArtVideo);
-    if (inFs) {
+    // ⭐ Geometry follows where the element ACTUALLY lives, not the inFs flag
+    // (AJ, 2026-10-20). The flag and the real parent can disagree for a frame or
+    // more after leaving fullscreen: the fs branch below strips the inline sizing
+    // and expects the .ym-sl-fs-media > video CSS to provide it, which does NOT
+    // match inside #song-image. The element then fell back to a 16:9 box inside
+    // the SQUARE player, so YTM's own #606060 background showed above and below it
+    // — that is the grey box, and the same desync is why two cover arts appeared
+    // in fullscreen. Keying off the real parent makes the branches impossible to
+    // desync.
+    const parentIsFsMedia = !!(
+      fsArtVideo.parentElement &&
+      fsArtVideo.parentElement.classList.contains("ym-sl-fs-media")
+    );
+    if (parentIsFsMedia) {
       // The fullscreen stylesheet owns the geometry.
       //
       // PRESERVE the inline `display`. Assigning cssText replaces the WHOLE
@@ -9629,9 +10187,8 @@
     if (fsArtImg) fsArtImg.style.display = "";
     // The ready class is gone, so this restores the player view's own cover too.
     placeArtVideo();
-    // The static card is back in layout — republish so the band anchors to the
-    // ART box again instead of a stale value (AJ, 2026-10-18).
-    publishFsBandVars();
+    // The static card is back in layout. No band re-publish needed — the chrome
+    // no longer anchors to the art box (AJ, 2026-10-20).
   }
 
   // Full removal: drop the video element + its hls instance entirely. Used when
@@ -9647,8 +10204,7 @@
     fsArtVideoLoadingKey = "";
     if (fsArtImg) fsArtImg.style.display = "";
     setInlineCoverHidden(false); // the player view gets its own cover back
-    // Static card is laid out again — re-anchor the band to the ART box.
-    publishFsBandVars();
+    // Static card is laid out again. No band re-publish (AJ, 2026-10-20).
   }
 
   // A CACHED animated cover is about to load, so do NOT show the static YTM cover
@@ -9680,13 +10236,7 @@
         if (fsArtImg) fsArtImg.style.display = "none";
         // Player view: hide YTM's own cover now that the animated one is up.
         placeArtVideo();
-        // REPUBLISH the band now that a real art box exists again. While the
-        // stream loaded, suppressStaticCardForAnimated() had the static card at
-        // display:none and the video was not ready, so publishFsBandVars()
-        // skipped the art box and left --ym-sl-fs-art-left/width unset. The CSS
-        // then fell back to the WIDER pane box, shifting the title + controls
-        // left and clipping them (AJ, 2026-10-18, intermittent after a skip).
-        publishFsBandVars();
+        // No band re-publish: the chrome is at fixed offsets (AJ, 2026-10-20).
         const p = video.play();
         if (p && p.catch) p.catch(() => {}); // autoplay may be deferred; ignore
       };
@@ -9921,11 +10471,7 @@
     // the class, so the re-home case is still covered (AJ, 2026-10-18).
     if (fsArtVideoKey === key && (fsArtVideoHls || (fsArtVideo && fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")))) {
       placeArtVideo();
-      // Re-anchor the band to the art box. This path is reached on every 2s
-      // reconcile tick while a stream is already playing, so it doubles as the
-      // catch-all that repairs a stale --ym-sl-fs-art-left/width after a skip
-      // (AJ, 2026-10-18).
-      publishFsBandVars();
+      // No band re-publish: the chrome is at fixed offsets (AJ, 2026-10-20).
       // Re-assert the static card's hide: the MV -> song transition can null
       // fsArtImg (the player-bar artwork briefly still reads as the MV's own
       // i.ytimg thumbnail, so reconcile's thumbnail branch drops the card),
@@ -10016,10 +10562,22 @@
     // (clamped to the MV pane's short height, hence cropped and small) beside
     // the video until the detach (AJ, 2026-09-28; the trace caught
     // reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
-    if (findPlayerVideo() || fsSavedVideo) {
+    // ⭐ Decide from the SAME intent signal syncFsVideoMode uses (AJ, 2026-10-21).
+    // `findPlayerVideo()` alone is transient during a reload — the recycled
+    // element reports videoWidth 0 for a beat — so this branch used to flip on
+    // and off mid-skip, removing and re-creating the cover card (the art that
+    // "shows, disappears, shows again"). A still-attached video keeps ownership
+    // until the detach actually runs.
+    const byType = trackHasVideoByType();
+    const videoOwnsPane = byType === null
+      ? !!(findPlayerVideo() || fsSavedVideo)
+      : (byType || !!fsSavedVideo);
+    if (videoOwnsPane) {
       // Symmetric teardown: never leave a cover card sitting on top of a video.
       // MV -> MV returns early inside syncFsVideoMode, so nothing else clears it.
-      if (fsArtImg) {
+      // EXCEPT while a cover -> MV swap is holding the card as its outgoing image
+      // (AJ, 2026-10-20) — finish() clears it in the same frame the video shows.
+      if (fsArtImg && !fsHoldCoverCard) {
         if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
         fsArtImg = null;
       }
@@ -10035,13 +10593,14 @@
     const hi = hiResArt(artUrl);
     if (!hi) return;
     if (isVideoThumbnailUrl(hi)) {
-      // The MV's own thumbnail, not cover art: drop any card and keep the pane
-      // hidden until the video attaches and reveals it.
+      // The MV's own thumbnail, not cover art: drop any card. The pane is NOT
+      // hidden (AJ, 2026-10-20) — hiding it faded to black and then faded the
+      // video back in. It now keeps its blurred backdrop until the video attaches
+      // and the reveal is a cut.
       if (fsArtImg) {
         if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
         fsArtImg = null;
       }
-      if (fsMediaHost) fsMediaHost.style.opacity = "0";
       return;
     }
     const img = ensureFsArtImg();
@@ -10180,15 +10739,9 @@
     // injected <style> tag in place for the next overflow.
     fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
     fsTitleRO.observe(fsTitleEl);
-    // The band anchor is measured from THIS title's height, and its font-size is
-    // TRANSITIONED (.35s) — so a measurement taken right after a mode swap reads
-    // the mid-zoom height, and the chip / scrubber (which stack off title-h)
-    // stayed on the stale value until the 2s tick corrected them, which read as a
-    // 2s animation delay on the controls only (AJ, 2026-09-28). Re-publish once
-    // the size transition has actually finished.
-    fsTitleEl.addEventListener("transitionend", (event) => {
-      if (event.propertyName === "font-size") publishFsBandVars();
-    });
+    // The font-size transitionend re-measure that used to live here is gone
+    // (AJ, 2026-10-20): the chip and scrubber no longer stack off the title's
+    // measured height, so there is nothing to re-sync after the zoom.
     // Request native browser fullscreen immediately while the user activation
     // from the click is still fresh. documentElement is always present, always
     // laid out, and always allowed; requesting on fsOverlay failed silently in
@@ -10303,10 +10856,10 @@
       // switches from cover art to the live video (or back). Without this,
       // fullscreen opened on a no-MV track is stuck on cover art forever.
       syncFsVideoMode();
-      // Also re-derive the band anchor: this is the only place that notices a
-      // viewport resize while fullscreen is open (the pane is centred and
-      // sized from the viewport, so both its width and height move).
-      publishFsBandVars();
+      // No band re-derive here any more (AJ, 2026-10-20). This tick used to be
+      // the only thing that noticed a viewport resize and moved the chrome; the
+      // chrome is anchored to the overlay's own bottom now, so it follows a
+      // resize by itself.
       // Catch a track change between a live video and a still upload
       // (Official Audio / Lyric Video) while staying in MV mode. Idempotent.
       applyStaticVideoBackdrop();
@@ -10330,17 +10883,23 @@
     document.addEventListener("keydown", handleFsKeydown, true);
     document.addEventListener("fullscreenchange", handleFsFullscreenChange);
     startFsIdleTracking();
+    // Media-element watchers: they detect a skip the moment YTM tears the source
+    // down, instead of waiting up to 500ms for the housekeeping pass.
+    startFsMediaWatchers();
   }
 
   function exitFullscreenMode() {
     if (!fsActive) return;
     if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
-    // A swap killed mid-flight would leave the chrome faded out; clear it so
-    // fullscreen can never come back with invisible controls.
-    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-swapping");
+    // Stop the pending-MV attach poll too, or it would keep calling
+    // syncFsVideoMode() after the overlay is gone.
+    if (fsVideoWaitTimer) { clearTimeout(fsVideoWaitTimer); fsVideoWaitTimer = 0; }
+    // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
+    // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;
     stopFsIdleTracking();
     document.removeEventListener("keydown", handleFsKeydown, true);
+    stopFsMediaWatchers();
     document.removeEventListener("fullscreenchange", handleFsFullscreenChange);
 
     try {
@@ -10468,8 +11027,15 @@
     // cannot restore a pane that no longer exists.
     cancelFsVideoReady();
     fsVideoSpinnerEl = null;
-    // Drop any pending settle-gated pane reveal too.
-    fsPaneRevealSeq++;
+    // Drop any pending media dissolve: the pane is going away, so clear the
+    // timer and the flag instead of letting a stale fade-in run against a
+    // detached host.
+    if (fsMediaFadeTimer) { window.clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
+    if (fsMediaFadeSafetyTimer) { window.clearTimeout(fsMediaFadeSafetyTimer); fsMediaFadeSafetyTimer = 0; }
+    fsMediaFadingOut = false;
+    // The sticky mode decision must not survive the session — the next entry has
+    // to re-read the track that is playing then.
+    fsLastKnownHasVideo = null;
     // Idle fill ring: the node lived in fsOverlay (removed), so drop the ref
     // and any pending show/leave timers.
     if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
@@ -10500,6 +11066,7 @@
     fsTimeTotal = null;
     fsScrubTip = null;
     fsSavedVideo = null;
+    fsHoldCoverCard = false;
     fsSavedPanel = null;
   }
 
@@ -10868,14 +11435,9 @@
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       // Apply (or remove) the marquee now that the text is in the DOM and
-      // measurable. Done BEFORE publishFsBandVars() so the band's measured
-      // title-h reflects the (now stable) one-line height.
+      // measurable. No band re-measure follows: the chip no longer stacks off the
+      // title's height (AJ, 2026-10-20).
       updateFsTitleMarquee();
-      // The title's height decides where the chip starts, so re-measure after
-      // the text swap (this forces a sync layout, which is fine once per track).
-      // Done while the title is faded out, but it is still laid out, so the
-      // measurement is valid.
-      publishFsBandVars();
     };
     if (fsTitleSwapTimer) {
       window.clearTimeout(fsTitleSwapTimer);
@@ -10951,81 +11513,55 @@
     const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
-    if (stack) {
-      if (vol.parentElement !== chip.parentElement) {
-        chip.parentElement.appendChild(vol);
+    const column = chip.parentElement;
+    const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
+      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+    // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
+    // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
+    // only way the gaps stay equal: as a separate absolutely-positioned element
+    // the gap under the title depended on the column's CONTENT height, which CSS
+    // cannot subtract from a `bottom`.
+    if (side) {
+      if (fsTitleEl && fsTitleEl.parentElement !== column) {
+        column.insertBefore(fsTitleEl, column.firstChild);
       }
+    } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
+      // Back to an overlay child for background / lyrics-only.
+      fsOverlay.appendChild(fsTitleEl);
+    }
+    // The volume only leaves the scrubber for the cover-art column, which wants it
+    // on its own row under the transport.
+    const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
+    if (coverSide) {
+      if (vol.parentElement !== column) column.appendChild(vol);
     } else if (vol.parentElement !== scrubber) {
       scrubber.appendChild(vol);
     }
   }
 
-  // The rect of whichever cover-art element is currently VISIBLE. The static
-  // card is display:none while the animated stream plays, and a display:none
-  // getBoundingClientRect is all zeros — so band anchoring must pick the live
-  // element rather than always fsArtImg. (Measuring the hidden card silently
-  // fell back to the pane bottom and dropped the whole band ~100px,
-  // AJ, 2026-10-03.) Both elements share the same box, so the swap moment
-  // needs no re-publish.
-  function visibleFsArtRect() {
-    if (fsArtVideo && fsArtVideo.isConnected &&
-      fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")) {
-      const r = fsArtVideo.getBoundingClientRect();
-      if (r.height) return r;
-    }
-    if (fsArtImg && fsArtImg.isConnected) {
-      const r = fsArtImg.getBoundingClientRect();
-      if (r.height) return r;
-    }
-    return null;
-  }
-
-  function publishFsBandVars() {
+  // STATIC CHROME STRUCTURE (AJ, 2026-10-20).
+  // The measured band publisher that used to live here is GONE: it wrote
+  // --ym-sl-fs-band-top / -title-h / -art-left / -art-width / -pane-left /
+  // -pane-width from the media's live rect, and every write moved the controls.
+  // Positions are fixed lengths in 05-styles.jsfrag now. The only thing still
+  // needed here is the volume group's HOME, which differs per composition:
+  // the cover-art column wants it on its own row, every other layout keeps it
+  // on the scrubber. Called on a mode change only - never on a timer, because
+  // re-parenting a node is a real DOM move and must not happen mid-track.
+  let fsChromeRepinTimers = [];
+  function syncFsChromeStructure() {
     stackFsChrome();
-    if (!fsOverlay || !fsMediaHost) return;
-    // No video guard any more: the cover-art side layout anchors its title /
-    // chip / scrubber off the SAME band (see the top-anchored no-video rules), so
-    // the band has to be published for cover art too — otherwise the stack has
-    // no shared property to transition and snaps (AJ, 2026-09-28).
-    const paneRect = fsMediaHost.getBoundingClientRect();
-    // A pre-layout read returns 0; skip rather than publish a bogus anchor.
-    if (!paneRect.height) return;
-    // Cover art: anchor the band to the ARTWORK's own bottom edge, not the
-    // full-height pane, so the title + controls sit right under the centred art
-    // rather than at the pane's much lower bottom (AJ, 2026-10-03). Measure the
-    // VISIBLE artwork (animated <video> when ready, else the static card).
-    let bandBottom = paneRect.bottom;
-    if (!fsOverlay.classList.contains("ym-sl-fs-has-video")) {
-      const artRect = visibleFsArtRect();
-      if (artRect) bandBottom = artRect.bottom;
-    }
-    fsOverlay.style.setProperty("--ym-sl-fs-band-top", Math.round(bandBottom + FS_BAND_GAP) + "px");
-    // The scrubber spans the MEDIA PANE, not the overlay (AJ, 2026-10-01). The
-    // pane's width is derived from the video's aspect ratio against the available
-    // height, so NO percentage of the overlay can track it: the old
-    // left:4% / width:50% only ever lined up when the pane happened to be half
-    // the overlay at 4% in. Publish the pane's own horizontal box instead,
-    // measured off the same rect as the band so the two cannot disagree.
-    const overlayRect = fsOverlay.getBoundingClientRect();
-    if (overlayRect.width) {
-      fsOverlay.style.setProperty("--ym-sl-fs-pane-left", Math.round(paneRect.left - overlayRect.left) + "px");
-      fsOverlay.style.setProperty("--ym-sl-fs-pane-width", Math.round(paneRect.width) + "px");
-    }
-    // Cover art: publish the ARTWORK's own box so the Apple Music stack under it
-    // matches the art's width, not the wider media pane (AJ, 2026-10-03).
-    if (!fsOverlay.classList.contains("ym-sl-fs-has-video") && overlayRect.width) {
-      const artRect = visibleFsArtRect();
-      if (artRect && artRect.width) {
-        fsOverlay.style.setProperty("--ym-sl-fs-art-left", Math.round(artRect.left - overlayRect.left) + "px");
-        fsOverlay.style.setProperty("--ym-sl-fs-art-width", Math.round(artRect.width) + "px");
-      }
-    }
-    if (fsTitleEl) {
-      const titleH = fsTitleEl.getBoundingClientRect().height;
-      if (titleH > 0) {
-        fsOverlay.style.setProperty("--ym-sl-fs-title-h", Math.round(titleH) + "px");
-      }
-    }
+    positionFsEdgeButtons();
+    // The layout can settle a beat AFTER the classes flip — the pane's aspect
+    // ratio only arrives with the video's metadata. The Like/Dislike buttons are
+    // pinned from the transport chip's measured offset, so without these retries
+    // they can stay where the chip USED to be, which put them on top of the video
+    // (measured live: button at y 725-769, video spanning 270-810, AJ 2026-10-21).
+    // Two bounded retries, cancelled on every call so they cannot pile up.
+    fsChromeRepinTimers.forEach((t) => window.clearTimeout(t));
+    fsChromeRepinTimers = [150, 600].map((ms) => window.setTimeout(() => {
+      if (fsActive) positionFsEdgeButtons();
+    }, ms));
   }
 
   function refreshTrack() {
@@ -11034,6 +11570,12 @@
     const trackEl = document.getElementById("ym-sl-track");
     if (trackEl) trackEl.textContent = label;
     refreshFsTitle();
+    // Decide the media MODE first, on the track change itself. It used to run
+    // only from the 2s fullscreen tick, so a cover <-> music-video skip could
+    // take up to two seconds to switch — the delay AJ reported (2026-10-20).
+    // syncFsVideoMode() is cheap and self-guarding: it early-returns unless the
+    // intent actually differs from what is attached.
+    if (fsActive) syncFsVideoMode();
     // Reconcile the fullscreen media on the track change itself instead of
     // waiting up to 2s for the refresh tick. The tick still covers the case
     // where the new artwork URL is not published yet at this instant.
@@ -13855,6 +14397,30 @@
   }
 
   /* ===================== next-track prefetch ===================== */
+  // Warm the NEXT track's ARTWORK so an MV -> audio skip has a decoded image the
+  // instant the pane switches (AJ, 2026-10-20). The browser keeps the decoded
+  // bitmap for the URL, so the pane's <img> paints on its first frame instead of
+  // showing an empty box while the CDN responds.
+  // Best-effort: no DOM node is kept, no error surfaces, and the URL goes through
+  // hiResArt() so the cache key matches what the pane actually requests (the raw
+  // queue thumbnail is =w60-h60, the pane asks for =w1024-h1024).
+  let prefetchArtUrl = "";
+  function prefetchNextTrackArt() {
+    try {
+      const player = window.YTMod && window.YTMod.player;
+      if (!player || typeof player.getNextTrack !== "function") return;
+      const next = player.getNextTrack();
+      const raw = next && next.artworkUrl;
+      if (!raw) return;
+      const url = hiResArt(raw);
+      if (!url || url === prefetchArtUrl) return;
+      prefetchArtUrl = url;
+      const img = new Image();
+      img.decoding = "async";
+      img.src = url;
+    } catch (_) { /* prefetch must never affect playback */ }
+  }
+
   // Warm the lyric cache for the upcoming track so the song change has no
   // blank flash. Best-effort only: any failure is swallowed and never touches
   // the current track's UI. Uses its own prefetchSeq + AbortController so it
@@ -14137,6 +14703,8 @@
 
     currentTrackKey = key;
     prefetchNextTrackLyrics();
+    // Also warm the next track's cover so an MV -> audio skip is instant.
+    prefetchNextTrackArt();
     loadVideoOffsetForTrack(track);
     refreshTrack();
     if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {
@@ -14372,7 +14940,17 @@
     lineElement.appendChild(h("div", { class: "romaji", text: rom }));
   }
 
-  function makeWord(word, isLast, lineTimed, noKaraoke) {
+  // Does the whole-word join apply to this line? `joinSyllables` is the master
+  // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
+  // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
+  // Defaults to ON, which is the historical behaviour — bg lines joined too.
+  function joinApplies(background) {
+    if (!currentSettings.joinSyllables) return false;
+    if (background && currentSettings.joinBgSyllables === false) return false;
+    return true;
+  }
+
+  function makeWord(word, isLast, lineTimed, noKaraoke, background) {
     // An unsynced line (no real per-word timing) must not spawn syllable/letter
     // karaoke springs — that is what tanks FPS on partially-synced TTML imports
     // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
@@ -14403,7 +14981,7 @@
     // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
-    if (currentSettings.joinSyllables) letterCapable = false;
+    if (joinApplies(background)) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -14457,7 +15035,7 @@
     // fills as a single unit. OFF by default, so the per-syllable karaoke and the
     // .word-group wrapping are unchanged unless the user opts in.
     let renderWords = words;
-    if (currentSettings.joinSyllables && Array.isArray(words) && words.length) {
+    if (joinApplies(background) && Array.isArray(words) && words.length) {
       const joined = [];
       for (const word of words) {
         const open = joined[joined.length - 1];
@@ -14485,8 +15063,7 @@
     }
     let currentWordGroup = null;
     renderWords.forEach((word, wordIndex) => {
-      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke);
-      if (background) wordModel.BGWord = true;
+      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke, background);
       if (background) {
         wordModel.BGWord = true;
         wordModel.HTMLElement.classList.add("bg-word");
@@ -16459,7 +17036,6 @@
     cachedFirstRealLyricStartMs = Infinity;
     cachedLastRealLyricEndMs = 0;
     pendingAnimationLines.clear();
-    teardownOnboarding();
     syncNativePanel(false);
     cleanupTabBar(tabBar);
     if (panelEl) panelEl.remove();
@@ -16516,151 +17092,13 @@
     detachMessageListener();
   }
 
-  /* ===================== first-run onboarding ===================== */
-  // Persist completion on the YouTube Music origin so the welcome card appears only once,
-  // rather than returning after every extension or tab reload.
-  const ONBOARDING_KEY = "better_lyrics_onboarding_done_v1";
-  let onbHasRun = false;
-
-  function hasCompletedOnboarding() {
-    try { return localStorage.getItem(ONBOARDING_KEY) === "1"; } catch (_) { return false; }
-  }
-
-  function markOnboardingComplete() {
-    try { localStorage.setItem(ONBOARDING_KEY, "1"); } catch (_) {}
-  }
-
-  function closePanelsNow() {
-    // Force-close any open lyrics panel without depending on internal state:
-    // hide our panel directly (incl. orphans from a previous injection) and
-    // collapse the native YTM lyrics panel.
-    try {
-      const p = document.getElementById("ym-sl-panel");
-      if (p) p.classList.add("hidden");
-    } catch (_) {}
-    try { setPanel(false); } catch (_) {}
-    try { syncNativePanel(false); } catch (_) {}
-  }
-
-  function waitForSelector(selector, timeout) {
-    return new Promise(function (resolve) {
-      const start = Date.now();
-      (function check() {
-        const el = document.querySelector(selector);
-        if (el) return resolve(el);
-        if (Date.now() - start > timeout) return resolve(null);
-        setTimeout(check, 150);
-      })();
-    });
-  }
-
-  function showOnbError(err) {
-    try { console.error("[Aurora Lyrics onboarding]", err); } catch (_) {}
-    finishOnboarding();
-  }
-
-  let onbStyleEl = null;
-  let onbRoot = null;
-  let onbHighlighted = null;
-
-  function ensureOnbStyle() {
-    if (onbStyleEl && onbStyleEl.isConnected) return;
-    const css = `
-.ym-onb-root { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; }
-.ym-onb-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.74); pointer-events: auto; }
-.ym-onb-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 440px; width: calc(100% - 48px); padding: 26px 28px 22px; border-radius: 16px; background: #181818; color: #fff; box-shadow: 0 20px 60px rgba(0,0,0,0.55); font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; pointer-events: auto; text-align: center; }
-.ym-onb-card h2 { font-size: 19px; font-weight: 700; margin: 0 0 8px; }
-.ym-onb-card p { margin: 0 0 18px; color: rgba(255,255,255,0.78); font-size: 14px; }
-.ym-onb-btn { appearance: none; cursor: pointer; font: inherit; font-weight: 600; font-size: 14px; padding: 10px 28px; border-radius: 999px; border: 2px solid #1ed760; color: #1ed760; background: rgba(30,215,96,0.12); transition: background .15s ease, color .15s ease, transform .1s ease; }
-.ym-onb-btn:hover { background: #1ed760; color: #0a0a0a; }
-.ym-onb-btn:active { transform: scale(0.97); }
-.ym-onb-highlight { position: relative !important; z-index: 2147483647 !important; outline: 3px solid #1ed760 !important; outline-offset: 5px !important; border-radius: 8px !important; animation: ymOnbPulse 1.5s ease-in-out infinite; background: rgba(30,215,96,.14) !important; }
-@keyframes ymOnbPulse { 0%,100% { outline-color: #1ed760; } 50% { outline-color: rgba(30,215,96,0.45); } }`;
-    onbStyleEl = document.createElement("style");
-    onbStyleEl.id = "ym-onb-style";
-    onbStyleEl.textContent = css;
-    document.head.appendChild(onbStyleEl);
-  }
-
-  function removeOnbOverlay() {
-    if (onbRoot && onbRoot.parentElement) onbRoot.parentElement.removeChild(onbRoot);
-    onbRoot = null;
-    if (onbHighlighted) {
-      try { onbHighlighted.classList.remove("ym-onb-highlight"); } catch (_) {}
-      onbHighlighted = null;
-    }
-  }
-
-  function teardownOnboarding() {
-    removeOnbOverlay();
-    if (onbStyleEl && onbStyleEl.parentElement) onbStyleEl.parentElement.removeChild(onbStyleEl);
-    onbStyleEl = null;
-  }
-
-  function buildOnbCard(title, body, btnLabel, onClick) {
-    const card = document.createElement("div");
-    card.className = "ym-onb-card";
-    const h = document.createElement("h2"); h.textContent = title;
-    const p = document.createElement("p"); p.textContent = body;
-    const btn = document.createElement("button");
-    btn.type = "button"; btn.className = "ym-onb-btn"; btn.textContent = btnLabel;
-    btn.addEventListener("click", onClick);
-    card.appendChild(h); card.appendChild(p); card.appendChild(btn);
-    return card;
-  }
-
-  function showOnbOverlay(card, withBackdrop) {
-    removeOnbOverlay();
-    ensureOnbStyle();
-    onbRoot = document.createElement("div");
-    onbRoot.className = "ym-onb-root";
-    if (withBackdrop) {
-      const bd = document.createElement("div");
-      bd.className = "ym-onb-backdrop";
-      onbRoot.appendChild(bd);
-    }
-    onbRoot.appendChild(card);
-    document.body.appendChild(onbRoot);
-  }
-
-  function finishOnboarding() {
-    markOnboardingComplete();
-    teardownOnboarding();
-  }
-
-  function startMarketplaceStep() {
-    waitForSelector("#ym-nav-btn", 10000).then(function (btn) {
-      if (!btn) {
-        finishOnboarding();
-        return;
-      }
-      onbHighlighted = btn;
-      btn.classList.add("ym-onb-highlight");
-      const card = buildOnbCard(
-        "More than lyrics",
-        "Aurora Lyrics also includes themes and artwork tools. Open the waffle icon in the top-right anytime to explore the rest.",
-        "Got it",
-        finishOnboarding
-      );
-      showOnbOverlay(card, false);
-    }).catch(function (e) { showOnbError(e); });
-  }
-
-  function maybeStartOnboarding() {
-    if (onbHasRun || hasCompletedOnboarding()) return;
-    onbHasRun = true;
-    // Make sure no lyrics panel is left open behind the onboarding overlay.
-    closePanelsNow();
-    try {
-      // The first-run lesson starts with the waffle icon so people know Aurora Lyrics
-      // is a small YT Music toolkit, not only a lyrics panel. The lyrics walkthrough
-      // remains available from the marketplace and the SYNCED tab itself.
-      startMarketplaceStep();
-    } catch (e) {
-      showOnbError(e);
-    }
-  }
-
+  /* ===================== boot =====================
+     The first-run onboarding tour used to live above this line: a modal card, a
+     pulsing highlight on the waffle icon, a localStorage completion flag and a
+     second kickoff IIFE that re-ran it on DOMContentLoaded. Removed entirely
+     (AJ, 2026-10-21) — a brand-new install opens straight into the app, which
+     also retires the four #1ed760 green rules that were the last non-crimson
+     colours in the project. */
   whenYTMod(() => {
     // Kick off the persisted Spicy Lyrics cache read immediately so it is warm
     // by the time the first track resolves — otherwise the very first lookup
@@ -16681,19 +17119,6 @@
     // (whose slider lives in that add-on) is right even if its panel is never
     // opened this session. handleHostMessage() picks out just that key.
     window.postMessage({ type: "ytmod-settings-request", id: "ytmod-dynamic" }, "*");
-    maybeStartOnboarding();
   });
 
-  // Independent kickoff so onboarding + panel-close also run even if the YTMod bridge
-  // is slow or unavailable. Guarded by onbHasRun, so it never double-runs.
-  (function kickoffOnboarding() {
-    const run = function () {
-      try { maybeStartOnboarding(); } catch (e) { showOnbError(e); }
-    };
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", run, { once: true });
-    } else {
-      run();
-    }
-  })();
 })();

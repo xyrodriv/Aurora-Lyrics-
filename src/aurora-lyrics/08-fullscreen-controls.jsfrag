@@ -85,11 +85,11 @@
     }
     syncFullscreenModeButtons();
     refreshFsRatingState();
-    // Re-pin the edge Like / Dislike every tick so a layout swap (side <-> cover /
-    // MV) that moves the media pane or the transport chip still lands the buttons
-    // correctly. positionFsEdgeButtons() re-reads both rects, so it is a no-op
-    // unless something actually moved.
-    positionFsEdgeButtons();
+    // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
+    // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
+    // so there is nothing to chase; re-pinning was itself a source of the
+    // "controls move a lot" behaviour. They are positioned once on entry and once
+    // per mode change (syncFsChromeStructure).
   }
 
   /* ---- shuffle / repeat mirroring -----------------------------------------
@@ -304,7 +304,6 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
-  let fsEdgeObserver = null;                // ResizeObserver that re-pins the edge buttons
 
   function loadFsRatings() {
     try {
@@ -349,6 +348,19 @@
   // Horizontal: media pane edges (so they track cover art / MV width).
   // Vertical:   the play chip's centre (so they sit on the same line as the
   //             transport controls, not floating at the video's mid-height).
+  // Sum of offsetTop from `node` up to `ancestor`, in LAYOUT space. Returns null
+  // when `ancestor` is not in the offsetParent chain, so the caller can fall back
+  // to rect maths. Used to measure past an in-flight transform.
+  function offsetWithin(node, ancestor) {
+    let y = 0;
+    let el = node;
+    while (el && el !== ancestor) {
+      y += el.offsetTop || 0;
+      el = el.offsetParent;
+    }
+    return el === ancestor ? y : null;
+  }
+
   function positionFsEdgeButtons() {
     if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     const layer = fsPlayerControls;
@@ -363,11 +375,24 @@
     // Vertical: centre on the transport chip. Its rect is valid even while the
     // chip is faded out (opacity does not affect layout). Fall back to the
     // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
+    //
+    // ⭐ LAYOUT offsets, not getBoundingClientRect (AJ, 2026-10-20). The chip
+    // animates with a TRANSFORM during fullscreen entry and on track change, and
+    // a rect includes that transform — so measuring mid-animation pinned the
+    // buttons to a half-slid position ("sometimes random, sometimes lower") until
+    // something re-ran this several seconds later. offsetTop is transform-free.
     const chip = layer.querySelector(".ym-sl-fs-play-chip");
     let top;
     if (chip) {
-      const cc = chip.getBoundingClientRect();
-      top = cc.top - lc.top + cc.height / 2 - bH / 2;
+      const rel = offsetWithin(chip, layer);
+      top = rel === null
+        // Not in the offsetParent chain of the layer (some intermediate positioned
+        // wrapper): fall back to the rects, which is still correct at rest.
+        ? (() => {
+            const cc = chip.getBoundingClientRect();
+            return cc.top - lc.top + cc.height / 2 - bH / 2;
+          })()
+        : rel + chip.offsetHeight / 2 - bH / 2;
     } else {
       top = lc.height - 46 - bH / 2;
     }
@@ -639,7 +664,6 @@
     // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
     // is above both; positionFsEdgeButtons() then pins them to the media's
     // horizontal edges and the transport row's vertical centre.
-    const fsMedia = document.querySelector(".ym-sl-fs-media");
     fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
       .forEach((n) => n.remove());
     fsPlayerControls.appendChild(likeButton);
@@ -649,25 +673,28 @@
     // them in over the existing .35s opacity transition instead of snapping them
     // on, so that flash is hidden behind the fade. The rating buttons live in the
     // controls layer now, so this fade does not affect their positioning.
-    if (fsMediaHost) fsMediaHost.style.opacity = "0";
+    if (fsMediaHost) {
+      // Route the entry through the same dissolve as a track change, but with the
+      // "out" already considered finished so the fade-in starts immediately.
+      fsMediaFadingOut = true;
+      fsMediaFadeOutAt = 0;
+      if (fsOverlay) fsOverlay.classList.add("ym-sl-fs-dissolving");
+    }
     if (fsLyricsHost) fsLyricsHost.style.opacity = "0";
     // Double rAF: paint opacity:0 first, then (a) drop ym-sl-fs-no-anim so the
-    // panes' .35s opacity transition is live, (b) clear opacity so they fade in,
-    // and (c) re-pin the edge buttons once the final layout has actually been
-    // laid out. positionFsEdgeButtons() reads the pane's own box, which is valid
-    // here whether or not the cover image has decoded yet.
+    // panes' transitions are live, (b) fade the media back in, and (c) home the
+    // chrome once the final layout has actually been laid out.
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
-      if (fsMediaHost) fsMediaHost.style.opacity = "";
+      if (fsMediaHost) fsFadeInMedia();
       if (fsLyricsHost) fsLyricsHost.style.opacity = "";
-      positionFsEdgeButtons();
+      syncFsChromeStructure();
     }));
-    positionFsEdgeButtons();
-    if (fsEdgeObserver) { try { fsEdgeObserver.disconnect(); } catch (_) {} }
-    if (fsMedia && typeof ResizeObserver !== "undefined") {
-      fsEdgeObserver = new ResizeObserver(() => positionFsEdgeButtons());
-      fsEdgeObserver.observe(fsMedia);
-    }
+    syncFsChromeStructure();
+    // The ResizeObserver that re-pinned the edge buttons whenever the media
+    // resized is REMOVED (AJ, 2026-10-20). It fired repeatedly while the pane
+    // animated its width, which slid the buttons along with it — one of the
+    // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
     exit.addEventListener("click", exitFullscreenMode);

@@ -103,6 +103,8 @@
     showTimestamp: true,
     portrait: false,
     video: false,
+    // Use the frame currently on screen instead of the thumbnail (MV only).
+    mvFrame: false,
   };
 
   const STYLE_ID = "ym-share-style";
@@ -310,6 +312,7 @@
   let previewStage = null;
   let previewPortraitToggle = null;
   let previewVideoToggle = null;
+  let previewFrameToggle = null;
   let previewFilename = "";
   let recordingActive = false;
   let recordingCancelled = false;
@@ -375,6 +378,49 @@
     if (!url || typeof url !== "string") return url || "";
     if (/=w\d+(-h\d+)?/.test(url)) return url.replace(/=w\d+(-h\d+)?/, "=w1024-h1024");
     return url + "=w1024-h1024";
+  }
+
+  // The frame currently on screen, as a canvas the card can drawImage() later.
+  // ⭐ YouTube feeds the video through MediaSource as a same-origin blob: URL, so
+  // drawImage(video) does NOT taint the card canvas and toBlob() keeps working.
+  // If that assumption ever breaks (no video element, zero dimensions, or a
+  // genuinely cross-origin source) the getImageData probe throws and the caller
+  // falls back to the thumbnail instead of killing the export.
+  function grabVideoFrame() {
+    try {
+      const video = document.querySelector("ytmusic-player video.html5-main-video")
+        || document.querySelector("video.html5-main-video");
+      if (!video || !video.videoWidth || !video.videoHeight) return null;
+      // Cover-crop to a square so neither the square nor the 3:4 card distorts it.
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const side = Math.min(vw, vh);
+      const canvas = makeEl("canvas");
+      canvas.width = 1024;
+      canvas.height = 1024;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(
+        video,
+        (vw - side) / 2, (vh - side) / 2, side, side,
+        0, 0, canvas.width, canvas.height
+      );
+      ctx.getImageData(0, 0, 1, 1); // taint probe — throws on a cross-origin frame
+      return canvas;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Single entry point for the card's artwork, so both render paths (still and
+  // video export) honour the MV-frame toggle the same way (AJ, 2026-10-20).
+  async function loadCardArt(info) {
+    if (!settings.showArt) return null;
+    if (settings.mvFrame) {
+      const frame = grabVideoFrame();
+      if (frame) return frame;
+    }
+    return loadArt(hiResArt(info.artworkUrl));
   }
 
   // Loads the extension's logo and verifies it is safe to composite.
@@ -836,7 +882,7 @@
     if (!ctx) return null;
     const art = artOverride !== undefined
       ? artOverride
-      : (settings.showArt ? await loadArt(hiResArt(info.artworkUrl)) : null);
+      : await loadCardArt(info);
     paintCard(ctx, size.w, size.h, text, info, art, null);
     return canvas;
   }
@@ -887,6 +933,7 @@
     previewStage = null;
     previewPortraitToggle = null;
     previewVideoToggle = null;
+    previewFrameToggle = null;
     document.removeEventListener("keydown", onPreviewKeydown, true);
     if (previewUrl) {
       const url = previewUrl;
@@ -960,11 +1007,25 @@
       refreshPreview();
     });
 
+    // MV frame (AJ, 2026-10-20): use the frame that is on screen right now instead
+    // of the thumbnail. Only offered when a video element actually exists — a
+    // still track has no frame to sample — which syncPreviewToggles() enforces.
+    const frameToggle = makeEl("button", "ym-share-toggle", "Frame");
+    frameToggle.type = "button";
+    frameToggle.title = "Use the current video frame instead of the thumbnail";
+    frameToggle.addEventListener("click", () => {
+      settings.mvFrame = !settings.mvFrame;
+      syncPreviewToggles();
+      persistSettings();
+      refreshPreview();
+    });
+
     const spacer = makeEl("div", "ym-share-spacer");
 
     const actions = makeEl("div", "ym-share-actions");
     actions.appendChild(portraitToggle);
     actions.appendChild(videoToggle);
+    actions.appendChild(frameToggle);
     actions.appendChild(spacer);
     actions.appendChild(download);
     actions.appendChild(close);
@@ -992,6 +1053,7 @@
     previewStage = stage;
     previewPortraitToggle = portraitToggle;
     previewVideoToggle = videoToggle;
+    previewFrameToggle = frameToggle;
     syncPreviewToggles();
     setStageSize();
   }
@@ -1004,6 +1066,14 @@
     }
     if (previewVideoToggle) {
       previewVideoToggle.setAttribute("data-on", settings.video ? "1" : "0");
+    }
+    if (previewFrameToggle) {
+      previewFrameToggle.setAttribute("data-on", settings.mvFrame ? "1" : "0");
+      // No video element means there is no frame to sample, so the toggle would
+      // do nothing — hide it rather than leave a dead button (AJ, 2026-10-20).
+      const hasVideo = !!(document.querySelector("ytmusic-player video.html5-main-video")
+        || document.querySelector("video.html5-main-video"));
+      previewFrameToggle.style.display = hasVideo ? "" : "none";
     }
   }
 
@@ -1251,7 +1321,7 @@
     await ensureFont();
     const art = info.demoArt
       ? info.demoArt
-      : (settings.showArt ? await loadArt(hiResArt(info.artworkUrl)) : null);
+      : await loadCardArt(info);
     if (seq !== renderSeq) return;
 
     // Kawarp needs an IMAGE URL, so the demo's canvas placeholder is handed over
@@ -1468,6 +1538,7 @@
       showTimestamp: typeof next.showTimestamp === "boolean" ? next.showTimestamp : DEFAULT_SETTINGS.showTimestamp,
       portrait: typeof next.portrait === "boolean" ? next.portrait : DEFAULT_SETTINGS.portrait,
       video: typeof next.video === "boolean" ? next.video : DEFAULT_SETTINGS.video,
+      mvFrame: typeof next.mvFrame === "boolean" ? next.mvFrame : DEFAULT_SETTINGS.mvFrame,
     };
   }
 

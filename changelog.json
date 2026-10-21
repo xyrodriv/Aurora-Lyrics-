@@ -1,6 +1,24 @@
 {
   "releases": [
     {
+      "version": "0.5.72",
+      "date": "2026-10-21",
+      "title": "Custom backgrounds and calmer fullscreen",
+      "features": [
+        "Aurora Bloom can use your own image as the page background - warped with Kawarp or softly blurred, with brightness, saturation and contrast controls",
+        "Aurora Lyrics settings now live behind their own rail, grouped into Look, Words, Motion, Timing and Font instead of one long list",
+        "A Discord invite sits at the top of the add-on list"
+      ],
+      "fixes": [
+        "Fullscreen controls stay where they are - they no longer drift while a video or cover art loads",
+        "Cover art and music videos now hand over with a clean fade in both directions, and music video to music video leaves the controls alone",
+        "Switching between a cover art track and a music video no longer shows the wrong layout for a moment first",
+        "Uninstalling an add-on now asks you to restart YouTube Music, so no leftover code stays behind",
+        "The first-run tour has been removed - a fresh install goes straight to the app",
+        "The artist card in the Now Playing rail labels its subscriber count again"
+      ]
+    },
+    {
       "version": "0.5.71",
       "date": "2026-09-27",
       "title": "Update notices",

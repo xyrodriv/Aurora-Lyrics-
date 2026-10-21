@@ -201,6 +201,16 @@
       for (const id of allowed) if (out.indexOf(id) === -1) out.push(id);
       return out;
     }
+    if (setting.type === "file") {
+      // ⭐ Boolean, NOT a number. Without this branch a file setting fell through
+      // to settingNumber(), which turns `false` into 0 and then clamps against
+      // undefined min/max — producing NaN. NaN is falsy, so the custom background
+      // switched itself off the moment settings were re-read (panel reopen, page
+      // reload), which looked like "it reverts to Kawarp" (AJ, 2026-10-21).
+      // The blob itself lives in IndexedDB; this key only means "an image is set".
+      if (typeof value === "string") return !/^(false|0|off|no|)$/i.test(value.trim());
+      return value === true || value === 1;
+    }
     return settingNumber(setting, value);
   };
   const getExtensionDefaults = (ext) => Object.fromEntries(
@@ -670,7 +680,7 @@
                     lastUpdated, css?, jsUrl?, comingSoon?, github? }
      github: string URL, OR string[] of URLs, OR {label,url}[] — shown in the detail view.
      categories: Extensions | Themes */
-  const CAT_COLOR = { Extensions: "#1DB954", Themes: "#448aff" };
+  const CAT_COLOR = { Extensions: "#e01040", Themes: "#8e0b26" };
 
   const AVAILABLE = [
     {
@@ -703,6 +713,17 @@
         // Never sample the live video; keep the backdrop on the track's cover
         // art even for music videos (AJ, 2026-10-20).
         { key: "kawarpCoverArtOnly", label: "Cover art only (ignore video)", type: "toggle", default: false },
+        // Custom background (AJ, 2026-10-21). The blob lives in IndexedDB; the
+        // key is only the boolean "an image is set and should be used".
+        // The header gives the block its own labelled section instead of letting
+        // it trail off the bottom of the Kawarp sliders.
+        { type: "header", label: "Custom background" },
+        { key: "customBg", label: "Background image", type: "file", default: false },
+        { key: "customBgKawarp", label: "Use Kawarp on the image", type: "toggle", default: true },
+        { key: "customBgBlur", label: "Blur", min: 0, max: 60, step: 1, default: 24, display: "pixels", disabledWhen: "customBgKawarp" },
+        // Contrast applies to the Kawarp canvas AND the blurred image, like
+        // brightness/saturation above.
+        { key: "contrast", label: "Contrast", min: 0.6, max: 1.6, step: 0.01, default: 1, display: "decimal" },
       ],
     },
     {
@@ -771,6 +792,11 @@
         // stepping, so a word lights up as a single unit. The Spicy Lyrics
         // "whole word" toggle (AJ, 2026-10-19).
         { key: "joinSyllables", label: "Join syllables into words", type: "toggle", default: false },
+        // Nested under the toggle above (AJ, 2026-10-20). The whole-word join
+        // already covered the background-vocal lines, so this exposes that
+        // behaviour as a choice instead of hard-coding it. Rendered as an
+        // indented child row that only exists while the parent is ON.
+        { key: "joinBgSyllables", label: "Also join background lines", type: "toggle", default: true, childOf: "joinSyllables" },
         // lrc.red's TTML often ships one span per syllable ("shi"+"ning"). This
         // merges those runs at parse time so the fill/glow covers the whole word.
         // Separate from the global whole-word renderer toggle above (AJ, 2026-10-20).
@@ -1010,6 +1036,22 @@
         // Lives here rather than on the panel itself (AJ, 2026-10-19): it is a
         // preference, not a per-session action.
         { key: "kawarp", label: "Ambient background", type: "toggle", default: true },
+      ],
+    },
+    {
+      id: "snippet-arrow-seek",
+      name: "Arrow-key seeking",
+      author: "Aurora Lyrics",
+      category: "Snippets",
+      stars: 5,
+      tags: ["keyboard", "seek", "shortcuts", "playback"],
+      description: "YouTube Music ignores the arrow keys on the player, so this claims them: Left/Right seek 5 seconds, hold Shift for 15. Typing is never intercepted.",
+      version: "0.1.0",
+      lastUpdated: "2026-10-20",
+      jsUrl: chrome.runtime.getURL("src/extensions/snippet-arrow-seek.js"),
+      settings: [
+        // Seconds per ArrowLeft/ArrowRight press (Shift multiplies by 3).
+        { key: "step", label: "Skip step", min: 1, max: 30, step: 1, default: 5, display: "seconds" },
       ],
     },
   ];
@@ -1897,7 +1939,7 @@
   const REPORT_MAX = 3;           // beyond this, the panel points to Discord only
   let currentReportExtId = "";    // ext id currently open in the modal
   let reportGen = 0;              // bumped on open; guards stale close/Send callbacks
-  const REPORT_DISCORD_URL = "https://example.com"; // TODO: real invite (AJ will supply)
+  const REPORT_DISCORD_URL = "https://discord.gg/wsZxTSnaMa";
   function reportIssuesFor(ext) {
     const byId = {
       "ytmod-spicy-lyrics": ["Lyrics not showing", "Romanization", "Fullscreen", "Lyric sources", "Other"],
@@ -1932,8 +1974,59 @@
     send.disabled = true;
 
     let rows = [];
+    // Single source of truth for the Other textarea (AJ, 2026-10-20). It used to
+    // be driven ONLY by the Other row's own click, so its visibility could drift
+    // out of sync with the row's checked state — e.g. it vanished after another
+    // option was picked. Deriving it from the row on EVERY click makes it
+    // idempotent, and clearing a stale inline card height on show means a
+    // previous collapse can never clip the box.
+    let otherVisible = false;
+    const syncOther = () => {
+      const otherRow = rows.find((r) => r.getAttribute("data-value") === "Other");
+      const want = !!(otherRow && otherRow.classList.contains("selected"));
+      if (want === otherVisible) return;
+      otherVisible = want;
+      if (want) {
+        card.style.height = ""; // a pinned height from a past collapse would clip it
+        otherWrap.classList.remove("hidden");
+        if (!reducedMotion() && otherWrap.animate) {
+          otherWrap.animate(
+            [{ opacity: 0, height: "0px" }, { opacity: 1, height: otherWrap.scrollHeight + "px" }],
+            { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
+          );
+        }
+        otherInput.focus();
+        return;
+      }
+      // Smooth OUT: collapse the wrapper AND animate the card's height down in
+      // step, so the surface shrinks together instead of the border snapping.
+      const cardH = card.offsetHeight;
+      const wrapH = otherWrap.offsetHeight;
+      if (!reducedMotion() && otherWrap.animate) {
+        track(otherWrap.animate(
+          [{ opacity: 1, height: wrapH + "px" }, { opacity: 0, height: "0px" }],
+          { duration: 260, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+        )).onfinish = () => {
+          otherWrap.classList.add("hidden");
+          otherWrap.style.height = "";
+        };
+        if (card.animate && wrapH > 0 && cardH > wrapH) {
+          card.style.height = cardH + "px";
+          track(card.animate(
+            [{ height: cardH + "px" }, { height: (cardH - wrapH) + "px" }],
+            { duration: 260, easing: "cubic-bezier(.22,1,.36,1)", fill: "forwards" }
+          )).onfinish = () => { card.style.height = ""; };
+        }
+      } else {
+        otherWrap.classList.add("hidden");
+      }
+    };
     const renderOptions = (issues) => {
       options.replaceChildren();
+      // Fresh rows are all unselected and openReportProblem() re-hides the
+      // textarea, so the derived flag has to start false — otherwise syncOther()
+      // believes it is already in the right state and skips showing it again.
+      otherVisible = false;
       rows = issues.map((label) => {
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("viewBox", "0 0 24 24");
@@ -1947,25 +2040,18 @@
         svg.appendChild(p);
         const circle = h("span", { class: "ym-report-radio" }, h("span", { class: "ym-report-check" }, svg));
         const row = h("button", {
-          class: "ym-report-option", type: "button", role: "radio", "aria-checked": "false", "data-value": label,
+          class: "ym-report-option", type: "button", role: "checkbox", "aria-checked": "false", "data-value": label,
         }, h("span", { class: "ym-report-option-label", text: label }), circle);
+        // MULTI-SELECT (AJ, 2026-10-20): more than one of these is usually true at
+        // the same time, so each row toggles independently instead of clearing the
+        // others. Send unlocks as soon as ANY row is selected, and the Other
+        // textarea follows that row's own checked state rather than the whole form.
         row.addEventListener("click", () => {
-          rows.forEach((r) => { r.classList.remove("selected"); r.setAttribute("aria-checked", "false"); });
-          row.classList.add("selected");
-          row.setAttribute("aria-checked", "true");
-          send.disabled = false;
-          if (label === "Other") {
-            otherWrap.classList.remove("hidden");
-            if (!reducedMotion() && otherWrap.animate) {
-              otherWrap.animate(
-                [{ opacity: 0, height: "0px" }, { opacity: 1, height: otherWrap.scrollHeight + "px" }],
-                { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
-              );
-            }
-            otherInput.focus();
-          } else {
-            otherWrap.classList.add("hidden");
-          }
+          const on = !row.classList.contains("selected");
+          row.classList.toggle("selected", on);
+          row.setAttribute("aria-checked", on ? "true" : "false");
+          send.disabled = !rows.some((r) => r.classList.contains("selected"));
+          syncOther();
         });
         options.appendChild(row);
         return row;
@@ -2159,6 +2245,197 @@
     host.appendChild(h("div", { class: "ym-report-foot" }, btn));
   }
 
+  /* ===== custom background storage (AJ, 2026-10-21) =====================
+     A user-uploaded backdrop can be many megabytes, so it lives in IndexedDB —
+     localStorage has a ~5MB cap and syncs badly (rule 7 in DEVELOPERS/IDEAS).
+     One store, keyed by add-on id. Only the BLOB is stored; the settings row
+     keeps a boolean so the extension knows one exists. */
+  const BG_DB_NAME = "aurora-bg";
+  const BG_DB_STORE = "images";
+  const BG_MAX_BYTES = 25 * 1024 * 1024;
+  const BG_MAX_EDGE = 2560;
+  let bgDbPromise = null;
+
+  function bgDb() {
+    if (bgDbPromise) return bgDbPromise;
+    bgDbPromise = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(BG_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(BG_DB_STORE)) db.createObjectStore(BG_DB_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
+      } catch (_) { resolve(null); }
+    });
+    return bgDbPromise;
+  }
+
+  async function bgStore(mode, fn) {
+    const db = await bgDb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(BG_DB_STORE, mode);
+        const store = tx.objectStore(BG_DB_STORE);
+        const req = fn(store);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch (_) { resolve(null); }
+    });
+  }
+
+  const bgPut = (key, record) => bgStore("readwrite", (st) => st.put(record, key));
+  const bgGet = (key) => bgStore("readonly", (st) => st.get(key));
+  const bgDel = (key) => bgStore("readwrite", (st) => st.delete(key));
+
+  // Downscale on import so a 40MP photo does not cost 200MB of VRAM. Anything
+  // already small enough is stored untouched (no needless re-encode).
+  async function bgPrepare(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = reject;
+        i.src = url;
+      });
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      const scale = Math.min(1, BG_MAX_EDGE / Math.max(w, h));
+      if (scale >= 1 && file.size <= 8 * 1024 * 1024) return { blob: file, w, h };
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = cw;
+      canvas.height = ch;
+      canvas.getContext("2d").drawImage(img, 0, 0, cw, ch);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      return { blob: blob || file, w: cw, h: ch };
+    } catch (_) {
+      return null;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function bgFormatBytes(n) {
+    if (!n) return "";
+    if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  /* Custom file picker for an image setting. Fully custom chrome — the only
+     native part is the OS file dialog itself, which cannot be styled. The
+     thumbnail always shows the RAW image (no Kawarp, no blur), so it is a
+     faithful preview of what was imported. */
+  const FILE_ICON = "M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3 3.5-4.5 4.5 6H5z";
+
+  function buildFileControl(ext, setting, commit) {
+    const row = h("div", { class: "ym-detail-setting-row ym-file-row", "data-key": setting.key });
+    row.appendChild(h("div", { class: "ym-detail-setting-label", text: setting.label }));
+
+    const control = h("div", { class: "ym-detail-setting-control ym-file-control" });
+    const card = h("div", { class: "ym-file-card" });
+    const thumb = h("div", { class: "ym-file-thumb" });
+    const info = h("div", { class: "ym-file-info" });
+    const nameEl = h("div", { class: "ym-file-name", text: "No image selected" });
+    const metaEl = h("div", { class: "ym-file-meta", text: "PNG, JPG or WebP \u00b7 up to 25 MB" });
+    info.append(nameEl, metaEl);
+    const actions = h("div", { class: "ym-file-actions" });
+    const pickBtn = h("button", { class: "ym-file-btn", type: "button", text: "Choose image" });
+    const clearBtn = h("button", { class: "ym-file-btn ym-file-btn-quiet", type: "button", text: "Remove" });
+    const input = h("input", {
+      class: "ym-file-input", type: "file", accept: "image/*",
+      tabindex: "-1", "aria-hidden": "true",
+    });
+    actions.append(pickBtn, clearBtn);
+    card.append(thumb, info, actions);
+    control.append(card, input);
+    row.appendChild(control);
+
+    let previewUrl = "";
+    function paint(url, name, meta, animate) {
+      if (previewUrl && previewUrl !== url) URL.revokeObjectURL(previewUrl);
+      previewUrl = url;
+      thumb.replaceChildren();
+      if (url) {
+        const img = h("img", { class: "ym-file-img", src: url, alt: "" });
+        thumb.appendChild(img);
+        if (animate && img.animate) {
+          img.animate(
+            [{ opacity: 0, transform: "scale(.92)" }, { opacity: 1, transform: "none" }],
+            { duration: 340, easing: "cubic-bezier(.34,1.3,.5,1)" }
+          );
+        }
+        thumb.classList.add("has-image");
+      } else {
+        thumb.appendChild(svgIcon(FILE_ICON));
+        thumb.classList.remove("has-image");
+      }
+      nameEl.textContent = name || "No image selected";
+      metaEl.textContent = meta || "PNG, JPG or WebP \u00b7 up to 25 MB";
+      clearBtn.disabled = !url;
+      clearBtn.classList.toggle("is-off", !url);
+    }
+    paint("", "", "", false);
+
+    // Read any stored blob AFTER the row is in the DOM, so a re-render never
+    // leaves the thumbnail permanently empty.
+    bgGet(ext.id).then((rec) => {
+      if (!row.isConnected) return;
+      if (!rec || !rec.blob) return;
+      const meta = [
+        rec.w && rec.h ? rec.w + " \u00d7 " + rec.h : "",
+        bgFormatBytes(rec.bytes || rec.blob.size),
+      ].filter(Boolean).join(" \u00b7 ");
+      paint(URL.createObjectURL(rec.blob), rec.name || "Background image", meta, false);
+    }).catch(() => {});
+
+    pickBtn.addEventListener("click", () => input.click());
+
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      input.value = "";
+      if (!file) return;
+      if (!/^image\//.test(file.type)) { toast("That file is not an image"); return; }
+      if (file.size > BG_MAX_BYTES) { toast("Image is larger than 25 MB"); return; }
+      card.classList.add("is-busy");
+      const prepared = await bgPrepare(file);
+      card.classList.remove("is-busy");
+      if (!prepared) { toast("Could not read that image"); return; }
+      await bgPut(ext.id, {
+        blob: prepared.blob,
+        name: file.name,
+        w: prepared.w,
+        h: prepared.h,
+        bytes: prepared.blob.size,
+      });
+      const meta = prepared.w + " \u00d7 " + prepared.h + " \u00b7 " + bgFormatBytes(prepared.blob.size);
+      paint(URL.createObjectURL(prepared.blob), file.name, meta, true);
+      commit({ [setting.key]: true });
+    });
+
+    clearBtn.addEventListener("click", async () => {
+      if (clearBtn.disabled) return;
+      const img = thumb.querySelector(".ym-file-img");
+      if (img && img.animate) {
+        const a = img.animate(
+          [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.92)" }],
+          { duration: 220, easing: "cubic-bezier(.4,0,.7,1)", fill: "forwards" }
+        );
+        await new Promise((resolve) => { a.onfinish = resolve; window.setTimeout(resolve, 300); });
+      }
+      await bgDel(ext.id);
+      paint("", "", "", false);
+      commit({ [setting.key]: false });
+    });
+
+    return row;
+  }
+
   async function buildSettingsSection(ext) {
     const list = visibleSettings(ext);
     if (!list.length) return null;
@@ -2272,6 +2549,14 @@
         section.appendChild(h("div", { class: "ym-detail-setting-section", text: setting.label }));
         continue;
       }
+      if (setting.type === "file") {
+        section.appendChild(buildFileControl(ext, setting, (patch) => {
+          values = Object.assign({}, values, patch);
+          postExtensionSettings(ext.id, patch);
+          saveExtensionSettings(ext.id, values);
+        }));
+        continue;
+      }
       if (setting.type === "order") {
         // Reordering does NOT push to the extension immediately. Posting on every
         // drag/arrow step would make the resolver re-run and refetch lyrics for the
@@ -2321,15 +2606,37 @@
         postExtensionSettings(ext.id, values);
         saveExtensionSettings(ext.id, values);
         // A change can flip another row's disabledWhen condition (e.g. toggling
-        // Simple Lyrics locks Smooth Scrolling), so re-sync every row.
-        controls.forEach((entry) => { if (entry.syncDisabled) entry.syncDisabled(); });
+        // Simple Lyrics locks Smooth Scrolling), so re-sync every row. `childOf`
+        // rows re-sync here too, which is what makes a parent toggle open and
+        // close its child row.
+        controls.forEach((entry) => {
+          if (entry.syncDisabled) entry.syncDisabled();
+          if (entry.syncVisible) entry.syncVisible();
+        });
       };
       input.addEventListener(isToggle ? "change" : "input", updateSetting);
       syncRangeFill();
-      const row = h("div", { class: "ym-detail-setting-row" },
+      const row = h("div", { class: "ym-detail-setting-row", "data-key": setting.key },
         h("div", { class: "ym-detail-setting-label", text: setting.label }),
         h("div", { class: "ym-detail-setting-control" }, input, valueEl)
       );
+      // `childOf`: a nested row that only exists while its parent toggle is ON
+      // (AJ, 2026-10-20). It stays in the DOM and collapses to zero height, so
+      // opening/closing is a CSS transition on the row itself instead of a
+      // layout jump — that is what gives the in AND out motion.
+      let syncVisible = null;
+      if (setting.childOf) {
+        row.classList.add("ym-detail-setting-child");
+        syncVisible = () => {
+          const open = !!values[setting.childOf];
+          row.classList.toggle("collapsed", !open);
+          row.setAttribute("aria-hidden", open ? "false" : "true");
+          // A collapsed row must not be tabbable or clickable either.
+          input.tabIndex = open ? 0 : -1;
+          row.style.pointerEvents = open ? "" : "none";
+        };
+        syncVisible();
+      }
       // `disabledWhen`: dim + lock this row while the named setting is truthy
       // (used by Smooth Scrolling, which Simple Lyrics overrides). Inline styles
       // keep it self-contained -- there is no conditional-row CSS to extend.
@@ -2340,7 +2647,7 @@
         row.title = blocked ? "Apple Music style lyrics overrides this setting" : "";
       };
       syncDisabled();
-      controls.set(setting.key, { input, valueEl, setting, syncRangeFill, syncDisabled });
+      controls.set(setting.key, { input, valueEl, setting, syncRangeFill, syncDisabled, syncVisible });
       section.appendChild(row);
     }
 
@@ -2418,7 +2725,7 @@
      injected by boot(). The content script runs in an isolated world, so its own
      window.YTMod is invisible to the console. Player readers + open/install controls
      are bridged to this isolated world via window.postMessage. */
-  const VERSION = "0.5.71";
+  const VERSION = "0.5.72";
   const ui = {
     category: "Extensions",
     // view / density / floating are PINNED (AJ, 2026-09-28): the toolbar was
@@ -2654,6 +2961,65 @@
     console.debug("[YTMod] extension", id, on ? "enabled" : "disabled");
   }
 
+  /* ---- "restart required" notice ---------------------------------------
+     Uninstalling sends the add-on a teardown message, but a page-world script
+     cannot reliably undo everything it attached: observers, timers, injected
+     <style> nodes and patched prototypes all survive their own teardown. A page
+     reload is the only honest reset, so we ASK for one instead of claiming the
+     removal is complete and leaving the user with half-removed code
+     (AJ, 2026-10-21). */
+  let restartScrim = null;
+  let restartTextEl = null;
+
+  function hideRestartRequired() {
+    if (restartScrim) restartScrim.classList.add("hidden");
+  }
+
+  function showRestartRequired(name) {
+    if (!restartScrim) {
+      restartScrim = h("div", { class: "ym-restart-scrim hidden" });
+      const card = h("div", {
+        class: "ym-restart-card",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "ym-restart-title",
+      });
+      card.appendChild(h("div", { class: "ym-restart-badge", "aria-hidden": "true", text: "\u27f3" }));
+      card.appendChild(h("h2", { class: "ym-restart-title", id: "ym-restart-title", text: "Restart YouTube Music" }));
+      restartTextEl = h("p", { class: "ym-restart-text" });
+      card.appendChild(restartTextEl);
+      card.appendChild(h("p", {
+        class: "ym-restart-note",
+        text: "Everything else you have installed keeps working \u2014 only a reload clears the leftover code.",
+      }));
+      const actions = h("div", { class: "ym-restart-actions" });
+      const later = h("button", { class: "ym-restart-later", type: "button", text: "Later" });
+      const now = h("button", { class: "ym-restart-now", type: "button", text: "Restart now" });
+      later.addEventListener("click", hideRestartRequired);
+      now.addEventListener("click", () => {
+        try { location.reload(); } catch (e) {}
+      });
+      actions.append(later, now);
+      card.appendChild(actions);
+      restartScrim.appendChild(card);
+      // Click-outside and Escape both mean "Later" — never trap the user.
+      restartScrim.addEventListener("click", (ev) => {
+        if (ev.target === restartScrim) hideRestartRequired();
+      });
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && restartScrim && !restartScrim.classList.contains("hidden")) {
+          hideRestartRequired();
+        }
+      });
+      document.body.appendChild(restartScrim);
+    }
+    restartTextEl.textContent = (name || "The add-on") +
+      " was removed. Some of its code can stay loaded until the page reloads, so restart YouTube Music to finish removing it.";
+    restartScrim.classList.remove("hidden");
+    const nowBtn = restartScrim.querySelector(".ym-restart-now");
+    if (nowBtn && typeof nowBtn.focus === "function") nowBtn.focus();
+  }
+
   async function uninstall(id) {
     const reg = await getReg();
     if (!reg[id]) return;
@@ -2662,8 +3028,12 @@
     delete reg[id];
     await setReg(reg);
     await removeExtensionSettings(id);
-    toast((ext ? ext.name : id) + " removed");
+    // Drop any uploaded background too, or the blob outlives the add-on.
+    await bgDel(id);
     renderSection(true);
+    // AFTER the re-render, so the panel already shows the add-on as available
+    // behind the notice instead of the stale "Uninstalling" state.
+    showRestartRequired(ext ? ext.name : id);
     console.debug("[YTMod] uninstalled extension:", id);
   }
 
@@ -2675,14 +3045,6 @@
   }
 
   /* ---- marketplace UI (Spicetify-style: tabs + sort + search + grid) ---- */
-  let kbIndex = -1;
-  function focusCard(cards) {
-    if (kbIndex < 0) kbIndex = 0;
-    kbIndex = Math.max(0, Math.min(kbIndex, cards.length - 1));
-    cards.forEach((c, i) => c.classList.toggle("ym-kbfocus", i === kbIndex));
-    const el = cards[kbIndex];
-    if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
-  }
   // Ambient panel background (AJ, 2026-09-28): the now-playing cover, blurred and
   // dimmed, so the panel picks up the track's colour. Falls back to the logo.
   function currentTrackArt() {
@@ -2759,27 +3121,6 @@
 
   // Switch category with motion: the current list fades OUT, then the new list
   // renders and its cards fade in (the existing ym-card-in stagger via --d).
-  async function animateTabSwitch(t) {
-    const sec = $("#ym-section");
-    const EASE = "cubic-bezier(0.32,0.72,0,1)";
-    let out = null;
-    if (sec && !reducedMotion()) {
-      out = sec.animate(
-        [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-8px)" }],
-        { duration: 170, easing: EASE, fill: "both" });
-      try { await out.finished; } catch (_) {}
-    }
-    ui.category = t;
-    if (overlay) {
-      overlay.querySelectorAll(".ym-tab").forEach((el) => el.classList.toggle("active", el.dataset.tab === t));
-    }
-    moveTabThumb();
-    // Keep the section at opacity 0 THROUGH the re-render, then drop the fade so
-    // the new cards run their own ym-card-in stagger. Cancelling before the render
-    // (the first cut) flashed the OLD list back at full opacity first.
-    await renderSection();
-    if (out) { try { out.cancel(); } catch (_) {} }
-  }
 
   function marketKey(e) {
     if (!overlay || overlay.classList.contains("hidden")) return;
@@ -2791,7 +3132,9 @@
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
     if (!mkRows) return;
-    const cards = $$(".ym-mk-card", mkRows);
+    // :not(.ym-mk-card-discord) — the Discord row is a link, so it must not be
+    // reachable with the arrows (they CLICK the card they land on).
+    const cards = $$(".ym-mk-card:not(.ym-mk-card-discord)", mkRows);
     if (!cards.length) return;
     const cur = cards.findIndex((c) => c.classList.contains("sel"));
     let i = cur < 0 ? 0 : cur;
@@ -2967,6 +3310,11 @@
       pros: ["Calmer, more balanced home layout", "No configuration needed"],
       cons: ["Purely cosmetic", "Can look off on very wide screens"],
     },
+    "snippet-arrow-seek": {
+      what: "Lets the left and right arrow keys scrub the song instead of doing nothing.",
+      pros: ["No new buttons to learn", "Shift jumps three times further", "Works on the player page and in fullscreen"],
+      cons: ["Claims the arrow keys for the whole page", "The step is a fixed number of seconds, not a percentage"],
+    },
     "snippet-npv-panel": {
       what: "A docked side rail with cover art or video, title, artist card, lyrics and the up-next queue.",
       pros: ["Keeps lyrics and queue visible while browsing", "Collapses to a thin edge", "Follows the Aurora Bloom backdrop"],
@@ -2976,8 +3324,8 @@
 
   // Per-add-on glyph + tint for the rail tiles and the detail monogram.
   const MK_GLYPH = {
-    "ytmod-dynamic":      { c: "#3fe0c5", d: "M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z" },
-    "ytmod-artwork-accent": { c: "#6ee06f", d: "M12 4a8 8 0 100 16 8 8 0 000-16zm0 3a5 5 0 110 10 5 5 0 010-10z" },
+    "ytmod-dynamic":      { c: "#ff4d6a", d: "M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z" },
+    "ytmod-artwork-accent": { c: "#8e0b26", d: "M12 4a8 8 0 100 16 8 8 0 000-16zm0 3a5 5 0 110 10 5 5 0 010-10z" },
     "ytmod-spicy-lyrics": { c: "#ff5c9e", d: "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z" },
     "ytmod-smooth-motion": { c: "#7aa2ff", d: "M3 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0v3c-2-3-4-3-6 0s-4 3-6 0-4-3-6 0z" },
     "ytmod-sleep-timer":  { c: "#9b8cff", d: "M12 3a9 9 0 108.5 12A7 7 0 1112 3z" },
@@ -2988,7 +3336,10 @@
     "snippet-track-toast":{ c: "#9aa7ff", d: "M12 22a2 2 0 002-2h-4a2 2 0 002 2zm7-6V11a7 7 0 10-14 0v5l-2 2v1h18v-1l-2-2z" },
     "snippet-copy-lyrics":{ c: "#7bd88f", d: "M8 3h10v14H8V3zm-2 4H4v14h10v-2H6V7z" },
     "snippet-centered-home": { c: "#a78bfa", d: "M7 5h10v2H7zM5 9h14v2H5zM8 13h8v2H8zM6 17h12v2H6z" },
-    "snippet-npv-panel":  { c: "#3fe0c5", d: "M3 4h18v16H3V4zm2 2v12h4V6H5zm6 0v12h8V6h-9z" },
+    "snippet-npv-panel":  { c: "#ff4d6a", d: "M3 4h18v16H3V4zm2 2v12h4V6H5zm6 0v12h8V6h-9z" },
+    // Two outward triangles = seek back / forward. Deep accent so it does not
+    // read the same as the two #ff4d6a tiles above (AJ, 2026-10-20).
+    "snippet-arrow-seek": { c: "#e01040", d: "M10 7v10l-6-5zM14 7v10l6-5z" },
   };
   // "#rrggbb" + alpha byte, for the tinted tile background/border.
   const mkTint = (hex, alpha) => hex + alpha;
@@ -2997,12 +3348,16 @@
   // on screen wherever lyrics appear.
   const MK_SOURCES = {
     "ytmod-spicy-lyrics": [
-      ["Lyrics", [["Spicy Lyrics", "https://spicylyrics.org/"], ["Unison", "https://unison.boidu.dev/"], ["LRCLIB", "https://lrclib.net/"]]],
+      ["Lyrics", [["Spicy Lyrics", "https://spicylyrics.org/"], ["lrc.red", "https://lrc.red/"], ["Unison", "https://unison.boidu.dev/"], ["LRCLIB", "https://lrclib.net/"]]],
       ["Track matching", [["MusicBrainz", "https://musicbrainz.org/"], ["ListenBrainz", "https://listenbrainz.org/"]]],
     ],
   };
   const MK_LNK = {
     "Spicy Lyrics": "ym-mk-lnk-spicy",
+    // lrc.red deliberately shares Unison's colour class (AJ, 2026-10-20): it is a
+    // community/unreviewed source of the same kind, and the two sit next to each
+    // other in the list, so giving it a third gradient just added noise.
+    "lrc.red": "ym-mk-lnk-unison",
     Unison: "ym-mk-lnk-unison",
     LRCLIB: "ym-mk-lnk-lrclib",
     MusicBrainz: "ym-mk-lnk-mb",
@@ -3110,9 +3465,31 @@
     return card;
   }
 
+  // An <a> with the rail-card classes, so it inherits the same hover, press and
+  // focus treatment as the add-on rows. Deliberately NOT given a data-id and
+  // excluded from the arrow-key list below: arrows must never fire an external
+  // link, and the rail indicator only tracks selectable rows.
+  function mkDiscordCard() {
+    const card = h("a", {
+      class: "ym-mk-card ym-mk-card-discord",
+      href: REPORT_DISCORD_URL,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: "Open the Aurora Lyrics Discord",
+      "aria-label": "Join the Aurora Lyrics Discord",
+    });
+    card.appendChild(h("div", { class: "ym-mk-mono" }, svgIcon(MK_DISCORD_PATH)));
+    card.appendChild(h("div", { class: "ym-mk-name", text: "Discord" }));
+    const out = svgIcon(MK_ARROW_PATH);
+    out.classList.add("ym-mk-out");
+    card.appendChild(out);
+    return card;
+  }
+
   function mkBuildRows(list, reg) {
     if (!mkRows || !mkInd) return;
     mkRows.replaceChildren(mkInd);
+    mkRows.appendChild(mkDiscordCard());
     mkRows.appendChild(mkCard("home", "Home", "", false, true));
     let last = null;
     for (const ext of list) {
@@ -3393,6 +3770,14 @@
     return acts;
   }
 
+  // Discord invite, rendered as a RAIL card above Home (AJ, 2026-10-21) — the
+  // same styling as the add-on rows, so it reads as part of the rail rather than
+  // as a banner inside the home content. Reuses REPORT_DISCORD_URL so the invite
+  // lives in exactly one place.
+  const MK_DISCORD_PATH = "M20.317 4.369a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.249a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.036A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.009c.12.099.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.891.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.331c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z";
+  const MK_ARROW_PATH = "M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z";
+
+
   function mkHome(reg) {
     const installedCount = Object.keys(reg).length;
     const themes = AVAILABLE.filter((e) => e.category === "Themes").length;
@@ -3468,6 +3853,175 @@
     }
   }
 
+  /* ===== Aurora Lyrics: grouped sub-rail (AJ, 2026-10-21) =================
+     This add-on has 19 settings and read as one endless column. They are split
+     into five groups and the pane gains a second, smaller rail.
+     ⭐ The rows are the SAME NODES the generic builder already made — they are
+     MOVED, never rebuilt — so every control keeps its listener, its childOf
+     collapse and its disabledWhen wiring. Nothing in the settings engine
+     changes; this is purely a re-parenting plus a tab strip. */
+  // Which group was last open. The detail pane is REBUILT on every quiet
+  // re-render (install / uninstall / settings save), so without this the rail
+  // snapped back to "Look" every time something else changed (AJ, 2026-10-21).
+  let lrActiveGroup = "";
+
+  const LYRICS_GROUPS = [
+    { id: "look", label: "Look", keys: ["size", "romanizationEnabled", "legibilityBackdrop", "mvLyricsShade", "bgOpacity", "adaptiveSpacing"] },
+    { id: "words", label: "Words", keys: ["joinSyllables", "joinBgSyllables", "joinLrcRedSyllables"] },
+    { id: "motion", label: "Motion", keys: ["animatedArt", "simpleLyrics", "animation", "syllableAnimation", "verticalAnimation"] },
+    { id: "timing", label: "Timing", keys: ["smoothScrolling", "scrollLeadEnabled", "scrollLeadMs"] },
+    { id: "font", label: "Font", keys: [] },
+  ];
+
+  // Same spring the detail pane opens with, applied to the newly shown group.
+  function staggerInPanel(panel) {
+    if (!panel || !panel.animate) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    Array.from(panel.children).forEach((el, i) => {
+      if (!el.animate) return;
+      el.animate(
+        [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
+        { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "both" }
+      );
+    });
+  }
+
+  function groupLyricsSettings(section) {
+    const rail = h("div", { class: "ym-lr-rail", role: "tablist", "aria-label": "Setting groups" });
+    const panels = h("div", { class: "ym-lr-panels" });
+    const wrap = h("div", { class: "ym-lr" }, rail, panels);
+    const panelById = new Map();
+    LYRICS_GROUPS.forEach((g) => {
+      const panel = h("div", { class: "ym-lr-panel", role: "tabpanel", "data-panel": g.id });
+      panelById.set(g.id, panel);
+      panels.appendChild(panel);
+    });
+
+    const firstRow = section.querySelector(".ym-detail-setting-row");
+    if (firstRow) section.insertBefore(wrap, firstRow);
+
+    // Headers named the old sections; the rail names them now.
+    Array.from(section.querySelectorAll(".ym-detail-setting-section")).forEach((n) => n.remove());
+
+    // Anything not listed falls into the FIRST group, so a setting added later
+    // can never silently vanish from the panel.
+    const fallback = panelById.get(LYRICS_GROUPS[0].id);
+    Array.from(section.querySelectorAll(".ym-detail-setting-row")).forEach((row) => {
+      const key = row.getAttribute("data-key");
+      const g = LYRICS_GROUPS.find((grp) => grp.keys.indexOf(key) >= 0);
+      (g ? panelById.get(g.id) : fallback).appendChild(row);
+    });
+
+    // The custom-font disclosure is its own group.
+    const fontPanel = panelById.get("font");
+    const moreBtn = section.querySelector(".ym-cfont-more");
+    const collapse = section.querySelector(".ym-cfont-collapse");
+    if (moreBtn) fontPanel.appendChild(moreBtn);
+    if (collapse) fontPanel.appendChild(collapse);
+
+    // A group with no rows would be a dead tab — drop it.
+    const live = LYRICS_GROUPS.filter((g) => panelById.get(g.id).childElementCount > 0);
+    const motionOK = () => !(window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    let activeId = (lrActiveGroup && live.some((g) => g.id === lrActiveGroup))
+      ? lrActiveGroup
+      : (live[0] ? live[0].id : "");
+    lrActiveGroup = activeId;
+    let switching = false;
+
+    // The container's height is explicit because every panel is absolutely
+    // positioned (that is what lets a taller panel overflow instead of being
+    // clipped). Re-sync whenever the ACTIVE panel changes size — a child row
+    // collapsing is the common case.
+    function syncPanelHeight() {
+      const p = panelById.get(activeId);
+      if (!p) return;
+      const h = p.offsetHeight;
+      if (h) panels.style.height = h + "px";
+    }
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => { if (!switching) syncPanelHeight(); });
+      LYRICS_GROUPS.forEach((g) => ro.observe(panelById.get(g.id)));
+    }
+
+    /* Group switch, in THREE beats rather than a swap (AJ, 2026-10-21):
+         1. the outgoing panel rises and fades out (.15s)
+         2. the incoming one is shown and its rows spring up, staggered
+         3. the container's HEIGHT is tweened between the two, so the pane
+            below does not jump — that jump was the "it snaps" complaint.
+       The tab highlight moves immediately, so the click feels instant even
+       though the content takes ~300ms to settle. */
+    function showPanel(id, btn) {
+      if (switching || id === activeId) return;
+      const from = panelById.get(activeId);
+      const to = panelById.get(id);
+      if (!to) return;
+      switching = true;
+      tabs.forEach((t) => {
+        const on = t === btn;
+        t.classList.toggle("active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      const finish = () => {
+        if (from) from.classList.remove("active");
+        to.classList.add("active");
+        activeId = id;
+        // The panels are ABSOLUTE, so this explicit height is what the container
+        // is; the CSS transition on .ym-lr-panels animates it. Deliberately NOT
+        // a tween with overflow:hidden — that clipped the bottom of a taller
+        // incoming panel for the length of the animation, which is the
+        // "text is cut off then goes normal" AJ saw (2026-10-21).
+        lrActiveGroup = id;
+        syncPanelHeight();
+        staggerInPanel(to);
+        switching = false;
+      };
+      if (from && from.animate && motionOK()) {
+        const a = from.animate(
+          [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-10px)" }],
+          { duration: 150, easing: "cubic-bezier(.4,0,.7,1)", fill: "forwards" }
+        );
+        let done = false;
+        const go = () => { if (done) return; done = true; a.cancel(); finish(); };
+        a.onfinish = go;
+        window.setTimeout(go, 220); // belt: onfinish can be missed if the tab is hidden
+      } else {
+        finish();
+      }
+    }
+
+    const tabs = live.map((g) => {
+      const btn = h("button", {
+        class: "ym-lr-tab" + (g.id === activeId ? " active" : ""),
+        type: "button",
+        role: "tab",
+        "aria-selected": g.id === activeId ? "true" : "false",
+        text: g.label,
+      });
+      btn.addEventListener("click", () => showPanel(g.id, btn));
+      // role="tablist" promises arrow-key navigation; without it the rail is
+      // only reachable by tabbing through every entry (AJ, 2026-10-21).
+      btn.addEventListener("keydown", (ev) => {
+        const i = live.findIndex((grp) => grp.id === g.id);
+        let next = -1;
+        if (ev.key === "ArrowDown" || ev.key === "ArrowRight") next = (i + 1) % live.length;
+        else if (ev.key === "ArrowUp" || ev.key === "ArrowLeft") next = (i - 1 + live.length) % live.length;
+        else return;
+        ev.preventDefault();
+        const target = tabs[next];
+        if (!target) return;
+        target.focus();
+        showPanel(live[next].id, target);
+      });
+      rail.appendChild(btn);
+      return btn;
+    });
+    if (activeId) panelById.get(activeId).classList.add("active");
+    // rAF so the panel has been laid out before its height is read.
+    requestAnimationFrame(syncPanelHeight);
+    return section;
+  }
+
   async function mkRenderDetail(reg, quiet) {
     if (!mkDetail) return;
     const keepScroll = quiet ? mkDetail.scrollTop : 0;
@@ -3482,12 +4036,20 @@
     const prevHadSettings = quiet && !!mkDetail.querySelector(".ym-mk-settings");
     const keepPromo = quiet ? mkDetail.querySelector(".ym-mk-promo") : null;
     if (keepPromo) keepPromo.remove(); // detach so the <video> keeps its position
+    // ⭐ Hold the pane invisible until mkAnimateIn() has ARMED its stagger. Without
+    // this the first paint showed the finished layout at full opacity for a frame
+    // and THEN the stagger restarted it from 0 — the "home screen flashes, then
+    // plays" AJ reported (2026-10-21). The hold is dropped in the same tick the
+    // animations are created, so the delay frames are covered by their backwards
+    // fill and nothing ever paints un-animated.
+    mkDetail.classList.add("ym-mk-anim-hold");
     mkDetail.replaceChildren();
     mkDetail.scrollTop = 0;
     if (mkSel === "home" || !findAvail(mkSel)) {
       mkSel = "home";
       mkDetail.appendChild(mkHome(reg));
       if (!quiet) mkAnimateIn();
+      mkDetail.classList.remove("ym-mk-anim-hold");
       mkDetail.scrollTop = keepScroll;
       return;
     }
@@ -3532,7 +4094,11 @@
       const settings = await buildSettingsSection(ext);
       if (settings) {
         settings.classList.add("ym-mk-settings");
-        left.appendChild(settings);
+        // Aurora Lyrics gets the grouped sub-rail; every other add-on keeps the
+        // plain column (AJ, 2026-10-21).
+        left.appendChild(ext.id === "ytmod-spicy-lyrics"
+          ? groupLyricsSettings(settings)
+          : settings);
       }
     } else if (!installed && ext.settings && ext.settings.length) {
       left.appendChild(h("div", { class: "ym-mk-hint", text: "Install this add-on to change its settings." }));
@@ -3553,6 +4119,7 @@
       }
       mkQuietPolish(prevBtnW, prevPillBg, keepPromo);
     }
+    mkDetail.classList.remove("ym-mk-anim-hold");
     mkDetail.scrollTop = keepScroll;
   }
 
@@ -3662,95 +4229,6 @@
     mkPositionSegPill(true);
   }
 
-  function gridCard(ext, installed, enabled) {
-    const card = h("div", { class: "ym-card " + (ui.view === "list" ? "ym-card-list" : "ym-card-grid") + (ext.comingSoon ? " coming-soon" : "") + (installed ? " installed" : "") });
-
-    // Thumbnail (gradient by category, with monogram initial)
-    const catColor = CAT_COLOR[ext.category] || "#888";
-    const thumb = h("div", { class: "ym-thumb" });
-    thumb.style.background = `linear-gradient(135deg, ${catColor}33, ${catColor}11)`;
-    const initial = (ext.name || "?").charAt(0).toUpperCase();
-    const mono = h("div", { class: "ym-thumb-mono", text: initial });
-    mono.style.color = catColor;
-    thumb.appendChild(mono);
-    // Per-add-on art (AJ, 2026-09-28). A video add-on plays its loop right in the
-    // LIST (visibility-gated below); a still-only add-on paints the image; neither
-    // -> the gradient + monogram.
-    const cardArt = ext.art || {};
-    if (cardArt.video) {
-      const vid = h("video", {
-        class: "ym-thumb-video",
-        src: extArtUrl(cardArt.video),
-        poster: extArtUrl(cardArt.poster || cardArt.image || ""),
-        loop: "", playsinline: "", autoplay: "", muted: "",
-        disablepictureinpicture: "", controlslist: "nodownload noplaybackrate",
-      });
-      vid.muted = true;
-      thumb.appendChild(vid);
-      observeThumbVideo(vid);
-      mono.style.display = "none";
-    } else if (cardArt.image || cardArt.poster) {
-      thumb.style.backgroundImage = 'url("' + extArtUrl(cardArt.image || cardArt.poster) + '")';
-      thumb.style.backgroundSize = "cover";
-      thumb.style.backgroundPosition = "center";
-      mono.style.display = "none";
-    }
-    if (installed) {
-      const badge = h("div", { class: "ym-thumb-badge", text: "INSTALLED" });
-      thumb.appendChild(badge);
-    }
-    card.appendChild(thumb);
-
-    // Body
-    const body = h("div", { class: "ym-card-body" });
-    body.appendChild(h("div", { class: "ym-name", text: ext.name }));
-    body.appendChild(h("div", { class: "ym-author", text: ext.author || "" }));
-
-    body.appendChild(h("div", { class: "ym-desc", text: ext.description || "" }));
-
-    if (ext.tags && ext.tags.length) {
-      const tagsEl = h("div", { class: "ym-tags" });
-      for (const t of ext.tags) tagsEl.appendChild(h("span", { class: "ym-tag", text: t }));
-      body.appendChild(tagsEl);
-    }
-
-    card.appendChild(body);
-
-    // Action
-    const action = h("div", { class: "ym-action" });
-    if (ext.comingSoon) {
-      action.appendChild(h("span", { class: "ym-soon", text: "Coming soon" }));
-    } else if (installed) {
-      // Track the intended on/off in a closure and flip it on click. We do NOT
-      // read tg.checked — in YTM's Polymer build the `change` event can report
-      // the previous value, so trusting it could persist the wrong state.
-      let state = !!enabled;
-      const tg = document.createElement("tp-yt-paper-toggle-button");
-      if (state) tg.setAttribute("checked", "");
-      tg.addEventListener("click", () => {
-        state = !state;
-        setEnabled(ext.id, state);
-      });
-      action.appendChild(tg);
-      if (ui.category === "Installed") {
-        const remove = makeIconButton(ICON_DELETE, () => uninstall(ext.id), "Remove " + ext.name);
-        remove.classList.add("ym-tool", "ym-delete");
-        action.appendChild(remove);
-      }
-    } else {
-      const b = h("tp-yt-paper-button", { class: "ym-install", text: "Install", raised: "" });
-      b.addEventListener("click", () => install(ext.id));
-      action.appendChild(b);
-    }
-    card.appendChild(action);
-
-    // Click anywhere on the card (except the action row) opens the detail SHEET,
-    // which morphs out of this card's thumb.
-    card.addEventListener("click", () => renderDetail(ext, card));
-    action.addEventListener("click", (e) => e.stopPropagation());
-
-    return card;
-  }
 
   /* ---- detail view (click a card to open it) ---- */
   function githubLinks(ext) {
@@ -4595,17 +5073,9 @@
   let rltSaveEnabled = false; // only record user changes AFTER we've applied
   let rltPending = null; // remembered identity we still want to apply
   let rltLoading = false; // guards the async storage read
-  let rltRaf = 0;
 
   function rltSelect(tab) {
     try { tab.click(); } catch (e) {}
-  }
-  function rltScheduleApply() {
-    if (rltRaf) return;
-    rltRaf = setTimeout(() => {
-      rltRaf = 0;
-      rltApplyRemembered();
-    }, 250);
   }
   function rltApplyRemembered() {
     if (!isWatchPage()) {

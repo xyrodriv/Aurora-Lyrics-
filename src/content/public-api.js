@@ -293,6 +293,11 @@
             videoId: String(item.videoId),
             title: cleanTrackTitle(title, ""),
             artist: cleanArtist(artistRaw || ""),
+            // Carried so the fullscreen pane can PRELOAD the next cover while the
+            // current track is still playing — an MV -> audio skip then has a
+            // decoded image ready instead of showing an empty pane (AJ,
+            // 2026-10-20). Best-effort: absent on some queue shapes.
+            artworkUrl: pickArtworkUrl(item.thumbnail && item.thumbnail.thumbnails),
           };
         }
       } catch (e) {}

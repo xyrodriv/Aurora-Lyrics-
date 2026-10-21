@@ -1,6 +1,21 @@
 /* Aurora Lyrics — injected base styles (Trusted-Types safe; loaded by the manifest)
    v0.5.1: Spicetify-style marketplace (tabs + sort/search + grid|list + glass + toasts). */
 
+/* ---- brand accent tokens (AJ, 2026-10-20) --------------------------------
+   Every solid accent in the panel and the report modal now reads from these, so
+   the next palette change is one edit instead of a 60-site find/replace.
+   Sampled from the logo's crimson glow (#cd1038) and lifted to #e01040 so it
+   stays legible on the near-black surfaces (--mk-surf #121217 / #101015).
+   NOTE: rgba() tints are still literal — see .scratch/recolour-rgba.py. */
+:root {
+  --mk-accent: #e01040;        /* primary accent: toggles, links, active states */
+  --mk-accent-soft: #ff4d6a;   /* bright accent / gradient start / hover */
+  --mk-accent-deep: #8e0b26;   /* gradient end / Themes category */
+  --mk-accent-dim: #c40b35;    /* accent variant */
+  --mk-accent-dark: #a30f2e;   /* deep accent (slider fill start) */
+  --mk-danger: #e5484d;        /* alarm red: Report / Send (filled, never ghost) */
+}
+
 #ym-market.hidden { display: none; }
 #ym-market {
   /* Monitor-relative scaling knob (AJ, 2026-09-28). Every layout metric in the
@@ -180,7 +195,7 @@
 #ym-market .ym-tab.active::after {
   content: '';
   position: absolute; left: 0; right: 0; bottom: -1px;
-  height: 3px; background: #1DB954; border-radius: 2px;
+  height: 3px; background: var(--mk-accent); border-radius: 2px;
   transform: scaleX(1); transform-origin: center;
   transition: transform .24s cubic-bezier(.2,.7,.3,1);
 }
@@ -199,7 +214,7 @@
 }
 #ym-market .ym-icon-btn.ym-tool svg { width: 19px; height: 19px; }
 #ym-market .ym-icon-btn.ym-tool:hover { background: rgba(255,255,255,.1); color: #fff; transform: translateY(-1px); }
-#ym-market .ym-icon-btn.ym-tool.active { background: rgba(29,185,84,.18); color: #fff; }
+#ym-market .ym-icon-btn.ym-tool.active { background: rgba(224,16,64,.18); color: #fff; }
 #ym-market .ym-icon-btn.ym-tool:active { transform: translateY(0) scale(.94); }
 #ym-market .ym-icon-btn.ym-delete {
   margin-left: 4px;
@@ -265,8 +280,8 @@
 }
 #ym-market .ym-card-grid:hover {
   transform: translateY(-5px);
-  border-color: rgba(29,185,84,.55);
-  box-shadow: 0 14px 34px rgba(0,0,0,.55), 0 0 22px rgba(29,185,84,.22);
+  border-color: rgba(224,16,64,.55);
+  box-shadow: 0 14px 34px rgba(0,0,0,.55), 0 0 22px rgba(224,16,64,.22);
 }
 #ym-market .ym-card-list {
   display: flex; flex-direction: row; align-items: center; gap: var(--ym-u);
@@ -274,8 +289,8 @@
   transition: transform .18s ease, box-shadow .2s ease, border-color .2s ease;
 }
 #ym-market .ym-card-list:hover {
-  border-color: rgba(29,185,84,.5);
-  box-shadow: 0 8px 24px rgba(0,0,0,.45), 0 0 18px rgba(29,185,84,.18);
+  border-color: rgba(224,16,64,.5);
+  box-shadow: 0 8px 24px rgba(0,0,0,.45), 0 0 18px rgba(224,16,64,.18);
 }
 #ym-market .ym-card.coming-soon { opacity: .8; }
 
@@ -291,8 +306,8 @@
 /* Keyboard-focus highlight */
 #ym-market .ym-card.ym-kbfocus {
   outline: none;
-  border-color: #1DB954;
-  box-shadow: 0 0 0 2px #1DB954, 0 0 26px rgba(29,185,84,.4);
+  border-color: var(--mk-accent);
+  box-shadow: 0 0 0 2px var(--mk-accent), 0 0 26px rgba(224,16,64,.4);
 }
 
 /* Thumbnail */
@@ -313,7 +328,11 @@
 #ym-market .ym-thumb-badge {
   position: absolute; top: calc(var(--ym-u) * .5); left: calc(var(--ym-u) * .5);
   font-size: calc(var(--ym-u) * .625); font-weight: 700; letter-spacing: .1em;
-  background: #1DB954; color: #000;
+  /* White on a dark plate with a red outline (AJ, 2026-10-20). It was BLACK text
+     on a solid red fill, which read as an alert rather than a status. The dark
+     plate also keeps it readable over any thumbnail, which the flat red could not. */
+  background: rgba(8,8,12,.82); color: #fff;
+  border: 1px solid var(--mk-accent);
   padding: calc(var(--ym-u) * .1875) calc(var(--ym-u) * .5); border-radius: calc(var(--ym-u) * .25);
 }
 
@@ -361,20 +380,20 @@
   text-transform: uppercase; letter-spacing: .05em;
 }
 #ym-market tp-yt-paper-button.ym-install {
-  background: #1DB954; color: #000;
+  background: var(--mk-accent); color: #000;
   text-transform: uppercase; letter-spacing: .05em;
   transition: background-color .18s ease, transform .16s ease, box-shadow .18s ease;
 }
 #ym-market tp-yt-paper-button.ym-install:hover {
-  background: #1ed760;
+  background: var(--mk-accent-soft);
   transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(29,185,84,.2);
+  box-shadow: 0 8px 20px rgba(224,16,64,.2);
 }
 #ym-market tp-yt-paper-button.ym-install:active { transform: translateY(0) scale(.97); }
 #ym-market tp-yt-paper-toggle-button {
-  --paper-toggle-button-checked-bar-color: #1DB954;
-  --paper-toggle-button-checked-button-color: #1DB954;
-  --paper-toggle-button-checked-ink-color: #1DB954;
+  --paper-toggle-button-checked-bar-color: var(--mk-accent);
+  --paper-toggle-button-checked-button-color: var(--mk-accent);
+  --paper-toggle-button-checked-ink-color: var(--mk-accent);
 }
 
 /* Top-bar nav button (also used by close) */
@@ -425,11 +444,11 @@
 @keyframes ym-nav-hint {
   0%, 100% {
     transform: scale(1);
-    filter: drop-shadow(0 0 6px rgba(46,124,246,.95)) drop-shadow(0 0 14px rgba(18,169,160,.8));
+    filter: drop-shadow(0 0 6px rgba(224,16,64,.95)) drop-shadow(0 0 14px rgba(163,15,46,.8));
   }
   50% {
     transform: scale(1.18);
-    filter: drop-shadow(0 0 12px rgba(62,190,92,.95)) drop-shadow(0 0 22px rgba(46,124,246,.9));
+    filter: drop-shadow(0 0 12px rgba(196,11,53,.95)) drop-shadow(0 0 22px rgba(224,16,64,.9));
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -437,7 +456,7 @@
   .ym-icon-btn#ym-nav-btn.ym-nav-hint {
     animation: none;
     filter: none;
-    outline: 2px solid rgba(46,124,246,.9);
+    outline: 2px solid rgba(224,16,64,.9);
     outline-offset: 2px;
   }
 }
@@ -465,7 +484,7 @@
 #ym-market .ym-detail-name { font-size: calc(var(--ym-u) * 1.625); font-weight: 600; margin: 0 0 calc(var(--ym-u) * .375); overflow-wrap: anywhere; }
 #ym-market .ym-detail-cat {
   display: inline-block; font-size: calc(var(--ym-u) * .75); font-weight: 500;
-  color: #1DB954; background: rgba(29,185,84,.12);
+  color: var(--mk-accent); background: rgba(224,16,64,.12);
   padding: calc(var(--ym-u) * .1875) calc(var(--ym-u) * .625); border-radius: 999px;
   text-transform: uppercase; letter-spacing: .05em;
 }
@@ -480,15 +499,15 @@
 #ym-market .ym-detail-links { display: flex; flex-wrap: wrap; gap: calc(var(--ym-u) * .75); margin: calc(var(--ym-u) * .5) 0 calc(var(--ym-u) * 1.375); }
 #ym-market .ym-detail-link {
   display: inline-flex; align-items: center; gap: calc(var(--ym-u) * .5);
-  background: #1DB954; color: #000; text-decoration: none;
+  background: var(--mk-accent); color: #000; text-decoration: none;
   font-size: calc(var(--ym-u) * .8125); font-weight: 600;
   padding: calc(var(--ym-u) * .5625) var(--ym-u); border-radius: 999px;
   transition: background-color .18s ease, transform .16s ease, box-shadow .18s ease;
 }
 #ym-market .ym-detail-link:hover {
-  background: #1ed760;
+  background: var(--mk-accent-soft);
   transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(29,185,84,.2);
+  box-shadow: 0 8px 20px rgba(224,16,64,.2);
 }
 #ym-market .ym-detail-link:active { transform: translateY(0) scale(.97); }
 #ym-market .ym-detail-link-icon { width: 18px; height: 18px; fill: #000; }
@@ -534,8 +553,8 @@
 }
 #ym-market .ym-mk-info-btn:hover,
 #ym-market .ym-mk-info-btn.on {
-  background: rgba(63,224,197,.16);
-  border-color: rgba(63,224,197,.55);
+  background: rgba(255,77,106,.16);
+  border-color: rgba(255,77,106,.55);
   color: #bff6ec;
   transform: scale(1.08);
 }
@@ -573,7 +592,7 @@
   color: rgba(255,255,255,.72);
 }
 #ym-market .ym-mk-info-list li::marker { color: rgba(255,255,255,.32); }
-#ym-market .ym-mk-info-pro .ym-mk-info-list li::marker { color: #6ee06f; }
+#ym-market .ym-mk-info-pro .ym-mk-info-list li::marker { color: var(--mk-accent-deep); }
 #ym-market .ym-mk-info-con .ym-mk-info-list li::marker { color: #ffb15c; }
 #ym-market .ym-detail-settings-subtitle {
   max-width: 60%;
@@ -625,8 +644,8 @@
 #ym-market .ym-order-row.dragging {
   cursor: grabbing;
   scale: 1.015;
-  border-color: rgba(63,224,197,.5);
-  background: rgba(63,224,197,.08);
+  border-color: rgba(255,77,106,.5);
+  background: rgba(255,77,106,.08);
   box-shadow: 0 8px 24px rgba(0,0,0,.45);
 }
 #ym-market .ym-order-handle {
@@ -707,7 +726,7 @@
   max-width: 100%;
   min-width: 0;
   width: 100%;
-  accent-color: #1DB954;
+  accent-color: var(--mk-accent);
   cursor: pointer;
 }
 #ym-market .ym-detail-setting-input[type="text"] {
@@ -723,8 +742,8 @@
   outline: none;
 }
 #ym-market .ym-detail-setting-input[type="text"]:focus {
-  border-color: #1DB954;
-  box-shadow: 0 0 0 2px rgba(29,185,84,.16);
+  border-color: var(--mk-accent);
+  box-shadow: 0 0 0 2px rgba(224,16,64,.16);
 }
 #ym-market .ym-detail-setting-input[type="checkbox"] {
   appearance: none;
@@ -750,15 +769,15 @@
   transition: transform .18s ease, background-color .18s ease;
 }
 #ym-market .ym-detail-setting-input[type="checkbox"]:checked {
-  border-color: #1DB954;
-  background: #1DB954;
+  border-color: var(--mk-accent);
+  background: var(--mk-accent);
 }
 #ym-market .ym-detail-setting-input[type="checkbox"]:checked::after {
   transform: translateX(var(--ym-u));
   background: #fff;
 }
 #ym-market .ym-detail-setting-input[type="checkbox"]:focus-visible {
-  outline: 2px solid rgba(29,185,84,.7);
+  outline: 2px solid rgba(224,16,64,.7);
   outline-offset: 2px;
 }
 #ym-market .ym-detail-setting-value {
@@ -782,9 +801,9 @@
   transition: border-color .18s ease, color .18s ease, background-color .18s ease, transform .16s ease;
 }
 #ym-market .ym-detail-settings-reset:hover {
-  border-color: #1DB954;
+  border-color: var(--mk-accent);
   color: #fff;
-  background: rgba(29,185,84,.08);
+  background: rgba(224,16,64,.08);
 }
 #ym-market .ym-detail-settings-reset:active { transform: scale(.97); }
 
@@ -796,7 +815,7 @@
 }
 #ym-market .ym-toast {
   background: rgba(18,18,18,.92); color: #f1f1f1;
-  border: 1px solid rgba(255,255,255,.1); border-left: 3px solid #1DB954;
+  border: 1px solid rgba(255,255,255,.1); border-left: 3px solid var(--mk-accent);
   border-radius: 12px; padding: 12px 18px; font-size: 13px;
   box-shadow: 0 10px 28px rgba(0,0,0,.55);
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
@@ -923,7 +942,7 @@
   transition: background .15s ease, color .15s ease;
 }
 .ym-upd-close:hover { color: #111; background: rgba(0,0,0,.06); }
-.ym-upd-close:focus-visible { outline: 2px solid rgba(20,80,60,.55); outline-offset: 2px; }
+.ym-upd-close:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
 .ym-upd-close svg { fill: currentColor; }
 .ym-upd-body {
   flex: 1 1 auto;
@@ -976,7 +995,7 @@
 }
 .ym-upd-btn:hover { background: rgba(255,255,255,.9); }
 .ym-upd-btn:active { transform: translateY(1px); }
-.ym-upd-btn:focus-visible { outline: 2px solid rgba(20,80,60,.55); outline-offset: 2px; }
+.ym-upd-btn:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
 .ym-upd-btn.primary {
   background: linear-gradient(180deg, #ffd000, #f0b400);
   border-color: transparent;
@@ -1015,9 +1034,9 @@
   gap: 10px;
   width: 210px;
   padding: 4px 10px;
-  border: 1px solid rgba(140,230,200,.45);
+  border: 1px solid rgba(255,180,190,.45);
   border-radius: 10px;
-  background: linear-gradient(135deg, rgba(74,144,226,.88), rgba(80,227,194,.88));
+  background: linear-gradient(135deg, rgba(224,16,64,.88), rgba(255,77,106,.88));
   backdrop-filter: blur(12px) saturate(140%);
   -webkit-backdrop-filter: blur(12px) saturate(140%);
   color: #fff;
@@ -1060,7 +1079,7 @@
    on and the toolbar (view / density / float) was removed. This block only
    overrides visuals — no structure changes — so search, install / enable /
    remove, dev-mode settings and the Support modal all keep working.
-   The accent stays the existing green (#1DB954), per AJ.
+   The accent stays the existing green (var(--mk-accent)), per AJ.
    ===================================================================== */
 /* Spicy Lyrics font across the whole panel (AJ, 2026-09-28). */
 #ym-market {
@@ -1133,7 +1152,7 @@
 #ym-market .ym-tab-thumb {
   position: absolute; bottom: -1px; left: 0;
   height: 3px; width: 0; border-radius: 2px;
-  background: linear-gradient(90deg, #2e7cf6, #12a9a0, #3ebe5c);
+  background: linear-gradient(90deg, var(--mk-accent), var(--mk-accent-dark), var(--mk-accent-dim));
   transition: transform .3s cubic-bezier(0.32,0.72,0,1), width .3s cubic-bezier(0.32,0.72,0,1);
   pointer-events: none;
 }
@@ -1142,7 +1161,7 @@
   -webkit-appearance: none; appearance: none;
   width: 150px; height: 4px; border-radius: 999px;
   background-color: rgba(255,255,255,.16);
-  background-image: linear-gradient(90deg, #2e7cf6, #12a9a0, #3ebe5c);
+  background-image: linear-gradient(90deg, var(--mk-accent), var(--mk-accent-dark), var(--mk-accent-dim));
   background-repeat: no-repeat;
   /* No transition on the fill: it tracks the thumb EXACTLY. A transition eased it
      behind the thumb, which read as "delayed" rather than smooth (AJ, 2026-09-28). */
@@ -1161,7 +1180,7 @@
 }
 #ym-market .ym-detail-setting-input[type="range"]:hover::-webkit-slider-thumb {
   transform: scale(1.18);
-  box-shadow: 0 0 0 5px rgba(62,190,92,.22), 0 2px 8px rgba(0,0,0,.5);
+  box-shadow: 0 0 0 5px rgba(196,11,53,.22), 0 2px 8px rgba(0,0,0,.5);
 }
 #ym-market .ym-detail-setting-input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.3); }
 #ym-market .ym-detail-setting-input[type="range"]::-webkit-slider-runnable-track {
@@ -1175,7 +1194,7 @@
   height: 4px; border-radius: 999px; background: rgba(255,255,255,.16);
 }
 #ym-market .ym-detail-setting-input[type="range"]::-moz-range-progress {
-  height: 4px; border-radius: 999px; background: linear-gradient(90deg, #2e7cf6, #3ebe5c);
+  height: 4px; border-radius: 999px; background: linear-gradient(90deg, var(--mk-accent), var(--mk-accent-dim));
 }
 /* dev hint */
 .ym-dev-hint {
@@ -1203,7 +1222,7 @@
   border-color: rgba(255,255,255,.18);
   box-shadow: 0 12px 30px -14px rgba(0,0,0,.7);
 }
-#ym-market .ym-card.ym-kbfocus { border-color: #1DB954; box-shadow: 0 0 0 2px #1DB954; }
+#ym-market .ym-card.ym-kbfocus { border-color: var(--mk-accent); box-shadow: 0 0 0 2px var(--mk-accent); }
 /* tags + action row */
 #ym-market .ym-tag {
   background: rgba(255,255,255,.06);
@@ -1358,7 +1377,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   --mk-dim2: rgba(255,255,255,.36);
   --mk-surf: #121217;
   --mk-surf2: #17171e;
-  --mk-grad: linear-gradient(100deg,#3fe0c5,#6ee06f);
+  --mk-grad: linear-gradient(100deg,var(--mk-accent-soft),var(--mk-accent-deep));
   display: grid;
   grid-template-columns: 322px minmax(0,1fr);
   grid-template-rows: minmax(0,1fr);
@@ -1373,8 +1392,17 @@ ytmusic-player-bar .ym-pb-btn:active,
    the pane and the bottom of the page is clipped (and Home will not scroll). */
 #ym-market.ym-mk2, #ym-market.ym-mk2 * { box-sizing: border-box; }
 #ym-market.ym-mk2.ym-floating {
-  width: min(1060px, 96vw);
-  height: min(740px, 92vh);
+  /* Proportional to the WINDOW, not near-full-bleed (AJ, 2026-10-20). The old
+     min(1060px, 96vw) / min(740px, 92vh) meant that on a narrower browser window
+     96vw won the min() and the "floating" box very nearly filled it — so it read
+     as a takeover rather than a panel, and the fixed 1060/740 caps stopped it
+     scaling with the display at all. clamp() gives it a floor (still usable on a
+     small window), a viewport-proportional middle, and a ceiling so it does not
+     balloon on a big monitor.
+     Tuning knob: the middle pair (78vw / 82vh) is the "how much of the window"
+     dial; raise both to make the panel bigger at every size. */
+  width: clamp(720px, 78vw, 1180px);
+  height: clamp(520px, 82vh, 860px);
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
   border-radius: 16px;
@@ -1480,7 +1508,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-card:hover { background: rgba(255,255,255,.045); }
 #ym-market .ym-mk-card.sel { background: rgba(255,255,255,.075); }
-#ym-market .ym-mk-card:focus-visible { outline: 2px solid #3fe0c5; outline-offset: -2px; }
+#ym-market .ym-mk-card:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
 #ym-market .ym-mk-mono {
   width: 38px; height: 38px; border-radius: 10px; flex: 0 0 auto;
   display: grid; place-items: center;
@@ -1495,7 +1523,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #ym-market .ym-mk-card.sel .ym-mk-name { color: #fff; }
-#ym-market .ym-mk-check { width: 16px; height: 16px; flex: 0 0 auto; fill: #38cf92; opacity: 0; }
+#ym-market .ym-mk-check { width: 16px; height: 16px; flex: 0 0 auto; fill: var(--mk-accent); opacity: 0; }
 #ym-market .ym-mk-card.installed .ym-mk-check { opacity: 1; }
 #ym-market .ym-mk-cat {
   margin: 14px 8px 7px;
@@ -1569,8 +1597,11 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-status { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mk-dim); }
 #ym-market .ym-mk-pill {
-  font-size: 11px; font-weight: 700; color: #38cf92;
-  background: rgba(56,207,146,.12); border: 1px solid rgba(56,207,146,.22);
+  /* Matches the INSTALLED badge on the cards (AJ, 2026-10-20): white text, red
+     outline. The background tint was still the OLD green rgba(56,207,146) while
+     the text had already gone red, so this pill was red-on-green. */
+  font-size: 11px; font-weight: 700; color: #fff;
+  background: rgba(224,16,64,.14); border: 1px solid rgba(224,16,64,.5);
   padding: 2px 9px; border-radius: 7px;
 }
 #ym-market .ym-mk-pill.avail { color: var(--mk-dim); background: rgba(255,255,255,.06); border-color: var(--mk-line); }
@@ -1603,15 +1634,15 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-srclinks i { font-style: normal; color: var(--mk-dim2); font-size: 11px; }
 #ym-market .ym-mk-lnk {
   text-decoration: none; position: relative; color: transparent;
-  background-image: linear-gradient(100deg,#fff 0%,#fff 34%,var(--mk-la,#3fe0c5) 46%,var(--mk-lb,#6ee06f) 56%,#fff 68%,#fff 100%);
+  background-image: linear-gradient(100deg,#fff 0%,#fff 34%,var(--mk-la,var(--mk-accent-soft)) 46%,var(--mk-lb,var(--mk-accent-deep)) 56%,#fff 68%,#fff 100%);
   background-size: 260% 100%;
   -webkit-background-clip: text; background-clip: text;
   animation: ym-mk-sweep-link 5s linear infinite, ym-mk-glow 5.5s ease-in-out infinite;
 }
 @keyframes ym-mk-sweep-link { from { background-position: 0% 0; } to { background-position: 162.5% 0; } }
 @keyframes ym-mk-glow {
-  0%,100% { filter: drop-shadow(0 0 4px var(--mk-lg, rgba(63,224,197,.6))) drop-shadow(0 0 9px transparent); }
-  50% { filter: drop-shadow(0 0 9px var(--mk-lg, rgba(63,224,197,.6))) drop-shadow(0 0 20px var(--mk-lg, rgba(63,224,197,.6))); }
+  0%,100% { filter: drop-shadow(0 0 4px var(--mk-lg, rgba(255,77,106,.6))) drop-shadow(0 0 9px transparent); }
+  50% { filter: drop-shadow(0 0 9px var(--mk-lg, rgba(255,77,106,.6))) drop-shadow(0 0 20px var(--mk-lg, rgba(255,77,106,.6))); }
 }
 #ym-market .ym-mk-lnk::after {
   content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
@@ -1679,16 +1710,45 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] {
   -webkit-appearance: none; appearance: none;
-  width: 170px; height: 5px; border-radius: 99px; outline: none;
-  background: linear-gradient(90deg,#fff 0 var(--val,50%),rgba(255,255,255,.14) var(--val,50%) 100%);
+  width: 170px; height: 4px; border-radius: 99px; outline: none;
+  /* Red fill up to the thumb, dim track after it (AJ, 2026-10-20). This used to be
+     a flat WHITE fill, which ignored the palette entirely. background-size gives a
+     hard stop at the thumb so the fill tracks it exactly - deliberately NO
+     transition, or the fill eases behind the thumb and reads as laggy.
+     Track height / thumb size / margin-top are the geometry that already worked;
+     only the colours changed. */
+  background-color: rgba(255,255,255,.13);
+  background-image: linear-gradient(90deg, var(--mk-accent-soft), var(--mk-accent), var(--mk-accent-dim));
+  background-repeat: no-repeat;
+  background-size: var(--val, 50%) 100%;
 }
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.5); cursor: pointer;
+  background: #fff; border: 2px solid var(--mk-accent);
+  box-shadow: 0 2px 6px rgba(0,0,0,.5); cursor: pointer; margin-top: -6px;
+  transition: box-shadow .16s ease, transform .16s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+  box-shadow: 0 2px 6px rgba(0,0,0,.5), 0 0 0 5px rgba(224,16,64,.22);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 99px; background: transparent;
 }
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"] {
   -webkit-appearance: none; appearance: none;
   width: 46px; height: 27px; border-radius: 99px; margin: 0; position: relative;
+  /* border: 0 is LOAD-BEARING (AJ, 2026-10-20). The base checkbox rule further up
+     sets `border: 1px solid #555` and this rule never reset it. Under border-box
+     that left only 25px of usable height instead of 27, so the 21px knob at
+     top: 3px had 3px above and just 1px below — which reads as "the circle sits a
+     bit low" — and it also stole 2px of travel on the right, so the knob never
+     reached its end position either. With the border gone, 3px/3px and
+     translateX(19px) are exact on both axes. */
+  border: 0;
   background: rgba(255,255,255,.14); cursor: pointer; transition: background .3s; flex: 0 0 auto;
 }
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]::after {
@@ -1696,12 +1756,55 @@ ytmusic-player-bar .ym-pb-btn:active,
   border-radius: 50%; background: #fff; box-shadow: 0 2px 5px rgba(0,0,0,.4);
   transition: transform .38s cubic-bezier(.34,1.4,.5,1);
 }
-#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]:checked { background: #38cf92; }
+#ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]:checked { background: var(--mk-accent); }
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"]:checked::after { transform: translateX(19px); }
 #ym-market .ym-mk-settings .ym-detail-settings-reset {
   margin-top: 14px; padding: 8px 12px; border-radius: 9px;
   background: none; border: 1px solid var(--mk-line);
   color: var(--mk-dim); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+/* Nested settings row (AJ, 2026-10-20): indented under its parent toggle, with
+   smaller, dimmer text. Collapsed = zero height + faded, so opening AND closing
+   are a transition on the row itself rather than a layout jump. `overflow:
+   hidden` plus border-box (the mk2 reset sets it globally) is what lets
+   max-height: 0 collapse the row to nothing including its padding. */
+#ym-market .ym-mk-settings .ym-detail-setting-child {
+  margin-left: 20px;
+  padding-left: 14px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  border-left: 2px solid rgba(255,255,255,.10);
+  overflow: hidden;
+  /* min-height MUST be 0 here. The base row sets min-height: 2.875u and
+     min-height BEATS max-height in CSS, so a "collapsed" child kept its full
+     ~57px and left a big empty gap between the parent row and the next one
+     (AJ, 2026-10-20). Padding gives the row its height back instead, and unlike
+     min-height it can animate to 0. */
+  min-height: 0;
+  max-height: 120px;
+  opacity: 1;
+  transform: none;
+  transition:
+    max-height .34s cubic-bezier(.22,1,.36,1),
+    opacity .24s ease,
+    transform .34s cubic-bezier(.22,1,.36,1),
+    padding-top .34s cubic-bezier(.22,1,.36,1),
+    padding-bottom .34s cubic-bezier(.22,1,.36,1);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-child .ym-detail-setting-label {
+  /* Matches the parent row exactly (14px). The first pass used .86em and the
+     second .95em (13.3px) — both still read as a footnote next to a 14px parent,
+     so the hierarchy is now carried by the indent + rule + a slightly dimmer
+     colour instead of by type size (AJ, 2026-10-20). */
+  font-size: 1em;
+  color: rgba(255,255,255,.9);
+}
+#ym-market .ym-mk-settings .ym-detail-setting-child.collapsed {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-6px);
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* actions */
@@ -1825,8 +1928,8 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market.ym-mk2 .ym-toast {
   background: #141419;
-  border: 1px solid rgba(63,224,197,.34);
-  border-left: 1px solid rgba(63,224,197,.34);
+  border: 1px solid rgba(255,77,106,.34);
+  border-left: 1px solid rgba(255,77,106,.34);
   border-radius: 999px;
   padding: 9px 18px;
   font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
@@ -1891,13 +1994,13 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 .ym-report-option:hover { background: #171717; }
 .ym-report-option:active { transform: scale(.99); }
-.ym-report-option.selected { border-color: #e5484d; background: #000000; }
+.ym-report-option.selected { border-color: var(--mk-danger); background: #000000; }
 .ym-report-radio {
   flex: 0 0 auto; position: relative; width: 22px; height: 22px; border-radius: 50%;
   border: 2px solid rgba(255,255,255,.5); display: flex; align-items: center; justify-content: center;
   transition: border-color .18s ease, background .18s ease;
 }
-.ym-report-option.selected .ym-report-radio { border-color: #e5484d; background: #e5484d; }
+.ym-report-option.selected .ym-report-radio { border-color: var(--mk-danger); background: var(--mk-danger); }
 .ym-report-check {
   width: 14px; height: 14px; color: #fff; display: flex;
   opacity: 0; transform: scale(.4);
@@ -1915,7 +2018,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 .ym-report-other-input:focus { outline: none; border-color: rgba(0,0,0,.45); }
 .ym-report-send {
   appearance: none; align-self: center; margin-top: 6px; padding: 11px 26px; border: 0; border-radius: 12px;
-  background: #e5484d; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  background: var(--mk-danger); color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
   box-shadow: 0 8px 22px -8px rgba(229,72,77,.55);
   transition: background .18s ease, opacity .18s ease, transform .15s ease;
 }
@@ -1956,7 +2059,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 .ym-report-btn {
   appearance: none;
   padding: 9px 18px; border: 0; border-radius: 11px;
-  background: #e5484d; color: #fff; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+  background: var(--mk-danger); color: #fff; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
   box-shadow: 0 8px 22px -10px rgba(229,72,77,.8);
   transition: background .18s ease, transform .15s ease;
 }
@@ -2101,7 +2204,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 .ym-cfont-slider-fill {
   position: absolute; top: 0; left: 0; bottom: 0; width: 0;
   border-radius: 999px;
-  background: linear-gradient(90deg, #2fd3b8, #3fe0c5);
+  background: linear-gradient(90deg, var(--mk-accent-dark), var(--mk-accent-soft));
   transition: width .08s linear;
 }
 .ym-cfont-slider-thumb {
@@ -2114,11 +2217,11 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 .ym-cfont-slider:hover .ym-cfont-slider-thumb,
 .ym-cfont-slider.is-dragging .ym-cfont-slider-thumb {
-  box-shadow: 0 1px 5px rgba(0,0,0,.5), 0 0 0 4px rgba(63,224,197,.2);
+  box-shadow: 0 1px 5px rgba(0,0,0,.5), 0 0 0 4px rgba(255,77,106,.2);
 }
 .ym-cfont-slider.is-dragging .ym-cfont-slider-thumb { transform: translateY(-50%) scale(1.1); }
 .ym-cfont-slider:focus-visible .ym-cfont-slider-thumb {
-  box-shadow: 0 1px 5px rgba(0,0,0,.5), 0 0 0 4px rgba(63,224,197,.4);
+  box-shadow: 0 1px 5px rgba(0,0,0,.5), 0 0 0 4px rgba(255,77,106,.4);
 }
 
 .ym-cfont-status {
@@ -2132,8 +2235,8 @@ ytmusic-player-bar .ym-pb-btn:active,
   background: rgba(255,255,255,.35);
   transition: background .18s ease, box-shadow .18s ease;
 }
-.ym-cfont-status.is-on { color: #3fe0c5; }
-.ym-cfont-status.is-on::before { background: #3fe0c5; box-shadow: 0 0 8px rgba(63,224,197,.8); }
+.ym-cfont-status.is-on { color: var(--mk-accent-soft); }
+.ym-cfont-status.is-on::before { background: var(--mk-accent-soft); box-shadow: 0 0 8px rgba(255,77,106,.8); }
 .ym-cfont-status.is-pending { color: #ffcf5c; }
 .ym-cfont-status.is-pending::before { background: #ffcf5c; box-shadow: 0 0 8px rgba(255,207,92,.7); }
 
@@ -2240,8 +2343,419 @@ ytmusic-player-bar .ym-pb-btn:active,
 .ym-cfont-apply {
   appearance: none; border: 0; border-radius: 10px; padding: 9px 16px;
   font: inherit; font-size: 13px; font-weight: 600;
-  background: #3fe0c5; color: #0b0d10; cursor: pointer;
+  background: var(--mk-accent-soft); color: #0b0d10; cursor: pointer;
   transition: filter .16s ease, transform .12s ease;
 }
 .ym-cfont-apply:hover { filter: brightness(1.08); }
 .ym-cfont-apply:active { transform: scale(.98); }
+
+/* ===== "restart required" notice (AJ, 2026-10-21) =========================
+   Shown after an add-on is uninstalled. A page-world script cannot reliably
+   undo everything it attached — observers, timers, injected <style> nodes and
+   patched prototypes all outlive their own teardown — so the panel asks for a
+   reload instead of pretending the removal was complete.
+   Sits above the marketplace overlay AND the report modal (2147483500). */
+.ym-restart-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 9, 13, .64);
+  -webkit-backdrop-filter: blur(10px) saturate(1.15);
+  backdrop-filter: blur(10px) saturate(1.15);
+}
+.ym-restart-scrim.hidden { display: none; }
+.ym-restart-card {
+  box-sizing: border-box;
+  width: min(430px, 100%);
+  padding: 26px 26px 20px;
+  border-radius: 18px;
+  background: #15151b;
+  color: #f3f3f5;
+  text-align: center;
+  /* Spicy Lyrics family, same stack the report card uses. The panel already
+     loads it via the #ym-font stylesheet in buildMarketplace(), so this needs no
+     extra link; the rest of the stack is the fallback when that add-on is off. */
+  font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.09), 0 30px 80px -24px rgba(0,0,0,.85);
+  animation: ymRestartPop .24s cubic-bezier(.34,1.2,.5,1) both;
+}
+@keyframes ymRestartPop {
+  from { opacity: 0; transform: translateY(10px) scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
+.ym-restart-badge {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 14px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+  color: #ff6b8a;
+  background: rgba(224,16,64,.16);
+  box-shadow: inset 0 0 0 1px rgba(224,16,64,.35);
+}
+.ym-restart-title {
+  margin: 0 0 8px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+}
+.ym-restart-text {
+  margin: 0 0 8px;
+  color: rgba(243,243,245,.82);
+}
+.ym-restart-note {
+  margin: 0 0 20px;
+  font-size: 12.5px;
+  color: rgba(243,243,245,.5);
+}
+.ym-restart-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.ym-restart-later,
+.ym-restart-now {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  font-size: 13.5px;
+  padding: 11px 20px;
+  border-radius: 11px;
+  transition: transform .2s cubic-bezier(.34,1.4,.5,1), background-color .2s ease;
+}
+.ym-restart-later {
+  color: #f3f3f5;
+  background: rgba(255,255,255,.08);
+}
+.ym-restart-later:hover { background: rgba(255,255,255,.14); }
+.ym-restart-now {
+  color: #111;
+  background: #fff;
+}
+.ym-restart-now:hover { transform: translateY(-1px); }
+.ym-restart-now:focus-visible,
+.ym-restart-later:focus-visible {
+  outline: 2px solid #e01040;
+  outline-offset: 2px;
+}
+
+/* ===== motion pass (AJ, 2026-10-21) =======================================
+   "Make literally everything have smooth animations." The toggles, sliders and
+   the sliding segment pill were already spring-driven; these were the surfaces
+   that still snapped:
+     - setting rows had NO hover state and no transition at all
+     - the rail card's glyph tile, label colour and installed check all flipped
+       instantly while the card's background eased
+   Appended rather than edited in place so each rule sits AFTER the base it
+   refines and wins on equal specificity without touching the originals. */
+
+/* Setting rows: a tint on hover, and the label lifts to full white. The negative
+   margin + matching padding widen the hit area to the full row without moving
+   anything: the padding is added and removed again by the margin. */
+#ym-market .ym-detail-setting-row {
+  padding: 0 10px;
+  margin: 0 -10px;
+  border-radius: 10px;
+  transition: background-color .2s ease;
+}
+#ym-market .ym-detail-setting-row:hover { background: rgba(255,255,255,.035); }
+#ym-market .ym-detail-setting-label { transition: color .2s ease; }
+#ym-market .ym-detail-setting-row:hover .ym-detail-setting-label { color: #fff; }
+/* A child row that is collapsed must not paint a hover tint while it is invisible. */
+#ym-market .ym-detail-setting-child.collapsed { pointer-events: none; }
+
+/* Rail cards: the tile lifts a hair on hover and the label/check ease in step
+   with the card's own background. */
+#ym-market .ym-mk-mono {
+  transition: color .22s ease, border-color .22s ease,
+              background-color .22s ease,
+              transform .22s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-card:hover .ym-mk-mono { transform: translateY(-1px); }
+#ym-market .ym-mk-card:active { transform: scale(.985); }
+#ym-market .ym-mk-card { transition: background .22s, transform .18s cubic-bezier(.34,1.4,.5,1); }
+#ym-market .ym-mk-name { transition: color .22s ease; }
+#ym-market .ym-mk-check {
+  transition: opacity .25s ease, transform .25s cubic-bezier(.34,1.4,.5,1);
+  transform: scale(.7);
+}
+#ym-market .ym-mk-card.installed .ym-mk-check { transform: none; }
+
+/* Reset + report: a press dip, matching the primary buttons. */
+#ym-market .ym-detail-settings-reset { transition: background-color .2s ease, border-color .2s ease, transform .16s cubic-bezier(.34,1.4,.5,1); }
+#ym-market .ym-detail-settings-reset:hover { border-color: var(--mk-line2); background: rgba(255,255,255,.04); }
+#ym-market .ym-detail-settings-reset:active { transform: scale(.97); }
+
+/* Section headings inside the settings column fade with the rest of the block
+   instead of appearing fully formed. */
+#ym-market .ym-detail-setting-header { animation: ymRowFadeIn .28s ease both; }
+@keyframes ymRowFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Respect the OS setting: kill the transforms, keep the colour changes. */
+@media (prefers-reduced-motion: reduce) {
+  #ym-market .ym-mk-card:active,
+  #ym-market .ym-mk-card:hover .ym-mk-mono,
+  #ym-market .ym-detail-settings-reset:active { transform: none; }
+  #ym-market .ym-mk-check { transform: none; }
+  #ym-market .ym-detail-setting-header { animation: none; }
+}
+
+/* ===== Aurora Lyrics: grouped sub-rail (AJ, 2026-10-21) ===================
+   A second, smaller rail inside the detail pane. It only exists for this one
+   add-on — every other add-on keeps the plain settings column — because this is
+   the only one with 19 settings.
+   The tab strip is the same visual language as the main rail (dim label, white
+   when active, tinted surface) at a smaller scale, so the two read as one system
+   rather than two competing navigations. */
+#ym-market .ym-lr {
+  display: grid;
+  /* The rail is pulled 10px LEFT and its column widened by the same 10px, so the
+     LABELS line up with the "SETTINGS" heading above them (AJ, 2026-10-21) while
+     the content column keeps its exact x. The pill therefore overhangs 10px to
+     the left of the heading, which is the usual sidebar look: the surface bleeds
+     past the text, the text does not bleed past the surface. */
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+  margin: 4px 0 6px -10px;
+}
+#ym-market .ym-lr-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+}
+#ym-market .ym-lr-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--mk-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  /* Flex, because every tab now starts with a rendered DOT. The labels looked
+     misaligned even though all five boxes measure identically (x 721, width 128,
+     padding-left 10) — the shift is the GLYPH SIDE BEARING: "L" and "F" start
+     tighter to their advance box than "W", "M" and "T", so Look/Font read a pixel
+     to the left of the rest. Padding cannot fix that, because the difference is
+     inside the letters. A dot is a real box at a fixed x, so it gives the eye the
+     anchor the letters never will (AJ, 2026-10-21). */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 7px 10px;
+  /* Rounded highlight (AJ, 2026-10-21 — squared it by mistake, he wanted the
+     pill kept). */
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color .2s ease, background-color .2s ease,
+              transform .16s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-lr-tab::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(255,255,255,.16);
+  transition: background-color .2s ease,
+              transform .2s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-lr-tab:hover { background: rgba(255,255,255,.045); color: #fff; }
+#ym-market .ym-lr-tab:hover::before { background: rgba(255,255,255,.4); }
+#ym-market .ym-lr-tab.active::before {
+  background: var(--mk-accent);
+  transform: scale(1.3);
+}
+#ym-market .ym-lr-tab:active { transform: scale(.97); }
+#ym-market .ym-lr-tab.active { background: rgba(255,255,255,.075); color: #fff; }
+#ym-market .ym-lr-tab:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
+/* The panels are ABSOLUTE and the container carries an explicit height that JS
+   keeps in sync. That combination is what lets a taller incoming panel OVERFLOW
+   instead of being clipped: animating the container's height with overflow:hidden
+   cut the bottom off the new content for the length of the animation
+   (AJ, 2026-10-21). */
+#ym-market .ym-lr-panels {
+  min-width: 0;
+  position: relative;
+  transition: height .32s cubic-bezier(.22,1,.36,1);
+}
+#ym-market .ym-lr-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: none;
+}
+#ym-market .ym-lr-panel.active { display: block; }
+/* The font disclosure used to sit under a long column; alone in its group it no
+   longer needs the top margin that separated it, and it must sit in the SAME box
+   as the setting rows or the group reads as shifted (rows are 20px wider and
+   start 10px further left because of their hover tint). */
+#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-more,
+#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-collapse {
+  width: calc(100% + 20px);
+  margin-left: -10px;
+  margin-right: -10px;
+}
+#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-more { margin-top: 0; }
+@media (max-width: 1100px) {
+  #ym-market .ym-lr { grid-template-columns: 106px minmax(0, 1fr); gap: 16px; }
+  #ym-market .ym-lr-tab { font-size: 12px; padding: 6px 8px; }
+}
+
+/* ===== home screen: Discord banner + no open-flash (AJ, 2026-10-21) ====== */
+
+/* mkRenderDetail() adds this while it builds and drops it in the same tick that
+   mkAnimateIn() creates the stagger, so the pane never paints at full opacity
+   before its entrance starts. */
+#ym-market .ym-mk-detail.ym-mk-anim-hold { opacity: 0; }
+
+/* Discord row in the rail, above Home. It IS a .ym-mk-card, so it inherits the
+   hover tint, the press scale and the glyph-tile lift; only the tile colour and
+   the trailing arrow are its own. Blurple is the one sanctioned non-crimson
+   accent — the mark has to be recognisable. */
+/* The whole row carries the blue treatment it had as a banner: a clear 1px
+   border plus a tinted surface, so it reads as an "outside the app" entry rather
+   than another add-on. */
+#ym-market .ym-mk-card-discord {
+  position: relative;
+  margin-bottom: 8px;
+  /* ⭐ The "purple line under the Discord text" was the UA's LINK UNDERLINE.
+     This is an <a>, and without these two lines it kept the browser defaults:
+     color rgb(0,0,238) (indigo) and text-decoration underline. The underline
+     inherits the ANCHOR's colour, not the label's, so it painted an indigo line
+     under "Discord" no matter what the label was set to (AJ, 2026-10-21). */
+  color: #f3f3f5;
+  text-decoration: none;
+  background: rgba(88,101,242,.08);
+  box-shadow: inset 0 0 0 1px rgba(88,101,242,.55);
+  transition: background-color .22s ease, box-shadow .22s ease,
+              transform .18s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-card-discord:hover {
+  background: rgba(88,101,242,.16);
+  box-shadow: inset 0 0 0 1px rgba(88,101,242,.9);
+}
+#ym-market .ym-mk-card-discord .ym-mk-mono {
+  color: #fff;
+  background: #5865F2;
+  border-color: rgba(255,255,255,.22);
+}
+#ym-market .ym-mk-card-discord:hover .ym-mk-mono { background: #6873f5; }
+#ym-market .ym-mk-card-discord .ym-mk-name { color: var(--mk-dim); }
+#ym-market .ym-mk-card-discord:hover .ym-mk-name { color: #fff; }
+#ym-market .ym-mk-out {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  /* WHITE, not inherited: at 55% of the dim label colour it read as a purple
+     smudge rather than an arrow (AJ, 2026-10-21). */
+  fill: #fff;
+  opacity: .85;
+  /* Points to the TOP-RIGHT: an arrow that leaves the app should read as
+     "external", not as "next". */
+  transform: rotate(-45deg);
+  transition: opacity .2s ease, transform .2s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-card-discord:hover .ym-mk-out {
+  opacity: 1;
+  transform: rotate(-45deg) translateY(-2px);
+}
+#ym-market.ym-mk-collapsed .ym-mk-card-discord .ym-mk-out { display: none; }
+
+/* ===== custom image picker (AJ, 2026-10-21) ==============================
+   Fully custom chrome: the row stacks its label above a card holding a raw
+   thumbnail, the filename + dimensions, and two buttons. The only native part is
+   the OS file dialog, which cannot be styled. */
+#ym-market .ym-file-row {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-items: stretch;
+}
+#ym-market .ym-file-control { width: 100%; min-width: 0; }
+#ym-market .ym-file-input { display: none; }
+#ym-market .ym-file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255,255,255,.035);
+  box-shadow: inset 0 0 0 1px var(--mk-line);
+  transition: background-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+}
+#ym-market .ym-file-card:hover {
+  background: rgba(255,255,255,.055);
+  box-shadow: inset 0 0 0 1px var(--mk-line2);
+}
+#ym-market .ym-file-card.is-busy { opacity: .55; pointer-events: none; }
+#ym-market .ym-file-thumb {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: rgba(255,255,255,.05);
+  box-shadow: inset 0 0 0 1px var(--mk-line);
+  color: var(--mk-dim2);
+  transition: background-color .2s ease;
+}
+#ym-market .ym-file-thumb svg { width: 20px; height: 20px; fill: currentColor; }
+#ym-market .ym-file-thumb.has-image { background: #000; }
+#ym-market .ym-file-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+#ym-market .ym-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#ym-market .ym-file-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f3f3f5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#ym-market .ym-file-meta { font-size: 11.5px; color: var(--mk-dim2); }
+#ym-market .ym-file-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+#ym-market .ym-file-btn {
+  appearance: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: #fff;
+  color: #111;
+  transition: transform .18s cubic-bezier(.34,1.4,.5,1),
+              background-color .2s ease, opacity .2s ease;
+}
+#ym-market .ym-file-btn:hover { transform: translateY(-1px); }
+#ym-market .ym-file-btn:active { transform: scale(.96); }
+#ym-market .ym-file-btn-quiet { background: rgba(255,255,255,.08); color: #f3f3f5; }
+#ym-market .ym-file-btn-quiet:hover { background: rgba(255,255,255,.14); }
+#ym-market .ym-file-btn-quiet.is-off { opacity: .32; pointer-events: none; }

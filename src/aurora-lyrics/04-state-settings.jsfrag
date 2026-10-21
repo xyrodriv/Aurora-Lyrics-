@@ -36,6 +36,36 @@
   let fsLyricsHost = null;
   let fsSavedVideo = null; // { node, parent, next }
   let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
+  // True while the OLD cover card is deliberately kept on screen across a
+  // cover -> music-video swap, so the cut has something to cut FROM (AJ,
+  // 2026-10-20). Cleared the moment the video is revealed, so the 2s reconcile
+  // can resume tearing stray cards down.
+  let fsHoldCoverCard = false;
+  // ---- track-change media dissolve (AJ, 2026-10-20) ----------------------
+  // ONE opacity value on the media host drives every transition: fade out on the
+  // track change, fade back in when the incoming media can paint. Deliberately
+  // sequential (out -> in), not a crossfade, so it works identically for
+  // cover->cover, cover->MV, MV->cover and MV->MV (where there is no swap at
+  // all — the same <video> is reused).
+  let fsMediaFadingOut = false;
+  let fsMediaFadeOutAt = 0;
+  let fsMediaFadeTimer = 0;
+  // Hard ceiling on how long the media may stay dissolved. Whatever the incoming
+  // media does (no artwork URL, a broken image, a stalled stream), the pane comes
+  // back — a dark pane is worse than a late one.
+  let fsMediaFadeSafetyTimer = 0;
+  // Which track the dissolve was last started for, plus when. Dedupes the two
+  // signals that can both report the same skip (see fsMaybeFadeForTrackChange).
+  let fsFadeTrackId = "";
+  let fsFadeAt = 0;
+  // When findPlayerVideo() first reported videoWidth 0 while a video was still
+  // attached. Debounces "the source is reloading" against "this is an audio
+  // track" (musicVideoType is NOT available on this build — probe confirmed).
+  let fsVideoZeroSince = 0;
+  // True while the CHROME (credit + transport + scrubber) is dissolved for a
+  // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
+  // chrome completely still (AJ, 2026-10-21).
+  let fsChromeFading = false;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;
@@ -151,9 +181,9 @@
   // so it draws once per real video frame and cannot outrun the source.
   const FS_BG_RENDER_FPS = 60;
   const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
-  // Gap between the bottom of the centred MV pane and the top of the title.
-  // Used by publishFsBandVars() to compute --ym-sl-fs-band-top.
-  const FS_BAND_GAP = 18;
+  // NOTE (AJ, 2026-10-20): FS_BAND_GAP was removed with the measured band anchor.
+  // Chrome positions are fixed lengths in 05-styles.jsfrag now, so nothing needs
+  // the old 18px pane-to-title gap as a variable.
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
   // Shade sampling geometry. The sample covers the FULL lyric band: from the
   // left edge of the shade/lyric region, bottom to top, through to the right
@@ -361,6 +391,12 @@
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
+    // Whether the whole-word join above also applies to BACKGROUND-vocal lines.
+    // ON by default, which is the historical behaviour (bg lines joined too);
+    // turning it off keeps per-syllable karaoke on the bg lines while the lead
+    // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
+    // ON — joinApplies() checks the master switch first.
+    joinBgSyllables: true,
     // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
     // those runs into words at PARSE time so the fill/glow covers the whole
     // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
@@ -542,6 +578,10 @@
     currentSettings.joinLrcRedSyllables = booleanValue(
       currentSettings.joinLrcRedSyllables,
       DEFAULT_SETTINGS.joinLrcRedSyllables
+    );
+    currentSettings.joinBgSyllables = booleanValue(
+      currentSettings.joinBgSyllables,
+      DEFAULT_SETTINGS.joinBgSyllables
     );
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale

@@ -1,4 +1,28 @@
   /* ===================== next-track prefetch ===================== */
+  // Warm the NEXT track's ARTWORK so an MV -> audio skip has a decoded image the
+  // instant the pane switches (AJ, 2026-10-20). The browser keeps the decoded
+  // bitmap for the URL, so the pane's <img> paints on its first frame instead of
+  // showing an empty box while the CDN responds.
+  // Best-effort: no DOM node is kept, no error surfaces, and the URL goes through
+  // hiResArt() so the cache key matches what the pane actually requests (the raw
+  // queue thumbnail is =w60-h60, the pane asks for =w1024-h1024).
+  let prefetchArtUrl = "";
+  function prefetchNextTrackArt() {
+    try {
+      const player = window.YTMod && window.YTMod.player;
+      if (!player || typeof player.getNextTrack !== "function") return;
+      const next = player.getNextTrack();
+      const raw = next && next.artworkUrl;
+      if (!raw) return;
+      const url = hiResArt(raw);
+      if (!url || url === prefetchArtUrl) return;
+      prefetchArtUrl = url;
+      const img = new Image();
+      img.decoding = "async";
+      img.src = url;
+    } catch (_) { /* prefetch must never affect playback */ }
+  }
+
   // Warm the lyric cache for the upcoming track so the song change has no
   // blank flash. Best-effort only: any failure is swallowed and never touches
   // the current track's UI. Uses its own prefetchSeq + AbortController so it
@@ -281,6 +305,8 @@
 
     currentTrackKey = key;
     prefetchNextTrackLyrics();
+    // Also warm the next track's cover so an MV -> audio skip is instant.
+    prefetchNextTrackArt();
     loadVideoOffsetForTrack(track);
     refreshTrack();
     if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {

@@ -4,6 +4,12 @@
     const trackEl = document.getElementById("ym-sl-track");
     if (trackEl) trackEl.textContent = label;
     refreshFsTitle();
+    // Decide the media MODE first, on the track change itself. It used to run
+    // only from the 2s fullscreen tick, so a cover <-> music-video skip could
+    // take up to two seconds to switch — the delay AJ reported (2026-10-20).
+    // syncFsVideoMode() is cheap and self-guarding: it early-returns unless the
+    // intent actually differs from what is attached.
+    if (fsActive) syncFsVideoMode();
     // Reconcile the fullscreen media on the track change itself instead of
     // waiting up to 2s for the refresh tick. The tick still covers the case
     // where the new artwork URL is not published yet at this instant.

@@ -29,13 +29,15 @@
   // page-world extension script self-contained: a `<script src>` injection
   // runs in the page's main world, which cannot fetch `chrome-extension://`
   // URLs, so a packaged image asset would be unreachable from this context.
-  // Current default (AJ, 2026-09-28) = his "gradient" artwork, source file
-  // `Logos/gradient (dont use).png` (512x512) -> ffmpeg libwebp -quality 90
-  // -pix_fmt yuv444p (~8.6 KB) -> base64. To swap it: re-encode the source to
+  // Current default (AJ, 2026-10-20) = his dark+red gradient, source file
+  // `Logos/dark and red gradient.jpg` (1536x1536 -> 512x512) -> PIL libwebp
+  // -quality 90 (~4.6 KB) -> base64. This is the backdrop shown at STARTUP when
+  // nothing is playing, so it is NOT assets/ambient-gradient.png (that one is the
+  // marketplace wash only). To swap it: re-encode the source to
   // WebP, base64 it, and update the constant below. Note: the MIME in the data
   // URL prefix MUST match the actual file format (image/webp here) or browsers
   // will refuse to decode it.
-  const DEFAULT_KAWARP_DATA_URL = "data:image/webp;base64,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";
+  const DEFAULT_KAWARP_DATA_URL = "data:image/webp;base64,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";
   const DEFAULT_SETTINGS = {
     brightness: 0.78,
     saturation: 1.7,
@@ -44,6 +46,12 @@
     // Keep the Kawarp backdrop on the cover art even when a music video is
     // playing (AJ, 2026-10-20).
     kawarpCoverArtOnly: false,
+    // Custom background (AJ, 2026-10-21). Declared here so the add-on has sane
+    // values BEFORE the first settings message arrives.
+    customBg: false,
+    customBgKawarp: true,
+    customBgBlur: 24,
+    contrast: 1,
   };
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -80,12 +88,20 @@
     currentSettings.blurPasses = Math.round(Math.min(8, Math.max(2, Number(currentSettings.blurPasses) || DEFAULT_SETTINGS.blurPasses)));
     currentSettings.warpIntensity = Math.min(1, Math.max(0.2, Number(currentSettings.warpIntensity) || DEFAULT_SETTINGS.warpIntensity));
     currentSettings.kawarpCoverArtOnly = !!currentSettings.kawarpCoverArtOnly;
+    // Normalise the custom-background keys. customBgKawarp uses !== false so a
+    // missing value keeps the intended default (ON) while an explicit OFF sticks.
+    currentSettings.customBg = !!currentSettings.customBg;
+    currentSettings.customBgKawarp = currentSettings.customBgKawarp !== false;
+    currentSettings.customBgBlur = Math.min(60, Math.max(0,
+      Number(currentSettings.customBgBlur) || DEFAULT_SETTINGS.customBgBlur));
+    currentSettings.contrast = Math.min(1.6, Math.max(0.6,
+      Number(currentSettings.contrast) || DEFAULT_SETTINGS.contrast));
     KAWARP_OPTIONS.warpIntensity = currentSettings.warpIntensity;
     KAWARP_OPTIONS.blurPasses = currentSettings.blurPasses;
     KAWARP_OPTIONS.saturation = currentSettings.saturation;
     if (kawarpCanvas) {
       kawarpCanvas.style.filter =
-        `saturate(${currentSettings.saturation}) brightness(${currentSettings.brightness})`;
+        `saturate(${currentSettings.saturation}) brightness(${currentSettings.brightness}) contrast(${currentSettings.contrast || 1})`;
     }
     if (kawarpInstance) {
       kawarpInstance.setOptions({
@@ -94,6 +110,16 @@
         saturation: currentSettings.saturation,
       });
     }
+    // Custom background: reload the blob if the flag flipped, then repaint.
+    if (customBgState === "ready" && customImgEl) applyCustomImgFilter();
+    syncCustomBg().then(() => {
+      if (customBgState === "ready" && customBgUrl && !currentSettings.customBgKawarp) {
+        showCustomImg();
+        return;
+      }
+      if (currentSettings.customBgKawarp) removeCustomImg();
+      updateKawarpBackground(getCurrentTrack());
+    });
   }
 
   const CSS = `
@@ -130,6 +156,18 @@
       filter: saturate(1.7) brightness(.78);
     }
     .ym-dynamic-page-bg-host .ym-dynamic-kawarp-bg.ready { opacity: .88; }
+    .ym-dynamic-page-bg-host .ym-dynamic-custom-img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(1.08);
+      transition: opacity .5s ease;
+    }
     .ym-dynamic-page-bg-host .ym-dynamic-kawarp-shade {
       background:
         linear-gradient(
@@ -521,6 +559,58 @@
     return kawarpModulePromise;
   }
 
+  let dividerObserver = null;
+  let dividerWatchTarget = null;
+
+  // Places the 1px page divider just left of the lyric/tab column.
+  //
+  // This used to live inside sizeKawarpCanvas(), which only runs when the
+  // full-viewport backdrop host resizes. That host does NOT change size when the
+  // NPV panel opens or when the guide (Home / Explore / Library) collapses — the
+  // PLAYER PAGE narrows or shifts instead — so the line kept its old x and drifted
+  // behind the lyrics (AJ, 2026-10-20). It is its own function now, driven by a
+  // ResizeObserver on the player page.
+  function positionPageDivider() {
+    if (!pageDivider) return;
+    const tab = document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
+      document.querySelector("tp-yt-paper-tabs");
+    const tabRect = tab && tab.getBoundingClientRect();
+    const nav = document.querySelector("ytmusic-nav-bar");
+    const playerBar = document.querySelector("ytmusic-player-bar");
+    const navRect = nav && nav.getBoundingClientRect();
+    const playerBarRect = playerBar && playerBar.getBoundingClientRect();
+    // Anchor the divider to the lyric/tab column's left edge ONLY. The old
+    // midpoint branch fed the video's rect into the calculation, so the line
+    // drifted with the video's aspect ratio and could land inside the video's
+    // letterbox area (AJ-confirmed 2026-09-16: "it moves according to the
+    // aspect ratio... behind the music video"). Dropping the video rect makes
+    // the separator stable for every video.
+    const dividerLeft = tabRect && tabRect.width ? tabRect.left - 24 : null;
+    pageDivider.style.left = Number.isFinite(dividerLeft)
+      ? `${Math.round(dividerLeft)}px`
+      : "66%";
+    pageDivider.style.top = navRect && navRect.height
+      ? `${Math.max(0, Math.round(navRect.bottom))}px`
+      : "84px";
+    pageDivider.style.bottom = playerBarRect && playerBarRect.height
+      ? `${Math.max(0, Math.round(window.innerHeight - playerBarRect.top))}px`
+      : "72px";
+  }
+
+  // (Re)attach the divider observer to the CURRENT player page. YouTube replaces
+  // that element on some navigations, so this is idempotent and re-checks cheaply.
+  function watchPlayerPageForDivider() {
+    if (!dividerObserver) return;
+    const page = document.querySelector("ytmusic-player-page");
+    if (!page || page === dividerWatchTarget) return;
+    if (dividerWatchTarget) {
+      try { dividerObserver.unobserve(dividerWatchTarget); } catch (_) {}
+    }
+    dividerWatchTarget = page;
+    dividerObserver.observe(page);
+    positionPageDivider();
+  }
+
   function sizeKawarpCanvas() {
     if (!kawarpCanvas || !pageBgHost) return;
     const rect = pageBgHost.getBoundingClientRect();
@@ -529,35 +619,7 @@
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
 
-    if (pageDivider) {
-      const tab = document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
-        document.querySelector("tp-yt-paper-tabs");
-      const tabRect = tab && tab.getBoundingClientRect();
-      const visual = document.querySelector("ytmusic-player-page video.html5-main-video") ||
-        document.querySelector("ytmusic-player-page #movie_player");
-      const visualRect = visual && visual.getBoundingClientRect();
-      const nav = document.querySelector("ytmusic-nav-bar");
-      const playerBar = document.querySelector("ytmusic-player-bar");
-      const navRect = nav && nav.getBoundingClientRect();
-      const playerBarRect = playerBar && playerBar.getBoundingClientRect();
-      // Anchor the divider to the lyric/tab column's left edge ONLY. The old
-      // midpoint branch fed the video's rect into the calculation, so the line
-      // drifted with the video's aspect ratio and could land inside the video's
-      // letterbox area (AJ-confirmed 2026-09-16: "it moves according to the
-      // aspect ratio... behind the music video"). Dropping the video rect makes
-      // the separator stable for every video.
-      const dividerLeft =
-        tabRect && tabRect.width ? tabRect.left - 24 : null;
-      pageDivider.style.left = Number.isFinite(dividerLeft)
-        ? `${Math.round(dividerLeft)}px`
-        : "66%";
-      pageDivider.style.top = navRect && navRect.height
-        ? `${Math.max(0, Math.round(navRect.bottom))}px`
-        : "84px";
-      pageDivider.style.bottom = playerBarRect && playerBarRect.height
-        ? `${Math.max(0, Math.round(window.innerHeight - playerBarRect.top))}px`
-        : "72px";
-    }
+    positionPageDivider();
 
     if (kawarpCanvas.width === width && kawarpCanvas.height === height) return;
     kawarpCanvas.width = width;
@@ -623,7 +685,14 @@
     if (!kawarpInstance || kawarpSuspended) return;
     // Cover-art-only: never follow the video. If one was being followed, the
     // block below hands the feed back to the cover art (AJ, 2026-10-20).
-    const v = currentSettings.kawarpCoverArtOnly ? null : findPlayingVideo();
+    // ⭐ A CUSTOM BACKGROUND is the same rule (AJ, 2026-10-21): this runs on every
+    // tick and called loadVideo() unconditionally, so on the first track change to
+    // an MV it quietly replaced the uploaded image with the video. updateKawarp
+    // Background() already refused the video, but this second path did not.
+    const usingCustom = customBgState === "ready" && !!customBgUrl;
+    const v = (usingCustom || currentSettings.kawarpCoverArtOnly)
+      ? null
+      : findPlayingVideo();
     if (v) {
       if (followingVideo !== v) {
         try {
@@ -646,14 +715,113 @@
     }
   }
 
+  /* ===== custom background (AJ, 2026-10-21) =============================
+     The blob is written by the panel's file control into IndexedDB; this side
+     only READS it. Two render paths:
+       Kawarp  — feed the object URL exactly like cover art (same loadImage call)
+       blurred — a plain <img> with a CSS filter, which is cheaper than a whole
+                 Kawarp pass when the user only wants a soft wallpaper */
+  const CUSTOM_BG_EXT_ID = "ytmod-dynamic";
+  let customBgUrl = "";
+  let customBgState = "off"; // off | loading | ready
+  let customImgEl = null;
+
+  function readCustomBgRecord() {
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open("aurora-bg", 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains("images")) db.createObjectStore("images");
+        };
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const tx = db.transaction("images", "readonly");
+            const get = tx.objectStore("images").get(CUSTOM_BG_EXT_ID);
+            get.onsuccess = () => resolve(get.result || null);
+            get.onerror = () => resolve(null);
+          } catch (_) { resolve(null); }
+        };
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
+      } catch (_) { resolve(null); }
+    });
+  }
+
+  async function syncCustomBg() {
+    if (!currentSettings.customBg) {
+      if (customBgUrl) { URL.revokeObjectURL(customBgUrl); customBgUrl = ""; }
+      customBgState = "off";
+      removeCustomImg();
+      kawarpArtworkUrl = "";
+      return;
+    }
+    if (customBgState !== "off") return;
+    customBgState = "loading";
+    const rec = await readCustomBgRecord();
+    if (!rec || !rec.blob) { customBgState = "off"; return; }
+    customBgUrl = URL.createObjectURL(rec.blob);
+    customBgState = "ready";
+    // Force the next pass to reload with the new source.
+    kawarpArtworkUrl = "";
+    requestedKawarpArtworkUrl = "";
+  }
+
+  function applyCustomImgFilter() {
+    if (!customImgEl) return;
+    const blur = Math.max(0, Math.min(60, Number(currentSettings.customBgBlur) || 0));
+    const bright = Number(currentSettings.brightness) || 1;
+    const sat = Number(currentSettings.saturation) || 1;
+    const contrast = Number(currentSettings.contrast) || 1;
+    customImgEl.style.filter =
+      "blur(" + blur + "px) brightness(" + bright + ") saturate(" + sat +
+      ") contrast(" + contrast + ")";
+  }
+
+  function showCustomImg() {
+    if (!customBgUrl) return false;
+    if (pageBgHost && !pageBgHost.isConnected) mountPageBackground();
+    if (!pageBgHost) return false;
+    if (!customImgEl) {
+      customImgEl = document.createElement("img");
+      customImgEl.className = "ym-dynamic-custom-img";
+      customImgEl.alt = "";
+      customImgEl.setAttribute("aria-hidden", "true");
+      customImgEl.addEventListener("load", () => { customImgEl.style.opacity = "1"; });
+    }
+    if (customImgEl.parentElement !== pageBgHost) pageBgHost.appendChild(customImgEl);
+    if (customImgEl.getAttribute("src") !== customBgUrl) {
+      customImgEl.style.opacity = "0";
+      customImgEl.src = customBgUrl;
+    }
+    applyCustomImgFilter();
+    if (kawarpCanvas) kawarpCanvas.classList.remove("ready");
+    return true;
+  }
+
+  function removeCustomImg() {
+    if (customImgEl && customImgEl.parentElement) {
+      customImgEl.parentElement.removeChild(customImgEl);
+    }
+  }
+
   async function updateKawarpBackground(track) {
+    // A custom background WINS over the track's artwork.
+    await syncCustomBg();
+    if (customBgState === "ready" && customBgUrl) {
+      if (!currentSettings.customBgKawarp) { showCustomImg(); return; }
+      removeCustomImg();
+    } else {
+      removeCustomImg();
+    }
     const artworkUrl = track && track.artworkUrl ? track.artworkUrl : "";
     requestedKawarpArtworkUrl = artworkUrl;
     const requestId = ++kawarpRequestSeq;
     if (pageBgHost && !pageBgHost.isConnected) mountPageBackground();
     // No track artwork? Show the embedded default gradient as a friendly
     // idle backdrop instead of the host's grey #0f0f0f.
-    const sourceUrl = artworkUrl || DEFAULT_KAWARP_DATA_URL;
+    const sourceUrl = customBgUrl || artworkUrl || DEFAULT_KAWARP_DATA_URL;
     if (!kawarpCanvas || !pageBgHost || !pageBgHost.isConnected || !sourceUrl) {
       if (kawarpCanvas) kawarpCanvas.classList.remove("ready");
       return;
@@ -672,7 +840,13 @@
       // Music videos: feed the live <video> so the backdrop moves with the
       // picture instead of sitting on a still. Kawarp samples a small colour
       // map, so this stays cheap. Audio tracks fall through to loadImage.
-      const playingVideo = currentSettings.kawarpCoverArtOnly ? null : findPlayingVideo();
+      // ⭐ A custom background must not be hijacked by the playing video. This
+      // branch runs BEFORE the source comparison, so an MV would always win and
+      // the uploaded image never appeared (AJ, 2026-10-21).
+      const usingCustom = customBgState === "ready" && !!customBgUrl;
+      const playingVideo = (usingCustom || currentSettings.kawarpCoverArtOnly)
+        ? null
+        : findPlayingVideo();
       if (playingVideo) {
         try {
           kawarpInstance.loadVideo(playingVideo, {
@@ -745,6 +919,11 @@
     if (typeof ResizeObserver === "function") {
       resizeObserver = new ResizeObserver(() => sizeKawarpCanvas());
       resizeObserver.observe(pageBgHost);
+      // The divider tracks the PLAYER PAGE, not the backdrop host: opening the NPV
+      // or collapsing the guide changes the player page's box while the host stays
+      // put (AJ, 2026-10-20).
+      dividerObserver = new ResizeObserver(() => positionPageDivider());
+      watchPlayerPageForDivider();
     }
 
     if (pageBgRoot) {
@@ -752,6 +931,7 @@
         mountPageBackground();
         syncPageChrome();
         sizeKawarpCanvas();
+        watchPlayerPageForDivider(); // re-attach if YouTube swapped the player page
       });
       rootObserver.observe(pageBgRoot, { childList: true, subtree: true });
     }
@@ -778,6 +958,13 @@
     if (now - lastTrackCheckAt > 500) {
       lastTrackCheckAt = now;
       syncPageChrome();
+      // ⭐ YTM replaces the app's children on a route change (Home -> watch), which
+      // detached the background host and made the custom image "disappear when I
+      // switched to the home tab" (AJ, 2026-10-21). Re-mount whenever it is gone.
+      if (pageBgHost && !pageBgHost.isConnected) mountPageBackground();
+      if (customBgState === "ready" && customBgUrl && !currentSettings.customBgKawarp) {
+        showCustomImg();
+      }
       const track = getCurrentTrack();
       const artworkUrl = track && track.artworkUrl ? track.artworkUrl : "";
       // Skip artwork swaps while suspended: the hidden page Kawarp should do no
@@ -801,8 +988,11 @@
     raf = 0;
     if (rootObserver) rootObserver.disconnect();
     if (resizeObserver) resizeObserver.disconnect();
+    if (dividerObserver) dividerObserver.disconnect();
     rootObserver = null;
     resizeObserver = null;
+    dividerObserver = null;
+    dividerWatchTarget = null;
     ++kawarpRequestSeq;
     if (kawarpInstance) kawarpInstance.dispose();
     kawarpInstance = null;

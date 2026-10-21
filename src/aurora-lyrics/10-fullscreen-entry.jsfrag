@@ -109,15 +109,9 @@
     // injected <style> tag in place for the next overflow.
     fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
     fsTitleRO.observe(fsTitleEl);
-    // The band anchor is measured from THIS title's height, and its font-size is
-    // TRANSITIONED (.35s) — so a measurement taken right after a mode swap reads
-    // the mid-zoom height, and the chip / scrubber (which stack off title-h)
-    // stayed on the stale value until the 2s tick corrected them, which read as a
-    // 2s animation delay on the controls only (AJ, 2026-09-28). Re-publish once
-    // the size transition has actually finished.
-    fsTitleEl.addEventListener("transitionend", (event) => {
-      if (event.propertyName === "font-size") publishFsBandVars();
-    });
+    // The font-size transitionend re-measure that used to live here is gone
+    // (AJ, 2026-10-20): the chip and scrubber no longer stack off the title's
+    // measured height, so there is nothing to re-sync after the zoom.
     // Request native browser fullscreen immediately while the user activation
     // from the click is still fresh. documentElement is always present, always
     // laid out, and always allowed; requesting on fsOverlay failed silently in
@@ -232,10 +226,10 @@
       // switches from cover art to the live video (or back). Without this,
       // fullscreen opened on a no-MV track is stuck on cover art forever.
       syncFsVideoMode();
-      // Also re-derive the band anchor: this is the only place that notices a
-      // viewport resize while fullscreen is open (the pane is centred and
-      // sized from the viewport, so both its width and height move).
-      publishFsBandVars();
+      // No band re-derive here any more (AJ, 2026-10-20). This tick used to be
+      // the only thing that noticed a viewport resize and moved the chrome; the
+      // chrome is anchored to the overlay's own bottom now, so it follows a
+      // resize by itself.
       // Catch a track change between a live video and a still upload
       // (Official Audio / Lyric Video) while staying in MV mode. Idempotent.
       applyStaticVideoBackdrop();
@@ -259,17 +253,23 @@
     document.addEventListener("keydown", handleFsKeydown, true);
     document.addEventListener("fullscreenchange", handleFsFullscreenChange);
     startFsIdleTracking();
+    // Media-element watchers: they detect a skip the moment YTM tears the source
+    // down, instead of waiting up to 500ms for the housekeeping pass.
+    startFsMediaWatchers();
   }
 
   function exitFullscreenMode() {
     if (!fsActive) return;
     if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
-    // A swap killed mid-flight would leave the chrome faded out; clear it so
-    // fullscreen can never come back with invisible controls.
-    if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-swapping");
+    // Stop the pending-MV attach poll too, or it would keep calling
+    // syncFsVideoMode() after the overlay is gone.
+    if (fsVideoWaitTimer) { clearTimeout(fsVideoWaitTimer); fsVideoWaitTimer = 0; }
+    // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
+    // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;
     stopFsIdleTracking();
     document.removeEventListener("keydown", handleFsKeydown, true);
+    stopFsMediaWatchers();
     document.removeEventListener("fullscreenchange", handleFsFullscreenChange);
 
     try {
@@ -397,8 +397,15 @@
     // cannot restore a pane that no longer exists.
     cancelFsVideoReady();
     fsVideoSpinnerEl = null;
-    // Drop any pending settle-gated pane reveal too.
-    fsPaneRevealSeq++;
+    // Drop any pending media dissolve: the pane is going away, so clear the
+    // timer and the flag instead of letting a stale fade-in run against a
+    // detached host.
+    if (fsMediaFadeTimer) { window.clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
+    if (fsMediaFadeSafetyTimer) { window.clearTimeout(fsMediaFadeSafetyTimer); fsMediaFadeSafetyTimer = 0; }
+    fsMediaFadingOut = false;
+    // The sticky mode decision must not survive the session — the next entry has
+    // to re-read the track that is playing then.
+    fsLastKnownHasVideo = null;
     // Idle fill ring: the node lived in fsOverlay (removed), so drop the ref
     // and any pending show/leave timers.
     if (fsIdleRingShowTimer) { window.clearTimeout(fsIdleRingShowTimer); fsIdleRingShowTimer = 0; }
@@ -429,6 +436,7 @@
     fsTimeTotal = null;
     fsScrubTip = null;
     fsSavedVideo = null;
+    fsHoldCoverCard = false;
     fsSavedPanel = null;
   }
 

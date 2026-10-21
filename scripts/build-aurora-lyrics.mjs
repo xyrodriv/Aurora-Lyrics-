@@ -28,13 +28,32 @@ const parts = [
   "18-animation.jsfrag",
   "19-animation-modes.jsfrag",
   "20-lifecycle.jsfrag",
-  "21-onboarding.jsfrag",
+  "21-boot.jsfrag",
 ];
 
 const check = process.argv.includes("--check");
 if (process.argv.length > 3 || (process.argv.length === 3 && !check)) {
   console.error("Usage: node scripts/build-aurora-lyrics.mjs [--check]");
   process.exit(2);
+}
+
+// GUARD: 05-styles is ONE template literal, so a stray backtick anywhere in it
+// (a comment quoting a class name, a CSS value) closes the literal early and
+// reopens it later. The result is still valid JavaScript, so `node --check`
+// passes and the bundle builds — the CSS is just silently truncated. This is
+// house rule #1 in DEVELOPERS/IDEAS.txt; enforce it here instead of relying on
+// remembering to scan.
+{
+  const cssPath = path.join(sourceDir, "05-styles.jsfrag");
+  const cssText = await readFile(cssPath, "utf8");
+  const ticks = (cssText.match(/`/g) || []).length;
+  if (ticks !== 2) {
+    console.error(
+      `05-styles.jsfrag must contain exactly 2 backticks (the template delimiters), found ${ticks}.` +
+      "\nA stray backtick silently truncates the stylesheet — remove it (use quotes in CSS comments)."
+    );
+    process.exit(1);
+  }
 }
 
 const source = Buffer.concat(await Promise.all(

@@ -90,7 +90,6 @@
     cachedFirstRealLyricStartMs = Infinity;
     cachedLastRealLyricEndMs = 0;
     pendingAnimationLines.clear();
-    teardownOnboarding();
     syncNativePanel(false);
     cleanupTabBar(tabBar);
     if (panelEl) panelEl.remove();

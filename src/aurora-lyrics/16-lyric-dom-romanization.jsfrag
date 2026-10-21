@@ -196,7 +196,17 @@
     lineElement.appendChild(h("div", { class: "romaji", text: rom }));
   }
 
-  function makeWord(word, isLast, lineTimed, noKaraoke) {
+  // Does the whole-word join apply to this line? `joinSyllables` is the master
+  // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
+  // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
+  // Defaults to ON, which is the historical behaviour — bg lines joined too.
+  function joinApplies(background) {
+    if (!currentSettings.joinSyllables) return false;
+    if (background && currentSettings.joinBgSyllables === false) return false;
+    return true;
+  }
+
+  function makeWord(word, isLast, lineTimed, noKaraoke, background) {
     // An unsynced line (no real per-word timing) must not spawn syllable/letter
     // karaoke springs — that is what tanks FPS on partially-synced TTML imports
     // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
@@ -227,7 +237,7 @@
     // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
-    if (currentSettings.joinSyllables) letterCapable = false;
+    if (joinApplies(background)) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -281,7 +291,7 @@
     // fills as a single unit. OFF by default, so the per-syllable karaoke and the
     // .word-group wrapping are unchanged unless the user opts in.
     let renderWords = words;
-    if (currentSettings.joinSyllables && Array.isArray(words) && words.length) {
+    if (joinApplies(background) && Array.isArray(words) && words.length) {
       const joined = [];
       for (const word of words) {
         const open = joined[joined.length - 1];
@@ -309,8 +319,7 @@
     }
     let currentWordGroup = null;
     renderWords.forEach((word, wordIndex) => {
-      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke);
-      if (background) wordModel.BGWord = true;
+      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke, background);
       if (background) {
         wordModel.BGWord = true;
         wordModel.HTMLElement.classList.add("bg-word");

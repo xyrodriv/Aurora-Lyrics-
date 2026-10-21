@@ -292,10 +292,20 @@
       const ar = v.videoWidth + " / " + v.videoHeight;
       if (fsOverlay.style.getPropertyValue("--ym-sl-fs-video-ar") !== ar) {
         fsOverlay.style.setProperty("--ym-sl-fs-video-ar", ar);
-        // The pane's height (and therefore the band anchor) just changed, but
-        // the new aspect-ratio has not been laid out yet, so measure on the
-        // next frame instead of reading a stale rect.
-        requestAnimationFrame(publishFsBandVars);
+        // ⭐ A plain NUMBER alongside the ratio (AJ, 2026-10-21). CSS can divide
+        // by a number but NOT by a "1920 / 960" token, so without this the chrome
+        // could not be anchored to the video's bottom edge — it had to be
+        // bottom-anchored to the viewport, which is why the gap under the video
+        // changed with its aspect ratio. The pane is 50% wide and centred, so its
+        // bottom edge is `50% + 25vw / ratio`.
+        if (v.videoWidth > 0 && v.videoHeight > 0) {
+          fsOverlay.style.setProperty(
+            "--ym-sl-fs-video-ratio",
+            String(v.videoWidth / v.videoHeight)
+          );
+        }
+        // No re-measure here any more (AJ, 2026-10-20): the chrome positions are
+        // fixed lengths, so a new aspect ratio only resizes the pane itself.
       }
     }
     const targetW = Math.max(2, Math.round(fsBgCanvas.clientWidth / 6));
@@ -486,6 +496,11 @@
     fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
     // Keep the opt-in MV-shade class in step with the setting on entry/switches.
     syncFsMvShadeClass();
+    // The volume group's home and the edge buttons follow the composition, so
+    // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
+    // are static — this only moves the volume node between the chip and the
+    // scrubber row, and re-pins the two edge buttons.
+    syncFsChromeStructure();
     if (fsLayoutSelect) {
       // Now a button rather than a <select>, so the mode rides on the dataset
       // instead of .value, and the tooltip is refreshed so the announced

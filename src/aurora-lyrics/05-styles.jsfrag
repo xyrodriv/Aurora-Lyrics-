@@ -412,6 +412,20 @@
       pointer-events: none;
       transform: translateY(-8px) scale(.97);
     }
+    /* ⭐ A closed overlay was still INTERACTIVE (AJ, 2026-10-20). visibility:hidden
+       on a parent does NOT beat a child that sets visibility:visible, and
+       pointer-events:none does not block a child that sets pointer-events:auto —
+       and .ym-sl-options-panel.active sets BOTH. So the
+       active tab's slider and toggles stayed clickable while invisible, swallowing
+       hover over the lyrics underneath and changing the offset at random.
+       These selectors carry the extra class specifically to out-rank .active. */
+    .ym-sl-options-overlay.hidden .ym-sl-options-panel,
+    .ym-sl-fs-options-overlay.hidden .ym-sl-options-panel,
+    .ym-sl-options-overlay.hidden .ym-sl-options-panel.active,
+    .ym-sl-fs-options-overlay.hidden .ym-sl-options-panel.active {
+      visibility: hidden;
+      pointer-events: none;
+    }
     .ym-sl-options-overlay,
     .ym-sl-fs-options-overlay {
       opacity: 1;
@@ -802,30 +816,17 @@
     /* Fullscreen overlay is always block; media + lyrics are absolute so
        layout changes (side / background / lyrics-only) animate via CSS
        transitions instead of snapping. */
-    /* Registered so the band anchor can ANIMATE. publishFsBandVars() measures
-       the media pane and writes --ym-sl-fs-band-top / --ym-sl-fs-title-h; the
-       title, chip and scrubber are positioned with calc() off them. When a new
-       music video changes the pane's aspect ratio, the whole stack has to glide
-       to the new anchor — but an UNREGISTERED custom property flips instantly.
-       That is why the first reposition looked smooth (the pane's own width
-       transition carried it) and every later one snapped (AJ, 2026-09-28).
-       Registering them as <length> makes the transition below work; if a browser
-       lacks @property the values simply flip as before. */
-    @property --ym-sl-fs-band-top {
-      syntax: "<length>";
-      inherits: true;
-      initial-value: 828px;
-    }
-    @property --ym-sl-fs-title-h {
-      syntax: "<length>";
-      inherits: true;
-      initial-value: 26px;
-    }
-    .ym-sl-fs-overlay {
-      transition:
-        --ym-sl-fs-band-top .35s cubic-bezier(.22,.61,.36,1),
-        --ym-sl-fs-title-h .35s cubic-bezier(.22,.61,.36,1);
-    }
+    /* ⭐ STATIC CHROME MODEL (AJ, 2026-10-20).
+       The title / transport chip / scrubber used to be positioned from
+       --ym-sl-fs-band-top and --ym-sl-fs-title-h, both measured in JS off the
+       media pane's live rect and both transitioned over .35s. That made the
+       whole stack chase the media: every aspect-ratio change, every art swap and
+       every video-metadata arrival moved the anchor, so the controls drifted and
+       then settled ("moves a lot, then goes back to normal", AJ 2026-10-20).
+       The band vars, their @property registrations and the transition on them
+       are GONE. Every chrome position is now a fixed CSS length below, identical
+       on every track. Nothing measures the media to place the controls any more.
+       Animations are being rebuilt from this static base. */
     .ym-sl-fs-overlay {
       position: fixed;
       inset: 0;
@@ -1098,13 +1099,28 @@
       inset: 0;
       z-index: 21;
       pointer-events: none;
-      /* Fades with the media pane on a video <-> cover-art swap; see
-         .ym-sl-fs-swapping at the end of this block. */
-      transition: opacity .3s ease;
+      /* The fade-IN of a mode change. .14s out / .26s in — the out is quicker so
+         the restructure happens while the layer is already nearly invisible. */
+      transition: opacity .26s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-player-controls {
       opacity: 1;
       pointer-events: none;
+    }
+    /* ===== chrome dissolve on a MODE CHANGE (AJ, 2026-10-21) ================
+       Between cover and MV the whole control column restructures — the credit
+       moves from under the artwork to under the video, the transport changes from
+       a spread row to a centred one, the volume changes rows. None of that can be
+       interpolated, so the column fades out, the swap happens while it is
+       invisible, and it fades back in with the media.
+       MV -> MV never gets this class: nothing restructures, so the chrome must
+       stay perfectly still and only the media dissolves.
+       MUST stay AFTER the .ym-sl-fs-idle rule above: same specificity (0,3,0), so
+       source order decides — and the idle rule forces opacity 1, which is the
+       state the overlay is in most of the time. */
+    .ym-sl-fs-overlay.ym-sl-fs-chrome-out .ym-sl-fs-player-controls {
+      opacity: 0;
+      transition: opacity .14s ease;
     }
     /* Floating play chip (prev / play / next + volume), centered just above the
        scrubber.
@@ -1137,9 +1153,7 @@
       opacity: 0;
       pointer-events: auto;
       transition: opacity .22s ease, background-color .3s ease,
-        transform .35s cubic-bezier(.22,.61,.36,1),
-        top .35s cubic-bezier(.22,.61,.36,1),
-        bottom .35s cubic-bezier(.22,.61,.36,1);
+        transform .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-play-chip,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-play-chip {
@@ -1244,8 +1258,7 @@
       padding: 0 18px;
       pointer-events: auto;
       opacity: 0;
-      transition: opacity .25s ease, background-color .3s ease,
-        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+      transition: opacity .25s ease, background-color .3s ease;
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-scrubber,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-scrubber {
@@ -1698,9 +1711,7 @@
       pointer-events: none;
       transform: translateY(-8px);
       transition: opacity .18s ease, background-color .3s ease,
-        transform .35s cubic-bezier(.22,.61,.36,1),
-        left .35s cubic-bezier(.22,.61,.36,1), right .35s cubic-bezier(.22,.61,.36,1),
-        top .35s cubic-bezier(.22,.61,.36,1), bottom .35s cubic-bezier(.22,.61,.36,1);
+        transform .35s cubic-bezier(.22,.61,.36,1);
     }
     .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
     .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
@@ -2028,12 +2039,10 @@
       transform: translateX(-50%) translateY(6px);
       animation: ym-sl-fs-title-in .34s cubic-bezier(.22,.61,.36,1) .08s forwards;
       /* Crossfade on a track change - see .ym-sl-fs-title-leaving below.
-         bottom/top are transitioned so the title glides when the media band
-         moves (a different MV aspect ratio changes --ym-sl-fs-band-top) instead
-         of snapping (AJ, 2026-09-28). */
+         NO top/bottom here (AJ, 2026-10-20): the position is static now, and
+         transitioning it was what made the credit glide after the media. */
       transition: opacity .24s ease, transform .24s ease,
         font-size .35s cubic-bezier(.22,.61,.36,1),
-        bottom .35s cubic-bezier(.22,.61,.36,1), top .35s cubic-bezier(.22,.61,.36,1),
         filter .3s ease;
     }
     .ym-sl-fs-title-artist { font-weight: 800; }
@@ -2197,9 +2206,23 @@
        left-aligned column under the artwork, spanning its width. Scoped to
        NO-VIDEO side mode; music videos keep their own layout (AJ, 2026-10-03). */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
-      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      /* FLOW ITEM, not an overlay child (AJ, 2026-10-21). stackFsChrome() moves
+         the credit INTO .ym-sl-fs-player-controls for this layout, so the block
+         is one column: art -> 16px -> title -> 14px -> seek -> transport ->
+         volume. That is what makes "title directly under the art, controls
+         directly under the title" exact — as a separate absolutely-positioned
+         element its gap to the controls depended on the column's unknown content
+         height. */
+      position: static;
+      order: 0;
+      left: auto;
+      bottom: auto;
+      width: auto;
       max-width: none;
+      /* MUST match the 16px the column is offset from the artwork's bottom edge
+         (see .ym-sl-fs-player-controls), or the two gaps read as different by a
+         couple of pixels — which AJ spotted immediately (2026-10-21). */
+      margin: 0 0 16px;
       text-align: left;
       /* Explicit, viewport-relative size so it scales on smaller monitors. */
       font-size: clamp(20px, 2.9vh, 36px);
@@ -2267,14 +2290,23 @@
          (AJ, 2026-10-18). gap:0 + chip margin-bottom:24px keeps the same total
          stack height while equalising the two distances. */
       gap: 0;
-      /* 18px below the title, matching FS_BAND_GAP: this offset IS the gap
-         between the title/artist block and the progress bar, and AJ asked for
-         it to match the cover-art -> title gap above (2026-10-03). */
-      top: calc(var(--ym-sl-fs-band-top, 0px) + var(--ym-sl-fs-title-h, 0px) + 18px);
+      /* STATIC (AJ, 2026-10-20): pinned to the bottom of the overlay instead of
+         being stacked off the measured band + title height. 18px matches the
+         old gap to the scrubber, so the column composition is unchanged — it
+         just no longer moves when the artwork changes size. */
+      /* Anchored to the ARTWORK's bottom edge, not the overlay's (AJ, 2026-10-21).
+         The art is 54vh tall, centred in a pane that stops 218px above the bottom
+         and nudged down 4vh, so its bottom edge is at
+             (100% - 218px) / 2 + 31vh
+         The block then flows DOWN from 16px below it. 218px mirrors the pane's
+         own bottom: 218px rule — if that changes, change it here too.
+         Width/left are the art's box: min(50%, 54vh) starting at
+         27% - min(25%, 27vh) (27% is the column midpoint). */
+      top: calc((100% - 218px) / 2 + 31vh + 16px);
       bottom: auto;
-      left: var(--ym-sl-fs-art-left, var(--ym-sl-fs-pane-left, 4%));
+      left: calc(27% - min(25%, 27vh));
       right: auto;
-      width: var(--ym-sl-fs-art-width, var(--ym-sl-fs-pane-width, 50%));
+      width: min(50%, 54vh);
       height: auto;
     }
     /* order: progress+times, then the transport chip, then the volume. */
@@ -2319,7 +2351,7 @@
       /* The whole gap below the transport. Paired with gap:0 on the stack above,
          this centres the transport between the seek bar and the volume even
          though the time row adds height on the seek side (AJ, 2026-10-18). */
-      margin-bottom: 24px;
+      margin-bottom: 16px;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
       order: 3;
@@ -2506,12 +2538,20 @@
        left/width further down (.ym-sl-fs-play-chip), which already outranked
        this rule. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      left: calc(var(--ym-sl-fs-pane-left, 2%) + var(--ym-sl-fs-pane-width, 50%) / 2);
+      /* 27% = the midpoint of the fixed 2% / 50% media column (2 + 50/2).
+         STATIC (AJ, 2026-10-20) — it used to be derived from the measured pane
+         box, so it re-centred itself whenever the pane's reported width moved. */
+      left: 27%;
       max-width: 50%;
     }
-    /* No-video: hero title, cover art sits directly above it. */
+    /* No-video: hero title, cover art sits directly above it.
+       210px clears the bottom-anchored control column (seek row + transport +
+       volume, height is content-driven) and keeps the art -> title gap at ~64px.
+       Tuned DOWN from 190px + a 14px column in one pass for "slightly more
+       compact" (AJ, 2026-10-21): title up 20, column up 10, transport->volume
+       gap 24 -> 16. These three numbers are the whole vertical rhythm. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
-      bottom: 160px;
+      bottom: 210px;
       font-size: 42px;
       line-height: 1.1;
       letter-spacing: -.015em;
@@ -2519,30 +2559,28 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
       bottom: 74px;
     }
-    /* Music video: smaller caption under the video pane. */
+    /* Music video: smaller caption under the video pane. The POSITION comes from
+       the flow block further down (the whole chrome is one column anchored to the
+       video's bottom edge), so no bottom offset here. */
     .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
-      bottom: 150px;
       font-size: 22px;
       line-height: 1.2;
       letter-spacing: 0;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
-      bottom: 72px;
-    }
     @media (max-height: 700px) {
+      /* Same stacking ORDER as the full-size rules above (title, then chip, then
+         scrubber), just compressed. The previous values were written for the old
+         measured band, where the chip sat below the title by construction — kept
+         as-is they overlapped once the positions became fixed (AJ, 2026-10-20). */
       .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
-        bottom: 136px;
+        bottom: 176px;
         font-size: 32px;
       }
       .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-play-chip {
-        bottom: 64px;
+        bottom: 66px;
       }
       .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-title {
-        bottom: 128px;
         font-size: 18px;
-      }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-play-chip {
-        bottom: 62px;
       }
     }
     /* Lyrics-only has no media under the title, so the "hero title at the
@@ -2707,6 +2745,24 @@
     .ym-sl-fs-media {
       transition: opacity .25s ease;
     }
+    /* ===== track-change dissolve (AJ, 2026-10-21) ==========================
+       ⭐ Fading ONLY .ym-sl-fs-media was invisible for music videos. The ambient
+       backdrop behind it (Kawarp / the blurred-video canvas) is a blurred copy of
+       the SAME frame, so dropping the sharp layer to opacity 0 just revealed a
+       blurry version of itself — it read as "music videos don't fade at all".
+       The backdrop fades WITH the media now, so the pane genuinely goes dark
+       between tracks and the incoming one fades up into place.
+       This is a class, not an inline opacity, on purpose: the OUT is .22s, while
+       the IN falls back to each element's own transition (media .25s, Kawarp
+       .6s), which is exactly the asymmetry we want and cannot express with a
+       single inline value. */
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-kawarp,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-bg-canvas,
+    .ym-sl-fs-overlay.ym-sl-fs-dissolving .ym-sl-fs-bg-img {
+      opacity: 0;
+      transition: opacity .22s ease;
+    }
     /* Music videos: the hero on the left is the unblurred live video (the
        clone behind supplies the blurred light). Remove any softening filter
        so the left video stays crisp. */
@@ -2724,6 +2780,16 @@
        read too large beside the lyrics (AJ, 2026-10-03). Music videos are a
        <video>, and this <img> is only created for cover-art tracks, so MVs are
        untouched by this rule. */
+    /* Two cover arts for the first second of fullscreen (AJ, 2026-10-20). The
+       static card is shown while the animated art loads — deliberately, so the
+       pane is never blank — and the card is only REMOVED once the video has been
+       attached, which is what left both visible at once. Hide the card the moment
+       a READY art video exists in the pane, so it crossfades instead of
+       double-exposing. :has() keeps this pure CSS: no extra JS timing to desync. */
+    .ym-sl-fs-media:has(> video.ym-sl-fs-art-video.ym-sl-fs-art-video-ready) > img {
+      opacity: 0;
+      transition: opacity .3s ease;
+    }
     .ym-sl-fs-media > img,
     .ym-sl-fs-media > video.ym-sl-fs-art-video {
       display: block;
@@ -2817,30 +2883,110 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
       max-height: 100%;
     }
-    /* CENTRE the cover inside the shortened pane. It used to be bottom-aligned so
-       the title sat directly under it; now that the art is smaller, centring it
-       reads better, and the title / controls follow the ART's own bottom edge
-       instead of the pane's (see publishFsBandVars, AJ 2026-10-03). */
+    /* CENTRE the cover inside the shortened pane. The title / controls are at
+       fixed offsets from the overlay bottom (AJ, 2026-10-20), so they no longer
+       follow the art's bottom edge. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
       align-items: center;
     }
-    /* Both variants: the scrubber spans the MEDIA PANE, not the overlay centre,
-       so it sits exactly under the cover art / video. --ym-sl-fs-pane-left and
-       --ym-sl-fs-pane-width are measured off the pane's own rect by
-       publishFsBandVars(); a percentage CANNOT work here, because the pane's
-       width comes from the video's aspect ratio against the available height
-       (AJ, 2026-10-01). box-sizing MUST be border-box: this rule is content-box
-       by default, so the base padding of 0 18px used to ADD 36px and push the
-       bar 36px past the video's right edge — which is why it never lined up.
-       transform must be reset because the no-video pill base centres itself
-       with translateX(-50%), which would drag a pane-anchored bar off the pane. */
+    /* Both variants: the scrubber spans the MEDIA COLUMN, not the overlay centre,
+       so it sits exactly under the cover art / video. STATIC (AJ, 2026-10-20):
+       the column is a fixed 2% / 50% box, so the bar reads those numbers directly
+       instead of the measured pane rect. box-sizing MUST be border-box: this rule
+       is content-box by default, so the base padding of 0 18px used to ADD 36px
+       and push the bar 36px past the video's right edge. transform must be reset
+       because the no-video pill base centres itself with translateX(-50%), which
+       would drag a column-anchored bar off the column. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      left: var(--ym-sl-fs-pane-left, 4%);
+      left: 2%;
       right: auto;
-      width: var(--ym-sl-fs-pane-width, 50%);
+      width: 50%;
       box-sizing: border-box;
       transform: none;
-      bottom: 24px;
+      bottom: auto;
+      /* NO side padding: the base rule's 0 18px inset the row from the video's
+         edges by 18px each side, so the seek bar never lined up with the pane
+         (AJ, 2026-10-21: "same length as the video"). The row now spans the pane
+         exactly and the time labels sit flush against its edges. */
+      padding: 0;
+    }
+
+    /* ===== MV side layout: ONE flow under the video (AJ, 2026-10-21) ========
+       Credit, transport and scrubber are a single flex column starting 20px below
+       the VIDEO's bottom edge, not the viewport's. The pane is 50% wide, centred,
+       and aspect-ratio'd, so its bottom edge is
+           50% + 25vw / var(--ym-sl-fs-video-ratio)
+       That is why the ratio is published as a NUMBER: CSS can divide by a number
+       but not by a "1920 / 960" token. Anchoring to the viewport instead is what
+       made the gap under the video change with its shape.
+       LIMIT: max-height clamps very tall videos, so for those the real bottom
+       edge is higher than this formula and the gap grows. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      display: flex;
+      flex-direction: column;
+      /* STRETCH, not center, and the column IS the media column (2% / 50%). A
+         full-width column with align-items:center centred the transport and the
+         scrubber on the SCREEN while the title sat under the video — two
+         different axes (AJ, 2026-10-21). */
+      align-items: stretch;
+      justify-content: flex-start;
+      top: calc(50% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
+      bottom: auto;
+      left: 2%;
+      right: auto;
+      width: 50%;
+      height: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+      position: static;
+      order: 0;
+      left: auto;
+      bottom: auto;
+      width: auto;
+      max-width: none;
+      /* 20px, matching the column's 20px offset from the video's bottom edge. It
+         looked BIGGER than the top gap because the chip below carried 10px of
+         vertical padding, which added to the space without appearing in either
+         number — the chip's padding is 0 now, so both gaps are honestly 20px. */
+      margin: 0 0 20px;
+      text-align: center;
+      transform: none;
+      /* ⭐ MUST swap the KEYFRAMES, not just the property. The base entrance
+         animation bakes translateX(-50%) into every frame and ends with a
+         forwards fill, so it keeps forcing the shift forever and outranks a
+         plain transform: none — that is why the caption sat 480px to the left
+         (measured: box x -442 with translateX(-480), AJ 2026-10-21). The -l
+         variant is the same rise without the translate. */
+      animation-name: ym-sl-fs-title-in-l;
+    }
+    /* Same for the leave animation, which also carries translateX(-50%). */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+      animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+      position: static;
+      order: 1;
+      left: auto;
+      bottom: auto;
+      width: auto;
+      margin: 0 0 16px;
+      transform: none;
+      /* No vertical padding: it added 10px to the gap ABOVE the transport (which
+         is what made that gap read wider than the one under the video) and
+         inflated the row the edge buttons centre on. The buttons carry their own
+         hit area. */
+      padding: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+      position: static;
+      order: 2;
+      left: auto;
+      right: auto;
+      bottom: auto;
+      width: auto;
+      margin: 0;
+      transform: none;
+      padding: 0;
     }
     /* The SEPARATOR sits dead under the title (AJ, 2026-10-01). The chip spans the
        pane and lays out as 1fr / auto / 1fr: the transport is pushed to the END of
@@ -2853,8 +2999,8 @@
        minmax(0, 1fr) not plain 1fr: a plain 1fr keeps an auto minimum, so a wide
        volume would widen its own column and drag the divider off centre. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      left: var(--ym-sl-fs-pane-left, 4%);
-      width: var(--ym-sl-fs-pane-width, 50%);
+      left: 2%;
+      width: 50%;
       max-width: none;
       transform: none;
       display: grid;
@@ -2967,22 +3113,18 @@
       z-index: 1;
       pointer-events: none;
     }
-    /* Cover-card crossfade (2026-09-28). Without the loading class the sharp
-       cover card painted the OLD decoded image during the window between the
-       fullscreen track-refresh tick setting a new src and the browser
-       finishing the new decode — meanwhile Kawarp had already loaded the
-       new art and was rendering it, so the pane briefly showed two different
-       covers at once. Adding the .ym-sl-fs-art-loading class on every src
-       swap (set by setFsArtSrc) drops the card to opacity 0 for the decode,
-       and removing it on the img's load event fades it back to opacity 1 —
-       by which point Kawarp also has the new art, so the two reveal
-       together. */
+    /* Cover card. It has NO opacity animation of its own any more (AJ,
+       2026-10-21). It used to carry a .ym-sl-fs-art-loading modifier that
+       dropped it to 0 while a new src decoded, to stop the sharp OLD bitmap
+       showing next to the new Kawarp backdrop. That modifier was a second
+       opacity animation fighting the track-change dissolve, and reconcile can
+       re-set the src up to 2s after a skip — outside any dissolve window — so
+       the card blinked by itself. The dissolve now covers every track change
+       (the pane is dark while the art swaps), and outside a track change the
+       src only changes between resolution variants of the SAME artwork, so the
+       old bitmap is never the wrong cover. */
     .ym-sl-fs-art {
       opacity: 1;
-      transition: opacity .28s ease;
-    }
-    .ym-sl-fs-art.ym-sl-fs-art-loading {
-      opacity: 0;
     }
     /* Animated Apple Music cover (m8tec HLS stream, played via hls.js). It
        shares the cover-card box with the static <img> and only ONE shows at a
@@ -2998,6 +3140,24 @@
       background: #000;
     }
     .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
+    /* SAFETY NET (AJ, 2026-10-20). YTM's player SIZES any <video> living inside
+       #player as if it were its own media element: it writes inline
+       inset: 140px 0 0; width: 637px; height: 358px onto our animated art video,
+       letterboxing a 16:9 stream inside the SQUARE #song-image and exposing
+       #player's own #606060 background above and below — the grey box.
+       !important is REQUIRED here: an inline style normally beats a stylesheet, and
+       !important in CSS is the only thing that outranks a non-important inline
+       declaration. Without it the geometry holds only until YTM's next sizing pass,
+       which is why switching tabs appeared to "fix" it (that re-runs
+       placeArtVideo(), which rewrites the style) and why it came back afterwards. */
+    #player video.ym-sl-fs-art-video {
+      position: absolute !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      border-radius: inherit;
+    }
     /* A not-ready animated cover must never occupy flex space. Two 583px squares
        in the 960px pane row shove the static card to x=-65 and clip the whole
        title/seek/transport stack (live-measured, AJ, 2026-10-18). This must
@@ -4604,9 +4764,8 @@
     /* The redesigned fullscreen controls are layout-agnostic: the chrome lives
        top-right (see .ym-sl-fs-controls at the top of this block) and the play
        chip + scrubber sit inside the full-size .ym-sl-fs-player-controls layer
-       (see .ym-sl-fs-player-controls above). In the side layouts they are
-       anchored to the media pane's bottom edge instead of the overlay's, via
-       --ym-sl-fs-band-top (see the MV side layout block at the end).
+       (see .ym-sl-fs-player-controls above). In the side layouts every position
+       is a FIXED length — nothing is measured off the media any more.
        The legacy per-layout repositioning that used to live here pushed the
        chrome to bottom-center and shrank the player-controls anchor to content
        width, which squeezed the play chip into the bottom-left corner on the
@@ -4623,51 +4782,14 @@
       }
     }
 
-    /* ===== MV side layout: hang the band off the video, not the screen =====
-       The pane is centred and sized to the video's aspect ratio, so its bottom
-       edge moves with the video. Anchoring the title + chrome to the overlay
-       bottom left a 94px hole under a 16:9 video (AJ: "it has too much space"),
-       and made the spacing depend on the video's shape. --ym-sl-fs-band-top is
-       published in px by publishFsBandVars(); these rules stack the title, the
-       transport chip and the scrubber directly beneath it, 18px under the
-       video and 12px apart. Fallbacks are the 16:9 / 1080p values so the first
-       paint before the video reports its size is still sensible.
-       The chip is a fixed 70px tall (50px play button + 2 x 10px padding).
-       These selectors carry the full :not() chain (specificity 0,5,0) so they
-       beat the per-variant bottom rules and the short-viewport media queries,
-       which is why bottom is reset to auto here. */
-    /* Cover-art side layout: the SAME top-anchored stack as the music-video case
-       below, so the title / chip / scrubber change ONE property (top) between
-       the two modes and can therefore TRANSITION. The old rules anchored them
-       with bottom: 160 / 74 / 24px, and bottom(auto) <-> top(length) is not
-       animatable — that is why the whole stack snapped on every MV <-> cover
-       swap (AJ, 2026-09-28). The values land within a few px of the old ones,
-       because the cover pane's bottom (100% - 218px) is what feeds
-       --ym-sl-fs-band-top. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      top: var(--ym-sl-fs-band-top, 828px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
-      top: var(--ym-sl-fs-band-top, 828px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px);
-      bottom: auto;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
-      top: calc(var(--ym-sl-fs-band-top, 828px) + var(--ym-sl-fs-title-h, 26px) + 12px + 70px + 12px);
-      bottom: auto;
-    }
+    /* ===== STATIC SIDE STACK (AJ, 2026-10-20) =============================
+       Every control position is a fixed length. This block used to re-anchor the
+       title, chip and scrubber to --ym-sl-fs-band-top (measured from the media's
+       live rect and transitioned over .35s), which is what made the controls
+       drift on every aspect-ratio change, art swap and metadata arrival.
+       The base rules above already carry the static bottom values
+       (title 170/150, chip 74/72), so nothing is overridden here — the measured
+       system is simply gone. Animations are rebuilt from this base. */
 
     /* ===== side + lyrics-only: transport chip + scrubber never hide ========
        AJ wants the transport chip and the scrubber permanently visible in the
@@ -4688,34 +4810,12 @@
       pointer-events: auto;
     }
 
-    /* ===== media-mode swap crossfade =====================================
-       syncFsVideoMode() hides the media pane while it swaps a music video for
-       cover art (or back). The CHROME changes geometry in the same beat - the
-       title re-anchors and the transport / scrubber / volume restructure - and
-       none of that is interpolatable: auto <-> length widths, centred <-> left
-       alignment, static <-> absolute, grid <-> flex internals. So the chrome
-       cannot glide to its new home; it has to fade with the pane, exactly like
-       the pane already does. This class is the chrome half of that crossfade;
-       the pane half is the inline opacity syncFsVideoMode() sets.
-       The title fades via FILTER, not opacity: its entrance animation ends on
-       a forwards fill that outranks a plain opacity declaration, so an opacity
-       fade would simply never run (the same reason .ym-sl-fs-title-leaving
-       swaps in a whole animation). filter is not touched by those keyframes. */
-    /* ASYMMETRIC on purpose: the fade-OUT is .12s, the fade-IN stays .3s.
-       The downward move is driven by --ym-sl-fs-band-top, which the overlay
-       transitions over .35s, so at .3s the controls were still a good fraction
-       opaque while already travelling - it read as "move down, sit there, then
-       fade" (AJ, 2026-10-03). They now vanish before the travel is perceptible.
-       A transition declared HERE is the AFTER-CHANGE style for the class add, so
-       it governs the OUT direction only; removing the class falls back to the
-       slower base transition, which is what the reveal uses. */
-    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-title {
-      filter: opacity(0);
-      transition: filter .12s ease;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-swapping .ym-sl-fs-player-controls {
-      opacity: 0;
-      transition: opacity .12s ease;
-    }
+    /* ===== media-mode swap: NO CROSSFADE (AJ, 2026-10-20) ==================
+       The .ym-sl-fs-swapping class and its two rules (title filter fade +
+       player-controls opacity fade) are REMOVED. syncFsVideoMode() no longer
+       hides the pane either, so a cover <-> music-video switch is a hard cut:
+       the outgoing image stays up until the incoming one can paint (the cover
+       card is held until the video is ready), then both swap in one frame.
+       Nothing to fade, nothing to time. */
   `;
 

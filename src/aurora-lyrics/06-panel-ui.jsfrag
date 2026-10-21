@@ -427,6 +427,10 @@
       { label: "File", panel: panelFile },
       { label: "Cache", panel: panelCache },
     ];
+    // Options opens on Sync rather than Playing (AJ, 2026-10-20): Sync is what the
+    // panel is opened for (offset + pause sync), so defaulting to Playing made
+    // every visit start with a click. Index into optionSections above.
+    const DEFAULT_OPTION_TAB = 1;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -485,13 +489,13 @@
 
     const optionTabs = optionSections.map((section, index) => {
       const tab = h("button", {
-        class: "ym-sl-options-tab" + (index === 0 ? " active" : ""),
+        class: "ym-sl-options-tab" + (index === DEFAULT_OPTION_TAB ? " active" : ""),
         type: "button",
         role: "tab",
-        "aria-selected": index === 0 ? "true" : "false",
+        "aria-selected": index === DEFAULT_OPTION_TAB ? "true" : "false",
         text: section.label,
       });
-      if (index === 0) section.panel.classList.add("active");
+      if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
       optionsPanels.appendChild(section.panel);
       tab.addEventListener("click", () => {
         if (tab.classList.contains("active")) return;
@@ -515,7 +519,7 @@
     optionsOverlay._staggerOpen = () => {
       syncPanelsHeight();
       staggerIn(optionsRail, true);
-      staggerIn(optionSections[0].panel, false);
+      staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
     };
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
