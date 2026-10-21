@@ -1,0 +1,595 @@
+  /* ===================== AMLL (Apple-Music-style) renderer =====================
+   * Simple lyrics mode renders through the REAL @applemusic-like-lyrics engine
+   * (DomLyricPlayer), bundled into src/extensions/amll-core.js. We do NOT
+   * re-implement the look — we import the upstream player, adapt Aurora's parsed
+   * lyrics into its LyricLine[] model (seconds -> ms), force the SpicyLyrics font
+   * on the host, and drive it every frame. That makes the scroll physics, spring
+   * motion, per-word emphasis (>1s words) and the karaoke mask byte-for-byte the
+   * engine's own behaviour, exactly like the AMLL preview.
+   *
+   * Any failure (engine import error, bad lyrics, drive exception) flips a flag
+   * and falls back to Aurora's built-in glow-free Simple renderer, so the mode
+   * can never break. The fallback Simple CSS already carries `text-shadow:none`
+   * so there is no whole-line glow either way.
+   */
+
+  let amllActive = false;             // user intent: Simple lyrics is ON
+  let amllReady = false;              // engine imported + player built
+  let amllFailed = false;             // engine failed once -> stay on Aurora
+  let amllPlayer = null;              // LyricPlayer instance
+  let amllHost = null;                // #ym-sl-amll-host container
+  let amllEnginePromise = null;       // cached dynamic-import promise
+  let amllLastContent = null;         // last parsed lyrics (to re-sync on activate)
+  let amllLastPositionMs = 0;
+  let amllPrevTime = 0;
+  let amllWasPlaying = false;
+  let amllCssInjected = false;
+  let amllLastFrameTime = 0;
+  let amllGen = 0;                     // invalidates in-flight activations on toggle
+
+  const AMLL_ENGINE_CSS = `.amll-lyric-player {
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  color: var(--amll-lp-color, white);
+  contain: strict;
+  mix-blend-mode: plus-lighter;
+  font-size: var(--amll-lp-font-size, max(max(5vh, 2.5vw), 12px));
+  overflow: hidden;
+
+  @media screen and (width <= 768px) {
+    font-size: var(--amll-lp-font-size, max(8vw, 12px));
+  }
+
+  &.dom {
+    --amll-lp-line-width-aspect: .8;
+    --amll-lp-line-padding-x: 1em;
+    --amll-lp-bg-line-scale: .7;
+    user-select: none;
+    box-sizing: content-box;
+    z-index: 1;
+    line-height: 1.2;
+  }
+}
+
+@media screen and (width <= 768px) {
+  .amll-lyric-player {
+    --amll-lp-line-width-aspect: 1;
+    --amll-lp-line-padding-x: 0;
+  }
+}
+@property --bright-mask-alpha {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+
+@property --dark-mask-alpha {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: .2;
+}
+
+.FmKaba_lyricLineWrapper {
+  box-sizing: border-box;
+  width: 100%;
+  padding: .4em var(--lyric-line-padding-x);
+  will-change: transform;
+  border-radius: .25em;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .3em;
+  transition: opacity .4s, filter .4s, background-color .25s;
+  display: flex;
+  position: absolute;
+  top: 0;
+  left: 0;
+
+  &:not(.FmKaba_bottomLineWrapper):hover {
+    background-color: var(--amll-lp-hover-bg-color, #fff1);
+  }
+
+  &:not(.FmKaba_bottomLineWrapper):active {
+    background-color: var(--amll-lp-hover-bg-color, #ffffff05);
+  }
+}
+
+.FmKaba_lyricLine {
+  box-sizing: border-box;
+  width: var(--amll-lp-width, 100%);
+  min-width: var(--amll-lp-width, 100%);
+  max-width: var(--amll-lp-width, 100%);
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 40px;
+  backface-visibility: hidden;
+  transform-origin: 0;
+  --mask-alpha-duration: .45s;
+  --bright-mask-alpha: .2;
+  --dark-mask-alpha: .2;
+  height: fit-content;
+  transition: box-shadow .25s,
+		--bright-mask-alpha var(--mask-alpha-duration) ease-out,
+		--dark-mask-alpha var(--mask-alpha-duration) ease-out;
+  margin: -.2em;
+  padding: .2em;
+  position: relative;
+
+  &.FmKaba_gradientMask {
+    --mask-alpha-duration: .3s;
+    --bright-mask-alpha: 1;
+    --dark-mask-alpha: .4;
+  }
+}
+
+.FmKaba_lyricDuetLine {
+  text-align: right;
+  transform-origin: 100%;
+}
+
+.FmKaba_lyricMainLine {
+  contain: layout style;
+  margin: -1em;
+  padding: 1em;
+  transition: opacity .3s .1s;
+
+  & span {
+    text-align: start;
+    vertical-align: bottom;
+    display: inline-block;
+  }
+
+  & .FmKaba_romanWord {
+    padding-inline-end: .3em;
+    font-size: .5em;
+    line-height: 1em;
+    display: flex;
+  }
+
+  & .FmKaba_rubyWord {
+    justify-content: center;
+    min-height: 1em;
+    font-size: .5em;
+    line-height: 1em;
+    display: flex;
+  }
+
+  & .FmKaba_wordWithRuby {
+    vertical-align: bottom;
+    flex-direction: column;
+    align-items: center;
+    display: inline-flex;
+  }
+
+  & .FmKaba_wordBody {
+    flex-direction: column;
+    display: flex;
+  }
+
+  & .FmKaba_rubyBaseWord {
+    white-space: nowrap;
+    flex-wrap: nowrap;
+    justify-content: center;
+    display: inline-flex;
+  }
+
+  & > span, & span.FmKaba_emphasizeWrapper {
+    white-space: pre-wrap;
+    vertical-align: bottom;
+    contain: layout style;
+    margin: -1em;
+    padding: 1em;
+    display: inline-block;
+
+    & > span {
+      margin: -1em;
+      padding: 1em;
+    }
+
+    &.FmKaba_emphasize, & span.FmKaba_emphasize {
+      backface-visibility: hidden;
+
+      & > span {
+        backface-visibility: hidden;
+        margin: -1em;
+        padding: 1em;
+      }
+    }
+  }
+}
+
+.FmKaba_lyricBgLine {
+  opacity: .4;
+  font-size: max(calc(1em * var(--amll-lp-bg-line-scale, .7)), 10px);
+  transition: background-color .25s,
+		box-shadow .25s,
+		--bright-mask-alpha var(--mask-alpha-duration) ease-out,
+		--dark-mask-alpha var(--mask-alpha-duration) ease-out;
+
+  & .FmKaba_lyricMainLine {
+    padding: 1.2em 1em;
+  }
+
+  &.FmKaba_active {
+    opacity: .4;
+    transition: background-color .25s,
+			box-shadow .25s,
+			--bright-mask-alpha var(--mask-alpha-duration) ease-out,
+			--dark-mask-alpha var(--mask-alpha-duration) ease-out;
+  }
+}
+
+.FmKaba_lyricSubLine {
+  opacity: .3;
+  font-size: max(.5em, 10px);
+  line-height: 1.5em;
+  transition: opacity .2s .25s;
+
+  @supports (mix-blend-mode: plus-lighter) {
+    opacity: .3;
+  }
+}
+
+.FmKaba_bottomLine {
+  font-size: var(--amll-lp-bottom-line-font-size, max(.7em, 10px));
+  cursor: default;
+  opacity: .2;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1.8em;
+  transition: opacity .4s;
+
+  &.FmKaba_gradientMask {
+    opacity: .85;
+  }
+
+  &:empty {
+    height: 0;
+    margin: 0;
+    padding: 0;
+    display: none;
+  }
+}
+
+.FmKaba_bgWrapper {
+  top: 100%;
+  left: var(--lyric-line-padding-x);
+  z-index: -1;
+  align-items: inherit;
+  width: calc(100% - var(--lyric-line-padding-x) * 2);
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 0;
+  transform-origin: 0 0;
+  flex-direction: column;
+  transition: opacity .3s;
+  display: flex;
+  position: absolute;
+}
+
+.FmKaba_bgWrapperTop {
+  transform-origin: 0 100%;
+  width: 100%;
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+}
+
+.FmKaba_bgWrapperActive {
+  opacity: 1;
+  width: 100%;
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+}
+
+.FmKaba_bgWrapperHidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.FmKaba_interludeDots {
+  width: fit-content;
+  height: clamp(.5em, 1vh, 3em);
+  padding: .4em var(--lyric-line-padding-x);
+  transform-origin: center;
+  align-items: center;
+  gap: .18em;
+  display: flex;
+  position: absolute;
+  left: 0;
+
+  & > * {
+    background-color: var(--amll-lp-color, white);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    width: .3em;
+    height: .3em;
+    display: inline-block;
+  }
+}
+
+.FmKaba_disableSpring > *, .FmKaba_disableSpring .FmKaba_lyricLine {
+  transition: filter .25s, transform .5s, background-color .25s, box-shadow .25s;
+}
+
+.FmKaba_tmpDisableTransition {
+  transition: none !important;
+}
+
+.amll-lyric-player {
+  --lyric-line-padding-x: 1em;
+  touch-action: pan-x;
+
+  @media screen and (width <= 500px) {
+    --lyric-line-padding-x: 20px;
+  }
+
+  &:hover .FmKaba_lyricLine, &:hover .FmKaba_lyricLineWrapper {
+    filter: unset !important;
+  }
+
+  &:not(.FmKaba_playing) .FmKaba_bgWrapper {
+    opacity: 1;
+    width: 100%;
+    position: relative;
+    top: auto;
+    bottom: auto;
+    left: 0;
+  }
+
+  &.FmKaba_hasDuetLine {
+    & .FmKaba_lyricLine:not(.FmKaba_lyricDuetLine) {
+      padding-right: 15%;
+    }
+
+    & .FmKaba_lyricDuetLine {
+      padding-left: 15%;
+    }
+
+    & .FmKaba_isDuetWrapper {
+      align-items: flex-end;
+
+      & .FmKaba_bgWrapper {
+        transform-origin: 100% 0;
+      }
+
+      & .FmKaba_bgWrapperTop {
+        transform-origin: 100% 100%;
+      }
+    }
+  }
+}
+`;
+
+  // Host + fallback rules layered on top of the engine stylesheet. The engine's
+  // own CSS has NO text-shadow glow; the only "bloom" is the intended Apple
+  // Music karaoke bright layer (mix-blend-mode: plus-lighter), which we keep.
+  const AMLL_HOST_CSS = `
+#ym-sl-amll-host {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+  pointer-events: auto;
+  font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
+  font-weight: 500;
+  color: var(--amll-lp-color, #fff);
+  line-height: 1.2;
+}
+#ym-sl-amll-host .amll-lyric-player { pointer-events: auto; height: 100%; }
+/* Make the lyrics area the positioning context so the host fills it. */
+.LyricsContainer { position: relative; }
+/* When AMLL owns the panel, hide Aurora's own (glow-free) Simple lines. */
+body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
+#ym-sl-amll-host { display: none; }
+body.amll-active #ym-sl-amll-host { display: block; }
+`;
+
+  function amllInjectCss() {
+    if (amllCssInjected) return;
+    const style = document.createElement("style");
+    style.id = "ym-sl-amll-css";
+    style.textContent = AMLL_ENGINE_CSS + "\n" + AMLL_HOST_CSS;
+    (document.head || document.documentElement).appendChild(style);
+    amllCssInjected = true;
+  }
+
+  function amllLyricsContainer() {
+    if (!panelEl) return null;
+    return panelEl.querySelector(".LyricsContainer") || panelEl;
+  }
+
+  function amllShow() {
+    if (!amllPlayer || !amllHost) return;
+    const c = amllLyricsContainer();
+    if (c && amllHost.parentNode !== c) c.appendChild(amllHost);
+    document.body.classList.add("amll-active");
+  }
+
+  function amllHide() {
+    document.body.classList.remove("amll-active");
+  }
+
+  function amllEnsureEngine() {
+    if (amllEnginePromise) return amllEnginePromise;
+    amllEnginePromise = (async () => {
+      if (typeof import !== "function") throw new Error("dynamic import unavailable");
+      const url = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
+        ? chrome.runtime.getURL("src/extensions/amll-core.js")
+        : "";
+      if (!url) throw new Error("extension URL unavailable");
+      const mod = await import(/* @vite-ignore */ url);
+      if (!mod || typeof mod.LyricPlayer !== "function") {
+        throw new Error("AMLL: LyricPlayer export missing");
+      }
+      return mod;
+    })();
+    return amllEnginePromise;
+  }
+
+  async function amllActivate() {
+    if (amllActive) { amllShow(); return; }
+    amllActive = true;
+    if (amllFailed) return;
+    const myGen = ++amllGen;
+    try {
+      amllInjectCss();
+      const mod = await amllEnsureEngine();
+      if (myGen !== amllGen) return;          // toggled off during import
+      // The panel may not be mounted yet on the very first settings apply; wait
+      // briefly (bounded) for the lyrics container to appear.
+      let container = amllLyricsContainer();
+      let tries = 0;
+      while (!container && tries < 25) {
+        await new Promise((r) => setTimeout(r, 200));
+        if (myGen !== amllGen) return;
+        container = amllLyricsContainer();
+        tries++;
+      }
+      if (!container) { amllActive = false; return; }
+      if (myGen !== amllGen) return;          // toggled off while waiting
+
+      amllHost = document.createElement("div");
+      amllHost.id = "ym-sl-amll-host";
+      container.appendChild(amllHost);
+
+      const player = new mod.LyricPlayer();
+      player.setEnableSpring(true);
+      player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
+      player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
+      player.getElement().style.height = "100%";
+      amllHost.appendChild(player.getElement());
+
+      amllPlayer = player;
+      amllReady = true;
+      player.resume();
+
+      if (amllLastContent) amllSyncLyrics(amllLastContent);
+      amllShow();
+    } catch (e) {
+      console.warn("[AuroraLyrics] AMLL engine failed to load; using built-in Simple renderer.", e);
+      amllFailed = true;
+      amllReady = false;
+      amllHide();
+      if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
+      amllHost = null;
+      amllPlayer = null;
+    }
+  }
+
+  function amllDeactivate() {
+    if (!amllActive && !amllReady) return;
+    amllGen++;                               // invalidate any in-flight activation
+    amllActive = false;
+    amllHide();
+    try { if (amllPlayer) amllPlayer.dispose(); } catch (e) {}
+    amllPlayer = null;
+    amllReady = false;
+    amllWasPlaying = false;
+    amllPrevTime = 0;
+    if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
+    amllHost = null;
+  }
+
+  // Aurora's parsed line model -> AMLL LyricLine[]. Times are in SECONDS in
+  // Aurora's model; AMLL wants MILLISECONDS.
+  function amllLinesFromContent(content) {
+    const out = [];
+    if (!Array.isArray(content)) return out;
+    for (const line of content) {
+      const lead = line && line.Lead;
+      if (!lead) continue;
+      const words = (lead.Syllables || []).map((s) => ({
+        word: s && s.Text != null ? String(s.Text) : "",
+        startTime: (s && s.StartTime ? s.StartTime : 0) * 1000,
+        endTime: (s && s.EndTime ? s.EndTime : 0) * 1000,
+      }));
+      out.push({
+        words,
+        translatedLyric: "",
+        romanLyric: "",
+        startTime: (lead.StartTime || 0) * 1000,
+        endTime: (lead.EndTime || 0) * 1000,
+        isBG: false,
+        isDuet: !!line.OppositeAligned,
+      });
+      const bgs = line.Background || [];
+      for (const bg of bgs) {
+        const bgWords = (bg.Syllables || []).map((s) => ({
+          word: s && s.Text != null ? String(s.Text) : "",
+          startTime: (s && s.StartTime ? s.StartTime : 0) * 1000,
+          endTime: (s && s.EndTime ? s.EndTime : 0) * 1000,
+        }));
+        out.push({
+          words: bgWords,
+          translatedLyric: "",
+          romanLyric: "",
+          startTime: (bg.StartTime || 0) * 1000,
+          endTime: (bg.EndTime || 0) * 1000,
+          isBG: true,
+          isDuet: false,
+        });
+      }
+    }
+    return out;
+  }
+
+  function amllContentIsTimed(content) {
+    if (!Array.isArray(content)) return false;
+    for (const line of content) {
+      const lead = line && line.Lead;
+      if (lead && (lead.EndTime > 0 || (lead.Syllables || []).some((s) => s && s.EndTime > 0))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function amllSyncLyrics(content) {
+    amllLastContent = content;
+    if (!amllActive || !amllReady || !amllPlayer) return;
+    try {
+      const lines = amllLinesFromContent(content);
+      // Untimed / plain lyrics: the engine can't place them on a timeline, so
+      // fall back to Aurora's own (glow-free) Simple render for this content.
+      if (!lines.length || !amllContentIsTimed(content)) {
+        amllHide();
+        return;
+      }
+      amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
+      amllShow();
+    } catch (e) {
+      console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
+      amllFailed = true;
+      amllHide();
+    }
+  }
+
+  function amllDrive(positionMs) {
+    if (!amllActive || !amllReady || !amllPlayer) return;
+    const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
+    amllLastFrameTime = now;
+    let off = 0;
+    try { off = (typeof getOffsetForPosition === "function") ? getOffsetForPosition(positionMs) : 0; } catch (e) {}
+    const t = Number.isFinite(off) ? Math.max(0, positionMs - off) : positionMs;
+    amllLastPositionMs = t;
+    try {
+      const advanced = t > (amllPrevTime || 0);
+      amllPrevTime = t;
+      if (advanced !== amllWasPlaying) {
+        if (advanced) { try { amllPlayer.resume(); } catch (e) {} }
+        else { try { amllPlayer.pause(); } catch (e) {} }
+        amllWasPlaying = advanced;
+      }
+      amllPlayer.setCurrentTime(t, false);
+      amllPlayer.update(delta);
+    } catch (e) {
+      console.warn("[AuroraLyrics] AMLL drive failed; falling back.", e);
+      amllFailed = true;
+      amllHide();
+    }
+  }

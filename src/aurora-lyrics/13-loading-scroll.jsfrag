@@ -653,7 +653,12 @@
       showLyricsMessage(NO_LYRICS_MESSAGE);
       return false;
     }
-    buildRendererLines(toSyllableContent(parsed));
+    const content = toSyllableContent(parsed);
+    buildRendererLines(content);
+    // Feed the parsed content to the AMLL engine when Simple lyrics (Apple-Music
+    // style) mode is active. amllSyncLyrics is a no-op unless the engine is ready,
+    // and it falls back to Aurora's own Simple renderer for untimed/plain lyrics.
+    amllSyncLyrics(content);
     lastActiveLine = -1;
     cachedFirstRealLyricStartMs = modelLines.reduce((first, line) =>
       line && !line.DotLine ? Math.min(first, line.StartTime) : first,

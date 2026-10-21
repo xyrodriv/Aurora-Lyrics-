@@ -640,6 +640,16 @@
     // covers the fullscreen overlay, which reparents the panel but leaves body
     // alone, so the mode follows the lyrics into fullscreen for free.
     document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
+    // Simple lyrics now renders through the REAL AMLL engine (see 22-amll-integration).
+    // When the mode flips, activate/deactivate it; when it stays on, just ensure it
+    // is shown. On any failure the engine falls back to Aurora's glow-free Simple
+    // renderer, so this can never break the lyrics view.
+    if (prevSimpleLyrics !== currentSettings.simpleLyrics) {
+      if (currentSettings.simpleLyrics) amllActivate();
+      else amllDeactivate();
+    } else if (currentSettings.simpleLyrics) {
+      amllShow();
+    }
     // When Simple Lyrics is switched OFF, drop the per-line depth alpha that
     // animate() injected while it was on, so normal mode's state-class alpha
     // (NotSung/Sung/Active) takes over again instead of a stale inline value.

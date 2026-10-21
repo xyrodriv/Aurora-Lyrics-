@@ -435,6 +435,10 @@
     // --gradient-position as "NaN%" and blanks the clipped background for a
     // frame. See the long note in tick().
     if (!Number.isFinite(positionMs)) return;
+    // Drive the imported AMLL engine every frame when Simple lyrics (Apple-Music
+    // style) mode is active. It applies the same playback-time offset Aurora uses
+    // so the highlighted line matches, then advances the engine's springs.
+    amllDrive(positionMs);
     const now = performance.now();
     const deltaTime = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;

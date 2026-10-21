@@ -29,6 +29,7 @@ const parts = [
   "19-animation-modes.jsfrag",
   "20-lifecycle.jsfrag",
   "21-boot.jsfrag",
+  "22-amll-integration.jsfrag",
 ];
 
 const check = process.argv.includes("--check");

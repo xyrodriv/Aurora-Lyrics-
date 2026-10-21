@@ -4181,15 +4181,16 @@
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line).Active {
       --ym-sl-line-alpha: 1;
     }
-    /* AMLL bloom: a layered white glow behind the gradient-clipped glyphs of the
-       ACTIVE line only — not the whole field. Scoped to .Active so neighbouring
-       lines stay crisp and dim. */
-    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .word,
-    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line.Active .letter {
-      text-shadow:
-        0 0 4px rgba(255,255,255,.55),
-        0 0 14px rgba(255,255,255,.35),
-        0 0 32px rgba(255,255,255,.18);
+    /* No text glow in Simple lyrics: AMLL's "glow" comes from a blurred album-art
+       backdrop behind the lyrics, NOT a text-shadow on the glyphs. With no such
+       backdrop here the shadow just reads as a fuzzy halo, so kill it — the text
+       stays crisp white like AMLL. The !important also overrides the base
+       .line.Active .word shadow so nothing glows in this mode. */
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line .word,
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line .letter,
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line .letterGroup,
+    body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line .bg-word {
+      text-shadow: none !important;
     }
     /* Depth lines: no blur — AMLL keeps them still and dims them by opacity. The
        exact opacity/scale per distance is injected in animate(); the state

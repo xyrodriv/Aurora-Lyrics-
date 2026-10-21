@@ -1,6 +1,17 @@
 {
   "releases": [
     {
+      "version": "0.5.80",
+      "date": "2026-10-21",
+      "title": "Simple lyrics now uses the real AMLL engine",
+      "features": [
+        "Simple lyrics is now powered by the actual @applemusic-like-lyrics (AMLL) DomLyricPlayer engine - imported and driven every frame, so the scroll physics, spring motion, per-word emphasis on long words and the karaoke mask are byte-for-byte the upstream behaviour, not an approximation",
+        "Lyrics are adapted from Aurora's parsed model into AMLL's LyricLine[] (seconds to milliseconds) and the Spicy Lyrics font is forced onto the engine's host, exactly like the AMLL preview",
+        "Falls back to Aurora's built-in glow-free Simple renderer on any engine error, so the mode can never break; the whole-line text-shadow glow is also removed"
+      ],
+      "fixes": []
+    },
+    {
       "version": "0.5.79",
       "date": "2026-10-21",
       "title": "Simple lyrics is now the Apple Music / AMLL style",
