@@ -548,6 +548,15 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.setEnableSpring(true);
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
       player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
+      // Halve the render buffer. The engine defaults to 300px of overscan, which
+      // on a ~950px panel means it builds roughly twice the viewport's worth of
+      // lines - and every one of those words re-resolves its CSS mask every
+      // frame, because the calc mask path reads --amll-player-time. Word-by-word
+      // lyrics carry ~5 words per line, so that is 5x the per-frame style work
+      // of line-by-line, which is exactly the fps gap being seen. Overscan is
+      // only a buffer: lines inside the viewport are unaffected, so the look
+      // does not change.
+      player.setOverscanPx(150);
       player.getElement().style.height = "100%";
       amllHost.appendChild(player.getElement());
       // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
@@ -968,6 +977,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         if (!enabled) continue;
         amllCallMaybeAsync(group.mainLine.disable, group.mainLine);
         if (group.bgLine) amllCallMaybeAsync(group.bgLine.disable, group.bgLine);
+        // Retiring the line is not enough on its own: the engine derives its
+        // scroll target from the earliest still-highlighted group, and it only
+        // drops a finished group from that set when the NEXT line starts. So the
+        // camera kept aiming at the line we just retired and never advanced to
+        // the upcoming one. Drop it from the highlight set and point the
+        // snapshot at the next line, then force a layout pass so the springs
+        // retarget.
+        try {
+          const idx = groups.indexOf(group);
+          const tc = amllPlayer.timelineController;
+          if (tc && idx !== -1) {
+            if (tc.highlightedGroupsSet && typeof tc.highlightedGroupsSet.delete === "function") {
+              tc.highlightedGroupsSet.delete(idx);
+            }
+            if (tc.snapshot) {
+              let nextIdx = -1;
+              for (let i = idx + 1; i < groups.length; i++) {
+                try {
+                  if (groups[i].mainLine.getLine().startTime > t) { nextIdx = i; break; }
+                } catch (err) {}
+              }
+              if (nextIdx !== -1) tc.snapshot.scrollToIndex = nextIdx;
+            }
+          }
+          if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("playback-tick");
+        } catch (err) {}
       }
     } catch (e) {}
   }
