@@ -17286,6 +17286,8 @@
   let amllLastFrameTime = 0;
   let amllLastDumpTime = 0;
   let amllLastTagTime = 0;
+  let amllDriveCount = 0;
+  let amllDumpCount = 0;
   let amllEnableError = null;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
   let amllDriveErrors = 0;             // consecutive update() failures; 0 = healthy
@@ -17921,6 +17923,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // data-debug so the live word timings can be read from the page without a
   // JS console. Remove once the animation issue is pinned down.
   function amllDumpDebug(lines) {
+    amllDumpCount++;
     try {
       const active = lines.findIndex((l) => !l.isBG && (l.endTime - l.startTime) > 0);
       const slice = (lines || []).slice(0, 4).map((l) => ({
@@ -17952,6 +17955,8 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       if (amllHost) {
         amllHost.dataset.debug = JSON.stringify({
           active,
+          drives: amllDriveCount,
+          dumps: amllDumpCount,
           playing: amllPlayer ? amllPlayer.getIsPlaying() : null,
           spring: amllPlayer ? amllPlayer.getEnableSpring() : null,
           seeded: amllSizeSeeded,
@@ -17959,6 +17964,8 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
           hostConnected: !!(amllHost && amllHost.isConnected),
           hostRect: amllHost ? (() => { const r = amllHost.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
+          playerTimeCss: (amllPlayer && amllPlayer.element && amllPlayer.element.style)
+            ? amllPlayer.element.style.getPropertyValue("--amll-player-time") : null,
           eng,
           enableError: amllEnableError,
           lines: slice,
@@ -18163,6 +18170,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   }
 
   function amllDrive(positionMs) {
+    amllDriveCount++;
     if (!amllActive || !amllReady || !amllPlayer) return;
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
