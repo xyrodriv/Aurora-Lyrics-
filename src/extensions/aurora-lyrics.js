@@ -18042,16 +18042,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     return null;
   }
 
-  // The engine only re-plays a line's karaoke animation when that line becomes
-  // active, and it decides play state from its own isPlaying flag. If that flag
-  // ever goes stale the Web Animation stays paused at a fixed mask-position and
-  // the word never fills. Nudge the active line every frame; resume() is a
-  // no-op for animations that are already playing or already finished.
+  // The engine positions a line's word animations (the per-word float, and the
+  // per-character glow/float on long words) exactly ONCE, inside enable(), at
+  // the instant the line becomes active - and it gates play() on its own
+  // isPlaying flag. After that they run on wall-clock and are never re-synced,
+  // so if that flag was ever stale the animations stay parked at whatever
+  // currentTime they were given: the first word (whose delay is 0) happens to
+  // show its float while every later word sits frozen at its start value.
+  //
+  // Re-run enable() for the active line every frame. It rewrites every word
+  // animation's currentTime from the media time we already feed the engine, so
+  // the floats track the song instead of the clock. Idempotent and cheap - it
+  // only touches the handful of words on the active line.
   function amllKickActiveLine() {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
+      const t = amllPlayer.getCurrentTime();
+      const playing = amllPlayer.getIsPlaying();
       for (const group of groups) {
-        if (group && group.isActive && group.mainLine) group.mainLine.resume();
+        if (group && group.isActive && group.mainLine) {
+          try { group.mainLine.enable(t, playing); } catch (e) {}
+          try { group.mainLine.resume(); } catch (e) {}
+          if (group.bgLine) {
+            try { group.bgLine.enable(t, playing); } catch (e) {}
+            try { group.bgLine.resume(); } catch (e) {}
+          }
+        }
       }
     } catch (e) {}
   }
@@ -18088,7 +18104,9 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       if (amllPlayer.size[1] <= 0) amllSeedEngineSize();
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
-      if (amllWasPlaying) amllKickActiveLine();
+      // Every frame, not only while playing: enable() also parks the word
+      // animations at the right positions when the media is paused.
+      amllKickActiveLine();
       amllDriveErrors = 0;
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the

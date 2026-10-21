@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.92",
+      "date": "2026-10-21",
+      "title": "The per-word animations now track the song",
+      "features": [],
+      "fixes": [
+        "Fixed Simple lyrics having no word-level animation. The engine positions a line's word animations (the per-word float, and the per-character glow and float on long words) exactly once, inside enable(), at the instant the line becomes active - gated on its own play-state flag - and never re-syncs them afterwards, so they ran on wall-clock and drifted. In practice every word except the first sat frozen at its start value, which is why the line filled but nothing moved. The active line is now re-enabled every frame from the media time, so the floats track the song and park correctly when paused"
+      ]
+    },
+    {
       "version": "0.5.91",
       "date": "2026-10-21",
       "title": "The engine viewport can no longer be zeroed",
