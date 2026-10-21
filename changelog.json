@@ -1,6 +1,17 @@
 {
   "releases": [
     {
+      "version": "0.5.86",
+      "date": "2026-10-21",
+      "title": "AMLL: correct word splits, a karaoke fill that can't freeze, and bolder type",
+      "features": [],
+      "fixes": [
+        "Fixed words being split apart where they should be joined, and joined where they should split - \"leave medigni fied\" now renders as \"leave me dignified\". The adapter was guessing word boundaries from IsPartOfWord, which the parser infers as \"no whitespace between the tags\" and is true for adjacent whole words too. It now uses HasSpaceBefore, which is measured from the actual markup, and only falls back to IsPartOfWord when the source recorded no spacing at all",
+        "The karaoke sweep could freeze mid-word: the engine only re-plays a line's animation when that line becomes active and trusts its own isPlaying flag, which time deltas kept stale during buffering and seeks. Play state now comes from the YouTube Music player itself, and the active line's animation is nudged every frame",
+        "Simple lyrics now draws slightly chunkier - the bundled face stops at weight 700, so a half-pixel stroke thickens the glyphs without a faux-bold fudge (the karaoke mask still clips it correctly)"
+      ]
+    },
+    {
       "version": "0.5.85",
       "date": "2026-10-21",
       "title": "AMLL: real word spacing, per-word karaoke fill and the bold font",

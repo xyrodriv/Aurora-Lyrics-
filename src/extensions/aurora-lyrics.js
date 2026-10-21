@@ -694,6 +694,11 @@
       StartTime: word.start,
       EndTime: word.end,
       IsPartOfWord: !!word.isPartOfWord,
+      // HasSpaceBefore is the ONLY trustworthy word-boundary signal: it comes
+      // from the real markup between the two <span>s. IsPartOfWord is inferred
+      // from "no whitespace between the tags", which is also true for adjacent
+      // whole words, so it cannot be used to decide where spaces go.
+      HasSpaceBefore: word.hasSpaceBefore === true,
       DisableLetterAnimation: !!word.disableLetterAnimation,
     }));
   }
@@ -17633,6 +17638,12 @@
   /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
      lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
   font-weight: 700;
+  /* The bundled face stops at 700 (LyricsBold), which is as heavy as the real
+     font goes. To get a chunkier karaoke look without a faux-bold fudge, stroke
+     the glyphs by a fraction of a pixel. -webkit-text-stroke is inherited, so
+     every word element gets it, and the engine's mask clips the stroke exactly
+     like the fill. */
+  -webkit-text-stroke: var(--amll-bold-stroke, 0.6px) currentColor;
   color: var(--amll-lp-color, #fff);
   line-height: 1.2;
 }
@@ -17641,8 +17652,8 @@
 .LyricsContainer { position: relative; }
 /* When AMLL owns the panel, hide Aurora's own (glow-free) Simple lines. */
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
-#ym-sl-amll-host { display: none; }
-body.amll-active #ym-sl-amll-host { display: block; }
+#ym-sl-amll-host { visibility: hidden; pointer-events: none; }
+body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 `;
 
   function amllInjectCss() {
@@ -17728,10 +17739,15 @@ body.amll-active #ym-sl-amll-host { display: block; }
 
       amllPlayer = player;
       amllReady = true;
+      // Show BEFORE handing it lyrics: the engine measures every word with
+      // clientWidth when setLyricLines() runs, and a display:none host (or one
+      // still hidden) measures 0 for all of them. A zero width degenerates the
+      // karaoke mask gradient, so the text renders fully lit with no
+      // left-to-right sweep — the "no fill" bug.
+      amllShow();
       player.resume();
 
       if (amllLastContent) amllSyncLyrics(amllLastContent);
-      amllShow();
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL engine failed to load; using built-in Simple renderer.", e);
       amllFailed = true;
@@ -17779,6 +17795,10 @@ body.amll-active #ym-sl-amll-host { display: block; }
   function amllWordAtoms(syllables) {
     const atoms = [];
     const list = Array.isArray(syllables) ? syllables : [];
+    // Prefer HasSpaceBefore (measured from the actual markup between the two
+    // <span>s). Fall back to IsPartOfWord only when the source never recorded
+    // spacing at all (line-synced LRC), where it is the best signal available.
+    const spacingKnown = list.some((s) => s && s.HasSpaceBefore === true);
     for (let i = 0; i < list.length; i++) {
       const syl = list[i];
       const text = syl && syl.Text != null ? String(syl.Text) : "";
@@ -17786,15 +17806,21 @@ body.amll-active #ym-sl-amll-host { display: block; }
       const start = (syl.StartTime || 0) * 1000;
       const end = (syl.EndTime || 0) * 1000;
       atoms.push({ word: text, startTime: start, endTime: end });
-      // A space belongs BETWEEN words, never inside one: IsPartOfWord marks a
-      // continuation of the same word (e.g. "beau" + "tiful").
-      const next = list[i + 1];
-      if (!next || next.IsPartOfWord) continue;
-      const nextText = next.Text != null ? String(next.Text) : "";
+      // Decide whether a space belongs AFTER this syllable.
+      let spaceAfter;
+      if (spacingKnown) {
+        // The next syllable tells us: if it had whitespace before it, there is
+        // a gap here. "digni"+"fied" has no space before "fied" -> one word.
+        const nextSyl = list[i + 1];
+        spaceAfter = !!(nextSyl && nextSyl.HasSpaceBefore === true);
+      } else {
+        // No spacing metadata: a space goes after a word that isn't continued.
+        const nextSyl = list[i + 1];
+        spaceAfter = !!nextSyl && !nextSyl.IsPartOfWord;
+      }
+      if (!spaceAfter) continue;
+      const nextText = list[i + 1] && list[i + 1].Text != null ? String(list[i + 1].Text) : "";
       if (!nextText) continue;
-      // Don't double up if the source already carried the whitespace, and don't
-      // insert spaces between CJK glyphs (they're space-less languages, and the
-      // engine splits those per character on its own).
       if (/\s$/.test(text) || /^\s/.test(nextText)) continue;
       if (AMLL_CJK_RE.test(text) || AMLL_CJK_RE.test(nextText)) continue;
       atoms.push({ word: " ", startTime: end, endTime: end });
@@ -17868,6 +17894,34 @@ body.amll-active #ym-sl-amll-host { display: block; }
     }
   }
 
+  function amllMediaIsPlaying() {
+    // YTMusic knows whether it is playing; time deltas lie during buffering and
+    // right after a seek, which used to leave the engine's own isPlaying flag
+    // stale and freeze the karaoke sweep mid-word.
+    try {
+      if (typeof window !== "undefined" && window.YTMod && window.YTMod.player) {
+        if (typeof window.YTMod.player.isPaused === "function") {
+          return !window.YTMod.player.isPaused();
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  // The engine only re-plays a line's karaoke animation when that line becomes
+  // active, and it decides play state from its own isPlaying flag. If that flag
+  // ever goes stale the Web Animation stays paused at a fixed mask-position and
+  // the word never fills. Nudge the active line every frame; resume() is a
+  // no-op for animations that are already playing or already finished.
+  function amllKickActiveLine() {
+    try {
+      const groups = amllPlayer.currentLyricGroups || [];
+      for (const group of groups) {
+        if (group && group.isActive && group.mainLine) group.mainLine.resume();
+      }
+    } catch (e) {}
+  }
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer) return;
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
@@ -17878,7 +17932,8 @@ body.amll-active #ym-sl-amll-host { display: block; }
     const t = Number.isFinite(off) ? Math.max(0, positionMs - off) : positionMs;
     amllLastPositionMs = t;
     try {
-      const advanced = t > (amllPrevTime || 0);
+      const mediaPlaying = amllMediaIsPlaying();
+      const advanced = mediaPlaying == null ? t > (amllPrevTime || 0) : mediaPlaying;
       amllPrevTime = t;
       if (advanced !== amllWasPlaying) {
         if (advanced) { try { amllPlayer.resume(); } catch (e) {} }
@@ -17887,6 +17942,7 @@ body.amll-active #ym-sl-amll-host { display: block; }
       }
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
+      if (amllWasPlaying) amllKickActiveLine();
       amllDriveErrors = 0;
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the

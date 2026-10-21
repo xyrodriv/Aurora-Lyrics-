@@ -576,6 +576,11 @@
       StartTime: word.start,
       EndTime: word.end,
       IsPartOfWord: !!word.isPartOfWord,
+      // HasSpaceBefore is the ONLY trustworthy word-boundary signal: it comes
+      // from the real markup between the two <span>s. IsPartOfWord is inferred
+      // from "no whitespace between the tags", which is also true for adjacent
+      // whole words, so it cannot be used to decide where spaces go.
+      HasSpaceBefore: word.hasSpaceBefore === true,
       DisableLetterAnimation: !!word.disableLetterAnimation,
     }));
   }
