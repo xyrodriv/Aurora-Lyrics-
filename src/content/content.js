@@ -2725,7 +2725,7 @@
      injected by boot(). The content script runs in an isolated world, so its own
      window.YTMod is invisible to the console. Player readers + open/install controls
      are bridged to this isolated world via window.postMessage. */
-  const VERSION = "0.5.72";
+  const VERSION = "0.5.73";
   const ui = {
     category: "Extensions",
     // view / density / floating are PINNED (AJ, 2026-09-28): the toolbar was

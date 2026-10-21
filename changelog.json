@@ -1,6 +1,18 @@
 {
   "releases": [
     {
+      "version": "0.5.73",
+      "date": "2026-10-21",
+      "title": "A darker update notice",
+      "features": [
+        "The update notice now matches the rest of the app: dark surface, white text and the same font as the panel",
+        "The Got it button is red instead of yellow"
+      ],
+      "fixes": [
+        "The notice is readable over a bright cover art again - the blurred artwork behind it was washing out the text"
+      ]
+    },
+    {
       "version": "0.5.72",
       "date": "2026-10-21",
       "title": "Custom backgrounds and calmer fullscreen",
