@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.85",
+      "date": "2026-10-21",
+      "title": "AMLL: real word spacing, per-word karaoke fill and the bold font",
+      "features": [],
+      "fixes": [
+        "Fixed Simple lyrics running every word together (\"everywordlookslikethis\") and having no left-to-right karaoke fill. Both came from the same cause: AMLL groups consecutive non-whitespace words into a single element, and Aurora's syllables carry no whitespace, so each line collapsed into one element holding the whole line. The adapter now inserts explicit space atoms at word boundaries - skipped inside split words (IsPartOfWord) and between CJK glyphs, and never doubled when the source already has one",
+        "Simple lyrics now uses the Spicy Lyrics bold face (weight 700, LyricsBold.woff2), matching the weight the built-in renderer uses, instead of the lighter 500"
+      ]
+    },
+    {
       "version": "0.5.84",
       "date": "2026-10-21",
       "title": "AMLL engine runs under YouTube's Trusted Types policy",

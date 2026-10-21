@@ -376,7 +376,9 @@
   overflow: hidden;
   pointer-events: auto;
   font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
-  font-weight: 500;
+  /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
+     lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
+  font-weight: 700;
   color: var(--amll-lp-color, #fff);
   line-height: 1.2;
 }
@@ -512,6 +514,40 @@ body.amll-active #ym-sl-amll-host { display: block; }
     amllHost = null;
   }
 
+  // AMLL treats whitespace as its own word atom. chunkAndSplitLyricWords()
+  // groups every run of consecutive non-space atoms into ONE word element, so a
+  // words array with no spaces collapses the entire line into a single element
+  // whose text is the syllables concatenated ("everywordlookslikethis") — and
+  // the karaoke mask then sweeps the line as a whole instead of word by word.
+  // Aurora's TTML syllables carry no whitespace (it lives between the <span>s),
+  // so rebuild the space atoms here.
+  const AMLL_CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+  function amllWordAtoms(syllables) {
+    const atoms = [];
+    const list = Array.isArray(syllables) ? syllables : [];
+    for (let i = 0; i < list.length; i++) {
+      const syl = list[i];
+      const text = syl && syl.Text != null ? String(syl.Text) : "";
+      if (!text) continue;
+      const start = (syl.StartTime || 0) * 1000;
+      const end = (syl.EndTime || 0) * 1000;
+      atoms.push({ word: text, startTime: start, endTime: end });
+      // A space belongs BETWEEN words, never inside one: IsPartOfWord marks a
+      // continuation of the same word (e.g. "beau" + "tiful").
+      const next = list[i + 1];
+      if (!next || next.IsPartOfWord) continue;
+      const nextText = next.Text != null ? String(next.Text) : "";
+      if (!nextText) continue;
+      // Don't double up if the source already carried the whitespace, and don't
+      // insert spaces between CJK glyphs (they're space-less languages, and the
+      // engine splits those per character on its own).
+      if (/\s$/.test(text) || /^\s/.test(nextText)) continue;
+      if (AMLL_CJK_RE.test(text) || AMLL_CJK_RE.test(nextText)) continue;
+      atoms.push({ word: " ", startTime: end, endTime: end });
+    }
+    return atoms;
+  }
+
   // Aurora's parsed line model -> AMLL LyricLine[]. Times are in SECONDS in
   // Aurora's model; AMLL wants MILLISECONDS.
   function amllLinesFromContent(content) {
@@ -520,11 +556,7 @@ body.amll-active #ym-sl-amll-host { display: block; }
     for (const line of content) {
       const lead = line && line.Lead;
       if (!lead) continue;
-      const words = (lead.Syllables || []).map((s) => ({
-        word: s && s.Text != null ? String(s.Text) : "",
-        startTime: (s && s.StartTime ? s.StartTime : 0) * 1000,
-        endTime: (s && s.EndTime ? s.EndTime : 0) * 1000,
-      }));
+      const words = amllWordAtoms(lead.Syllables);
       out.push({
         words,
         translatedLyric: "",
@@ -536,11 +568,7 @@ body.amll-active #ym-sl-amll-host { display: block; }
       });
       const bgs = line.Background || [];
       for (const bg of bgs) {
-        const bgWords = (bg.Syllables || []).map((s) => ({
-          word: s && s.Text != null ? String(s.Text) : "",
-          startTime: (s && s.StartTime ? s.StartTime : 0) * 1000,
-          endTime: (s && s.EndTime ? s.EndTime : 0) * 1000,
-        }));
+        const bgWords = amllWordAtoms(bg.Syllables);
         out.push({
           words: bgWords,
           translatedLyric: "",
