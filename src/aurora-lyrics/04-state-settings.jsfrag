@@ -66,6 +66,10 @@
   // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
   // chrome completely still (AJ, 2026-10-21).
   let fsChromeFading = false;
+  // Backstop watchdog handle: force-restores the chrome if a mode-change fade is
+  // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
+  // fullscreen exit.
+  let fsChromeFadeHealTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;

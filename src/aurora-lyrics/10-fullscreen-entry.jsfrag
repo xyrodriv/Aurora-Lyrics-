@@ -264,6 +264,9 @@
     // Stop the pending-MV attach poll too, or it would keep calling
     // syncFsVideoMode() after the overlay is gone.
     if (fsVideoWaitTimer) { clearTimeout(fsVideoWaitTimer); fsVideoWaitTimer = 0; }
+    // Drop the chrome-heal watchdog too, or it would fire against a removed overlay
+    // on the next entry (the timer re-arms itself on the next fade-out anyway).
+    if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
     // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;

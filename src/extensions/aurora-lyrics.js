@@ -1295,6 +1295,10 @@
   // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
   // chrome completely still (AJ, 2026-10-21).
   let fsChromeFading = false;
+  // Backstop watchdog handle: force-restores the chrome if a mode-change fade is
+  // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
+  // fullscreen exit.
+  let fsChromeFadeHealTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
   let fsControls = null;
@@ -9356,11 +9360,14 @@
       return;
     }
 
-    // Reaching this point means a REAL mode change (every no-op case returned
-    // above), so the chrome dissolves out first and the swap happens while it is
-    // invisible. The delay below is the chrome fade, not the media fade — the
-    // media is already dark for 220ms, so this costs nothing perceptible.
-    fsChromeFadeOut();
+    // Reaching this point means the mode is UNCERTAIN (the no-op cases above
+    // already returned): a transient videoWidth 0 during a reload lands here just
+    // as a real MV <-> cover change would. So the swap timer below RE-EVALUATES
+    // and only COMMITS a swap once it has a decisive answer. The chrome dissolve
+    // is applied INSIDE the commit branches (attach / detach), not up here — that
+    // is what keeps an MV -> MV reload from fading the controls out at all (AJ,
+    // 2026-10-21). The media is already dissolving from fsFadeOutMedia(), so the
+    // wait here only delays the layout restructure, not the track-change effect.
     fsVideoModeSwapTimer = setTimeout(() => {
       fsVideoModeSwapTimer = 0;
       // Guard each separately: touching fsMediaHost.style when fsMediaHost is
@@ -9388,6 +9395,10 @@
         return;
       }
       if (want && !ha) {
+        // Committed cover -> MV swap: the whole control column restructures, so
+        // dissolve the chrome before the swap runs (it fades back in with the
+        // video via awaitFsVideoReady -> revealFsMediaPane -> fsFadeInMedia).
+        fsChromeFadeOut();
         // Attach the live video (mirrors enterFullscreenMode).
         fsSavedVideo = {
           node: lv,
@@ -9461,6 +9472,9 @@
             return;
           }
         }
+        // Committed MV -> cover swap: restructure the control column, so dissolve
+        // the chrome first. (The debounce above already ruled out a mere reload.)
+        fsChromeFadeOut();
         // Detach the stale video and fall back to cover art.
         const saved = fsSavedVideo;
         // Stop the draw loop FIRST, while fsSavedVideo is still set:
@@ -9650,7 +9664,7 @@
   const FS_MEDIA_SWAP_MS = 140;
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
-  const FS_VIDEO_ZERO_DEBOUNCE_MS = 400;
+  const FS_VIDEO_ZERO_DEBOUNCE_MS = 700;
   const FS_VIDEO_READY_MAX_MS = 8000;
   const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
@@ -9695,13 +9709,35 @@
   // invisible, and it fades back in with the media.
   // MV -> MV does NOT go through here — nothing restructures, so the chrome must
   // stay perfectly still while only the media dissolves.
+  // The chrome dissolve is ONLY for a committed cover <-> MV mode change. Callers
+  // invoke this from the attach / detach branches of syncFsVideoMode() once the
+  // mode has DECISIVELY flipped — never during the reload window where
+  // findPlayerVideo() transiently reports videoWidth 0. Calling it up front used
+  // to make an MV -> MV skip fade the controls out (the element reuses itself on a
+  // track change, so only its source changes) and, through a race in the
+  // detach/re-attach, sometimes strand them invisible until fullscreen was
+  // reopened (AJ, 2026-10-21).
+  // The heal timer is the backstop: a real swap restores the chrome through
+  // fsFadeInMedia() -> fsChromeFadeIn(). If that path is ever missed, the timer
+  // force-restores it after the longest legitimate swap (a cover -> MV wait is
+  // capped by FS_VIDEO_READY_MAX_MS), so the controls can never stay hidden for
+  // the rest of the session.
   function fsChromeFadeOut() {
-    if (!fsOverlay) return;
+    if (!fsOverlay || fsChromeFading) return;
     fsChromeFading = true;
     fsOverlay.classList.add("ym-sl-fs-chrome-out");
+    if (fsChromeFadeHealTimer) clearTimeout(fsChromeFadeHealTimer);
+    fsChromeFadeHealTimer = window.setTimeout(() => {
+      fsChromeFadeHealTimer = 0;
+      if (fsActive && fsChromeFading && fsOverlay) {
+        fsChromeFading = false;
+        fsOverlay.classList.remove("ym-sl-fs-chrome-out");
+      }
+    }, FS_VIDEO_READY_MAX_MS + 1000);
   }
 
   function fsChromeFadeIn() {
+    if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
     if (!fsOverlay || !fsChromeFading) return;
     fsChromeFading = false;
     fsOverlay.classList.remove("ym-sl-fs-chrome-out");
@@ -10894,6 +10930,9 @@
     // Stop the pending-MV attach poll too, or it would keep calling
     // syncFsVideoMode() after the overlay is gone.
     if (fsVideoWaitTimer) { clearTimeout(fsVideoWaitTimer); fsVideoWaitTimer = 0; }
+    // Drop the chrome-heal watchdog too, or it would fire against a removed overlay
+    // on the next entry (the timer re-arms itself on the next fade-out anyway).
+    if (fsChromeFadeHealTimer) { clearTimeout(fsChromeFadeHealTimer); fsChromeFadeHealTimer = 0; }
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
     // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;

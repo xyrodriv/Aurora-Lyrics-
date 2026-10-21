@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.74",
+      "date": "2026-10-21",
+      "title": "Fullscreen controls stay put on a skip",
+      "features": [],
+      "fixes": [
+        "Fullscreen controls no longer vanish when you skip between two music videos - they stay on screen the whole time, like they do on a cover-to-cover skip",
+        "If a control fade is ever left stranded, a safety timer now restores it automatically instead of needing a fullscreen reopen"
+      ]
+    },
+    {
       "version": "0.5.73",
       "date": "2026-10-21",
       "title": "A darker update notice",
