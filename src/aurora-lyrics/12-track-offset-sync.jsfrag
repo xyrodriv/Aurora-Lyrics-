@@ -19,6 +19,10 @@
     warmAnimatedArt();
     const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
     if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+    // Apple-Music-style lyrics are rendered by a separate engine that holds the
+    // previous track's lines until the new ones arrive. Blank it with a skeleton
+    // so a track change never shows the wrong song.
+    amllShowSkeleton();
   }
 
   function getCurrentTrack() {

@@ -11722,6 +11722,10 @@
     warmAnimatedArt();
     const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
     if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
+    // Apple-Music-style lyrics are rendered by a separate engine that holds the
+    // previous track's lines until the new ones arrive. Blank it with a skeleton
+    // so a track change never shows the wrong song.
+    amllShowSkeleton();
   }
 
   function getCurrentTrack() {
@@ -17762,6 +17766,38 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   margin: 0 !important;
   padding: 0 !important;
 }
+/* Loading skeleton. The engine keeps the previous track's lines on screen until
+   the new ones arrive, so a track change would otherwise show the wrong song.
+   Shimmering bars stand in while the lyrics resolve. */
+#ym-sl-amll-host .ym-sl-amll-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.55em;
+  padding: 0 6%;
+  pointer-events: none;
+}
+#ym-sl-amll-host .ym-sl-amll-skeleton-bar {
+  height: 0.85em;
+  border-radius: 0.45em;
+  background: linear-gradient(90deg, rgba(255,255,255,.08), rgba(255,255,255,.22), rgba(255,255,255,.08));
+  background-size: 200% 100%;
+  animation: ym-sl-amll-shimmer 1.15s linear infinite;
+}
+@keyframes ym-sl-amll-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+/* Fullscreen: the lyrics hard-cut at the panel edges. Fade the top and bottom
+   the way the built-in renderer's scroll mask does, so lines glide out instead
+   of clipping. */
+.ym-sl-fs-lyrics #ym-sl-amll-host .amll-lyric-player {
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
+}
 `;
 
   function amllInjectCss() {
@@ -17855,7 +17891,9 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.supportMaskImage = false;
       player.setEnableSpring(true);
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
-      player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
+      // Focal line sits a little further down than AMLL's own 0.35 default, so
+      // the active line reads lower in the panel.
+      player.setAlignPosition(0.42);
       // Halve the render buffer. The engine defaults to 300px of overscan, which
       // on a ~950px panel means it builds roughly twice the viewport's worth of
       // lines - and every one of those words re-resolves its CSS mask every
@@ -17886,6 +17924,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // karaoke mask gradient, so the text renders fully lit with no
       // left-to-right sweep — the "no fill" bug.
       amllShow();
+      amllHideSkeleton();
       player.resume();
       amllAttachSeekHandler();
 
@@ -17933,6 +17972,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
     amllHost = null;
+    amllHideSkeleton();
     if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
   }
 
@@ -18073,6 +18113,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       amllShow();
+      amllHideSkeleton();
       amllSyncCredits();
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
@@ -18232,6 +18273,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         }
       } catch (e) {}
     });
+  }
+
+  // Loading skeleton for track changes. The engine holds the previous track's
+  // lines until the new ones arrive, which reads as "the wrong song". Show
+  // shimmering bars from the moment the track changes, and drop them the instant
+  // real lyrics are handed over.
+  let amllSkeletonEl = null;
+  function amllShowSkeleton() {
+    if (!amllActive || !amllReady || !amllHost || amllSkeletonEl) return;
+    try {
+      const wrap = document.createElement("div");
+      wrap.className = "ym-sl-amll-skeleton";
+      for (let i = 0; i < 5; i++) {
+        const bar = document.createElement("div");
+        bar.className = "ym-sl-amll-skeleton-bar";
+        bar.style.width = (55 + Math.random() * 40) + "%";
+        wrap.appendChild(bar);
+      }
+      amllHost.appendChild(wrap);
+      amllSkeletonEl = wrap;
+    } catch (e) {}
+  }
+  function amllHideSkeleton() {
+    if (!amllSkeletonEl) return;
+    try { amllSkeletonEl.remove(); } catch (e) {}
+    amllSkeletonEl = null;
   }
 
   function amllMediaIsPlaying() {
