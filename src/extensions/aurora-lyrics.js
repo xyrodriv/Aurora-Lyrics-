@@ -9673,7 +9673,7 @@
   const FS_MEDIA_SWAP_MS = 140;
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
-  const FS_VIDEO_ZERO_DEBOUNCE_MS = 700;
+  const FS_VIDEO_ZERO_DEBOUNCE_MS = 450;
   // Minimum time the chrome must stay dissolved on a mode change before it is
   // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
   // ready (which on a cover -> MV skip is the same tick the fade-out started), and
@@ -9839,6 +9839,13 @@
     }
     fsFadeAt = now;
     if (id) fsFadeTrackId = id;
+    // Sync the control dissolve with the media dissolve: when we are LEAVING a
+    // cover-art track (cover -> MV or cover -> cover) the controls should fade out
+    // on the same beat the media does, not when the next video finishes attaching.
+    // MV-origin skips are deliberately NOT faded here — an MV -> MV reload looks
+    // identical to an MV -> cover at this instant, so those are handled by the
+    // debounced swap-commit below, which keeps MV -> MV perfectly still.
+    if (fsOverlay && !fsSavedVideo) fsChromeFadeOut();
     fsFadeOutMedia();
   }
 

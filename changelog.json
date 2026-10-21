@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.77",
+      "date": "2026-10-21",
+      "title": "The fullscreen fade is now in step with the song",
+      "features": [],
+      "fixes": [
+        "The control dissolve on a cover-art <-> music-video skip now fires with the track change itself, so the controls fade out on the same beat the media does instead of a beat late when the next video finished attaching",
+        "Trimmed the music-video -> cover-art detection delay so that fade lands in the middle of the transition instead of after it"
+      ]
+    },
+    {
       "version": "0.5.76",
       "date": "2026-10-21",
       "title": "The fullscreen fade actually shows now",
