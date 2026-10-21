@@ -1,13 +1,14 @@
 {
   "releases": [
     {
-      "version": "0.5.81",
+      "version": "0.5.82",
       "date": "2026-10-21",
       "title": "Lyrics panel mounts again in every mode",
       "features": [],
       "fixes": [
-        "Fixed the lyrics panel disappearing entirely (both with Apple-Music-style lyrics on and off): the AMLL integration fragment was being appended after the shared IIFE had already closed, so its functions sat outside the scope that owns panelEl and threw on load - the build now emits it inside the IIFE, before the boot fragment",
-        "The rebuilt bundle is verified to contain no static import/export statements (only the two dynamic import() calls the page-world loader already used), so the classic-script bundle always parses and the panel UI is created on every page load"
+        "Fixed the lyrics panel disappearing entirely (with Apple-Music-style lyrics both on and off). A `typeof import` guard in the AMLL loader was a syntax error - `import` is an always-reserved keyword - so the browser rejected the whole classic-script bundle with \"Cannot use import statement outside a module\" before a single line ran, and the panel UI was never created. The guard is gone; dynamic import is always available in Chrome MV3",
+        "Also fixed a scope bug where the AMLL integration was appended after the shared IIFE had closed, putting its functions outside the scope that owns panelEl - the build now emits it inside the IIFE, before the boot fragment",
+        "The build script now compiles the bundle with vm.Script (classic-script grammar, the same one Chrome uses) and refuses to emit it if it does not parse, so a static import/export or reserved-word misuse can never silently ship again. node --check was not enough: it is lenient and let this through"
       ]
     },
     {

@@ -65,6 +65,30 @@ const source = Buffer.concat(await Promise.all(
   parts.map((part) => readFile(path.join(sourceDir, part)))
 ));
 
+// GUARD: the bundle is injected as a CLASSIC <script> (no type="module"), so a
+// static `import`/`export` anywhere makes the browser throw
+//   SyntaxError: Cannot use import statement outside a module
+// and the ENTIRE bundle fails to parse — no panel, no lyrics, nothing.
+// `node --check` does NOT catch this (Node 22 auto-detects ESM and is lenient),
+// which is exactly how `typeof import` shipped once: `import` is an always
+// reserved word, so `typeof import` parses as the start of an import
+// declaration. Compile with vm.Script instead — that is classic-script
+// semantics, the same grammar Chrome uses.
+{
+  const vm = await import("node:vm");
+  try {
+    new vm.Script(source.toString("utf8"), { filename: "aurora-lyrics.js" });
+  } catch (error) {
+    console.error(
+      "aurora-lyrics.js does not parse as a classic script:\n  " + error.message +
+      "\nThe bundle is injected as a classic <script>, so it must contain no static" +
+      "\nimport/export statements. (Common cause: `typeof import`, which is a syntax" +
+      "\nerror — `import` is always reserved.) Only dynamic import(...) is allowed."
+    );
+    process.exit(1);
+  }
+}
+
 if (check) {
   let output;
   try {

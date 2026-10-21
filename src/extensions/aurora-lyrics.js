@@ -17663,7 +17663,12 @@ body.amll-active #ym-sl-amll-host { display: block; }
   function amllEnsureEngine() {
     if (amllEnginePromise) return amllEnginePromise;
     amllEnginePromise = (async () => {
-      if (typeof import !== "function") throw new Error("dynamic import unavailable");
+      // NOTE: never write `typeof import` here — `import` is an always-reserved
+      // keyword, so the parser treats it as the start of an import declaration /
+      // dynamic-import call and throws "Cannot use import statement outside a
+      // module", killing the WHOLE classic-script bundle (panel included).
+      // Dynamic import is always available in MV3 Chrome; a failure surfaces
+      // from the await below and is caught by amllActivate's try/catch.
       const url = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
         ? chrome.runtime.getURL("src/extensions/amll-core.js")
         : "";
