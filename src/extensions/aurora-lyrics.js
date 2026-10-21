@@ -17285,10 +17285,6 @@
   let amllWasPlaying = false;
   let amllCssInjected = false;
   let amllLastFrameTime = 0;
-  let amllLastDumpTime = 0;
-  let amllDriveCount = 0;
-  let amllDumpCount = 0;
-  let amllEnableError = null;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
 
   // YouTube Music loads its own Web Animations polyfill
@@ -17962,60 +17958,6 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     return false;
   }
 
-  // TEMPORARY diagnostic. Mirrors the converted LyricLine[] onto the host as
-  // data-debug so the live word timings can be read from the page without a
-  // JS console. Remove once the animation issue is pinned down.
-  function amllDumpDebug(lines) {
-    amllDumpCount++;
-    try {
-      const active = lines.findIndex((l) => !l.isBG && (l.endTime - l.startTime) > 0);
-      const slice = (lines || []).slice(0, 4).map((l) => ({
-        s: Math.round(l.startTime),
-        e: Math.round(l.endTime),
-        bg: !!l.isBG,
-        w: l.words.map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
-      }));
-      // What the ENGINE currently holds: for every lyric group,
-      // [isActive, lineStart, lineEnd, builtWordCount, floatAnimationCount],
-      // plus the engine's own current time. This is the only way to tell "the
-      // words were never built" from "the animations were built but parked".
-      let eng = null;
-      try {
-        const groups = amllPlayer.currentLyricGroups || [];
-        eng = {
-          n: groups.length,
-          t: Math.round(amllPlayer.getCurrentTime()),
-          g: groups.slice(0, 14).map((x) => {
-            let act = false, s = null, e = null, nw = 0, na = 0;
-            try { act = !!x.isActive; } catch (e2) {}
-            try { const l = x.mainLine.getLine(); s = Math.round(l.startTime); e = Math.round(l.endTime); } catch (e2) {}
-            try { nw = (x.mainLine.splittedWords || []).length; } catch (e2) {}
-            try { na = (x.mainLine.splittedWords || []).reduce((n, w) => n + ((w.elementAnimations || []).length), 0); } catch (e2) {}
-            return [act, s, e, nw, na];
-          }),
-        };
-      } catch (e) { eng = { error: String(e) }; }
-      if (amllHost) {
-        amllHost.dataset.debug = JSON.stringify({
-          active,
-          drives: amllDriveCount,
-          dumps: amllDumpCount,
-          playing: amllPlayer ? amllPlayer.getIsPlaying() : null,
-          spring: amllPlayer ? amllPlayer.getEnableSpring() : null,
-          seeded: amllSizeSeeded,
-          measured: amllMeasured,
-          size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
-          hostConnected: !!(amllHost && amllHost.isConnected),
-          hostRect: amllHost ? (() => { const r = amllHost.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
-          playerTimeCss: (amllPlayer && amllPlayer.element && amllPlayer.element.style)
-            ? amllPlayer.element.style.getPropertyValue("--amll-player-time") : null,
-          eng,
-          enableError: amllEnableError,
-          lines: slice,
-        });
-      }
-    } catch (e) {}
-  }
 
   function amllSyncLyrics(content) {
     amllLastContent = content;
@@ -18030,7 +17972,6 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       amllShow();
-      amllDumpDebug(lines);
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
@@ -18182,16 +18123,28 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     } catch (err) { return null; }
   }
 
-  function amllKickActiveLine() {
+  // Re-seek the active line's word animations from the media clock. The engine
+  // positions them once, when the line becomes active, and after that they run
+  // on wall-clock - which is fine until anything seeks or stalls.
+  //
+  // Two rules learned the hard way:
+  //  - ONLY the line whose window currently contains the playhead. An earlier
+  //    +/-1500ms window re-enabled lines that had already ended, fighting the
+  //    engine's own disable(): the line never went dim, the fill never released,
+  //    and the panel looked stuck on a finished line.
+  //  - Throttled. enable() walks every word and writes currentTime on each of
+  //    its animations, so doing it every frame is pure waste; ~10x a second is
+  //    far below the threshold of perception for a 1s ease-out.
+  let amllLastKickTime = 0;
+  function amllKickActiveLine(now) {
+    if (now - amllLastKickTime < 100) return;
+    amllLastKickTime = now;
     try {
       const groups = amllPlayer.currentLyricGroups || [];
       const t = amllPlayer.getCurrentTime();
       const playing = amllPlayer.getIsPlaying();
       for (const group of groups) {
         if (!group || !group.mainLine) continue;
-        // Select by time, not by the group's isActive flag: that flag is only
-        // written when the engine lays a line out, and it can be stale, which
-        // left the word animations untouched by this loop entirely.
         let s = -1;
         let e = -1;
         try {
@@ -18199,7 +18152,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           s = ln.startTime;
           e = ln.endTime;
         } catch (err) { continue; }
-        if (t < s - 1500 || t > e + 1500) continue;
+        if (t < s || t > e) continue;
         amllCallMaybeAsync(group.mainLine.enable, group.mainLine);
         amllCallMaybeAsync(group.mainLine.resume, group.mainLine);
         if (group.bgLine) {
@@ -18210,8 +18163,50 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     } catch (e) {}
   }
 
+  // The engine builds a line's word elements - and one Web Animation per word,
+  // plus per-character animations for every long word - the first time that line
+  // scrolls into the render range, and only releases them when the TRACK changes.
+  // hide() merely detaches the DOM node; it never disposes. So every line you
+  // have ever scrolled past keeps its animations alive for the rest of the song.
+  // With word-by-word syncs that is hundreds of live animations, which is why the
+  // panel gets laggier the longer you listen. (This reproduces in the upstream
+  // AMLL preview too, so it is an engine issue, not something we introduced.)
+  //
+  // Release anything well outside the render range. show() rebuilds a line from
+  // scratch when it comes back (built === false forces rebuildElement()), so
+  // nothing is lost - the words, the masks and the animations are all recreated.
+  let amllLastReapTime = 0;
+  function amllReapDistantLines(now) {
+    if (now - amllLastReapTime < 2000) return;
+    amllLastReapTime = now;
+    try {
+      const groups = amllPlayer.currentLyricGroups || [];
+      const t = amllPlayer.getCurrentTime();
+      for (const group of groups) {
+        if (!group || !group.mainLine) continue;
+        let s = -1;
+        let e = -1;
+        try {
+          const ln = group.mainLine.getLine();
+          s = ln.startTime;
+          e = ln.endTime;
+        } catch (err) { continue; }
+        // Generous halo around the playhead, so nothing visibly rebuilds while
+        // it is still anywhere near the viewport.
+        if (t >= s - 15000 && t <= e + 15000) continue;
+        let inRange = false;
+        try { inRange = group.isInRenderRange ? group.isInRenderRange() : false; } catch (err) {}
+        if (inRange) continue;
+        for (const line of [group.mainLine, group.bgLine]) {
+          if (!line) continue;
+          try { line.built = false; } catch (err) {}
+          try { line.disposeElements(); } catch (err) {}
+        }
+      }
+    } catch (e) {}
+  }
+
   function amllDrive(positionMs) {
-    amllDriveCount++;
     if (!amllActive || !amllReady || !amllPlayer) return;
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
@@ -18243,15 +18238,11 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       if (amllPlayer.size[1] <= 0) amllSeedEngineSize();
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
-      // Every frame, not only while playing: enable() also parks the word
-      // animations at the right positions when the media is paused.
-      amllKickActiveLine();
-      // Refresh the diagnostic a few times a second so it reflects the line that
-      // is active right now, not just the one loaded at the last track change.
-      if (amllLastContent && now - amllLastDumpTime > 400) {
-        amllLastDumpTime = now;
-        amllDumpDebug(amllLastContent);
-      }
+      // Re-seek the active line's word animations from the media clock.
+      amllKickActiveLine(now);
+      // Release lines that have scrolled well out of range, so their per-word
+      // animations do not pile up for the whole song.
+      amllReapDistantLines(now);
       amllDriveErrors = 0;
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
