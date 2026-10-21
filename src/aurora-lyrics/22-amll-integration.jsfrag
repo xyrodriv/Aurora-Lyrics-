@@ -496,9 +496,12 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
       player.getElement().style.height = "100%";
       amllHost.appendChild(player.getElement());
+      // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
+      // bails on a missing player, so seeding first was a silent no-op.
+      amllPlayer = player;
+      amllGuardEngineSize();
       amllSeedEngineSize();
 
-      amllPlayer = player;
       amllReady = true;
       // Show BEFORE handing it lyrics: the engine measures every word with
       // clientWidth when setLyricLines() runs, and a display:none host (or one
@@ -655,7 +658,10 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           playing: amllPlayer ? amllPlayer.getIsPlaying() : null,
           spring: amllPlayer ? amllPlayer.getEnableSpring() : null,
           seeded: amllSizeSeeded,
+          measured: amllMeasured,
           size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
+          hostConnected: !!(amllHost && amllHost.isConnected),
+          hostRect: amllHost ? (() => { const r = amllHost.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
           lines: slice,
         });
       }
@@ -697,6 +703,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // keep it in sync ourselves instead of trusting that observer.
   let amllSizeObserver = null;
   let amllSizeSeeded = false;
+  let amllMeasured = [0, 0];
   // The host is inset:0 inside .LyricsContainer, so the container's box IS the
   // host's box. Walking up also covers the moment of activation, when the panel
   // has not been laid out yet and the host itself still measures 0x0.
@@ -704,10 +711,34 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     let el = amllHost;
     while (el && el !== document.body) {
       const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) return r;
+      if (r.width > 0 && r.height > 0) { amllMeasured = [r.width, r.height]; return r; }
       el = el.parentElement;
     }
     return null;
+  }
+  // Wrap player.size so a write of 0 is ignored. The engine's own ResizeObserver
+  // reports 0x0 the first time (it observes its still-detached root element), and
+  // once the viewport is zero the engine never recovers on its own. With this
+  // guard a real viewport, once known, can never be lost again.
+  function amllGuardEngineSize() {
+    try {
+      const guarded = [0, 0];
+      let w = 0;
+      let h = 0;
+      Object.defineProperty(guarded, "0", {
+        get() { return w; },
+        set(v) { if (v > 0) w = v; },
+        enumerable: true,
+        configurable: true,
+      });
+      Object.defineProperty(guarded, "1", {
+        get() { return h; },
+        set(v) { if (v > 0) h = v; },
+        enumerable: true,
+        configurable: true,
+      });
+      amllPlayer.size = guarded;
+    } catch (e) {}
   }
   function amllSeedEngineSize() {
     if (!amllPlayer || !amllHost) return false;

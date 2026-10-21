@@ -1,6 +1,17 @@
 {
   "releases": [
     {
+      "version": "0.5.91",
+      "date": "2026-10-21",
+      "title": "The engine viewport can no longer be zeroed",
+      "features": [],
+      "fixes": [
+        "Fixed the seed never running: the engine's viewport was being seeded before the player reference was assigned, so the seed bailed out every time. The player is now assigned first",
+        "The engine's viewport array is now guarded so a write of zero is ignored. The engine's own resize observer reports 0x0 the first time it runs, and once the viewport is zero the engine never recovers - with the guard, a real viewport once known cannot be lost",
+        "The diagnostic now also reports what the seed measured and whether the host is still connected, so a failed seed can be told apart from a clobbered one"
+      ]
+    },
+    {
       "version": "0.5.90",
       "date": "2026-10-21",
       "title": "The engine viewport is now self-healing",
