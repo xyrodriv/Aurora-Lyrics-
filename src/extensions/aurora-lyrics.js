@@ -17714,6 +17714,17 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
+/* Credits footer (Written By / provided by / Uploaded by / Made by). The same
+   markup Aurora uses for the built-in renderer, pinned over the bottom of the
+   engine's scroll area so it is always reachable. */
+#ym-sl-amll-host .ym-sl-credits {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  pointer-events: auto;
+}
 `;
 
   function amllInjectCss() {
@@ -17882,6 +17893,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
     amllHost = null;
+    if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
   }
 
   // AMLL treats whitespace as its own word atom. chunkAndSplitLyricWords()
@@ -17975,6 +17987,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   }
 
 
+  // Credits footer. Aurora already builds a full "Written By / Lyrics provided by
+  // / Uploaded by / Made by" block for the built-in renderer (buildCreditsFooter
+  // in 16-lyric-dom-romanization), and it reads the same shared state, so the
+  // Apple-Music-style panel can simply reuse it rather than duplicating the
+  // markup, the provider links, the warning pill or the avatar-glow theming.
+  // It is pinned to the bottom of the host, over the engine's own scroll area.
+  let amllCreditsEl = null;
+  function amllSyncCredits() {
+    if (!amllHost) return;
+    const hasCredits =
+      (typeof currentSongwriters !== "undefined" && currentSongwriters && currentSongwriters.length) ||
+      (typeof currentProvider !== "undefined" && currentProvider) ||
+      (typeof currentUploader !== "undefined" && currentUploader) ||
+      (typeof currentMaker !== "undefined" && currentMaker);
+    if (!hasCredits) {
+      if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
+      return;
+    }
+    if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
+    try {
+      const names = (typeof currentSongwriters !== "undefined" && currentSongwriters) ? currentSongwriters : [];
+      amllCreditsEl = buildCreditsFooter(names);
+      amllHost.appendChild(amllCreditsEl);
+    } catch (e) {}
+  }
+
   function amllSyncLyrics(content) {
     amllLastContent = content;
     if (!amllActive || !amllReady || !amllPlayer) return;
@@ -17988,6 +18026,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       amllShow();
+      amllSyncCredits();
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
