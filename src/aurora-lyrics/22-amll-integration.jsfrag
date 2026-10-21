@@ -542,6 +542,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllWasPlaying = false;
     amllPrevTime = 0;
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
+    amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
     amllHost = null;
   }
@@ -653,6 +654,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           active,
           playing: amllPlayer ? amllPlayer.getIsPlaying() : null,
           spring: amllPlayer ? amllPlayer.getEnableSpring() : null,
+          seeded: amllSizeSeeded,
           size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
           lines: slice,
         });
@@ -694,15 +696,27 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // "rendered but lifeless". Seed the size from the host we actually control and
   // keep it in sync ourselves instead of trusting that observer.
   let amllSizeObserver = null;
+  let amllSizeSeeded = false;
+  // The host is inset:0 inside .LyricsContainer, so the container's box IS the
+  // host's box. Walking up also covers the moment of activation, when the panel
+  // has not been laid out yet and the host itself still measures 0x0.
+  function amllMeasureHost() {
+    let el = amllHost;
+    while (el && el !== document.body) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return r;
+      el = el.parentElement;
+    }
+    return null;
+  }
   function amllSeedEngineSize() {
-    if (!amllPlayer || !amllHost) return;
-    try {
-      const rect = amllHost.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        amllPlayer.size[0] = rect.width;
-        amllPlayer.size[1] = rect.height;
-      }
-    } catch (e) {}
+    if (!amllPlayer || !amllHost) return false;
+    const rect = amllMeasureHost();
+    if (rect) {
+      amllPlayer.size[0] = rect.width;
+      amllPlayer.size[1] = rect.height;
+      amllSizeSeeded = true;
+    }
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} }
     amllSizeObserver = new ResizeObserver((entries) => {
       if (!amllPlayer) return;
@@ -714,12 +728,14 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       if (amllPlayer.size[0] === w && amllPlayer.size[1] === h) return;
       amllPlayer.size[0] = w;
       amllPlayer.size[1] = h;
+      amllSizeSeeded = true;
       // Lines that were never measured still carry the old default height, and
       // the engine's own layout pass has to run again with the real viewport.
       try { amllPlayer.layoutCalculator.updateUnmeasuredHeights(amllPlayer.defaultLineHeight); } catch (e) {}
       try { if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("resize"); } catch (e) {}
     });
     try { amllSizeObserver.observe(amllHost); } catch (e) {}
+    return amllSizeSeeded;
   }
 
   function amllMediaIsPlaying() {
@@ -775,6 +791,11 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         else { try { amllPlayer.pause(); } catch (e) {} }
       }
       amllWasPlaying = advanced;
+      // Self-heal. The engine's own ResizeObserver can report 0x0 and never
+      // recover, which zeroes defaultLineHeight and makes its in-render-range
+      // check bail for every line - silently disabling every committed style
+      // while the fill keeps working. Re-seed until the viewport sticks.
+      if (amllPlayer.size[1] <= 0) amllSeedEngineSize();
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
       if (amllWasPlaying) amllKickActiveLine();

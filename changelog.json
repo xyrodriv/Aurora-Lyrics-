@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.90",
+      "date": "2026-10-21",
+      "title": "The engine viewport is now self-healing",
+      "features": [],
+      "fixes": [
+        "The AMLL engine's zero viewport is now re-seeded until it sticks: the seed walks up from the host to the nearest sized ancestor (the host can still measure 0x0 at the moment the mode switches on), and the drive loop re-seeds every frame while the viewport is still zero, so no animation depends on the engine's own resize observer recovering"
+      ]
+    },
+    {
       "version": "0.5.89",
       "date": "2026-10-21",
       "title": "AMLL: the engine finally gets a real viewport, so the animations run",
