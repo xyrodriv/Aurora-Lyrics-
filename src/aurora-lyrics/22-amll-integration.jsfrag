@@ -653,28 +653,26 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         bg: !!l.isBG,
         w: l.words.map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
       }));
-      // What the ENGINE currently has as its active line, plus the word count
-      // it actually built and the float animations it created for them. This is
-      // the only way to tell "the words were never built" from "the animations
-      // were built but parked".
+      // What the ENGINE currently holds: for every lyric group,
+      // [isActive, lineStart, lineEnd, builtWordCount, floatAnimationCount],
+      // plus the engine's own current time. This is the only way to tell "the
+      // words were never built" from "the animations were built but parked".
       let eng = null;
       try {
         const groups = amllPlayer.currentLyricGroups || [];
-        const g = groups.find((x) => x && x.isActive) || null;
-        if (g && g.mainLine) {
-          const ln = g.mainLine.getLine();
-          const words = g.mainLine.splittedWords || [];
-          eng = {
-            groups: groups.length,
-            s: Math.round(ln.startTime),
-            e: Math.round(ln.endTime),
-            words: words.length,
-            anims: words.reduce((n, w) => n + ((w.elementAnimations || []).length), 0),
-            w: (ln.words || []).map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
-            built: !!g.mainLine.built,
-          };
-        }
-      } catch (e) {}
+        eng = {
+          n: groups.length,
+          t: Math.round(amllPlayer.getCurrentTime()),
+          g: groups.slice(0, 14).map((x) => {
+            let act = false, s = null, e = null, nw = 0, na = 0;
+            try { act = !!x.isActive; } catch (e2) {}
+            try { const l = x.mainLine.getLine(); s = Math.round(l.startTime); e = Math.round(l.endTime); } catch (e2) {}
+            try { nw = (x.mainLine.splittedWords || []).length; } catch (e2) {}
+            try { na = (x.mainLine.splittedWords || []).reduce((n, w) => n + ((w.elementAnimations || []).length), 0); } catch (e2) {}
+            return [act, s, e, nw, na];
+          }),
+        };
+      } catch (e) { eng = { error: String(e) }; }
       if (amllHost) {
         amllHost.dataset.debug = JSON.stringify({
           active,
