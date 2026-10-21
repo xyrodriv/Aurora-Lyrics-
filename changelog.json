@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.87",
+      "date": "2026-10-21",
+      "title": "The karaoke sweep actually sweeps",
+      "features": [],
+      "fixes": [
+        "Fixed the missing left-to-right fill in Simple lyrics. The engine was using its Web Animations mask path, which only re-plays a line's karaoke animation at the instant that line becomes active and trusts the engine's own play-state flag - when that flag went stale the animation stayed paused at a fixed mask-position, leaving every word parked in the dim state with no sweep. It now uses the engine's calc mask path, which recomputes the mask position from the playback time on every single frame and has no play-state dependency at all"
+      ]
+    },
+    {
       "version": "0.5.86",
       "date": "2026-10-21",
       "title": "AMLL: correct word splits, a karaoke fill that can't freeze, and bolder type",

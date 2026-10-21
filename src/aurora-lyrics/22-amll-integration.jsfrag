@@ -387,6 +387,11 @@
   -webkit-text-stroke: var(--amll-bold-stroke, 0.6px) currentColor;
   color: var(--amll-lp-color, #fff);
   line-height: 1.2;
+  /* Written every frame by the engine on the CalcMaskAnimator path. Seed it so
+     the clamp() in each word's mask-position always evaluates - an unset var
+     would make the whole declaration invalid and the word would render at full
+     brightness before the first frame. */
+  --amll-player-time: 0;
 }
 #ym-sl-amll-host .amll-lyric-player { pointer-events: auto; height: 100%; }
 /* Make the lyrics area the positioning context so the host fills it. */
@@ -472,6 +477,20 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       container.appendChild(amllHost);
 
       const player = new mod.LyricPlayer();
+      // Force the engine's CalcMaskAnimator path (a CSS clamp() that reads
+      // --amll-player-time, which update() rewrites EVERY frame) instead of
+      // WebMaskAnimator (per-word Web Animations keyframes).
+      //
+      // The WAAPI path only re-plays a line's animation at the moment that line
+      // becomes active, and it decides whether to play from the engine's own
+      // isPlaying flag. When that flag is ever stale the animation stays paused
+      // at a fixed mask-position and the word never fills - the mask sits far
+      // enough left that the whole word renders at the 0.4 "dim" alpha, which
+      // looks exactly like "no left-to-right fill" even though the mask is
+      // correct. The calc path has no such dependency: mask-position is
+      // recomputed from the current time on every frame, so the sweep tracks
+      // playback no matter what the play-state plumbing does.
+      player.supportMaskImage = false;
       player.setEnableSpring(true);
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
       player.setAlignPosition(0.35);          // focal line sits 35% down (matches AMLL)
