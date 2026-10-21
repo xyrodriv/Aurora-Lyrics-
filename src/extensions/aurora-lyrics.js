@@ -18117,7 +18117,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // Swallow it here so one bad word cannot spam the console.
   function amllCallMaybeAsync(fn, thisArg) {
     try {
-      const p = fn.call(thisArg);
+      const p = fn.call(thisArg, ...[].slice.call(arguments, 2));
       if (p && typeof p.catch === "function") p.catch(() => {});
       return p;
     } catch (err) { return null; }
@@ -18153,7 +18153,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           e = ln.endTime;
         } catch (err) { continue; }
         if (t < s || t > e) continue;
-        amllCallMaybeAsync(group.mainLine.enable, group.mainLine);
+        amllCallMaybeAsync(group.mainLine.enable, group.mainLine, t, playing);
         amllCallMaybeAsync(group.mainLine.resume, group.mainLine);
         if (group.bgLine) {
           amllCallMaybeAsync(group.bgLine.enable, group.bgLine);
@@ -18175,10 +18175,41 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // Release anything well outside the render range. show() rebuilds a line from
   // scratch when it comes back (built === false forces rebuildElement()), so
   // nothing is lost - the words, the masks and the animations are all recreated.
+  // Reap anything the engine itself has scrolled out of its render range. That is
+  // the exact set hide() has detached, and it is what bounds the number of live
+  // word animations to roughly the viewport instead of the whole song.
   let amllLastReapTime = 0;
   function amllReapDistantLines(now) {
-    if (now - amllLastReapTime < 2000) return;
+    if (now - amllLastReapTime < 1000) return;
     amllLastReapTime = now;
+    try {
+      const groups = amllPlayer.currentLyricGroups || [];
+      for (const group of groups) {
+        if (!group || !group.mainLine) continue;
+        let inRange = false;
+        try { inRange = group.isInRenderRange ? group.isInRenderRange() : false; } catch (err) {}
+        if (inRange) continue;
+        for (const line of [group.mainLine, group.bgLine]) {
+          if (!line) continue;
+          let alreadyBare = false;
+          try { alreadyBare = (line.splittedWords || []).length === 0; } catch (err) {}
+          if (alreadyBare) continue;
+          try { line.built = false; } catch (err) {}
+          try { line.disposeElements(); } catch (err) {}
+        }
+      }
+    } catch (e) {}
+  }
+
+  // The engine retires a finished line ONLY when the next line starts in the same
+  // sync - its timeline controller guards the removal with
+  //     if (addedPlayingCount > 0) { ...delete expired highlights... }
+  // so a line whose window has passed stays in GRADIENT (fully lit) mode until
+  // the following line begins. That is exactly "the fill never releases and the
+  // line never goes down". Retire it ourselves: anything the playhead has left
+  // gets disable(), which drops it back to the dim base and releases the fill.
+  // Only ever force disable() - the engine's own enable() path is left alone.
+  function amllRetireFinishedLines() {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
       const t = amllPlayer.getCurrentTime();
@@ -18191,17 +18222,12 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           s = ln.startTime;
           e = ln.endTime;
         } catch (err) { continue; }
-        // Generous halo around the playhead, so nothing visibly rebuilds while
-        // it is still anywhere near the viewport.
-        if (t >= s - 15000 && t <= e + 15000) continue;
-        let inRange = false;
-        try { inRange = group.isInRenderRange ? group.isInRenderRange() : false; } catch (err) {}
-        if (inRange) continue;
-        for (const line of [group.mainLine, group.bgLine]) {
-          if (!line) continue;
-          try { line.built = false; } catch (err) {}
-          try { line.disposeElements(); } catch (err) {}
-        }
+        if (t >= s && t <= e) continue;      // still the line under the playhead
+        let enabled = false;
+        try { enabled = !!group.mainLine.isEnabled; } catch (err) {}
+        if (!enabled) continue;
+        amllCallMaybeAsync(group.mainLine.disable, group.mainLine);
+        if (group.bgLine) amllCallMaybeAsync(group.bgLine.disable, group.bgLine);
       }
     } catch (e) {}
   }
@@ -18240,6 +18266,8 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       amllPlayer.update(delta);
       // Re-seek the active line's word animations from the media clock.
       amllKickActiveLine(now);
+      // Retire lines the playhead has already left, so their fill releases.
+      amllRetireFinishedLines();
       // Release lines that have scrolled well out of range, so their per-word
       // animations do not pile up for the whole song.
       amllReapDistantLines(now);
