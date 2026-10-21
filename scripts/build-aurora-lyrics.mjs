@@ -28,8 +28,12 @@ const parts = [
   "18-animation.jsfrag",
   "19-animation-modes.jsfrag",
   "20-lifecycle.jsfrag",
-  "21-boot.jsfrag",
+  // AMLL (real Apple-Music-style engine) lives INSIDE the shared IIFE so its
+  // functions can see panelEl / getOffsetForPosition. It must come before
+  // 21-boot.jsfrag, which closes the IIFE with })(); — otherwise every amll*
+  // function ends up at module scope and throws ReferenceError on panelEl.
   "22-amll-integration.jsfrag",
+  "21-boot.jsfrag",
 ];
 
 const check = process.argv.includes("--check");

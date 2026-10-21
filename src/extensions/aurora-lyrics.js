@@ -17245,36 +17245,6 @@
     detachMessageListener();
   }
 
-  /* ===================== boot =====================
-     The first-run onboarding tour used to live above this line: a modal card, a
-     pulsing highlight on the waffle icon, a localStorage completion flag and a
-     second kickoff IIFE that re-ran it on DOMContentLoaded. Removed entirely
-     (AJ, 2026-10-21) — a brand-new install opens straight into the app, which
-     also retires the four #1ed760 green rules that were the last non-crimson
-     colours in the project. */
-  whenYTMod(() => {
-    // Kick off the persisted Spicy Lyrics cache read immediately so it is warm
-    // by the time the first track resolves — otherwise the very first lookup
-    // pays a storage round-trip on the critical path.
-    loadSpicyCache().then(() => sweepSpicyCache(Date.now())).catch(() => {});
-    // Pre-warm the animated-art cache too, so the FIRST fullscreen entry already
-    // holds it in memory and the cached-art check costs no storage round-trip. A
-    // round-trip there meant the static cover could paint for a frame before
-    // suppressStaticCardForAnimated() hid it (AJ, 2026-10-03).
-    loadArtCache().catch(() => {});
-    buildUI();
-    // YTM's own video fullscreen button now opens OUR fullscreen instead, so
-    // the control feels native. Registered after buildUI() because the redirect
-    // needs panelEl, which buildUI() creates.
-    installNativeFullscreenRedirect();
-    window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
-    // Also pull Aurora Bloom's settings so the MV blurred-backdrop brightness
-    // (whose slider lives in that add-on) is right even if its panel is never
-    // opened this session. handleHostMessage() picks out just that key.
-    window.postMessage({ type: "ytmod-settings-request", id: "ytmod-dynamic" }, "*");
-  });
-
-})();
   /* ===================== AMLL (Apple-Music-style) renderer =====================
    * Simple lyrics mode renders through the REAL @applemusic-like-lyrics engine
    * (DomLyricPlayer), bundled into src/extensions/amll-core.js. We do NOT
@@ -17870,3 +17840,33 @@ body.amll-active #ym-sl-amll-host { display: block; }
       amllHide();
     }
   }
+  /* ===================== boot =====================
+     The first-run onboarding tour used to live above this line: a modal card, a
+     pulsing highlight on the waffle icon, a localStorage completion flag and a
+     second kickoff IIFE that re-ran it on DOMContentLoaded. Removed entirely
+     (AJ, 2026-10-21) — a brand-new install opens straight into the app, which
+     also retires the four #1ed760 green rules that were the last non-crimson
+     colours in the project. */
+  whenYTMod(() => {
+    // Kick off the persisted Spicy Lyrics cache read immediately so it is warm
+    // by the time the first track resolves — otherwise the very first lookup
+    // pays a storage round-trip on the critical path.
+    loadSpicyCache().then(() => sweepSpicyCache(Date.now())).catch(() => {});
+    // Pre-warm the animated-art cache too, so the FIRST fullscreen entry already
+    // holds it in memory and the cached-art check costs no storage round-trip. A
+    // round-trip there meant the static cover could paint for a frame before
+    // suppressStaticCardForAnimated() hid it (AJ, 2026-10-03).
+    loadArtCache().catch(() => {});
+    buildUI();
+    // YTM's own video fullscreen button now opens OUR fullscreen instead, so
+    // the control feels native. Registered after buildUI() because the redirect
+    // needs panelEl, which buildUI() creates.
+    installNativeFullscreenRedirect();
+    window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
+    // Also pull Aurora Bloom's settings so the MV blurred-backdrop brightness
+    // (whose slider lives in that add-on) is right even if its panel is never
+    // opened this session. handleHostMessage() picks out just that key.
+    window.postMessage({ type: "ytmod-settings-request", id: "ytmod-dynamic" }, "*");
+  });
+
+})();
