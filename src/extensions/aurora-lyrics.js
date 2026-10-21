@@ -17665,12 +17665,17 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 /* Word float. Each word element carries --w-start / --w-end (stamped by
    amllTagWordTimings) and inherits --amll-player-time, which the engine
    rewrites every frame - so this tracks the song with no animation objects
-   and no play-state dependency. AMLL's float lifts a word by 0.05em across its
-   own duration and holds it there, which is what the ramp below reproduces. */
+   and no play-state dependency.
+   Matches the engine's own createFloatAnimation() exactly: the lift runs for
+   max(1000ms, the word's own duration) and eases out, which is what makes it
+   read as a float rather than a snap. A linear ramp over the raw word duration
+   looks mechanical. */
 #ym-sl-amll-host .FmKaba_lyricMainLine > span > span {
-  --w-dur: max(1, calc(var(--w-end, 0) - var(--w-start, 0)));
+  --w-dur: max(1000, calc(var(--w-end, 0) - var(--w-start, 0)));
   --w-p: clamp(0, calc((var(--amll-player-time, 0) - var(--w-start, 0)) / var(--w-dur)), 1);
-  transform: translateY(calc(var(--w-p) * var(--amll-word-float, -0.05em)));
+  /* cubic ease-out, the engine's easing */
+  --w-e: calc(1 - (1 - var(--w-p)) * (1 - var(--w-p)) * (1 - var(--w-p)));
+  transform: translateY(calc(var(--w-e) * var(--amll-word-float, -0.05em)));
 }
 `;
 
