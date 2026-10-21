@@ -423,6 +423,26 @@
   // own CSS has NO text-shadow glow; the only "bloom" is the intended Apple
   // Music karaoke bright layer (mix-blend-mode: plus-lighter), which we keep.
   const AMLL_HOST_CSS = `
+/* Register the mask alpha custom properties so the engine's transition on them
+   actually runs. The engine declares
+     transition: --bright-mask-alpha var(--mask-alpha-duration) ease-out, ...
+   but an UNREGISTERED custom property cannot be animated, so the change is
+   instant. That is the "snap": when a line becomes active its alphas jump from
+   the dim base (.2) to bright/dim (1 / .4) in one frame instead of cross-fading
+   over the 0.3s the engine asks for. Registering them with @property makes the
+   transition real, so a line fades up as it takes over.
+   initial-value matches the engine's own base so nothing changes before the
+   engine sets anything. */
+@property --bright-mask-alpha {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.2;
+}
+@property --dark-mask-alpha {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.2;
+}
 #ym-sl-amll-host {
   position: absolute;
   inset: 0;
