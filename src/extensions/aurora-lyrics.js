@@ -17290,6 +17290,60 @@
   let amllDumpCount = 0;
   let amllEnableError = null;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
+
+  // YouTube Music loads its own Web Animations polyfill
+  // (web-animations-next-lite.min.js), and its Animation.effect objects do NOT
+  // implement getComputedTiming(). The AMLL engine calls it in enable() and
+  // resume() to work out an animation's end time:
+  //     const timing = a.effect?.getComputedTiming();
+  //     const endTime = Number(timing?.delay ?? 0) + Number(timing?.duration ?? 0);
+  // With the polyfill that line THROWS, and because it sits inside enable()'s
+  // word loop the whole loop aborts partway through - which is exactly why only
+  // the FIRST word of a line ever animated. The same throw in resume() then fed
+  // the drive loop's error counter until it forced a fallback to the built-in
+  // renderer.
+  //
+  // Supply the missing method. Only ever ADD it, and only when it is absent, so
+  // nothing about YTM's own animations changes.
+  (function amllPatchAnimate() {
+    try {
+      const proto = window.Element && window.Element.prototype;
+      if (!proto || typeof proto.animate !== "function") return;
+      if (proto.animate.__amllPatched) return;
+      const original = proto.animate;
+      function patched(keyframes, options) {
+        const anim = original.call(this, keyframes, options);
+        try {
+          const effect = anim && anim.effect;
+          if (effect && typeof effect.getComputedTiming !== "function") {
+            const opts = options || {};
+            const duration = Number(opts.duration);
+            const delay = Number(opts.delay);
+            const dur = Number.isFinite(duration) ? duration : 0;
+            const del = Number.isFinite(delay) ? delay : 0;
+            effect.getComputedTiming = function () {
+              return {
+                delay: del,
+                endDelay: 0,
+                duration: dur,
+                activeDuration: dur,
+                fill: opts.fill || "none",
+                playbackRate: 1,
+                currentIteration: null,
+                progress: null,
+                easing: "linear",
+                direction: "normal",
+                iterations: 1,
+              };
+            };
+          }
+        } catch (e) {}
+        return anim;
+      }
+      patched.__amllPatched = true;
+      proto.animate = patched;
+    } catch (e) {}
+  })();
   let amllDriveErrors = 0;             // consecutive update() failures; 0 = healthy
 
   const AMLL_ENGINE_CSS = `.amll-lyric-player {
@@ -18095,6 +18149,18 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // animation's currentTime from the media time we already feed the engine, so
   // the floats track the song instead of the clock. Idempotent and cheap - it
   // only touches the handful of words on the active line.
+  // enable() and resume() are async, so a throw inside them becomes a rejected
+  // promise rather than a sync error - which is why the getComputedTiming
+  // failure showed up as "Unhandled rejection" and slipped past every try/catch.
+  // Swallow it here so one bad word cannot spam the console.
+  function amllCallMaybeAsync(fn, thisArg) {
+    try {
+      const p = fn.call(thisArg);
+      if (p && typeof p.catch === "function") p.catch(() => {});
+      return p;
+    } catch (err) { return null; }
+  }
+
   function amllKickActiveLine() {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
@@ -18113,16 +18179,11 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           e = ln.endTime;
         } catch (err) { continue; }
         if (t < s - 1500 || t > e + 1500) continue;
-        try {
-          const p = group.mainLine.enable(t, playing);
-          if (p && typeof p.catch === "function") {
-            p.catch((err) => { amllEnableError = String(err); });
-          }
-        } catch (err) { amllEnableError = String(err); }
-        try { group.mainLine.resume(); } catch (err) {}
+        amllCallMaybeAsync(group.mainLine.enable, group.mainLine);
+        amllCallMaybeAsync(group.mainLine.resume, group.mainLine);
         if (group.bgLine) {
-          try { group.bgLine.enable(t, playing); } catch (err) {}
-          try { group.bgLine.resume(); } catch (err) {}
+          amllCallMaybeAsync(group.bgLine.enable, group.bgLine);
+          amllCallMaybeAsync(group.bgLine.resume, group.bgLine);
         }
       }
     } catch (e) {}
