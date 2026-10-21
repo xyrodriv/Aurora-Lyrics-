@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.78",
+      "date": "2026-10-21",
+      "title": "Music-video to cover no longer lags",
+      "features": [],
+      "fixes": [
+        "MV -> cover-art now dissolves the controls as soon as the video is gone, instead of waiting out the full mode-change debounce - it lands in step with the song like cover -> MV does",
+        "MV -> MV is still left perfectly still: a short probe only fades the controls if the player video is actually gone by ~170ms after the skip"
+      ]
+    },
+    {
       "version": "0.5.77",
       "date": "2026-10-21",
       "title": "The fullscreen fade is now in step with the song",

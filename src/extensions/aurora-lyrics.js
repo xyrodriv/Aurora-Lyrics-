@@ -9839,13 +9839,25 @@
     }
     fsFadeAt = now;
     if (id) fsFadeTrackId = id;
-    // Sync the control dissolve with the media dissolve: when we are LEAVING a
-    // cover-art track (cover -> MV or cover -> cover) the controls should fade out
-    // on the same beat the media does, not when the next video finishes attaching.
-    // MV-origin skips are deliberately NOT faded here — an MV -> MV reload looks
-    // identical to an MV -> cover at this instant, so those are handled by the
-    // debounced swap-commit below, which keeps MV -> MV perfectly still.
-    if (fsOverlay && !fsSavedVideo) fsChromeFadeOut();
+    // Sync the control dissolve with the media dissolve.
+    if (fsOverlay && !fsSavedVideo) {
+      // LEAVING a cover-art track (cover -> MV or cover -> cover): the controls
+      // fade out on the same beat the media does, not when the next video finishes
+      // attaching.
+      fsChromeFadeOut();
+    } else if (fsOverlay && fsSavedVideo) {
+      // LEAVING a music video: an MV -> MV reload and an MV -> cover look
+      // identical at the skip instant (both still have a live player video). The
+      // restructure is gated by the debounce below so a reload is never mistaken
+      // for a cover, but the control fade should NOT wait that long. Probe a beat
+      // later: if the player video is GONE by then it is a cover -> dissolve the
+      // controls now, synced with the video leaving; if it survived it is MV -> MV
+      // and the controls must stay perfectly still.
+      window.setTimeout(() => {
+        if (!fsActive || !fsSavedVideo) return;
+        if (!findPlayerVideo()) fsChromeFadeOut();
+      }, 170);
+    }
     fsFadeOutMedia();
   }
 
