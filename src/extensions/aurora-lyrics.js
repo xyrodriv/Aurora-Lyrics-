@@ -17285,6 +17285,7 @@
   let amllCssInjected = false;
   let amllLastFrameTime = 0;
   let amllLastDumpTime = 0;
+  let amllEnableError = null;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
   let amllDriveErrors = 0;             // consecutive update() failures; 0 = healthy
 
@@ -17943,6 +17944,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           hostConnected: !!(amllHost && amllHost.isConnected),
           hostRect: amllHost ? (() => { const r = amllHost.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })() : null,
           eng,
+          enableError: amllEnableError,
           lines: slice,
         });
       }
@@ -18082,13 +18084,28 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       const t = amllPlayer.getCurrentTime();
       const playing = amllPlayer.getIsPlaying();
       for (const group of groups) {
-        if (group && group.isActive && group.mainLine) {
-          try { group.mainLine.enable(t, playing); } catch (e) {}
-          try { group.mainLine.resume(); } catch (e) {}
-          if (group.bgLine) {
-            try { group.bgLine.enable(t, playing); } catch (e) {}
-            try { group.bgLine.resume(); } catch (e) {}
+        if (!group || !group.mainLine) continue;
+        // Select by time, not by the group's isActive flag: that flag is only
+        // written when the engine lays a line out, and it can be stale, which
+        // left the word animations untouched by this loop entirely.
+        let s = -1;
+        let e = -1;
+        try {
+          const ln = group.mainLine.getLine();
+          s = ln.startTime;
+          e = ln.endTime;
+        } catch (err) { continue; }
+        if (t < s - 1500 || t > e + 1500) continue;
+        try {
+          const p = group.mainLine.enable(t, playing);
+          if (p && typeof p.catch === "function") {
+            p.catch((err) => { amllEnableError = String(err); });
           }
+        } catch (err) { amllEnableError = String(err); }
+        try { group.mainLine.resume(); } catch (err) {}
+        if (group.bgLine) {
+          try { group.bgLine.enable(t, playing); } catch (err) {}
+          try { group.bgLine.resume(); } catch (err) {}
         }
       }
     } catch (e) {}
