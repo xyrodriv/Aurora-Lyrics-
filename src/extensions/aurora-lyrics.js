@@ -16738,10 +16738,11 @@
     // --gradient-position as "NaN%" and blanks the clipped background for a
     // frame. See the long note in tick().
     if (!Number.isFinite(positionMs)) return;
-    // Drive the imported AMLL engine every frame when Simple lyrics (Apple-Music
-    // style) mode is active. It applies the same playback-time offset Aurora uses
-    // so the highlighted line matches, then advances the engine's springs.
-    amllDrive(positionMs);
+    // NOTE: the AMLL engine is driven by its own loop (amllStartOwnLoop in
+    // 22-amll-integration), not from here. animate() gates on
+    // panelVisible/modelLines, and when that gate closes the engine stops being
+    // fed entirely - which froze the karaoke fill and parked the word
+    // animations. Do not add an amllDrive() call back here.
     const now = performance.now();
     const deltaTime = Math.min(0.05, Math.max(0.001, (now - lastFrameTime) / 1000));
     lastFrameTime = now;
@@ -17782,6 +17783,9 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       amllSeedEngineSize();
 
       amllReady = true;
+      // Take over driving the engine from Aurora's render loop, which gates on
+      // panelVisible/modelLines and stops feeding us when that gate closes.
+      amllStartOwnLoop();
       // Show BEFORE handing it lyrics: the engine measures every word with
       // clientWidth when setLyricLines() runs, and a display:none host (or one
       // still hidden) measures 0 for all of them. A zero width degenerates the
@@ -17823,6 +17827,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllReady = false;
     amllWasPlaying = false;
     amllPrevTime = 0;
+    amllStopOwnLoop();
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
@@ -18108,6 +18113,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         }
       }
     } catch (e) {}
+  }
+
+  // The engine must be driven every frame, but Aurora's own loop gates on
+  // panelVisible/modelLines before it ever reaches amllDrive() - and when that
+  // gate closes the engine stops being fed entirely. That froze the karaoke fill
+  // (--amll-player-time stuck at 0) and parked every word animation, because
+  // setCurrentTime() is what makes the engine highlight a new line and run
+  // enable() on it. Live measurement: drives === 3 over a whole track.
+  // Run our own loop so the engine is fed regardless of Aurora's render state.
+  let amllRaf = 0;
+  function amllStartOwnLoop() {
+    if (amllRaf) return;
+    const step = () => {
+      amllRaf = requestAnimationFrame(step);
+      try {
+        if (!amllActive || !amllReady || !amllPlayer) return;
+        if (!window.YTMod || !window.YTMod.player) return;
+        const pos = window.YTMod.player.getPositionMs();
+        if (Number.isFinite(pos)) amllDrive(pos);
+      } catch (e) {}
+    };
+    amllRaf = requestAnimationFrame(step);
+  }
+  function amllStopOwnLoop() {
+    if (amllRaf) cancelAnimationFrame(amllRaf);
+    amllRaf = 0;
   }
 
   function amllMediaIsPlaying() {
