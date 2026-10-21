@@ -26,7 +26,6 @@
   let amllCssInjected = false;
   let amllLastFrameTime = 0;
   let amllLastDumpTime = 0;
-  let amllLastTagTime = 0;
   let amllDriveCount = 0;
   let amllDumpCount = 0;
   let amllEnableError = null;
@@ -405,21 +404,6 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
-/* Word float. Each word element carries --w-start / --w-end (stamped by
-   amllTagWordTimings) and inherits --amll-player-time, which the engine
-   rewrites every frame - so this tracks the song with no animation objects
-   and no play-state dependency.
-   Matches the engine's own createFloatAnimation() exactly: the lift runs for
-   max(1000ms, the word's own duration) and eases out, which is what makes it
-   read as a float rather than a snap. A linear ramp over the raw word duration
-   looks mechanical. */
-#ym-sl-amll-host .FmKaba_lyricMainLine > span > span {
-  --w-dur: max(1000, calc(var(--w-end, 0) - var(--w-start, 0)));
-  --w-p: clamp(0, calc((var(--amll-player-time, 0) - var(--w-start, 0)) / var(--w-dur)), 1);
-  /* cubic ease-out, the engine's easing */
-  --w-e: calc(1 - (1 - var(--w-p)) * (1 - var(--w-p)) * (1 - var(--w-p)));
-  transform: translateY(calc(var(--w-e) * var(--amll-word-float, -0.05em)));
-}
 `;
 
   function amllInjectCss() {
@@ -820,62 +804,6 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     return amllSizeSeeded;
   }
 
-  // Word float, driven by the same --amll-player-time the karaoke fill uses.
-  //
-  // The engine's own per-word float is a Web Animation that LyricLine.enable()
-  // positions exactly ONCE, when the line becomes active, and never re-syncs -
-  // so in this embedded context only the first word of a line (whose delay is
-  // zero) ever moved. Rather than keep fighting that, stamp each word element
-  // with its own start/end time and let CSS compute the float from the media
-  // clock, which is guaranteed to be current because update() rewrites
-  // --amll-player-time every frame.
-  function amllTagWordTimings() {
-    try {
-      const groups = amllPlayer.currentLyricGroups || [];
-      for (const group of groups) {
-        const lines = [group.mainLine, group.bgLine];
-        for (const line of lines) {
-          if (!line) continue;
-          const words = line.splittedWords || [];
-          for (const w of words) {
-            const el = w.mainElement;
-            if (!el || !el.style) continue;
-            if (el.style.getPropertyValue("--w-start") !== "") continue;
-            el.style.setProperty("--w-start", String(Math.round(w.startTime)));
-            el.style.setProperty("--w-end", String(Math.round(w.endTime)));
-            // The engine's float animation is composite:"add", so it would stack
-            // on top of the CSS float. Cancel that one and leave everything else
-            // (the per-character emphasis animations) alone.
-            for (const a of (w.elementAnimations || [])) {
-              if (a && a.id === "float-word") { try { a.cancel(); } catch (e) {} }
-            }
-          }
-        }
-      }
-    } catch (e) {}
-  }
-
-  // The engine must be driven every frame, but Aurora's own loop gates on
-  // panelVisible/modelLines before it ever reaches amllDrive() - and when that
-  // gate closes the engine stops being fed entirely. That froze the karaoke fill
-  // (--amll-player-time stuck at 0) and parked every word animation, because
-  // setCurrentTime() is what makes the engine highlight a new line and run
-  // enable() on it. Live measurement: drives === 3 over a whole track.
-  // Run our own loop so the engine is fed regardless of Aurora's render state.
-  let amllRaf = 0;
-  function amllStartOwnLoop() {
-    if (amllRaf) return;
-    const step = () => {
-      amllRaf = requestAnimationFrame(step);
-      try {
-        if (!amllActive || !amllReady || !amllPlayer) return;
-        if (!window.YTMod || !window.YTMod.player) return;
-        const pos = window.YTMod.player.getPositionMs();
-        if (Number.isFinite(pos)) amllDrive(pos);
-      } catch (e) {}
-    };
-    amllRaf = requestAnimationFrame(step);
-  }
   function amllStopOwnLoop() {
     if (amllRaf) cancelAnimationFrame(amllRaf);
     amllRaf = 0;
@@ -976,12 +904,6 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // Every frame, not only while playing: enable() also parks the word
       // animations at the right positions when the media is paused.
       amllKickActiveLine();
-      // Stamp word timings as lines get built. Lines are rebuilt when the track
-      // changes, so this has to keep running rather than fire once.
-      if (now - amllLastTagTime > 250) {
-        amllLastTagTime = now;
-        amllTagWordTimings();
-      }
       // Refresh the diagnostic a few times a second so it reflects the line that
       // is active right now, not just the one loaded at the last track change.
       if (amllLastContent && now - amllLastDumpTime > 400) {
