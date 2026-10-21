@@ -17836,6 +17836,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // left-to-right sweep — the "no fill" bug.
       amllShow();
       player.resume();
+      amllAttachSeekHandler();
 
       if (amllLastContent) amllSyncLyrics(amllLastContent);
     } catch (e) {
@@ -17871,6 +17872,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllWasPlaying = false;
     amllPrevTime = 0;
     amllStopOwnLoop();
+    if (amllTimeHost) { try { amllTimeHost.style.removeProperty("--amll-player-time"); } catch (e) {} amllTimeHost = null; }
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
@@ -18094,6 +18096,38 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllRaf = 0;
   }
 
+  // Tap a lyric line to jump the player there. The engine renders its own DOM, so
+  // Aurora's existing line-click handling never sees these nodes - wire the host
+  // directly and map the clicked element back to the group that owns it.
+  function amllAttachSeekHandler() {
+    if (!amllHost || amllHost.__amllSeekBound) return;
+    amllHost.__amllSeekBound = true;
+    amllHost.addEventListener("click", (ev) => {
+      try {
+        if (!amllPlayer) return;
+        let el = ev.target;
+        while (el && el !== amllHost) {
+          if (el.classList && el.classList.contains("FmKaba_lyricLine")) break;
+          el = el.parentElement;
+        }
+        if (!el || el === amllHost) return;
+        const groups = amllPlayer.currentLyricGroups || [];
+        for (const group of groups) {
+          if (!group || group.element !== el || !group.mainLine) continue;
+          const ln = group.mainLine.getLine();
+          const at = Number(ln.startTime);
+          if (!Number.isFinite(at) || at < 0) return;
+          try {
+            if (window.YTMod && window.YTMod.player && typeof window.YTMod.player.seek === "function") {
+              window.YTMod.player.seek(at);
+            }
+          } catch (err) {}
+          return;
+        }
+      } catch (e) {}
+    });
+  }
+
   function amllMediaIsPlaying() {
     // YTMusic knows whether it is playing; time deltas lie during buffering and
     // right after a seek, which used to leave the engine's own isPlaying flag
@@ -18272,6 +18306,39 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     } catch (e) {}
   }
 
+  // The calc mask path reads --amll-player-time to place each word's sweep. While
+  // that variable sat on the player root, changing it once per frame invalidated
+  // computed style for every word in the panel - about 80 recalculations to move
+  // the 5 words on the active line. Scope it to the active line instead: only
+  // that line's words recompute, and every other line resolves the variable to
+  // its 0 default (the engine was patched to supply that fallback), which is the
+  // correct "not currently singing" state.
+  let amllTimeHost = null;
+  function amllScopePlayerTime(t) {
+    try {
+      let host = null;
+      const groups = amllPlayer.currentLyricGroups || [];
+      for (const group of groups) {
+        if (!group || !group.mainLine || !group.element) continue;
+        let s = -1;
+        let e = -1;
+        try {
+          const ln = group.mainLine.getLine();
+          s = ln.startTime;
+          e = ln.endTime;
+        } catch (err) { continue; }
+        if (t >= s && t <= e) { host = group.element; break; }
+      }
+      if (amllTimeHost && amllTimeHost !== host) {
+        try { amllTimeHost.style.removeProperty("--amll-player-time"); } catch (err) {}
+      }
+      if (host) {
+        try { host.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
+      }
+      amllTimeHost = host;
+    } catch (e) {}
+  }
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer) return;
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
@@ -18304,6 +18371,8 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       if (amllPlayer.size[1] <= 0) amllSeedEngineSize();
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
+      // Keep the mask clock on the active line only - see amllScopePlayerTime.
+      amllScopePlayerTime(t);
       // Re-seek the active line's word animations from the media clock.
       amllKickActiveLine(now);
       // Retire lines the playhead has already left, so their fill releases.

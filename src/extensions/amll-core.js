@@ -6925,7 +6925,11 @@ var CalcMaskAnimator = class {
       const totalAspectStr = `${totalAspect * 100}% 100%`;
       const speed = textWidth / Math.max(Math.abs(endTime - startTime), 1);
       const startPos = paddingLeft - totalWordWidth - fadeWidth / 2;
-      const maskPos = `clamp(${-totalWordWidth - fadeWidth}px, ${startPos}px + (var(--amll-player-time) - ${startTime}) * ${speed}px, 0px) 0px`;
+      // Aurora patch: default of 0. The host scopes --amll-player-time to the
+      // ACTIVE line only (see amllDrive in 22-amll-integration), so lines that
+      // are not currently playing must resolve to a sane "not yet sung" state
+      // rather than invalidating the whole declaration.
+      const maskPos = `clamp(${-totalWordWidth - fadeWidth}px, ${startPos}px + (var(--amll-player-time, 0) - ${startTime}) * ${speed}px, 0px) 0px`;
       Object.assign(wordEl.style, {
         maskImage,
         webkitMaskImage: maskImage,
@@ -7628,7 +7632,11 @@ var DomLyricPlayer = class extends LyricPlayerBase {
   update(delta = 0) {
     const d = Duration.min(Duration.fromMillis(delta), MAX_FRAME_DELTA);
     super.update(Duration.asMillis(d));
-    if (!this.supportMaskImage) this.element.style.setProperty("--amll-player-time", `${this.getCurrentTime()}`);
+    // Aurora patch: deliberately does NOT write --amll-player-time here. While it
+    // lived on the player root, every word in the panel re-resolved its CSS mask
+    // every frame - ~80 style recalculations to move 5 words. The host now sets
+    // the variable on the ACTIVE line's element instead (amllDrive in
+    // 22-amll-integration), so only that line's words recompute.
     if (!this.isPageVisible) return;
     for (const group of this.currentLyricGroups) group.update(d);
     for (const group of this.currentLyricGroups) group.commitChanges();
