@@ -1157,37 +1157,34 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // computed style for every word in the panel - about 80 recalculations to move
   // the 5 words on the active line. Scope it to the lines that actually need it.
   //
-  // It must cover the ACTIVE line *and the next one*. Active-only left an
-  // upcoming line with no time at all, so its words sat at the 0 default and
-  // never swept - and the moment it became active the variable appeared and the
-  // fill snapped in instead of ramping. Giving the next line the clock too means
-  // it is already at 0% and simply continues from there.
+  // Selection is by the ENGINE's own state, not by time window. When two lines
+  // overlap, the engine enables BOTH - measured live, two lines carried
+  // FmKaba_active FmKaba_gradientMask at the same time. Picking only the line
+  // whose window contains the playhead (and breaking out of the loop) left the
+  // second one clockless: highlighted, but its words sat at the 0 default and
+  // never filled. That is exactly the reported bug.
+  // The next line that has not started yet is included too, so it is already at
+  // 0% and continues rather than snapping when it takes over.
   let amllTimeHosts = [];
   function amllScopePlayerTime(t) {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
       const hosts = [];
-      let activeIdx = -1;
+      let lastEnabled = -1;
       for (let i = 0; i < groups.length; i++) {
         const group = groups[i];
         if (!group || !group.mainLine || !group.element) continue;
-        let s = -1;
-        let e = -1;
-        try {
-          const ln = group.mainLine.getLine();
-          s = ln.startTime;
-          e = ln.endTime;
-        } catch (err) { continue; }
-        if (t >= s && t <= e) { activeIdx = i; break; }
+        let enabled = false;
+        try { enabled = !!group.mainLine.isEnabled; } catch (err) {}
+        if (!enabled) continue;
+        hosts.push(group.element);
+        lastEnabled = i;
       }
-      if (activeIdx !== -1) {
-        hosts.push(groups[activeIdx].element);
-        // The next group that has not started yet.
-        for (let i = activeIdx + 1; i < groups.length; i++) {
-          try {
-            if (groups[i].mainLine.getLine().startTime > t) { hosts.push(groups[i].element); break; }
-          } catch (err) {}
-        }
+      // The next line that has not started yet, so it is pre-seeded at 0%.
+      for (let i = lastEnabled + 1; i < groups.length; i++) {
+        try {
+          if (groups[i].mainLine.getLine().startTime > t) { hosts.push(groups[i].element); break; }
+        } catch (err) {}
       }
       const prev = amllTimeHosts;
       for (const el of prev) {
