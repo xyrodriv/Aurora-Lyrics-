@@ -1,6 +1,15 @@
 {
   "releases": [
     {
+      "version": "0.5.75",
+      "date": "2026-10-21",
+      "title": "A cleaner fullscreen fade",
+      "features": [],
+      "fixes": [
+        "Going from a music video to a cover-art song (and back) now fades the controls with a smooth, deliberate dissolve instead of a near-instant blink - the fullscreen UI reads as polished rather than snappy"
+      ]
+    },
+    {
       "version": "0.5.74",
       "date": "2026-10-21",
       "title": "Fullscreen controls stay put on a skip",

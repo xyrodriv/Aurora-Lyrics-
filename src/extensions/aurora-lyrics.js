@@ -3053,9 +3053,11 @@
       inset: 0;
       z-index: 21;
       pointer-events: none;
-      /* The fade-IN of a mode change. .14s out / .26s in — the out is quicker so
-         the restructure happens while the layer is already nearly invisible. */
-      transition: opacity .26s ease;
+      /* The fade-IN of a mode change. .22s out / .32s in — a deliberate, visible
+         dissolve so the controls read as "polished" rather than snapping. The out
+         is a touch quicker than the in so the restructure settles while the layer
+         is already near-invisible, and the reveal eases back in with the media. */
+      transition: opacity .32s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-player-controls {
       opacity: 1;
@@ -3074,7 +3076,7 @@
        state the overlay is in most of the time. */
     .ym-sl-fs-overlay.ym-sl-fs-chrome-out .ym-sl-fs-player-controls {
       opacity: 0;
-      transition: opacity .14s ease;
+      transition: opacity .22s ease;
     }
     /* Floating play chip (prev / play / next + volume), centered just above the
        scrubber.
