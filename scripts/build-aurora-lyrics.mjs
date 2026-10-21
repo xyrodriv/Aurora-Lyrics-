@@ -89,6 +89,31 @@ const source = Buffer.concat(await Promise.all(
   }
 }
 
+// GUARD: every amll* symbol a fragment CALLS must also be DEFINED somewhere in
+// the bundle. A scripted edit that removes a block can take a function with it
+// while leaving the bundle perfectly parseable - that is exactly how
+// amllStartOwnLoop() vanished in 0.6.0 and shipped as
+//   ReferenceError: amllStartOwnLoop is not defined
+// which silently disabled the whole AMLL path. vm.Script cannot catch this.
+{
+  const text = source.toString("utf8");
+  const called = new Set();
+  for (const m of text.matchAll(/\b(amll[A-Za-z0-9_]*)\s*\(/g)) called.add(m[1]);
+  const defined = new Set();
+  for (const m of text.matchAll(/\bfunction\s+(amll[A-Za-z0-9_]*)\s*\(/g)) defined.add(m[1]);
+  for (const m of text.matchAll(/\b(?:let|const|var)\s+(amll[A-Za-z0-9_]*)\s*=/g)) defined.add(m[1]);
+  const missing = [...called].filter((name) => !defined.has(name)).sort();
+  if (missing.length) {
+    console.error(
+      "aurora-lyrics.js references undefined amll* symbols: " + missing.join(", ") +
+      "\nA fragment calls these but nothing in the bundle defines them." +
+      "\nThis is almost always a deleted block - check for a function that was" +
+      "\nremoved while its call sites survived."
+    );
+    process.exit(1);
+  }
+}
+
 if (check) {
   let output;
   try {
