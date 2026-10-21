@@ -17893,6 +17893,30 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     return false;
   }
 
+  // TEMPORARY diagnostic. Mirrors the converted LyricLine[] onto the host as
+  // data-debug so the live word timings can be read from the page without a
+  // JS console. Remove once the animation issue is pinned down.
+  function amllDumpDebug(lines) {
+    try {
+      const active = lines.findIndex((l) => !l.isBG && (l.endTime - l.startTime) > 0);
+      const slice = (lines || []).slice(0, 4).map((l) => ({
+        s: Math.round(l.startTime),
+        e: Math.round(l.endTime),
+        bg: !!l.isBG,
+        w: l.words.map((x) => [x.word, Math.round(x.startTime), Math.round(x.endTime)]),
+      }));
+      if (amllHost) {
+        amllHost.dataset.debug = JSON.stringify({
+          active,
+          playing: amllPlayer ? amllPlayer.getIsPlaying() : null,
+          spring: amllPlayer ? amllPlayer.getEnableSpring() : null,
+          size: amllPlayer && amllPlayer.size ? [amllPlayer.size[0], amllPlayer.size[1]] : null,
+          lines: slice,
+        });
+      }
+    } catch (e) {}
+  }
+
   function amllSyncLyrics(content) {
     amllLastContent = content;
     if (!amllActive || !amllReady || !amllPlayer) return;
@@ -17906,6 +17930,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       amllShow();
+      amllDumpDebug(lines);
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
@@ -17954,11 +17979,18 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       const mediaPlaying = amllMediaIsPlaying();
       const advanced = mediaPlaying == null ? t > (amllPrevTime || 0) : mediaPlaying;
       amllPrevTime = t;
-      if (advanced !== amllWasPlaying) {
+      // Compare against the ENGINE's own state, not a cached copy. The cached
+      // copy starts as false, so when the media was already playing on the very
+      // first frame the two values matched and resume() was never called - the
+      // engine stayed "paused" forever. That silently killed the scale spring,
+      // the per-word float and the background-vocal slide (all of them are
+      // gated on getIsPlaying()), while the time-driven fill kept working
+      // because update() writes --amll-player-time before any of that.
+      if (advanced !== amllPlayer.getIsPlaying()) {
         if (advanced) { try { amllPlayer.resume(); } catch (e) {} }
         else { try { amllPlayer.pause(); } catch (e) {} }
-        amllWasPlaying = advanced;
       }
+      amllWasPlaying = advanced;
       amllPlayer.setCurrentTime(t, false);
       amllPlayer.update(delta);
       if (amllWasPlaying) amllKickActiveLine();

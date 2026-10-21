@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.5.88",
+      "date": "2026-10-21",
+      "title": "Diagnostic build for the missing AMLL animations",
+      "features": [],
+      "fixes": [
+        "Drive the engine's play state from its own reported state rather than a cached copy, so a state mismatch self-corrects on the next frame instead of persisting",
+        "Adds a temporary data-debug dump on the AMLL host so the converted word timings and engine state can be read straight off the page while diagnosing the remaining animation gap"
+      ]
+    },
+    {
       "version": "0.5.87",
       "date": "2026-10-21",
       "title": "The karaoke sweep actually sweeps",
