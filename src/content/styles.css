@@ -883,14 +883,18 @@
   flex-direction: column;
   overflow: hidden;
   border-radius: 22px;
-  border: 1px solid rgba(255,255,255,.55);
-  background: rgba(255,255,255,.45);
+  /* DARK glass, not light (AJ, 2026-10-21): the blurred logo behind is dark, so
+     dark text on a 45%-white wash was barely readable. White text needs a dark
+     surface under it. */
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(16,16,22,.82);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
   box-shadow:
-    0 30px 80px rgba(10,40,30,.28),
-    inset 0 1px 0 rgba(255,255,255,.5);
-  color: #16161a;
+    0 30px 80px rgba(0,0,0,.55),
+    inset 0 1px 0 rgba(255,255,255,.08);
+  color: #f3f3f5;
+  font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
   animation: ym-upd-pop-in .26s cubic-bezier(.22,.61,.36,1);
 }
 /* The logo fills the panel, blurred, behind the text. z-index:-1 paints it
@@ -902,7 +906,8 @@
   background-size: cover;
   background-position: center;
   filter: blur(26px) saturate(125%);
-  opacity: .72;
+  /* Dimmed from .72 so white text stays readable over a bright cover. */
+  opacity: .34;
   z-index: -1;
   pointer-events: none;
 }
@@ -912,18 +917,18 @@
   align-items: center;
   gap: 12px;
   padding: 18px 22px;
-  border-bottom: 1px solid rgba(0,0,0,.08);
+  border-bottom: 1px solid rgba(255,255,255,.09);
 }
 .ym-upd-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.ym-upd-title { margin: 0; font-size: 16px; font-weight: 700; color: #111114; }
+.ym-upd-title { margin: 0; font-size: 16px; font-weight: 700; color: #fff; }
 .ym-upd-ver {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: .04em;
   padding: 3px 9px;
   border-radius: 999px;
-  background: rgba(0,0,0,.08);
-  color: #2a2a32;
+  background: rgba(255,255,255,.1);
+  color: rgba(255,255,255,.72);
   white-space: nowrap;
 }
 .ym-upd-close {
@@ -937,11 +942,11 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: rgba(20,20,30,.55);
+  color: rgba(255,255,255,.6);
   cursor: pointer;
   transition: background .15s ease, color .15s ease;
 }
-.ym-upd-close:hover { color: #111; background: rgba(0,0,0,.06); }
+.ym-upd-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .ym-upd-close:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
 .ym-upd-close svg { fill: currentColor; }
 .ym-upd-body {
@@ -952,19 +957,19 @@
   padding: 20px 22px;
   overflow-y: auto;
 }
-.ym-upd-sub { margin: 0; font-size: 14px; font-weight: 600; color: #1a1a1f; }
-.ym-upd-date { margin: 0; font-size: 12px; color: rgba(0,0,0,.5); }
+.ym-upd-sub { margin: 0; font-size: 14px; font-weight: 600; color: #fff; }
+.ym-upd-date { margin: 0; font-size: 12px; color: rgba(255,255,255,.45); }
 .ym-upd-sect { margin: 4px 0 0; font-size: 12px; font-weight: 700; letter-spacing: .05em;
-  text-transform: uppercase; color: rgba(0,0,0,.48); }
+  text-transform: uppercase; color: rgba(255,255,255,.45); }
 .ym-upd-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
-.ym-upd-list li { font-size: 13.5px; line-height: 1.5; color: #2a2a32; }
+.ym-upd-list li { font-size: 13.5px; line-height: 1.5; color: rgba(255,255,255,.82); }
 .ym-upd-hint {
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: #3a2e00;
-  background: rgba(255,208,0,.18);
-  border: 1px solid rgba(0,0,0,.06);
+  color: rgba(255,235,190,.92);
+  background: rgba(212,168,0,.14);
+  border: 1px solid rgba(255,208,0,.16);
   border-left: 3px solid #d4a800;
   border-radius: 10px;
   padding: 12px 14px;
@@ -976,7 +981,7 @@
   justify-content: flex-end;
   gap: 10px;
   padding: 16px 22px 20px;
-  border-top: 1px solid rgba(0,0,0,.08);
+  border-top: 1px solid rgba(255,255,255,.09);
 }
 .ym-upd-btn {
   padding: 11px 18px;
@@ -988,20 +993,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #16161a;
-  background: rgba(255,255,255,.72);
-  border: 1px solid rgba(0,0,0,.1);
+  color: #f3f3f5;
+  background: rgba(255,255,255,.1);
+  border: 1px solid rgba(255,255,255,.16);
   transition: background .15s ease, transform .12s ease, filter .15s ease;
 }
-.ym-upd-btn:hover { background: rgba(255,255,255,.9); }
+.ym-upd-btn:hover { background: rgba(255,255,255,.18); }
 .ym-upd-btn:active { transform: translateY(1px); }
 .ym-upd-btn:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
 .ym-upd-btn.primary {
-  background: linear-gradient(180deg, #ffd000, #f0b400);
-  border-color: transparent;
-  color: #241d00;
+  background: #e01040;
+  border-color: rgba(255,255,255,.14);
+  color: #fff;
+  box-shadow: 0 6px 18px -6px rgba(224,16,64,.7);
 }
-.ym-upd-btn.primary:hover { filter: brightness(1.05); }
+.ym-upd-btn.primary:hover { filter: brightness(1.1); }
 @keyframes ym-upd-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ym-upd-pop-in {
   from { opacity: 0; transform: translateY(8px) scale(.97); }

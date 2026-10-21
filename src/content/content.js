@@ -4123,18 +4123,24 @@
     mkDetail.scrollTop = keepScroll;
   }
 
+  // Spicy Lyrics font for the panel AND the update notice (AJ, 2026-09-28).
+  // The stylesheet's relative woff2 URLs resolve against the extension, so a
+  // <link> is enough. Extracted so showUpdateModal() can call it too — that card
+  // can appear before the panel has ever been opened, and without the sheet the
+  // family silently falls back to system-ui.
+  function ensurePanelFont() {
+    if (document.getElementById("ym-font")) return;
+    try {
+      const fontLink = document.createElement("link");
+      fontLink.id = "ym-font";
+      fontLink.rel = "stylesheet";
+      fontLink.href = chrome.runtime.getURL("src/extensions/fonts/spicy-lyrics.css");
+      document.head.appendChild(fontLink);
+    } catch (_) {}
+  }
+
   function buildMarketplace() {
-    // Spicy Lyrics font for the whole panel (AJ, 2026-09-28). The stylesheet's
-    // relative woff2 URLs resolve against the extension, so a <link> is enough.
-    if (!document.getElementById("ym-font")) {
-      try {
-        const fontLink = document.createElement("link");
-        fontLink.id = "ym-font";
-        fontLink.rel = "stylesheet";
-        fontLink.href = chrome.runtime.getURL("src/extensions/fonts/spicy-lyrics.css");
-        document.head.appendChild(fontLink);
-      } catch (_) {}
-    }
+    ensurePanelFont();
     const close = makeIconButton(ICON_CLOSE, () => {
       closeMarketplace();
     }, "Close");
@@ -4824,6 +4830,7 @@
       h("h2", { class: "ym-upd-title", text: isUpdated ? "Aurora Lyrics updated" : "Update available" }),
       version ? h("span", { class: "ym-upd-ver", text: "v" + version }) : null
     );
+    ensurePanelFont();
     const card = h("div", { class: "ym-upd-card", role: "dialog", "aria-modal": "true",
       "aria-label": isUpdated ? "Aurora Lyrics updated" : "Aurora Lyrics update available" },
       cardface,
