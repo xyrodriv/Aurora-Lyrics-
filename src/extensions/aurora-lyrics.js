@@ -17872,7 +17872,12 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllWasPlaying = false;
     amllPrevTime = 0;
     amllStopOwnLoop();
-    if (amllTimeHost) { try { amllTimeHost.style.removeProperty("--amll-player-time"); } catch (e) {} amllTimeHost = null; }
+    if (amllTimeHosts && amllTimeHosts.length) {
+      for (const el of amllTimeHosts) {
+        try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
+      }
+      amllTimeHosts = [];
+    }
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     amllSizeSeeded = false;
     if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
@@ -18117,11 +18122,20 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           const ln = group.mainLine.getLine();
           const at = Number(ln.startTime);
           if (!Number.isFinite(at) || at < 0) return;
-          try {
-            if (window.YTMod && window.YTMod.player && typeof window.YTMod.player.seek === "function") {
-              window.YTMod.player.seek(at);
-            }
-          } catch (err) {}
+          // Try every seek entry point we know of; YTMod.player.seek() is the
+          // documented one but builds differ in what they expose.
+          const p = window.YTMod && window.YTMod.player;
+          const attempts = [
+            () => { if (p && typeof p.seek === "function") p.seek(at); },
+            () => { if (p && typeof p.seekTo === "function") p.seekTo(at); },
+            () => {
+              const el = document.querySelector("video");
+              if (el) el.currentTime = at / 1000;
+            },
+          ];
+          for (const attempt of attempts) {
+            try { attempt(); return; } catch (err) {}
+          }
           return;
         }
       } catch (e) {}
@@ -18309,16 +18323,21 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // The calc mask path reads --amll-player-time to place each word's sweep. While
   // that variable sat on the player root, changing it once per frame invalidated
   // computed style for every word in the panel - about 80 recalculations to move
-  // the 5 words on the active line. Scope it to the active line instead: only
-  // that line's words recompute, and every other line resolves the variable to
-  // its 0 default (the engine was patched to supply that fallback), which is the
-  // correct "not currently singing" state.
-  let amllTimeHost = null;
+  // the 5 words on the active line. Scope it to the lines that actually need it.
+  //
+  // It must cover the ACTIVE line *and the next one*. Active-only left an
+  // upcoming line with no time at all, so its words sat at the 0 default and
+  // never swept - and the moment it became active the variable appeared and the
+  // fill snapped in instead of ramping. Giving the next line the clock too means
+  // it is already at 0% and simply continues from there.
+  let amllTimeHosts = [];
   function amllScopePlayerTime(t) {
     try {
-      let host = null;
       const groups = amllPlayer.currentLyricGroups || [];
-      for (const group of groups) {
+      const hosts = [];
+      let activeIdx = -1;
+      for (let i = 0; i < groups.length; i++) {
+        const group = groups[i];
         if (!group || !group.mainLine || !group.element) continue;
         let s = -1;
         let e = -1;
@@ -18327,15 +18346,27 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           s = ln.startTime;
           e = ln.endTime;
         } catch (err) { continue; }
-        if (t >= s && t <= e) { host = group.element; break; }
+        if (t >= s && t <= e) { activeIdx = i; break; }
       }
-      if (amllTimeHost && amllTimeHost !== host) {
-        try { amllTimeHost.style.removeProperty("--amll-player-time"); } catch (err) {}
+      if (activeIdx !== -1) {
+        hosts.push(groups[activeIdx].element);
+        // The next group that has not started yet.
+        for (let i = activeIdx + 1; i < groups.length; i++) {
+          try {
+            if (groups[i].mainLine.getLine().startTime > t) { hosts.push(groups[i].element); break; }
+          } catch (err) {}
+        }
       }
-      if (host) {
-        try { host.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
+      const prev = amllTimeHosts;
+      for (const el of prev) {
+        if (hosts.indexOf(el) === -1) {
+          try { el.style.removeProperty("--amll-player-time"); } catch (err) {}
+        }
       }
-      amllTimeHost = host;
+      for (const el of hosts) {
+        try { el.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
+      }
+      amllTimeHosts = hosts;
     } catch (e) {}
   }
 
