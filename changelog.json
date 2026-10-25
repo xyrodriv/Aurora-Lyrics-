@@ -7,7 +7,7 @@
       "features": [
         "Word-level synced lyrics in the YouTube Music Lyrics tab, with the active word lit and the lines around it stepping back.",
         "A fullscreen view over the artwork, with a per-track offset and romanization for Japanese and Korean tracks.",
-        "Lyrics from Spicy Lyrics, Unison and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
+        "Lyrics from Spicy Lyrics and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
         "Optional add-ons: the Aurora Bloom backdrop, artwork tinting, share cards, Next Up, song notes, a sleep timer and picture-in-picture lyrics.",
         "No account, no analytics, no Aurora server. The track's title, artist, album and duration are the only things sent anywhere."
       ],
