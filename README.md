@@ -24,7 +24,8 @@ add-ons.
   ambient Kawarp fluid WebGL backdrop.
 - **Apple Music–style renderer** — the AMLL engine for line-synced tracks, with
   spring scrolling and the Apple Music stacked-line look, alongside the Spicy
-  renderer for word-by-word karaoke.
+  renderer for word-by-word karaoke. Which engine draws which kind of track is
+  a setting, so you can put the Apple Music look on karaoke if you prefer it.
 - **On-device translation** — optional English translation of non-English lines,
   done locally in Chrome (138+); nothing is sent to a server.
 - **Manual lyric search** — when the automatic lookup misses, search LRCLIB in
@@ -108,7 +109,7 @@ Aurora Lyrics/
 
 ## Development
 
-The synced-lyrics renderer is assembled from ordered fragments. Edit the
+The Aurora Lyrics renderer is assembled from ordered fragments. Edit the
 numbered files in `src/aurora-lyrics/` (`01-bootstrap.jsfrag` …
 `23-auto-translate.jsfrag`) and rebuild the injected script:
 
