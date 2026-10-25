@@ -326,32 +326,6 @@
       res();
     });
   });
-  // ---- animated-cover-art cache (m8tec m3u8 URL per track key) --------------
-  // Same bridge pattern as the lyrics cache: one object, a per-entry `exp`, swept
-  // lazily on read. The track -> m3u8 mapping is stable, so a 30-day window is
-  // safe, and a persisted hit means the fullscreen cover appears with NO network
-  // round-trip (AJ, 2026-10-03).
-  const ART_CACHE_KEY = "ytmod_art_cache";
-  const getArtCache = () => new Promise((res) => {
-    chrome.storage.local.get(ART_CACHE_KEY, (r) => {
-      const saved = r[ART_CACHE_KEY];
-      if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-        console.debug(`[YTMod] Art cache loaded: ${Object.keys(saved).length} entries.`);
-        res(saved);
-      } else {
-        res({});
-      }
-    });
-  });
-  const setArtCache = (cache) => new Promise((res) => {
-    const count = cache && typeof cache === "object" ? Object.keys(cache).length : 0;
-    chrome.storage.local.set({ [ART_CACHE_KEY]: cache }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn(`[YTMod] Art cache write FAILED (${count} entries):`, chrome.runtime.lastError.message);
-      }
-      res();
-    });
-  });
   const clearSpicyCache = () => new Promise((res) => {
     chrome.storage.local.remove(SPICY_CACHE_KEY, () => {
       if (chrome.runtime.lastError) {
@@ -845,11 +819,6 @@
         // row — the panel strips header rows now that the rail names sections.
         { key: "amllWordTracks", label: "Apple Music for word-by-word", type: "toggle", default: false },
         { key: "spicyLineTracks", label: "Spicy lyrics for line-by-line", type: "toggle", default: false },
-        // Animated Apple Music cover art (m8tec HLS): swaps the cover for a looping
-        // clip in the player view and in fullscreen. Network-backed, so it gets a
-        // switch — and it defaults OFF (AJ, 2026-10-07): it is an opt-in extra,
-        // not something to turn on for every install unasked.
-        { key: "animatedArt", label: "Animated cover art", type: "toggle", default: false },
         // On-device English translation of non-English lines (Chrome 138+ desktop).
         // OFF by default: it may download a language pack and adds a second line
         // under the lyrics, so it is a choice rather than part of the look.
@@ -3334,8 +3303,6 @@
           case "getSpicyCache": r = await getSpicyCache(); break;
           case "setSpicyCache": await setSpicyCache(args[0]); r = true; break;
           case "clearSpicyCache": await clearSpicyCache(); r = true; break;
-          case "getArtCache": r = await getArtCache(); break;
-          case "setArtCache": await setArtCache(args[0]); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
@@ -4116,11 +4083,11 @@
   let lrActiveGroup = "";
 
   const LYRICS_GROUPS = [
-    // Look collects everything you SEE: how big the words are, what they sit
-    // on, and the two presentation modes (Apple-Music motion + animated art).
+    // Look collects everything you SEE: how big the words are and what they sit
+    // on, plus the Apple-Music motion mode.
     // The Motion tab keeps only the intensities, which are dev-only — so for a
     // normal install that tab is empty and drops itself (see `live` below).
-    { id: "look", label: "Look", keys: ["size", "animatedArt", "legibilityBackdrop", "fullscreenInPage", "bgOpacity", "adaptiveSpacing"] },
+    { id: "look", label: "Look", keys: ["size", "legibilityBackdrop", "fullscreenInPage", "bgOpacity", "adaptiveSpacing"] },
     // Which renderer draws which kind of track (AJ, 2026-10-23). Its own tab so
     // the choice reads as a choice instead of hiding under the look settings.
     { id: "renderer", label: "Renderer", keys: ["amllWordTracks", "spicyLineTracks"] },
@@ -6350,7 +6317,29 @@
     const dismiss = typeof opts.onDismiss === "function" ? opts.onDismiss : null;
 
     let overlay = null;
-    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const previousFocus = document.activeElement;
+    // aria-modal promises the page behind is unavailable. Without this trap Tab
+    // walked straight into the YouTube Music page behind the card.
+    const focusables = () => overlay ? Array.from(overlay.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter((el) => el.getClientRects().length) : [];
+    const onKey = (e) => {
+      if (e.key === "Escape") { close(); return; }
+      if (e.key !== "Tab" || !overlay) return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const outside = !overlay.contains(active);
+      if (e.shiftKey && (outside || active === first)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (outside || active === last)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     const close = () => {
       document.removeEventListener("keydown", onKey);
       if (overlay && overlay.isConnected) {
@@ -6362,6 +6351,9 @@
         setTimeout(remove, 400); // fallback in case animationend never fires
       }
       updateModalOpen = false;
+      if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") {
+        try { previousFocus.focus({ preventScroll: true }); } catch (_) {}
+      }
     };
     const dismissAndClose = () => {
       close();
@@ -7332,18 +7324,6 @@
     // The stored value can still turn them off; this early start is only so the
     // default (on) paints without waiting for storage (AJ, 2026-10-23).
     if (ytPrefs.customIcons) ytStartPlayerIcons();
-    // Vendored hls.js, loaded into the PAGE world (so window.Hls is directly
-    // usable by the spicy-lyrics add-on, which also runs page-world). Chrome /
-    // Comet cannot play HLS natively, and the animated Apple Music cover art
-    // from artwork.m8tec.top is delivered as an HLS .m3u8, so this dependency
-    // must be present before any fullscreen art is attached. Not registered as
-    // an "extension" — it exposes no UI and the Marketplace must not list it.
-    try {
-      const hlsNode = document.createElement("script");
-      hlsNode.src = chrome.runtime.getURL("src/extensions/hls.min.js");
-      hlsNode.className = "ym-vendor-script";
-      (document.head || document.documentElement).appendChild(hlsNode);
-    } catch (_) {}
     const reg = await getReg();
     let registryChanged = false;
     for (const removedId of ["ytmod-rose", "ytmod-compact"]) {

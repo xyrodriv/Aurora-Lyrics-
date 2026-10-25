@@ -634,6 +634,14 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   margin: 24px 0 10px !important;
   padding: 10px 0 0 !important;
 }
+/* A song that ends on a duet line leaves the reader on the right-hand side, so
+   the credits follow the last line there. Same rule as the built-in renderer. */
+#ym-sl-amll-host .ym-sl-credits.align-right {
+  text-align: right !important;
+}
+#ym-sl-amll-host .ym-sl-credits.align-right :is(.ym-sl-provider, .ym-sl-uploader) {
+  justify-content: flex-end !important;
+}
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) > * {
   -webkit-text-stroke: 0 !important;
   margin-top: 0 !important;
@@ -1237,7 +1245,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
     try {
       const names = (typeof currentSongwriters !== "undefined" && currentSongwriters) ? currentSongwriters : [];
-      amllCreditsEl = buildCreditsFooter(names);
+      amllCreditsEl = buildCreditsFooter(names, contentEndsOnDuet(amllLastContent));
       // The engine's bottom-line slot, not the host: it is laid out as the last
       // item of the scrollable content, so the credits sit under all the lyrics
       // exactly like the built-in renderer. Appending (rather than setting

@@ -95,16 +95,6 @@
     // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
     // abandoned, so there is nothing left to open. The Next up list above is
     // now display-only.)
-    // Adopt the art video into the pane. It has been playing in the player view
-    // (its normal home) since the track started, so the animated cover is on screen
-    // with no HLS startup at all — this is what makes entry instant (AJ, 2026-10-03).
-    // placeArtVideo() also restores YTM's own player-view cover, which the overlay
-    // is about to cover anyway.
-    if (fsArtVideo && fsArtVideo.parentElement !== fsMediaHost) {
-      placeArtVideo();
-      const warmPlay = fsArtVideo.play();
-      if (warmPlay && warmPlay.catch) warmPlay.catch(() => {});
-    }
     refreshFsTitle();
     // Kick the media reconcile NOW instead of waiting up to 2s for the refresh
     // tick. Entry builds the static cover card immediately, but the animated
@@ -235,13 +225,6 @@
         const card = ensureFsArtImg();
         if (card) {
           setFsArtSrc(card, hiResArt(artUrl));
-          // A warm animated cover is already ready for this track (it has been
-          // playing in the player view since the track started): do not put the
-          // static card beside it.
-          if (fsArtVideo && fsArtVideo.parentElement === fsMediaHost &&
-              fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")) {
-            card.style.display = "none";
-          }
         }
       }
       // Song fullscreen: replace the blurred cover backdrop with Kawarp when the
@@ -457,20 +440,6 @@
     }
     fsArtImg = null;
     ++fsArtImgSeq;
-    // Send the animated cover home to the player view instead of destroying it: the
-    // engine and its buffer survive, so re-entering fullscreen on the same track is
-    // instant too. fsActive is already false here, so placeArtVideo() re-parents it
-    // into #song-image and re-hides YTM's own cover. It is VISIBLE there, so resume
-    // it — the old off-screen warm host needed a pause, this home does not
-    // (AJ, 2026-10-03). Only fall back to a full teardown when there is nothing to
-    // keep alive.
-    if (fsArtVideo && fsArtVideo.isConnected) {
-      placeArtVideo();
-      const backPlay = fsArtVideo.play();
-      if (backPlay && backPlay.catch) backPlay.catch(() => {});
-    } else {
-      destroyAnimatedArt();
-    }
     const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
     if (fsOptionsOverlay) fsOptionsOverlay.remove();
     if (fsSavedHtmlOverflow !== null) {

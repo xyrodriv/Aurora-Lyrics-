@@ -43,14 +43,13 @@
     try {
       let data = null;
       // Mirror the LRCLIB path of fetchLRCLyrics, but cache instead of rendering.
-      if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return;
       const params = new URLSearchParams();
       params.set("track_name", next.title);
       if (next.artist) params.set("artist_name", next.artist);
       if (Number.isFinite(Number(next.durationMs)) && Number(next.durationMs) > 0) {
         params.set("duration", String(Math.round(Number(next.durationMs) / 1000)));
       }
-      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_API}?${params.toString()}`);
+      const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
       if (reqId !== prefetchSeq) return;
       if (response && response.ok && response.data && response.data.syncedLyrics) {
         data = response.data;
@@ -58,8 +57,9 @@
         const searchParams = new URLSearchParams({
           q: [next.title, next.artist].filter(Boolean).join(" "),
         });
-        const searchResponse = await window.YTMod.fetchLRCLIB(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        const searchResponse = await fetchLrclibJson(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
+          controller.signal
         );
         if (reqId !== prefetchSeq) return;
         if (searchResponse && searchResponse.ok) {
@@ -256,10 +256,6 @@
       panel._status.textContent = "Type a song title or artist first.";
       return;
     }
-    if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") {
-      panel._status.textContent = "Search unavailable. Reload Aurora Lyrics and try again.";
-      return;
-    }
     const requestId = ++searchRequestSeq;
     if (searchAbortController) searchAbortController.abort();
     const controller = new AbortController();
@@ -269,7 +265,7 @@
 
     const params = new URLSearchParams({ q: query });
     try {
-      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_SEARCH_API}?${params.toString()}`);
+      const response = await fetchLrclibJson(`${LRCLIB_SEARCH_API}?${params.toString()}`, controller.signal);
       if (controller.signal.aborted || requestId !== searchRequestSeq) return;
       searchAbortController = null;
       if (!response.ok) throw new Error("LRCLIB search returned HTTP " + response.status);

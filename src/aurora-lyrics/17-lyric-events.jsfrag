@@ -366,7 +366,7 @@
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
     if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
-      creditsFooterEl = buildCreditsFooter(currentSongwriters);
+      creditsFooterEl = buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content));
       linesRoot.appendChild(creditsFooterEl);
     } else {
       creditsFooterEl = null;

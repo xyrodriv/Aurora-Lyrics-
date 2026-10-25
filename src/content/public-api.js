@@ -782,8 +782,6 @@
     getSpicyCache: () => cmd("getSpicyCache"),
     setSpicyCache: (cache) => cmd("setSpicyCache", [cache]),
     clearSpicyCache: () => cmd("clearSpicyCache"),
-    getArtCache: () => cmd("getArtCache"),
-    setArtCache: (cache) => cmd("setArtCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),

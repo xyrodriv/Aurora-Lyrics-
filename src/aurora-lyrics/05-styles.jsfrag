@@ -969,7 +969,7 @@
       box-sizing: border-box;
       z-index: 1;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media > video:not(.ym-sl-fs-art-video) {
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-media > video {
       border-radius: 0;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics {
@@ -2818,11 +2818,7 @@
       overflow: hidden;
       background: transparent !important;
     }
-    /* NOTE: the animated cover-art <video> (ym-sl-fs-art-video) is EXCLUDED via
-       :not() — this rule's !important width/height/inset fill would otherwise
-       beat the cover-card sizing rules no matter their specificity, and the
-       animated cover rendered at the full pane size (960x862, AJ, 2026-10-03). */
-    .ym-sl-fs-media > video:not(.ym-sl-fs-art-video) {
+    .ym-sl-fs-media > video {
       position: absolute !important;
       top: 0 !important;
       left: 0 !important;
@@ -2897,22 +2893,7 @@
        read too large beside the lyrics (AJ, 2026-10-03). Music videos are a
        <video>, and this <img> is only created for cover-art tracks, so MVs are
        untouched by this rule. */
-    /* Two cover arts for the first second of fullscreen (AJ, 2026-10-20). The
-       static card is shown while the animated art loads — deliberately, so the
-       pane is never blank — and the card is only REMOVED once the video has been
-       attached, which is what left both visible at once. Hide the card the moment
-       a READY art video exists in the pane. :has() keeps this pure CSS: no extra
-       JS timing to desync.
-
-       display:none, NOT opacity (AJ, 2026-10-21): the pane is a flex row, so an
-       opacity-0 card still reserved its ~583px of space and squeezed the ready
-       video to half width until JS hid the card two seconds later — the two
-       covers sitting side by side. The video's own 0.5s fade is the crossfade. */
-    .ym-sl-fs-media:has(> video.ym-sl-fs-art-video.ym-sl-fs-art-video-ready) > img {
-      display: none;
-    }
-    .ym-sl-fs-media > img,
-    .ym-sl-fs-media > video.ym-sl-fs-art-video {
+    .ym-sl-fs-media > img {
       display: block;
       width: min(100%, 54vh);
       height: auto;
@@ -2940,24 +2921,13 @@
       align-items: center;
       justify-content: center;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
       /* MORE specific than the base .ym-sl-fs-media > img rule, so in side mode
          THIS is what actually sizes the cover art — keep it in step with the
          base (AJ, 2026-10-03). */
       width: min(100%, 54vh);
       max-height: 54vh;
       flex: 0 1 auto;
-    }
-    /* Animated cover only: INTEGER-pixel sizing. A fractional box (54vh =
-       583.2px -> 583.188 after layout) makes the video's composited layer snap
-       short of the element's far edges, so the #000 background peeked out as a
-       thin line along the bottom + right only (origin-anchored top/left never
-       show it; static <img> paints its own box and is immune). Rounding the
-       box down to whole pixels removes the gap. Must sit AFTER the side-mode
-       sizing rule above and match its specificity to win (AJ, 2026-10-03). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
-      width: round(down, min(100%, 54vh), 1px);
     }
     /* ===== bottom band: reserve room for the title + playback chrome ======
        AJ's spec (2026-09-27): everything lives UNDER the media, so the media
@@ -3000,8 +2970,7 @@
     }
     /* Cover art must shrink into the shortened pane instead of overflowing
        the band. aspect-ratio keeps it square; max-height:100% clamps it. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
       max-height: 100%;
     }
     /* CENTRE the cover inside the shortened pane. The title / controls are at
@@ -3246,46 +3215,6 @@
        old bitmap is never the wrong cover. */
     .ym-sl-fs-art {
       opacity: 1;
-    }
-    /* Animated Apple Music cover (m8tec HLS stream, played via hls.js). It
-       shares the cover-card box with the static <img> and only ONE shows at a
-       time: while the stream loads the static card stays put (its own
-       crossfade handles the track-swap), and once the video can play we fade
-       it in and hide the card. The video is muted + loops + autoplays inline,
-       so it behaves like a living album cover with no chrome of its own. */
-    .ym-sl-fs-art-video {
-      opacity: 0;
-      transition: opacity .5s ease;
-      pointer-events: none;
-      object-fit: cover;
-      background: #000;
-    }
-    .ym-sl-fs-art-video.ym-sl-fs-art-video-ready { opacity: 1; }
-    /* SAFETY NET (AJ, 2026-10-20). YTM's player SIZES any <video> living inside
-       #player as if it were its own media element: it writes inline
-       inset: 140px 0 0; width: 637px; height: 358px onto our animated art video,
-       letterboxing a 16:9 stream inside the SQUARE #song-image and exposing
-       #player's own #606060 background above and below — the grey box.
-       !important is REQUIRED here: an inline style normally beats a stylesheet, and
-       !important in CSS is the only thing that outranks a non-important inline
-       declaration. Without it the geometry holds only until YTM's next sizing pass,
-       which is why switching tabs appeared to "fix" it (that re-runs
-       placeArtVideo(), which rewrites the style) and why it came back afterwards. */
-    #player video.ym-sl-fs-art-video {
-      position: absolute !important;
-      inset: 0 !important;
-      width: 100% !important;
-      height: 100% !important;
-      object-fit: cover !important;
-      border-radius: inherit;
-    }
-    /* A not-ready animated cover must never occupy flex space. Two 583px squares
-       in the 960px pane row shove the static card to x=-65 and clip the whole
-       title/seek/transport stack (live-measured, AJ, 2026-10-18). This must
-       outrank the display:block in .ym-sl-fs-media > video.ym-sl-fs-art-video
-       (0,2,1), hence the same scope plus the :not() class (0,3,1). */
-    .ym-sl-fs-media > video.ym-sl-fs-art-video:not(.ym-sl-fs-art-video-ready) {
-      display: none;
     }
     /* .ym-sl-fs-media / .ym-sl-fs-lyrics base position + z-index are set by
        the animated rules higher up. */
@@ -4828,6 +4757,14 @@
        developers.spicylyrics.org/md/attribution makes displaying the provider a
        binding condition (ToS section 6), not a nicety. Plain text: the provider
        carries no url of its own. */
+    /* Credits on the same side as the final line, when that line is a duet.
+       text-align covers the label/names; the two flex rows need justify. */
+    .ym-sl-credits.align-right {
+      text-align: right;
+    }
+    .ym-sl-credits.align-right :is(.ym-sl-provider, .ym-sl-uploader) {
+      justify-content: flex-end;
+    }
     #ym-sl-panel.SpicyRenderer .ym-sl-provider {
       display: flex;
       align-items: center;
@@ -5118,8 +5055,7 @@
       }
       /* The card must FILL its new box: the landscape rules still ask for
          min(100%, 54vh), which would crop it to a short strip. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
         width: 100%;
         height: 100%;
         max-width: 100%;

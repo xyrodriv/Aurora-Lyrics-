@@ -14,9 +14,6 @@
     // waiting up to 2s for the refresh tick. The tick still covers the case
     // where the new artwork URL is not published yet at this instant.
     reconcileFsMediaArt();
-    // ...and start buffering the animated cover NOW, while the user is still on
-    // the page, so opening fullscreen has no HLS startup left to pay for.
-    warmAnimatedArt();
     const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
     if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
   }

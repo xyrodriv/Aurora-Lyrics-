@@ -1,6 +1,6 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 23 October 2026
+**Last updated:** 25 October 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -47,9 +47,15 @@ The services contacted are:
 | `api.deezer.com` | Artwork lookup |
 | `musicbrainz.org` | Artwork lookup |
 | `open.spotify.com` | Artwork lookup |
+| `raw.githubusercontent.com` | Update check (release notes only) |
+| `fonts.spikerko.org` | Lyrics typeface stylesheet |
 
 Each of these is an independent third party with its own privacy policy. Aurora
 Lyrics does not control them and is not responsible for their practices.
+
+The update check requests a release-notes file and nothing else; it carries no
+track metadata. The typeface stylesheet is requested only when the bundled copy
+cannot be resolved, and is the same face the lyrics are drawn in.
 
 ## This website
 

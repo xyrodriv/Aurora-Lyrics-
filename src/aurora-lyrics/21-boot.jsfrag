@@ -10,11 +10,6 @@
     // by the time the first track resolves — otherwise the very first lookup
     // pays a storage round-trip on the critical path.
     loadSpicyCache().then(() => sweepSpicyCache(Date.now())).catch(() => {});
-    // Pre-warm the animated-art cache too, so the FIRST fullscreen entry already
-    // holds it in memory and the cached-art check costs no storage round-trip. A
-    // round-trip there meant the static cover could paint for a frame before
-    // suppressStaticCardForAnimated() hid it (AJ, 2026-10-03).
-    loadArtCache().catch(() => {});
     buildUI();
     // YTM's own video fullscreen button now opens OUR fullscreen instead, so
     // the control feels native. Registered after buildUI() because the redirect

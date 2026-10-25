@@ -46,6 +46,24 @@
   // unsynced track forever, without pinning a miss for the full 30-day window.
   const SPICY_CACHE_NEGATIVE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
+  // LRCLIB is CORS-open, so the page world can call it directly. That matters
+  // for cancellation: the content-script bridge cannot carry an AbortSignal
+  // across the world boundary, so a skipped track used to leave the request
+  // running. Every caller passes its own controller signal.
+  async function fetchLrclibJson(url, signal) {
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        credentials: "omit",
+        signal,
+      });
+      return { ok: res.ok, status: res.status, data: res.ok ? await res.json().catch(() => null) : null };
+    } catch (error) {
+      if (signal && signal.aborted) return { ok: false, status: 0, data: null, aborted: true };
+      throw error;
+    }
+  }
+
   // ---- Spicy Lyrics API cache (in-memory mirror) ----------------------------
   // The persisted object is read once per page load and then served from this
   // map, so a cache hit costs no storage round-trip. Writes go through to
@@ -949,8 +967,13 @@
       response = await fetch(`${SPICY_LYRICS_API}/${spotifyId}`, {
         headers: { Authorization: "Bearer " + SPICY_LYRICS_PUBLISHABLE_KEY },
         credentials: "omit",
+        // The controller is the track-change guard: passing it to fetch (not
+        // just checking it afterwards) is what actually cancels the request on
+        // a skip, instead of leaving a rate-limited call running to completion.
+        signal: controller.signal,
       });
     } catch (e) {
+      if (controller.signal.aborted) return bail("request was aborted (a newer track/request superseded it)");
       console.warn("[AuroraLyrics] request failed:", e);
       return null;
     }
@@ -1067,14 +1090,14 @@
         lrclibCache.set(key, persisted);
         return persisted;
       }
-      if (!window.YTMod || typeof window.YTMod.fetchLRCLIB !== "function") return null;
       const params = new URLSearchParams();
       params.set("track_name", track.title);
       if (track.artist) params.set("artist_name", track.artist);
       if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
         params.set("duration", String(Math.round(track.durationMs / 1000)));
       }
-      const response = await window.YTMod.fetchLRCLIB(`${LRCLIB_API}?${params.toString()}`);
+      const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
+      if (response.aborted) return null;
       if (!response.ok && response.status !== 404) {
         throw new Error("LRCLIB returned HTTP " + response.status);
       }
@@ -1084,9 +1107,11 @@
           q: [track.title, track.artist].filter(Boolean).join(" "),
         });
         if (stale()) return null;
-        const searchResponse = await window.YTMod.fetchLRCLIB(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`
+        const searchResponse = await fetchLrclibJson(
+          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
+          controller.signal
         );
+        if (searchResponse.aborted) return null;
         if (!searchResponse.ok) {
           throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
         }

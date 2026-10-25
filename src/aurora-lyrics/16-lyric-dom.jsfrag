@@ -240,8 +240,30 @@
     };
   }
 
-  function buildCreditsFooter(names) {
+  // Only the last sung line matters: the reader is parked at the bottom of the
+  // page, next to it. A duet line there is drawn on the right, so the credits
+  // follow it there instead of sending the eye back across a full-width block.
+  function contentEndsOnDuet(content) {
+    if (!Array.isArray(content)) return false;
+    for (let index = content.length - 1; index >= 0; index--) {
+      const line = content[index];
+      const syllables = line && line.Lead && line.Lead.Syllables;
+      if (!Array.isArray(syllables) || !syllables.length) continue;
+      // A trailing blank line (an outro gap) is not what the reader is looking
+      // at, so it cannot decide the credits' side either.
+      const text = syllables.map((syllable) => (syllable && syllable.Text) || "").join("").trim();
+      if (!text) continue;
+      return !!line.OppositeAligned;
+    }
+    return false;
+  }
+
+  function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
+    // A track that ends on a duet line leaves the reader on the right-hand side.
+    // Mirror the credits so the next thing they look at is already in view,
+    // instead of a full-width block they have to travel back left for.
+    if (alignRight) footer.classList.add("align-right");
     if (names && names.length) {
       footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
       const namesEl = h("div", { class: "ym-sl-credits-names" });

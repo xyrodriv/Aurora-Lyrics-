@@ -117,27 +117,6 @@
   let fsPlayerStateTimer = 0;
   let fsBgImg = null; // cover-art layer used when fullscreen has no live video
   let fsArtImg = null; // sharp cover-art card in fsMediaHost (no-video tracks)
-  let fsArtVideo = null;        // animated Apple Music cover <video> (m8tec HLS stream)
-  let fsArtWarmHost = null;     // off-screen host that keeps the stream warm out of fullscreen
-  let fsArtNoAlbumKey = "";     // rough track key for the "album not settled yet" retry
-  let fsArtNoAlbumTries = 0;
-  let fsArtVideoHls = null;     // hls.js instance bound to fsArtVideo
-  let fsArtVideoKey = "";       // track key whose animated art the video currently shows
-  let fsArtVideoLoadingKey = ""; // track key currently being fetched
-  const fsArtVideoFail = new Set();  // track keys with no animated art (skip re-fetch)
-  const fsArtVideoCache = new Map(); // track key -> m3u8 url | false
-  // ---- persisted animated-art cache (30-day TTL) ---------------------------
-  // The Map above is the in-memory mirror; this is the chrome.storage copy, so a
-  // URL survives reloads and a replayed track shows its cover with NO API call.
-  // Only POSITIVE results persist — "this album has no animated art" can change
-  // (a later upload), so a miss stays session-only (AJ, 2026-10-03).
-  const ART_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-  const ART_CACHE_VERSION = 1;
-  const ART_CACHE_LIMIT = 200;
-  let artCache = null;
-  let artCacheLoad = null;
-  let artCacheDirty = false;
-  let artCacheFlushTimer = 0;
   let fsBgRefresh = null; // interval id for tracking track changes during fs
   // Kawarp WebGL backdrop for song fullscreen (handed off from the Dynamic add-on).
   let fsKawarpCanvas = null;
@@ -385,11 +364,6 @@
     // pack and add a second line of text to lyrics the user already knows.
     autoTranslate: false,
     legibilityBackdrop: false,
-    // Animated Apple Music cover art (m8tec HLS) — the player view's cover AND the
-    // fullscreen pane. OFF by default (AJ, 2026-10-07): it is a network-backed
-    // extra, so it is opt-in rather than something every fresh install starts
-    // fetching. The toggle turns it on.
-    animatedArt: false,
     // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
     // prefers the eased glide into the active line. (It was flipped OFF on
     // 2026-09-28 to match an older screenshot; that is reverted.) The Apple
@@ -530,7 +504,6 @@
     const prevAutoTranslate = currentSettings.autoTranslate;
     const prevSize = currentSettings.size;
     const prevJoinSyllables = currentSettings.joinSyllables;
-    const prevAnimatedArt = currentSettings.animatedArt;
     // Only merge a plain object. `Object.assign` will happily spread a string or
     // an array by index, so a corrupted stored value would inject junk keys
     // ("0", "1", ...) into the settings object and leave it permanently out of
@@ -650,10 +623,6 @@
         ? clamp(cfsRaw, 0.5, 2.0)
         : DEFAULT_SETTINGS.customFontScale;
     }
-    currentSettings.animatedArt = booleanValue(
-      currentSettings.animatedArt,
-      DEFAULT_SETTINGS.animatedArt
-    );
     // Simple lyrics is MOSTLY a curve swap: the letter-scale and Y-offset splines
     // get gentler, non-bouncing variants. Re-point them on every settings pass so
     // the toggle lands without a reload.
@@ -665,13 +634,6 @@
     // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
     // re-publish would be a silent no-op (AJ, 2026-10-07).
     try { publishRendererKit(true); } catch (e) {}
-    // Animated cover art toggle, applied LIVE (AJ, 2026-10-03). OFF tears the
-    // stream down immediately; ON re-runs the lookup for the current track.
-    if (currentSettings.animatedArt === false) {
-      if (prevAnimatedArt !== false) destroyAnimatedArt();
-    } else if (prevAnimatedArt === false) {
-      refreshAnimatedArt(getCurrentTrack());
-    }
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
     // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
     // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
