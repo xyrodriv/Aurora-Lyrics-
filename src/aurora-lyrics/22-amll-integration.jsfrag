@@ -24,8 +24,124 @@
   let amllPrevTime = 0;
   let amllWasPlaying = false;
   let amllCssInjected = false;
+  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS (AJ, 2026-10-23):
+   *  - by default, word-synced lyrics render through Aurora's own Spicy
+   *    renderer exactly as they always have (same DOM, springs, glow, scroll),
+   *    and line-synced ones through the AMLL engine.
+   *
+   * WHICH renderer takes which kind of track is now the user's choice, not a
+   * hard rule any more: the two Renderer rows in the panel (`amllWordTracks` /
+   * `spicyLineTracks`, content.js) point either kind of track at either
+   * renderer. See amllContentGoesToSpicy.
+   *
+   * Two earlier attempts are gone and should not come back: (1) taking over the
+   * engine's line contents to get Spicy words inside AMLL's scroll, which could
+   * never be byte-identical to the Spicy renderer, and (2) grafting the Apple
+   * stack (per-line focus blur, scale, staggered rows) onto the Spicy side. Each
+   * renderer is left to do its own thing.
+   *
+   * `amllSpicyTrack` = "the built-in renderer owns the content currently loaded",
+   * whatever the reason. It decides the LOOK too: the AMLL body class, the
+   * gentle spline set and every `amllSimpleLookActive()` call follow it. */
+  let amllSpicyTrack = false;
+  function amllSimpleLookActive() {
+    return !amllSpicyTrack;
+  }
+  function amllContentHasWordTiming(content) {
+    if (!Array.isArray(content)) return false;
+    for (const line of content) {
+      const lead = line && line.Lead;
+      const syls = lead && Array.isArray(lead.Syllables) ? lead.Syllables : null;
+      if (!syls) continue;
+      const windows = new Set();
+      for (const syl of syls) {
+        const start = Number(syl && syl.StartTime) || 0;
+        const end = Number(syl && syl.EndTime) || 0;
+        if (end > start + 0.001) windows.add(Math.round(start * 1000) + ":" + Math.round(end * 1000));
+      }
+      // Two or more syllables with DIFFERENT windows = word karaoke. A line
+      // whose word spans all carry the line's own window is line-timed.
+      if (windows.size >= 2) return true;
+    }
+    return false;
+  }
+  // Does THIS content belong to the built-in Spicy renderer? Each kind of track
+  // has its own Renderer row, and each row names the renderer it SELECTS, so the
+  // two are independent rather than inverses of one another.
+  function amllContentGoesToSpicy(content) {
+    if (amllContentHasWordTiming(content)) return currentSettings.amllWordTracks !== true;
+    return currentSettings.spicyLineTracks === true;
+  }
+
+  function amllSetSpicyTrack(spicy) {
+    const next = !!spicy;
+    if (next === amllSpicyTrack) return;
+    amllSpicyTrack = next;
+    try {
+      document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
+    } catch (e) {}
+    // The spline set follows the renderer, not the setting: the Spicy renderer
+    // must get the real (bouncing) curves back, and the AMLL look gets the
+    // gentle ones.
+    try { applySimpleLyricsSplines(); } catch (e) {}
+    // Consumers (the PiP) hold the spline OBJECTS, and applySimpleLyricsSplines()
+    // REPLACES them. Re-publish when the owner changes, or the next Spicy track
+    // is built from the AMLL curves - which read as words floating up instead of
+    // bouncing.
+    try { publishRendererKit(true); } catch (e) {}
+    // Anything the look may have written inline belongs to the other renderer's
+    // frame; drop it so a rebuilt line never starts from a stale value.
+    try {
+      if (typeof modelLines !== "undefined" && modelLines) {
+        for (const ln of modelLines) {
+          const el = ln && ln.HTMLElement;
+          if (!el) continue;
+          el.style.removeProperty("filter");
+          el.style.removeProperty("--ym-sl-line-alpha");
+          el.style.removeProperty("--amll-depth-scale");
+          el.__ymSpicyStyleCache = {};
+        }
+      }
+    } catch (e) {}
+  }
+  /* Decide the renderer for the loaded content and make the engine agree.
+     Returns true when the OWNER changed, so the caller can rebuild the Spicy
+     lines and re-sync. Safe to call any time: it no-ops when nothing moved.
+
+     The engine may never have been started for the previous track (a word track
+     that went to Spicy does not load it), so handing the next track to the
+     engine has to START it here — waiting for a settings change was the "stays
+     on Spicy until I toggle the mode" bug. */
+  // Which renderer actually OWNS this content right now — published to consumers
+  // (the PiP) so they run the same one instead of guessing from the timings.
+  // "amll" means the engine is drawing timed, line-by-line content; everything
+  // else (word tracks pointed at Spicy, static lyrics, no content) is the
+  // built-in renderer, even while the engine object exists.
+  function amllTrackUsesEngine(content) {
+    if (!content || amllSpicyTrack) return false;
+    if (amllContentGoesToSpicy(content)) return false;
+    return amllContentIsTimed(content);
+  }
+
+  function amllApplyTrackRenderer(content) {
+    const spicy = !content || amllContentGoesToSpicy(content);
+    const changed = spicy !== amllSpicyTrack;
+    amllSetSpicyTrack(spicy);
+    if (spicy) {
+      amllHideSkeleton();
+      if (amllActive) amllHide();
+      return changed;
+    }
+    if (!amllActive) amllActivate();          // async; it syncs amllLastContent
+    else if (changed && content) amllSyncLyrics(content);
+    return changed;
+  }
+
   let amllLastFrameTime = 0;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
+  // Focal line as a fraction of the player height. The loading skeleton reads
+  // the same number through --amll-align-y, so nudging this moves both.
+  const AMLL_ALIGN_POSITION = 0.42;
 
   // YouTube Music loads its own Web Animations polyfill
   // (web-animations-next-lite.min.js), and its Animation.effect objects do NOT
@@ -89,16 +205,27 @@
   color: var(--amll-lp-color, white);
   contain: strict;
   mix-blend-mode: plus-lighter;
-  font-size: var(--amll-lp-font-size, max(max(5vh, 2.5vw), 12px));
+  /* Sized off the lyric HOST's width, not the viewport. The same card renders
+     in a 1920 fullscreen pane, a tab that shrinks when the NPV rail opens, and
+     a ~380px NPV lyric box; 5vh stayed at full-screen size in the small ones,
+     so the rail's words blew past its card edges (AJ, 2026-10-21). 7.5cqw is
+     tuned to land on the SAME size as the standard renderer, whose
+     --DefaultLyricsSize is 7cqw of .ym-sl-panel (measured: 522px panel -> 36.5px,
+     this host 487px -> 36.5px), so the two renderers agree in the tab; the 5vh
+     term still caps it in fullscreen, where the old look is unchanged. The bare
+     5vh line is the fallback for a browser without container query units. */
+  font-size: var(--amll-lp-font-size, 5vh);
+  font-size: var(--amll-lp-font-size, clamp(12px, min(5vh, 7.5cqw), 64px));
   overflow: hidden;
 
-  @media screen and (width <= 768px) {
-    font-size: var(--amll-lp-font-size, max(8vw, 12px));
-  }
-
   &.dom {
-    --amll-lp-line-width-aspect: .8;
-    --amll-lp-line-padding-x: 1em;
+    /* Inset of the line box inside the player, and the ONLY lever that decides
+       where a row wraps. The engine wraps at the wrapper's CONTENT width while
+       the highlight box paints the wrapper's full width, so the upstream 1em
+       per side broke rows at 696px inside an 804px player and left a dead
+       strip on the right of every wrapped line (measured live, AJ 2026-10-21).
+       .2em keeps the box off the glyphs and hands ~86px back to the text. */
+    --lyric-line-padding-x: .2em;
     --amll-lp-bg-line-scale: .7;
     user-select: none;
     box-sizing: content-box;
@@ -107,12 +234,6 @@
   }
 }
 
-@media screen and (width <= 768px) {
-  .amll-lyric-player {
-    --amll-lp-line-width-aspect: 1;
-    --amll-lp-line-padding-x: 0;
-  }
-}
 @property --bright-mask-alpha {
   syntax: "<number>";
   inherits: true;
@@ -447,9 +568,16 @@
   position: absolute;
   inset: 0;
   z-index: 4;
+  /* Query container for the engine's font size (6.7cqw in the player rule):
+     this host is the lyric surface, so its width IS the column the text has to
+     fit. inset:0 already fixes its size, so the containment costs nothing. */
+  container-type: inline-size;
   overflow: hidden;
   pointer-events: auto;
-  font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
+  /* The SAME face the built-in renderer uses, including a user-supplied custom
+     font (--ym-sl-lyric-font). Hardcoding "SpicyLyrics" here meant a custom font
+     applied everywhere except Apple-style lyrics (AJ, 2026-10-23). */
+  font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
   /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
      lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
   font-weight: 700;
@@ -474,28 +602,62 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
-/* Credits footer (Written By / provided by / Uploaded by / Made by) goes into the
-   engine's own bottom-line slot, so it scrolls with the lyrics as the last block
-   - the same behaviour as the built-in renderer. The engine watches that element
-   with a MutationObserver and re-lays-out when its content changes.
-   The engine treats that slot as a distant lyric line, so it would otherwise
-   inherit the deepest blur, the dimmest mask alphas and the lyric line's own
-   negative margins - override all of it so the credits read as plain text. */
+/* Credits footer (Written By / Lyrics provided by / Uploaded by / Made by) goes
+   into the engine's own bottom-line slot, so it scrolls with the lyrics as the
+   last block - the same behaviour as the built-in renderer. The engine watches
+   that element with a MutationObserver and re-lays-out when its content
+   changes. The slot is laid out as a distant lyric line, so it would otherwise
+   inherit the deepest blur, the dimmest mask alphas and the line's own negative
+   margins. */
 #ym-sl-amll-host .FmKaba_bottomLine,
-#ym-sl-amll-host .FmKaba_bottomLineWrapper,
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
+#ym-sl-amll-host .FmKaba_bottomLineWrapper {
   filter: none !important;
   opacity: 1 !important;
 }
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
+/* The host stamps its karaoke face onto EVERYTHING inside it: 700 weight plus a
+   0.6px text stroke, in a 1.2 line box. That is right for the lyrics and wrong
+   for the footer - the built-in renderer draws this same shared markup as a
+   plain footnote at 400/600, so here it read bold and airy (AJ, 2026-10-23).
+   Opt the credits out and give them that footnote's pitch. :is() covers both
+   mountings: the engine's bottom-line slot when it has one, the host when it
+   does not. */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) {
   --bright-mask-alpha: 1;
   --dark-mask-alpha: 1;
-  margin: 0 !important;
-  padding: 0 !important;
+  filter: none !important;
+  -webkit-text-stroke: 0 !important;
+  text-shadow: none !important;
+  font-weight: 400 !important;
+  line-height: 1.35 !important;
+  letter-spacing: 0 !important;
+  opacity: .85 !important;
+  margin: 24px 0 10px !important;
+  padding: 10px 0 0 !important;
 }
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits > * {
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) > * {
+  -webkit-text-stroke: 0 !important;
   margin-top: 0 !important;
   margin-bottom: 0 !important;
+}
+/* The label/name/provider weights are the footer's own; only the gaps differ
+   here, so the three lines read as one block instead of drifting apart in the
+   engine's taller line box. */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-label {
+  margin-bottom: 4px !important;
+  line-height: 1.2 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-names {
+  line-height: 1.4 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider, .ym-sl-provider-block, .ym-sl-uploader) {
+  margin-top: 10px !important;
+}
+/* Inside the pill+note block the block owns the gap (flex gap 7px). */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-provider-block .ym-sl-provider {
+  margin-top: 0 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider + .ym-sl-uploader, .ym-sl-uploader + .ym-sl-uploader) {
+  margin-top: 4px !important;
 }
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
@@ -504,35 +666,116 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 }
 /* Loading skeleton. The engine keeps the previous track's lines on screen until
    the new ones arrive, so a track change would otherwise show the wrong song.
-   Shimmering bars stand in while the lyrics resolve. */
+   Hiding the player outright is the only thing that actually removes them - a
+   translucent scrim still lets the old words read through. The bars sit on the
+   engine's focal line at the same pitch as the built-in skeleton, so the panel
+   does not jump when the real lines land. */
+#ym-sl-amll-host.ym-sl-amll-loading .amll-lyric-player { visibility: hidden; }
 #ym-sl-amll-host .ym-sl-amll-skeleton {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: var(--amll-align-y, 42%);
+  transform: translateY(-50%);
   z-index: 8;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 0.55em;
+  gap: calc(var(--DefaultLyricsSize, 32px) * .95);
   padding: 0 6%;
   pointer-events: none;
 }
 #ym-sl-amll-host .ym-sl-amll-skeleton-bar {
-  height: 0.85em;
-  border-radius: 0.45em;
-  background: linear-gradient(90deg, rgba(255,255,255,.08), rgba(255,255,255,.22), rgba(255,255,255,.08));
-  background-size: 200% 100%;
-  animation: ym-sl-amll-shimmer 1.15s linear infinite;
+  position: relative;
+  flex: 0 0 auto;
+  height: calc(var(--DefaultLyricsSize, 32px) * .6);
+  border-radius: 6px;
+  background: rgba(255,255,255,.075);
+  overflow: hidden;
 }
-@keyframes ym-sl-amll-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+#ym-sl-amll-host .ym-sl-amll-skeleton-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
+  animation: ym-sl-amll-skeleton-sweep 1.15s ease-in-out infinite;
 }
-/* Fullscreen: the lyrics hard-cut at the panel edges. Fade the top and bottom
-   the way the built-in renderer's scroll mask does, so lines glide out instead
-   of clipping. */
-.ym-sl-fs-lyrics #ym-sl-amll-host .amll-lyric-player {
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
+@keyframes ym-sl-amll-skeleton-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ym-sl-amll-host .ym-sl-amll-skeleton-bar::after { display: none; }
+}
+/* Middle-click autoscroll marker. It sits in the middle of the lyrics panel
+   rather than under the cursor, so the pointer is free to pull in any direction
+   without the marker trailing it. Centred with the translate property (not
+   transform) so
+   the scale-in animation can own transform. A chevron brightens for the
+   direction the pointer is pulling. */
+#ym-sl-amll-host .ym-sl-amll-autoscroll {
+  position: absolute;
+  z-index: 9;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(18, 18, 20, .7);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.32), 0 2px 10px rgba(0,0,0,.4);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: ym-sl-amll-auto-in .13s ease-out;
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::before,
+#ym-sl-amll-host .ym-sl-amll-autoscroll::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid currentColor;
+  border-left: 1.5px solid currentColor;
+  color: rgba(255,255,255,.42);
+  transition: color .12s ease;
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::before {
+  top: 8px;
+  transform: translateX(-50%) rotate(45deg);
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::after {
+  bottom: 8px;
+  transform: translateX(-50%) rotate(225deg);
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll[data-dir="up"]::before,
+#ym-sl-amll-host .ym-sl-amll-autoscroll[data-dir="down"]::after {
+  color: #fff;
+}
+@keyframes ym-sl-amll-auto-in {
+  from { opacity: 0; transform: scale(.8); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ym-sl-amll-host .ym-sl-amll-autoscroll { animation: none; }
+}
+/* Fullscreen: the lyrics pane keeps clamp() vertical padding for the built-in
+   renderer's header and safe bands. AMLL has no header there, so drop it and let
+   the engine's viewport reach the monitor's top and bottom edges. Deliberately
+   no mask: the lines stay visible all the way to the edge instead of fading. */
+body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+/* Loading skeleton in the docked NPV rail: its bars and pitch are em-of-32px
+   tuned for the tab and read as slabs in the small card. */
+#ym-npv .ym-npv-lyrics .ym-sl-amll-skeleton {
+  gap: 14px;
+  padding: 0 4%;
+}
+#ym-npv .ym-npv-lyrics .ym-sl-amll-skeleton-bar {
+  height: 12px;
+  border-radius: 4px;
 }
 `;
 
@@ -559,6 +802,150 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   function amllHide() {
     document.body.classList.remove("amll-active");
+    amllStopAutoScroll();
+  }
+
+  /* ---- middle-click autoscroll --------------------------------------------
+     Chrome's autoscroll drives a NATIVE scroll container. The built-in
+     renderer's pane is one (a real overflow box), which is why a middle click
+     there and a mouse move scroll the lyrics; this engine has no scroll box at
+     all — it moves its lines with transforms and listens for wheel. So the
+     gesture had nothing to drive here. Reproduce it: hold the middle button
+     down and move the pointer, and every frame feeds the engine the wheel
+     events a real wheel would, at a speed set by how far the pointer sits from
+     the press point. Releasing the middle button ends it at once (press-and-
+     hold, not Chrome's toggle — AJ asked for the release to stop it), as does
+     any other press, a real wheel, Escape or losing the window. Links keep
+     their own middle-click (open in a new tab). */
+  let amllAuto = null;
+
+  function amllStopAutoScroll() {
+    if (!amllAuto) return;
+    const auto = amllAuto;
+    amllAuto = null;
+    if (auto.raf) cancelAnimationFrame(auto.raf);
+    window.removeEventListener("mousemove", auto.move, true);
+    window.removeEventListener("mousedown", auto.press, true);
+    window.removeEventListener("mouseup", auto.up, true);
+    window.removeEventListener("wheel", auto.wheel, true);
+    window.removeEventListener("keydown", auto.key, true);
+    window.removeEventListener("blur", auto.blur);
+    if (auto.indicator && auto.indicator.parentNode) {
+      auto.indicator.parentNode.removeChild(auto.indicator);
+    }
+  }
+
+  function amllStartAutoScroll(event) {
+    if (event.button !== 1 || !amllPlayer || !amllHost) return;
+    if (!document.body.classList.contains("amll-active")) return;
+    if (event.target && event.target.closest && event.target.closest("a")) {
+      amllStopAutoScroll();
+      return;
+    }
+    // Already running (a middle press whose release was never delivered): stop
+    // rather than stack a second loop. The press is suppressed so Chrome does
+    // not start its own page autoscroll on the way out.
+    if (amllAuto) {
+      event.preventDefault();
+      amllStopAutoScroll();
+      return;
+    }
+    const playerEl = amllPlayer.getElement();
+    if (!playerEl) return;
+    // Chrome would start its own autoscroll on the page here. The lyrics are not
+    // a native scroller, so the gesture is ours.
+    event.preventDefault();
+
+    const anchorY = event.clientY;
+    const indicator = document.createElement("div");
+    indicator.className = "ym-sl-amll-autoscroll";
+    indicator.setAttribute("aria-hidden", "true");
+    amllHost.appendChild(indicator);
+
+    let mouseY = anchorY;
+    // Sub-pixel remainder: a wheel event can only carry whole pixels, so the
+    // fraction is kept for the next frame instead of being thrown away.
+    let carry = 0;
+    let lastFrame = performance.now();
+    let shownDir = "";
+
+    const move = (e) => {
+      // The button state is the authority: if the release happened outside the
+      // window (where no mouseup reaches us), the next move with the middle
+      // button no longer held ends the gesture instead of scrolling forever.
+      if (typeof e.buttons === "number" && (e.buttons & 4) === 0) {
+        amllStopAutoScroll();
+        return;
+      }
+      mouseY = e.clientY;
+    };
+    // The arming press is already propagating when these land on window, so it
+    // has to be excluded by identity or the mode would end on itself. A middle
+    // press inside the lyrics is handled above (stop/arm); every other press,
+    // including middle presses elsewhere, ends the mode.
+    const press = (e) => {
+      if (e === event) return;
+      if (e.button === 1 && amllHost.contains(e.target)) return;
+      amllStopAutoScroll();
+    };
+    // Press-and-hold: the middle button coming up is the end of the gesture.
+    const up = (e) => { if (e.button === 1) amllStopAutoScroll(); };
+    // Our own wheel events bubble to window too; they must not count as the
+    // user scrolling.
+    const wheel = (e) => { if (!e.__auroraAutoScroll) amllStopAutoScroll(); };
+    const key = (e) => { if (e.key === "Escape") amllStopAutoScroll(); };
+    const blur = () => amllStopAutoScroll();
+
+    const tick = (now) => {
+      if (!amllAuto) return;
+      // The panel can be torn down under the gesture (track change, mode
+      // switch); stop rather than scroll a detached element.
+      if (!playerEl.isConnected) { amllStopAutoScroll(); return; }
+      // Per-second speed, not per-frame: a 144Hz screen must not scroll more
+      // than twice as fast as a 60Hz one. The delta is clamped so a stalled tab
+      // cannot resume with one huge jump.
+      const dt = Math.min(50, Math.max(0, (now || lastFrame) - lastFrame));
+      lastFrame = now || lastFrame;
+      const dy = mouseY - anchorY;
+      // A dead zone, like Chrome's: the first few pixels arm nothing, so a
+      // click that did not move does not creep.
+      const power = Math.abs(dy) - 8;
+      if (power > 0) {
+        const sign = dy > 0 ? 1 : -1;
+        // Speed tracks the pull, and keeps tracking it well past the panel:
+        // a 50px pull is a slow creep, 150px is a brisk run, ~270px is the
+        // 4400px/s cap. Linear like Chrome's, so the change is felt at every
+        // distance instead of flattening out early.
+        carry += sign * Math.min(4400, 150 + power * 16) * dt / 1000;
+        const whole = Math.trunc(carry);
+        if (whole) {
+          carry -= whole;
+          const synthetic = new WheelEvent("wheel", {
+            deltaY: whole,
+            deltaMode: 0,
+            bubbles: true,
+            cancelable: true,
+          });
+          synthetic.__auroraAutoScroll = true;
+          playerEl.dispatchEvent(synthetic);
+        }
+        const dir = sign > 0 ? "down" : "up";
+        if (dir !== shownDir) { indicator.dataset.dir = dir; shownDir = dir; }
+      } else if (shownDir) {
+        delete indicator.dataset.dir;
+        shownDir = "";
+      }
+      if (amllAuto) amllAuto.raf = requestAnimationFrame(tick);
+    };
+
+    window.addEventListener("mousemove", move, true);
+    window.addEventListener("mousedown", press, true);
+    window.addEventListener("mouseup", up, true);
+    window.addEventListener("wheel", wheel, true);
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("blur", blur);
+    amllAuto = { raf: 0, indicator, move, press, up, wheel, key, blur };
+    amllAuto.raf = requestAnimationFrame(tick);
   }
 
   function amllEnsureEngine() {
@@ -608,6 +995,10 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
       amllHost = document.createElement("div");
       amllHost.id = "ym-sl-amll-host";
+      // Keep the skeleton on the same focal line as the real lines.
+      amllHost.style.setProperty("--amll-align-y", (AMLL_ALIGN_POSITION * 100) + "%");
+      // Middle-click autoscroll: the gesture Chrome gives a native scroller.
+      amllHost.addEventListener("mousedown", amllStartAutoScroll);
       container.appendChild(amllHost);
 
       const player = new mod.LyricPlayer();
@@ -629,7 +1020,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
       // Focal line sits a little further down than AMLL's own 0.35 default, so
       // the active line reads lower in the panel.
-      player.setAlignPosition(0.42);
+      player.setAlignPosition(AMLL_ALIGN_POSITION);
       // Halve the render buffer. The engine defaults to 300px of overscan, which
       // on a ~950px panel means it builds roughly twice the viewport's worth of
       // lines - and every one of those words re-resolves its CSS mask every
@@ -680,18 +1071,28 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     }
   }
 
+  // Full teardown of the engine (host, player, drive loop, latches). Nothing in
+  // the settings path calls it any more — the renderer is chosen per track and
+  // a loaded engine is reused across tracks — so it stays as the subsystem's
+  // dispose primitive rather than being lost.
   function amllDeactivate() {
-    // Always clear the failure latch and the cached import promise, so switching
-    // the mode back on retries. This must happen BEFORE the early return below:
+    // Always clear the failure latch and the cached import promise, so a later
+    // activation retries. This must happen BEFORE the early return below:
     // after a failed activation amllActive/amllReady are both false, and the
     // early return would otherwise leave the latch stuck for the whole session.
     amllFailed = false;
     amllEnginePromise = null;
     amllDriveErrors = 0;
+    // With the engine gone the built-in renderer owns whatever is loaded, so the
+    // look has to follow it on the next activation's first sync.
+    amllSpicyTrack = false;
     if (!amllActive && !amllReady) return;
     amllGen++;                               // invalidate any in-flight activation
     amllActive = false;
     amllHide();
+    // The engine owned the pill's state; without it there is nothing to jump
+    // back to, and leaving it up would fake a suspended scroll.
+    setJumpButtonVisible(false);
     try { if (amllPlayer) amllPlayer.dispose(); } catch (e) {}
     amllPlayer = null;
     amllReady = false;
@@ -700,9 +1101,14 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllStopOwnLoop();
     if (amllTimeHosts && amllTimeHosts.length) {
       for (const el of amllTimeHosts) {
+        amllReleaseTimeHold(el);
         try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
       }
       amllTimeHosts = [];
+    }
+    for (const el of amllTimeHoldTimers.keys()) {
+      amllReleaseTimeHold(el);
+      try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
     }
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     amllSizeSeeded = false;
@@ -761,32 +1167,39 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   function amllLinesFromContent(content) {
     const out = [];
     if (!Array.isArray(content)) return out;
-    for (const line of content) {
+    for (let index = 0; index < content.length; index++) {
+      const line = content[index];
       const lead = line && line.Lead;
       if (!lead) continue;
       const words = amllWordAtoms(lead.Syllables);
       out.push({
         words,
-        translatedLyric: "",
+        // The translation plan is keyed by the CONTENT index, not by time, so a
+        // lead line and a background line that start together never collide.
+        // Both renderers use the same key, which is what makes their output
+        // identical (see 23-auto-translate).
+        translatedLyric: autoTranslateAmllText(index, -1),
         romanLyric: "",
+        __ymTransKey: autoTranslateKey(index, -1),
         startTime: (lead.StartTime || 0) * 1000,
         endTime: (lead.EndTime || 0) * 1000,
         isBG: false,
         isDuet: !!line.OppositeAligned,
       });
       const bgs = line.Background || [];
-      for (const bg of bgs) {
+      bgs.forEach((bg, bgIndex) => {
         const bgWords = amllWordAtoms(bg.Syllables);
         out.push({
           words: bgWords,
-          translatedLyric: "",
+          translatedLyric: autoTranslateAmllText(index, bgIndex),
           romanLyric: "",
+          __ymTransKey: autoTranslateKey(index, bgIndex),
           startTime: (bg.StartTime || 0) * 1000,
           endTime: (bg.EndTime || 0) * 1000,
           isBG: true,
           isDuet: false,
         });
-      }
+      });
     }
     return out;
   }
@@ -805,7 +1218,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   // Credits footer. Aurora already builds a full "Written By / Lyrics provided by
   // / Uploaded by / Made by" block for the built-in renderer (buildCreditsFooter
-  // in 16-lyric-dom-romanization), and it reads the same shared state, so the
+  // in 16-lyric-dom), and it reads the same shared state, so the
   // Apple-Music-style panel can simply reuse it rather than duplicating the
   // markup, the provider links, the warning pill or the avatar-glow theming.
   // It is pinned to the bottom of the host, over the engine's own scroll area.
@@ -838,22 +1251,46 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   function amllSyncLyrics(content) {
     amllLastContent = content;
+    // The engine was never started for the previous track (it belonged to
+    // Spicy), so this track has to start it rather than silently staying on
+    // Spicy until the mode is toggled. amllActivate re-syncs from
+    // amllLastContent once it is ready.
+    if (!amllSpicyTrack && !amllActive && !amllFailed) {
+      amllActivate();
+      return;
+    }
     if (!amllActive || !amllReady || !amllPlayer) return;
+    // A track the user pointed at Spicy: hide the engine (the body class is what
+    // makes the built-in container visible again) and leave the line model alone
+    // - it is already built in full Spicy mode.
+    if (amllSpicyTrack) {
+      amllHideSkeleton();
+      amllHide();
+      return;
+    }
     try {
       const lines = amllLinesFromContent(content);
       // Untimed / plain lyrics: the engine can't place them on a timeline, so
       // fall back to Aurora's own (glow-free) Simple render for this content.
       if (!lines.length || !amllContentIsTimed(content)) {
+        // No timeline for the engine: hand the track to Aurora's own renderer,
+        // but take the loading skeleton down first or it would sit on top of
+        // the static lines (and hide the empty state on the next failure).
+        amllHideSkeleton();
         amllHide();
         return;
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
+      // Cached translations were already in the line objects; this fills the
+      // sub-line of any line the engine built before the translation landed.
+      autoTranslateRefreshAmll();
       amllShow();
       amllHideSkeleton();
       amllSyncCredits();
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
+      amllHideSkeleton();
       amllHide();
     }
   }
@@ -889,6 +1326,19 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // reports 0x0 the first time (it observes its still-detached root element), and
   // once the viewport is zero the engine never recovers on its own. With this
   // guard a real viewport, once known, can never be lost again.
+  //
+  // The SAME observer also measures every line, and that report is just as
+  // destructive: switching away from the Lyrics tab (Comments, Related) makes
+  // the panel display:none, so every measured line height is written back as 0.
+  // The layout is then recalculated from zero-height lines, isInRenderRange()
+  // fails for all of them, and commitChanges() removes their elements. Removal
+  // is the part that makes it permanent: a removed line is unobserved (hide()
+  // calls unobserve), so it can never be measured again and never comes back —
+  // the panel returns with a collapsed, half-empty list and no active line.
+  // Verified live against the bundled engine: with only the size guard in
+  // place, 44 of 50 lines are in range before the tab switch and 6 after; with
+  // this second guard, 45 before and 46 after. Lines always carry text, so a
+  // non-positive height is never a real measurement.
   function amllGuardEngineSize() {
     try {
       const guarded = [0, 0];
@@ -907,6 +1357,18 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         configurable: true,
       });
       amllPlayer.size = guarded;
+      const calc = amllPlayer.layoutCalculator;
+      if (calc && typeof calc.setLineHeight === "function" && !calc.setLineHeight.__amllGuarded) {
+        const setLineHeight = calc.setLineHeight.bind(calc);
+        const guardedSetLineHeight = (index, height) => {
+          if (height > 0) setLineHeight(index, height);
+        };
+        // initHeights() writes the per-song defaults straight into the heights
+        // array and clears the measured flags, so resetting a new track does not
+        // depend on this setter and is unaffected by the guard.
+        guardedSetLineHeight.__amllGuarded = true;
+        calc.setLineHeight = guardedSetLineHeight;
+      }
     } catch (e) {}
   }
   function amllSeedEngineSize() {
@@ -991,15 +1453,26 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           const ln = group.mainLine.getLine();
           const at = Number(ln.startTime);
           if (!Number.isFinite(at) || at < 0) return;
+          // `at` is LYRIC time (amllLinesFromContent passes Aurora's raw line
+          // times straight through, and amllDrive feeds the engine pos - offset).
+          // The media has to travel `offset` ms past it to reach that lyric, so
+          // seeking to `at` alone landed the whole offset away from the line and
+          // read as "the line has no sync". Same rule as the panel's own line
+          // click in 17-lyric-events and the PiP's seekToLyricTime.
+          let seekTo = at;
+          try {
+            if (typeof getOffsetForLine === "function") seekTo = at + getOffsetForLine(at);
+          } catch (err) {}
+          seekTo = Math.max(0, seekTo);
           // Try every seek entry point we know of; YTMod.player.seek() is the
           // documented one but builds differ in what they expose.
           const p = window.YTMod && window.YTMod.player;
           const attempts = [
-            () => { if (p && typeof p.seek === "function") p.seek(at); },
-            () => { if (p && typeof p.seekTo === "function") p.seekTo(at); },
+            () => { if (p && typeof p.seek === "function") p.seek(seekTo); },
+            () => { if (p && typeof p.seekTo === "function") p.seekTo(seekTo); },
             () => {
               const el = document.querySelector("video");
-              if (el) el.currentTime = at / 1000;
+              if (el) el.currentTime = seekTo / 1000;
             },
           ];
           for (const attempt of attempts) {
@@ -1012,26 +1485,37 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   }
 
   // Loading skeleton for track changes. The engine holds the previous track's
-  // lines until the new ones arrive, which reads as "the wrong song". Show
-  // shimmering bars from the moment the track changes, and drop them the instant
-  // real lyrics are handed over.
+  // lines until the new ones arrive, which reads as "the wrong song". While the
+  // skeleton is up the player is hidden (.ym-sl-amll-loading), so the old words
+  // cannot show through; it comes down the instant real lyrics are handed over,
+  // whether they came from a provider or from a local TTML file.
+  // Fixed ragged widths, like the built-in skeleton: random ones reshuffle on
+  // every load and read as a glitch.
+  const AMLL_SKELETON_WIDTHS = [86, 62, 94, 71, 88, 55, 92, 66];
   let amllSkeletonEl = null;
   function amllShowSkeleton() {
-    if (!amllActive || !amllReady || !amllHost || amllSkeletonEl) return;
+    if (!amllActive || !amllReady || !amllHost) return;
+    // Reveal the host too. A previous no-lyrics result calls amllHide(), which
+    // takes body.amll-active off, and the host is visibility:hidden until it is
+    // back - so without this the skeleton would be built but never painted.
+    amllShow();
+    if (amllSkeletonEl) return;
     try {
       const wrap = document.createElement("div");
       wrap.className = "ym-sl-amll-skeleton";
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < AMLL_SKELETON_WIDTHS.length; i++) {
         const bar = document.createElement("div");
         bar.className = "ym-sl-amll-skeleton-bar";
-        bar.style.width = (55 + Math.random() * 40) + "%";
+        bar.style.width = AMLL_SKELETON_WIDTHS[i] + "%";
         wrap.appendChild(bar);
       }
       amllHost.appendChild(wrap);
+      amllHost.classList.add("ym-sl-amll-loading");
       amllSkeletonEl = wrap;
     } catch (e) {}
   }
   function amllHideSkeleton() {
+    if (amllHost) amllHost.classList.remove("ym-sl-amll-loading");
     if (!amllSkeletonEl) return;
     try { amllSkeletonEl.remove(); } catch (e) {}
     amllSkeletonEl = null;
@@ -1229,6 +1713,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // The next line that has not started yet is included too, so it is already at
   // 0% and continues rather than snapping when it takes over.
   let amllTimeHosts = [];
+  // A line that retires must NOT lose its mask clock the same frame it goes
+  // inactive. Each word's mask is a gradient POSITIONED by --amll-player-time;
+  // without the property the clamp falls back to time 0, which is the "not sung"
+  // end, so every word snaps from the lit end of its sweep to the dim one. The
+  // theme's --bright-mask-alpha easing (.45s) was already fading the line down -
+  // the mask jump overrode it, which is what read as "the white fill just
+  // disappears". Hold the last clock value for longer than that easing so the
+  // words stay lit where they finished and only the alpha fades out.
+  const amllTimeHoldTimers = new Map();
+  const AMLL_TIME_HOLD_MS = 600;
+  function amllHoldTime(el, t) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (pending) clearTimeout(pending);
+    try { el.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
+    const timer = setTimeout(() => {
+      amllTimeHoldTimers.delete(el);
+      try { el.style.removeProperty("--amll-player-time"); } catch (err) {}
+    }, AMLL_TIME_HOLD_MS);
+    amllTimeHoldTimers.set(el, timer);
+  }
+  function amllReleaseTimeHold(el) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (!pending) return;
+    clearTimeout(pending);
+    amllTimeHoldTimers.delete(el);
+  }
   function amllScopePlayerTime(t) {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
@@ -1251,19 +1761,36 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       const prev = amllTimeHosts;
       for (const el of prev) {
-        if (hosts.indexOf(el) === -1) {
-          try { el.style.removeProperty("--amll-player-time"); } catch (err) {}
-        }
+        if (hosts.indexOf(el) === -1) amllHoldTime(el, t);
       }
       for (const el of hosts) {
+        amllReleaseTimeHold(el);
         try { el.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
       }
       amllTimeHosts = hosts;
     } catch (e) {}
   }
 
+  /* The "Jump to current" pill only knew about the built-in scroll box: its
+     handler is wired to that element, so Apple-style lyrics could be scrolled
+     away with no way back until a line change happened to land inside the
+     engine's render buffer. The engine keeps the same state on
+     scrollState.isAutoAlignSuspended, and resetScroll() is its way home, so
+     mirror that onto the SAME button instead of adding a second one.
+     Reading the class back (rather than caching a flag) means anything else
+     that hides the pill on a track change is respected on the next frame. */
+  function amllSyncJumpButton() {
+    if (!amllPlayer || !jumpButton) return;
+    let suspended = false;
+    try { suspended = !!amllPlayer.scrollState.isAutoAlignSuspended; } catch (e) {}
+    const shown = !jumpButton.classList.contains("hidden");
+    if (suspended === shown) return;
+    setJumpButtonVisible(suspended);
+  }
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer) return;
+    const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
     amllLastFrameTime = now;
@@ -1303,7 +1830,9 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // Release lines that have scrolled well out of range, so their per-word
       // animations do not pile up for the whole song.
       amllReapDistantLines(now);
+      amllSyncJumpButton();
       amllDriveErrors = 0;
+      if (window.__auroraPerf) window.__auroraPerf.addAmll(performance.now() - amllPerfStartedAt);
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
       // first one: a single hiccup (a half-built line, a mid-track line swap)
@@ -1317,6 +1846,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         console.warn("[AuroraLyrics] AMLL drive failed repeatedly; falling back.", e);
         amllFailed = true;
         amllHide();
+        setJumpButtonVisible(false);
       }
     }
   }

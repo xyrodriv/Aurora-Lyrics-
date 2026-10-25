@@ -1,0 +1,744 @@
+  /* ===================== on-device lyric translation =====================
+     Chrome 138+ ships the Translator and LanguageDetector built-in AI APIs.
+     Both run locally (a language pack may download once), so the lyrics are
+     never sent anywhere. Non-English lines get a small English line
+     underneath, like a subtitle for the one line you are reading.
+
+     Why a PLAN instead of translating each line as it is built:
+       - telling Japanese from Chinese needs the whole song, not one short line;
+       - the Spicy DOM and the AMLL engine draw the same content, and they must
+         show the SAME translation for a line;
+       - a rebuild (settings change) must not start the queue over.
+     autoTranslateBegin() builds the plan once per line build, both renderers
+     read from it by key, and atFill() patches whichever ones exist.
+
+     Nothing here is required for lyrics to work. Every failure path (no API,
+     no language pack, no user gesture, a failed translate) ends with fewer
+     translations, never with a broken panel. */
+
+  const AT_TARGET = "en";
+  // Below this many characters a line is an interjection ("Oh oh oh") where
+  // detection is unreliable and the translation adds nothing.
+  const AT_MIN_LATIN_CHARS = 4;
+  const AT_MIN_CJK_CHARS = 2;
+  const AT_MAX_TRANSLATIONS = 800;
+  // How long to wait before giving a failed line, or a failed translator, a
+  // second chance. Long enough for a language pack that is still settling,
+  // short enough that the glosses still arrive while the line is on screen.
+  const AT_RETRY_DELAY_MS = 600;
+
+  let atPlan = new Map();              // key -> { key, text, source, translation, nodes }
+  let atOrder = [];                    // plan keys in song order
+  let atGeneration = 0;                // invalidates in-flight work on track/build change
+  let atTranslatorBySource = new Map(); // source -> Promise<translator|null>
+  let atDetector = null;
+  let atDetectorPromise = null;
+  let atTextCache = new Map();         // source + NUL + text -> english
+  let atNeedsGesture = new Set();      // pairs Chrome refused until the user clicks
+  let atNeedsDetect = false;           // Latin song whose detector needs a click
+  let atLatinEntries = null;
+  let atWorkingSource = "";
+  let atProgressSources = new Set();
+  let atChip = null;
+  let atChipTimer = 0;
+  let atUnsupportedNoted = false;
+  let atDebugLast = "";
+  let atErrorNote = "";
+
+  function autoTranslateKey(index, bgIndex) {
+    return index + ":" + (bgIndex == null ? -1 : bgIndex);
+  }
+
+  function autoTranslateEnabled() {
+    return currentSettings.autoTranslate === true;
+  }
+
+  /* ---- script detection ---------------------------------------------------
+     A script is a much stronger signal than a detector on a four-word line:
+     anything with kana is Japanese, anything with Hangul is Korean, anything
+     Han-only is Chinese unless the song has kana somewhere. Latin-script
+     languages are the one case a script cannot answer, so those go to
+     LanguageDetector (see atResolveLatin). */
+  const AT_SCRIPT_LANG = {
+    cyrillic: "ru",
+    greek: "el",
+    thai: "th",
+    hebrew: "he",
+    arabic: "ar",
+    devanagari: "hi",
+    bengali: "bn",
+    tamil: "ta",
+    telugu: "te",
+    kannada: "kn",
+  };
+
+  function atScriptCounts(text) {
+    const counts = {
+      kana: 0, hangul: 0, han: 0, cyrillic: 0, greek: 0, thai: 0, hebrew: 0,
+      arabic: 0, devanagari: 0, bengali: 0, tamil: 0, telugu: 0, kannada: 0,
+      latin: 0, other: 0,
+    };
+    const value = String(text || "");
+    for (const ch of value) {
+      const cp = ch.codePointAt(0);
+      if (cp >= 0x3040 && cp <= 0x30ff) counts.kana++;
+      else if (cp >= 0x31f0 && cp <= 0x31ff) counts.kana++;
+      else if ((cp >= 0x1100 && cp <= 0x11ff) || (cp >= 0x3130 && cp <= 0x318f) ||
+               (cp >= 0xa960 && cp <= 0xa97f) || (cp >= 0xac00 && cp <= 0xd7ff)) counts.hangul++;
+      else if ((cp >= 0x3400 && cp <= 0x4dbf) || (cp >= 0x4e00 && cp <= 0x9fff) ||
+               (cp >= 0xf900 && cp <= 0xfaff)) counts.han++;
+      else if ((cp >= 0x0400 && cp <= 0x052f)) counts.cyrillic++;
+      else if ((cp >= 0x0370 && cp <= 0x03ff) || (cp >= 0x1f00 && cp <= 0x1fff)) counts.greek++;
+      else if (cp >= 0x0e00 && cp <= 0x0e7f) counts.thai++;
+      else if (cp >= 0x0590 && cp <= 0x05ff) counts.hebrew++;
+      else if ((cp >= 0x0600 && cp <= 0x06ff) || (cp >= 0x0750 && cp <= 0x077f) ||
+               (cp >= 0x08a0 && cp <= 0x08ff) || (cp >= 0xfb50 && cp <= 0xfdff) ||
+               (cp >= 0xfe70 && cp <= 0xfeff)) counts.arabic++;
+      else if (cp >= 0x0900 && cp <= 0x097f) counts.devanagari++;
+      else if (cp >= 0x0980 && cp <= 0x09ff) counts.bengali++;
+      else if (cp >= 0x0b80 && cp <= 0x0bff) counts.tamil++;
+      else if (cp >= 0x0c00 && cp <= 0x0c7f) counts.telugu++;
+      else if (cp >= 0x0c80 && cp <= 0x0cff) counts.kannada++;
+      else if ((cp >= 0x0041 && cp <= 0x005a) || (cp >= 0x0061 && cp <= 0x007a) ||
+               (cp >= 0x00c0 && cp <= 0x024f) || (cp >= 0x1e00 && cp <= 0x1eff) ||
+               (cp >= 0xff21 && cp <= 0xff3a) || (cp >= 0xff41 && cp <= 0xff5a)) counts.latin++;
+      else if (!/\s/.test(ch)) counts.other++;
+    }
+    return counts;
+  }
+
+  function atCountsTotal(counts) {
+    let total = 0;
+    for (const key in counts) total += counts[key];
+    return total;
+  }
+
+  // The song's dominant non-Latin script, or a Latin marker when there is no
+  // meaningful non-Latin text. null means "too little to tell" (an instrumental
+  // or one-word song), where doing nothing is better than guessing.
+  function atSongScript(lines) {
+    const totals = {
+      kana: 0, hangul: 0, han: 0, cyrillic: 0, greek: 0, thai: 0, hebrew: 0,
+      arabic: 0, devanagari: 0, bengali: 0, tamil: 0, telugu: 0, kannada: 0, latin: 0,
+    };
+    for (const line of lines) {
+      const counts = atScriptCounts(line.text);
+      for (const key in totals) totals[key] += counts[key];
+    }
+    // Kana outranks Han: a Japanese song has kanji-only lines, and Han alone
+    // cannot tell Japanese from Chinese.
+    if (totals.kana >= 2) return { source: "ja", scripts: ["kana", "han"] };
+    if (totals.hangul >= 2) return { source: "ko", scripts: ["hangul"] };
+    if (totals.han >= 2) return { source: "zh", scripts: ["han"] };
+    let best = "";
+    for (const key in AT_SCRIPT_LANG) {
+      if (!best || totals[key] > totals[best]) best = key;
+    }
+    if (best && totals[best] >= 3) return { source: AT_SCRIPT_LANG[best], scripts: [best] };
+    if (totals.latin >= 24) return { source: "", scripts: ["latin"] };
+    return null;
+  }
+
+  function atLineHasScript(text, scripts) {
+    const counts = atScriptCounts(text);
+    for (const script of scripts) {
+      if (script === "latin") {
+        if (counts.latin > 0) return true;
+      } else if (counts[script] > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function atLatinWords(text) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+    return words.length;
+  }
+
+  function atLatinCandidate(text) {
+    const counts = atScriptCounts(text);
+    if (counts.latin < 8 || atLatinWords(text) < 2) return false;
+    // A line that carries another script is handled by the script path; do not
+    // hand mixed CJK/English lines to the Latin detector.
+    for (const key in AT_SCRIPT_LANG) if (counts[key] > 0) return false;
+    if (counts.kana || counts.hangul || counts.han) return false;
+    return true;
+  }
+
+  /* ---- plan --------------------------------------------------------------- */
+  function atBuildPlan(content) {
+    const lines = [];
+    content.forEach((line, index) => {
+      if (!line || !line.Lead || !Array.isArray(line.Lead.Syllables)) return;
+      const text = syllablesToText(line.Lead.Syllables);
+      if (text.trim()) lines.push({ index, bgIndex: -1, text });
+      (line.Background || []).forEach((background, bgIndex) => {
+        if (!background || !Array.isArray(background.Syllables)) return;
+        const bgText = syllablesToText(background.Syllables);
+        if (bgText.trim()) lines.push({ index, bgIndex, text: bgText });
+      });
+    });
+    if (!lines.length) return null;
+
+    const song = atSongScript(lines);
+    if (!song) return null;
+
+    if (song.scripts[0] === "latin") {
+      const latin = [];
+      for (const line of lines) {
+        if (!atLatinCandidate(line.text)) continue;
+        const entry = {
+          key: autoTranslateKey(line.index, line.bgIndex),
+          text: line.text,
+          source: "",
+          translation: "",
+          nodes: [],
+        };
+        atPlan.set(entry.key, entry);
+        atOrder.push(entry.key);
+        latin.push(entry);
+      }
+      return latin.length ? { source: "", latin } : null;
+    }
+
+    for (const line of lines) {
+      if (!atLineHasScript(line.text, song.scripts)) continue;
+      const counts = atScriptCounts(line.text);
+      if (atCountsTotal(counts) < AT_MIN_CJK_CHARS) continue;
+      const entry = {
+        key: autoTranslateKey(line.index, line.bgIndex),
+        text: line.text,
+        source: song.source,
+        translation: "",
+        nodes: [],
+      };
+      atPlan.set(entry.key, entry);
+      atOrder.push(entry.key);
+    }
+    return atPlan.size ? { source: song.source, latin: null } : null;
+  }
+
+  async function autoTranslateBegin(content) {
+    atGeneration++;
+    const generation = atGeneration;
+    atPlan = new Map();
+    atOrder = [];
+    atWorkingSource = "";
+    atLatinEntries = null;
+    atNeedsDetect = false;
+    atProgressSources = new Set();
+    atHideChip();
+    atSetDebug("");
+    if (!Array.isArray(content) || !autoTranslateEnabled()) return;
+    if (typeof Translator === "undefined" || typeof Translator.availability !== "function") {
+      atNoteUnsupported();
+      return;
+    }
+    const plan = atBuildPlan(content);
+    if (!plan) return;
+    atWorkingSource = plan.source;
+    if (plan.latin) {
+      const source = await atResolveLatin(plan.latin, false);
+      if (generation !== atGeneration) return;
+      if (!source) return;
+      atWorkingSource = source;
+    }
+    await atRunPlan();
+  }
+
+  /* ---- language detector --------------------------------------------------
+     Only Latin-script songs need this. A detector model may also download, so
+     a refusal without user activation is handled the same way as a translator:
+     one click to set it up, then the same plan is resolved. */
+  async function atEnsureDetector(force) {
+    if (typeof LanguageDetector === "undefined") return null;
+    if (atDetector) return atDetector;
+    if (force) {
+      atDetectorPromise = null;
+      atDetector = null;
+    }
+    if (!atDetectorPromise) {
+      atDetectorPromise = (async () => {
+        try {
+          if (typeof LanguageDetector.availability === "function") {
+            const status = await LanguageDetector.availability();
+            if (status === "unavailable") return null;
+          }
+          return await LanguageDetector.create();
+        } catch (error) {
+          return null;
+        }
+      })();
+    }
+    atDetector = await atDetectorPromise;
+    if (!atDetector) atDetectorPromise = null;
+    return atDetector;
+  }
+
+  function atNormalizeLang(tag) {
+    const raw = String(tag || "").toLowerCase();
+    if (!raw || raw === "und") return "";
+    if (raw.indexOf("zh") === 0) {
+      return (raw.indexOf("hant") >= 0 || raw === "zh-tw" || raw === "zh-hk") ? "zh-Hant" : "zh";
+    }
+    return raw.split("-")[0];
+  }
+
+  async function atResolveLatin(entries, force) {
+    atLatinEntries = entries;
+    // Without a detector the browser cannot tell Spanish from English, and
+    // guessing would translate English lyrics into English. Leave Latin-script
+    // songs alone rather than showing a setup button that can never succeed.
+    if (typeof LanguageDetector === "undefined") return "";
+    if (atNeedsDetect && !force) {
+      atShowSetup("");
+      return "";
+    }
+    const generation = atGeneration;
+    const detector = await atEnsureDetector(force);
+    if (generation !== atGeneration) return "";
+    if (!detector) {
+      atNeedsDetect = true;
+      atShowSetup("");
+      return "";
+    }
+    const sample = entries.map((entry) => entry.text).join("\n").slice(0, 900);
+    let results = [];
+    try {
+      results = await detector.detect(sample);
+    } catch (error) {
+      return "";
+    }
+    const best = (results || []).find((item) => item && item.detectedLanguage && item.detectedLanguage !== "und");
+    if (!best || Number(best.confidence) < 0.55) return "";
+    const source = atNormalizeLang(best.detectedLanguage);
+    if (!source || source === AT_TARGET) return "";
+
+    // The song is not English, but the hook often is. Ask per line and only
+    // translate the lines that really are in the song's language; short lines
+    // are left on the song-level answer because detection is unreliable there.
+    for (const entry of entries) {
+      if (generation !== atGeneration) return "";
+      if (atLatinWords(entry.text) < 3) {
+        entry.source = source;
+        continue;
+      }
+      let ok = true;
+      try {
+        const lineResults = await detector.detect(entry.text);
+        const top = lineResults && lineResults[0];
+        if (top && top.detectedLanguage && top.detectedLanguage !== "und" &&
+            Number(top.confidence) >= 0.5) {
+          ok = atNormalizeLang(top.detectedLanguage) === source ||
+            atNormalizeLang(top.detectedLanguage) === "";
+        }
+      } catch (error) {}
+      if (ok) entry.source = source;
+    }
+    atNeedsDetect = false;
+    return source;
+  }
+
+  async function autoTranslateRetryDetect() {
+    if (!atLatinEntries || !atLatinEntries.length) return;
+    atNeedsDetect = false;
+    atDetectorPromise = null;
+    atDetector = null;
+    atShowChip("Preparing translation…");
+    const source = await atResolveLatin(atLatinEntries, true);
+    if (!source) return;
+    atWorkingSource = source;
+    await atRunPlan();
+  }
+
+  /* ---- translator --------------------------------------------------------- */
+  function atLanguageName(tag) {
+    if (!tag) return "this language";
+    try {
+      const names = new Intl.DisplayNames(["en"], { type: "language" });
+      return names.of(tag) || tag;
+    } catch (error) {
+      return tag;
+    }
+  }
+
+  async function atEnsureTranslator(source, generation) {
+    if (atTranslatorBySource.has(source)) return atTranslatorBySource.get(source);
+    if (atNeedsGesture.has(source)) {
+      atShowSetup(source);
+      return null;
+    }
+    const promise = (async () => {
+      try {
+        if (typeof Translator.availability === "function") {
+          const status = await Translator.availability({
+            sourceLanguage: source,
+            targetLanguage: AT_TARGET,
+          });
+          if (generation !== atGeneration) return null;
+          if (status === "unavailable") {
+            atShowTransient("Chrome can't translate " + atLanguageName(source) + " yet.");
+            return null;
+          }
+        }
+        const translator = await Translator.create({
+          sourceLanguage: source,
+          targetLanguage: AT_TARGET,
+          monitor(monitor) {
+            try {
+              monitor.addEventListener("downloadprogress", (event) => {
+                atProgress(source, event && event.loaded);
+              });
+            } catch (error) {}
+          },
+        });
+        atProgressSources.delete(source);
+        // A download that started on the previous track must not hide the new
+        // track's setup chip when it finishes.
+        if (generation === atGeneration) atHideChip();
+        return translator;
+      } catch (error) {
+        // Chrome asks for a user gesture before a language pack may download.
+        // Hold the pair until the chip's button is clicked instead of retrying
+        // on every line.
+        atNeedsGesture.add(source);
+        atProgressSources.delete(source);
+        if (generation === atGeneration) atShowSetup(source);
+        return null;
+      }
+    })();
+    atTranslatorBySource.set(source, promise);
+    const translator = await promise;
+    if (!translator) atTranslatorBySource.delete(source);
+    return translator;
+  }
+
+  function autoTranslateRetry() {
+    if (atNeedsDetect) return autoTranslateRetryDetect();
+    const source = atWorkingSource;
+    if (!source) return undefined;
+    atNeedsGesture.delete(source);
+    atTranslatorBySource.delete(source);
+    atProgressSources.add(source);
+    atShowProgress(source, 0);
+    return atRunPlan();
+  }
+
+  function atDelay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // The first failure of a given kind is worth a console line: when a language
+  // that "never translates" shows up again, the error name is the answer.
+  function atNoteTranslateError(source, error) {
+    const tag = source + " " + ((error && error.name) || "Error");
+    if (atErrorNote === tag) return;
+    atErrorNote = tag;
+    console.warn("[AuroraLyrics] on-device translation failed (" + tag + "):", (error && error.message) || error);
+  }
+
+  // One pass over the entries. Returns how many filled and which ones threw,
+  // because a line that failed is usually worth one more try and a rebuild of
+  // the whole song is not.
+  async function atTranslateEntries(translator, entries, source, generation) {
+    let done = 0;
+    const failed = [];
+    for (const entry of entries) {
+      if (generation !== atGeneration) return { done, failed };
+      if (atPlan.get(entry.key) !== entry) continue;
+      if (entry.translation) { done++; continue; }
+      const cacheKey = source + "\u0000" + entry.text;
+      const cached = atTextCache.get(cacheKey);
+      if (cached) {
+        atFill(entry, cached);
+        done++;
+        continue;
+      }
+      try {
+        const raw = await translator.translate(entry.text);
+        if (generation !== atGeneration) return { done, failed };
+        const text = atCleanTranslation(raw);
+        if (!text || text === entry.text) continue;
+        atRemember(cacheKey, text);
+        atFill(entry, text);
+        done++;
+      } catch (error) {
+        // One line the model choked on must not strand the rest of the song.
+        // QuotaExceeded means this string is too large; retrying cannot help.
+        atNoteTranslateError(source, error);
+        if (!error || error.name !== "QuotaExceededError") failed.push(entry);
+      }
+    }
+    return { done, failed };
+  }
+
+  // Throw the cached translator away and build a new one. Only called after a
+  // run that filled nothing, so a working translator is never disturbed.
+  async function atRestartTranslator(source, generation) {
+    const existing = atTranslatorBySource.get(source);
+    atTranslatorBySource.delete(source);
+    if (existing) {
+      try {
+        const translator = await existing;
+        if (translator && typeof translator.destroy === "function") translator.destroy();
+      } catch (error) {}
+    }
+    await atDelay(AT_RETRY_DELAY_MS);
+    if (generation !== atGeneration) return null;
+    return atEnsureTranslator(source, generation);
+  }
+
+  async function atRunPlan() {
+    const generation = atGeneration;
+    const source = atWorkingSource;
+    if (!source) return;
+    const entries = [];
+    for (const key of atOrder) {
+      const entry = atPlan.get(key);
+      if (entry && entry.source === source && !entry.translation) entries.push(entry);
+    }
+    if (!entries.length) return;
+    const translator = await atEnsureTranslator(source, generation);
+    if (generation !== atGeneration || !translator) return;
+    atProgressSources.delete(source);
+    atHideChip();
+
+    let { done, failed } = await atTranslateEntries(translator, entries, source, generation);
+
+    // Chrome can hand back a translator whose model is not ready yet (a language
+    // pack that finished downloading just after create()). Every call then fails
+    // within a millisecond and the song stays bare until the page is reloaded —
+    // which is exactly what "this language never translates" looks like. The same
+    // happens when the model answers with the input unchanged. A delayed retry,
+    // then a fresh instance, covers both and a translator the browser dropped.
+    // Lines that failed are retried on their own; a run that filled nothing at
+    // all retries the whole plan, because "unchanged" is not recorded as failure.
+    const atPending = () => (failed.length ? failed : done === 0 ? entries : []);
+    if (generation === atGeneration) {
+      const first = atPending();
+      if (first.length) {
+        await atDelay(AT_RETRY_DELAY_MS);
+        if (generation !== atGeneration) return;
+        const again = await atTranslateEntries(translator, first, source, generation);
+        done += again.done;
+        failed = again.failed;
+      }
+      if (done === 0) {
+        const fresh = await atRestartTranslator(source, generation);
+        if (fresh && generation === atGeneration) {
+          const again = await atTranslateEntries(fresh, atPending(), source, generation);
+          done += again.done;
+        }
+      }
+    }
+    atSetDebug(source + ":" + done + "/" + entries.length);
+  }
+
+  function atCleanTranslation(raw) {
+    return String(raw || "").replace(/\s+/g, " ").trim();
+  }
+
+  function atRemember(key, text) {
+    if (atTextCache.size >= AT_MAX_TRANSLATIONS) {
+      const oldest = atTextCache.keys().next();
+      if (!oldest.done) atTextCache.delete(oldest.value);
+    }
+    atTextCache.set(key, text);
+  }
+
+  /* ---- rendering ---------------------------------------------------------- */
+  // A translation element for one line. Created empty and hidden by :empty, so
+  // a line only grows once its text arrives. Both renderers call this, which is
+  // what keeps their output identical.
+  function appendTranslation(lineElement, index, bgIndex) {
+    if (!lineElement || !autoTranslateEnabled()) return;
+    const entry = atPlan.get(autoTranslateKey(index, bgIndex));
+    if (!entry) return;
+    const node = h("div", { class: "translation", lang: AT_TARGET });
+    lineElement.appendChild(node);
+    entry.nodes.push(node);
+    if (entry.translation) {
+      node.textContent = entry.translation;
+      node.classList.add("ready");
+    }
+  }
+
+  // The AMLL engine renders translatedLyric into its own sub-line. Feed it at
+  // build time so a re-render keeps the text, and hand it the plan key so a
+  // translation that lands later can be patched into the live node.
+  function autoTranslateAmllText(index, bgIndex) {
+    const entry = atPlan.get(autoTranslateKey(index, bgIndex));
+    return entry && entry.translation ? entry.translation : "";
+  }
+
+  function autoTranslateRefreshAmll() {
+    if (!amllReady || !amllPlayer) return;
+    let groups = null;
+    try {
+      groups = amllPlayer.currentLyricGroups;
+    } catch (error) {
+      return;
+    }
+    if (!Array.isArray(groups)) return;
+    for (const group of groups) {
+      if (!group) continue;
+      atPatchAmllLine(group.mainLine);
+      atPatchAmllLine(group.bgLine);
+    }
+  }
+
+  function atPatchAmllLine(lineEl) {
+    if (!lineEl || typeof lineEl.getLine !== "function") return;
+    let line = null;
+    try {
+      line = lineEl.getLine();
+    } catch (error) {
+      return;
+    }
+    if (!line || !line.__ymTransKey) return;
+    const entry = atPlan.get(line.__ymTransKey);
+    if (!entry || !entry.translation) return;
+    line.translatedLyric = entry.translation;
+    let sub = null;
+    try {
+      sub = lineEl.element && lineEl.element.children && lineEl.element.children[1];
+    } catch (error) {}
+    if (sub && sub.textContent !== entry.translation) sub.textContent = entry.translation;
+  }
+
+  function atFill(entry, text) {
+    entry.translation = text;
+    for (const node of entry.nodes) {
+      if (!node) continue;
+      node.textContent = text;
+      node.classList.add("ready");
+    }
+    autoTranslateRefreshAmll();
+    atSetDebug(atWorkingSource + ":live");
+  }
+
+  /* ---- setup / status chip --------------------------------------------------
+     Only shown when the browser wants a click (language pack download) or when
+     there is genuinely nothing to try. It sits where the old source chip does,
+     above the lyrics, and never blocks a line. */
+  function atChipEl() {
+    if (!panelEl) return null;
+    if (atChip && atChip.isConnected) return atChip;
+    atChip = h("div", { class: "ym-sl-translate-chip", role: "status", "aria-live": "polite" });
+    panelEl.appendChild(atChip);
+    return atChip;
+  }
+
+  function atHideChip() {
+    if (atChipTimer) {
+      clearTimeout(atChipTimer);
+      atChipTimer = 0;
+    }
+    if (atChip) {
+      atChip.remove();
+      atChip = null;
+    }
+  }
+
+  function atShowChip(text, actionLabel, action) {
+    const chip = atChipEl();
+    if (!chip) return;
+    if (atChipTimer) {
+      clearTimeout(atChipTimer);
+      atChipTimer = 0;
+    }
+    chip.classList.remove("ym-sl-fading");
+    chip.replaceChildren();
+    chip.appendChild(h("span", { class: "ym-sl-translate-chip-label", text }));
+    if (actionLabel && typeof action === "function") {
+      const button = h("button", {
+        class: "ym-sl-translate-chip-action",
+        type: "button",
+        text: actionLabel,
+      });
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const result = action();
+          if (result && typeof result.catch === "function") result.catch(() => {});
+        } catch (error) {}
+      });
+      chip.appendChild(button);
+    }
+  }
+
+  function atShowSetup(source) {
+    const label = source
+      ? "Translate " + atLanguageName(source) + " lyrics?"
+      : "Add English translation";
+    atShowChip(label, "Set up", autoTranslateRetry);
+  }
+
+  function atShowTransient(text) {
+    atShowChip(text);
+    atChipTimer = setTimeout(() => {
+      atChipTimer = 0;
+      if (!atChip) return;
+      atChip.classList.add("ym-sl-fading");
+      atChipTimer = setTimeout(atHideChip, 450);
+    }, 6000);
+  }
+
+  function atShowProgress(source, loaded) {
+    if (!atProgressSources.has(source)) return;
+    const percent = Math.max(0, Math.min(100, Math.round(Number(loaded) || 0)));
+    const name = source ? atLanguageName(source) : "";
+    atShowChip("Preparing " + (name ? name + " " : "") + "translation… " + percent + "%");
+  }
+
+  function atProgress(source, loaded) {
+    atShowProgress(source, loaded);
+  }
+
+  function atNoteUnsupported() {
+    if (atUnsupportedNoted) return;
+    atUnsupportedNoted = true;
+    atShowTransient("Translation needs Chrome 138 or newer on desktop.");
+  }
+
+  function atSetDebug(value) {
+    if (value === atDebugLast) return;
+    atDebugLast = value;
+    try {
+      if (value) document.documentElement.dataset.ymTranslate = value;
+      else delete document.documentElement.dataset.ymTranslate;
+    } catch (error) {}
+  }
+
+  function autoTranslateShutdown() {
+    atGeneration++;
+    atPlan = new Map();
+    atOrder = [];
+    atLatinEntries = null;
+    atNeedsDetect = false;
+    atWorkingSource = "";
+    atProgressSources = new Set();
+    atErrorNote = "";
+    atHideChip();
+    atSetDebug("");
+    for (const promise of atTranslatorBySource.values()) {
+      Promise.resolve(promise).then((translator) => {
+        try {
+          if (translator && typeof translator.destroy === "function") translator.destroy();
+        } catch (error) {}
+      });
+    }
+    atTranslatorBySource = new Map();
+    atNeedsGesture.clear();
+    if (atDetector && typeof atDetector.destroy === "function") {
+      try { atDetector.destroy(); } catch (error) {}
+    }
+    atDetector = null;
+    atDetectorPromise = null;
+    // atTextCache survives on purpose: switching the setting off and on again
+    // should not re-translate a song the user already paid the download for.
+  }
+
+  /* ===================== /on-device lyric translation ==================== */

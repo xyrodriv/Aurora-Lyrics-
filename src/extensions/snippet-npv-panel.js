@@ -1671,6 +1671,14 @@ return Kawarp;
      ensured by ensureSpicyLyricsFont() in injectStyle(). */
   font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", "YouTube Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
+/* The lyrics fullscreen overlay is its own full-screen surface; the rail used to
+   keep floating above it and punched through the composition (AJ, 2026-10-21).
+   Keyed off the overlay's existence rather than an add-on id, so it hides for
+   fullscreen no matter which add-on put the overlay up, and costs nothing when
+   there is no overlay. */
+body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
+  display: none !important;
+}
 /* Frame = the sliding unit (collapse animation lives here). Inside it, the
    frosted glass is its OWN background layer, separate from the content panel.
    With the frost painted on the content element itself, every repaint of the
@@ -2986,6 +2994,12 @@ function updateLyricsSlotEmpty() {
   if (!lyricsSlotEl) return;
   const hasPanel = !!lyricsSlotEl.querySelector(".ym-sl-panel");
   lyricsSlotEl.classList.toggle("empty", !hasPanel);
+  // Expanded lyrics only mean anything while the card actually holds the live
+  // lyrics. Handing them back to YTM's Lyrics tab (song view), collapsing, or
+  // simply never docking left the rail in take-over mode with no hero, no
+  // artist and no words - just the Kawarp backdrop (AJ, 2026-10-21). The mode
+  // goes with the content it was covering, and the normal rail comes back.
+  if (!hasPanel && root && root.dataset.lyricsStretch === "true") applyLyricsStretch(false);
 }
 
 // Single decision point, re-run on collapse changes AND on SPA navigations
@@ -3048,6 +3062,11 @@ function syncLyricsDock() {
 
     if (root) root.dataset.songView = onSongView ? "true" : "false";
     if (stretchBtnEl) stretchBtnEl.hidden = ytmLyricsTab;
+
+    // Drop take-over mode BEFORE anything below lays out: it hides the queue,
+    // and the queue's height is measured in this same tick (see syncHeight).
+    // updateLyricsSlotEmpty() still owns the general case.
+    if (ytmLyricsTab && root && root.dataset.lyricsStretch === "true") applyLyricsStretch(false);
 
     // With the lyrics card empty (Lyrics tab owns the lyrics), the queue can
     // take the freed space and list everything (AJ, 2026-10-19).
@@ -3721,30 +3740,39 @@ function syncLyricsDock() {
     });
   }
 
-  function applyCollapsed() {
+  function applyCollapsed(animate = true) {
     root.dataset.collapsed = String(collapsed);
     // ALWAYS docked while the snippet is mounted; --ym-npv-offset decides how far
     // the page is pushed (rail width when open, peek width when collapsed).
     // Dropping this class instead — the old behaviour — made `right` fall back to
     // YouTube's own value, and px -> auto is not transitionable, hence the snap.
     document.body.classList.add("ym-npv-docked");
-    // Glides the page content with the rail instead of snapping.
-    applyNpvOffset(true);
+    // Glides the page content with the rail instead of snapping. The initial
+    // mount passes animate=false: the rail is already collapsed in the markup,
+    // so there is no transition to play and adding the scoped transition class
+    // would just make the whole page ease 18px on load.
+    applyNpvOffset(animate);
     edge.setAttribute("aria-expanded", String(!collapsed));
     const frameEl = root.querySelector(".ym-npv-frame");
     if (frameEl) {
       if (npvCloseTimer) { window.clearTimeout(npvCloseTimer); npvCloseTimer = 0; }
       frameEl.classList.remove("ym-npv-opening", "ym-npv-closing");
-      void frameEl.offsetWidth; // restart whichever animation we add
-      if (collapsed) {
-        // Slide out + blur + let the content sink, instead of snapping away.
-        frameEl.classList.add("ym-npv-closing");
-        npvCloseTimer = window.setTimeout(() => {
-          npvCloseTimer = 0;
-          frameEl.classList.remove("ym-npv-closing");
-        }, 420);
-      } else {
-        frameEl.classList.add("ym-npv-opening");
+      // The play/close animations are for a user-initiated toggle only. On the
+      // first mount the rail must start collapsed with no slide: it used to be
+      // built open (data-collapsed="false"), then applyCollapsed() added the
+      // closing animation, so every page load visibly opened and shut it.
+      if (animate) {
+        void frameEl.offsetWidth; // restart whichever animation we add
+        if (collapsed) {
+          // Slide out + blur + let the content sink, instead of snapping away.
+          frameEl.classList.add("ym-npv-closing");
+          npvCloseTimer = window.setTimeout(() => {
+            npvCloseTimer = 0;
+            frameEl.classList.remove("ym-npv-closing");
+          }, 420);
+        } else {
+          frameEl.classList.add("ym-npv-opening");
+        }
       }
     }
     try { localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0"); } catch (e) {}
@@ -4278,14 +4306,19 @@ function syncLyricsDock() {
     // rides the rail's leading edge (see the .ym-npv-edge rule). Appended last so
     // it paints above the glass and the panel.
     frame.appendChild(edge);
-    root = h("div", { id: ROOT_ID, "data-collapsed": "false" }, frame, resizeHandle);
+    // Start in the state loadState() chose (collapsed) BEFORE the node is in the
+    // document, so the first paint is already the closed rail. Mounting it open
+    // and collapsing afterwards is what made a refresh look like
+    // open-then-close.
+    root = h("div", { id: ROOT_ID, "data-collapsed": String(collapsed) }, frame, resizeHandle);
     // Publish the peek widths so the tab width, the frame's collapsed transform and
     // the page dock offset all read the same numbers. JS owns the constants.
     root.style.setProperty("--ym-npv-peek", PEEK_W + "px");
     root.style.setProperty("--ym-npv-peek-hover", PEEK_W_HOVER + "px");
     (document.body || document.documentElement).appendChild(root);
     setupResize();
-    applyCollapsed();
+    // animate=false: this is the initial mount, not a user toggle.
+    applyCollapsed(false);
 
     // Kawarp is inlined, so this is synchronous. The matte glass stays behind
     // it as the fallback if WebGL is unavailable. Skipped entirely when the user
@@ -4675,10 +4708,23 @@ function syncLyricsDock() {
     // Animate the card to its new height once the rows are laid out. +8px
     // buffer absorbs any late webfont swap so a row is never clipped.
     const syncHeight = () => {
-      requestAnimationFrame(() => {
+      let tries = 0;
+      const apply = () => {
         if (!queueListEl) return;
+        // A hidden card (expanded lyrics hide the queue outright) measures 0,
+        // and caching that number clipped the list to a sliver the moment the
+        // normal rail came back (AJ, 2026-10-21). The rows already carry the
+        // right COUNT, so unclipping is always correct content - only the
+        // height glide is lost - and we look again a beat later.
+        if (!queueListEl.scrollHeight) {
+          queueListEl.style.maxHeight = "";
+          const hidden = !queueEl || queueEl.offsetHeight === 0;
+          if (hidden && tries++ < 20) window.setTimeout(apply, 100);
+          return;
+        }
         queueListEl.style.maxHeight = (queueListEl.scrollHeight + 8) + "px";
-      });
+      };
+      requestAnimationFrame(apply);
     };
 
     const paintFull = (animateFrom) => {

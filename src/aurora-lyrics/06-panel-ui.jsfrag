@@ -307,14 +307,15 @@
        left in place but dormant — nothing calls enterPausePickMode() now, and
        every pauseUi/pauseBanner consumer is null-safe. */
 
-    // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
-    // exposes an explicit purge so a stale or wrong match can be cleared without
-    // nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored Lyrics
-    // Cache" row.
+    // (H) Cache section. Spicy Lyrics (API) results are cached for 30 days (the
+    // Terms of Service s7 ceiling — see SPICY_CACHE_TTL_MS in 14-lyrics-sources);
+    // this exposes an explicit purge so a stale or wrong match can be cleared
+    // without nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored
+    // Lyrics Cache" row.
     const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
     const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
-    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 3 days." });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 30 days." });
     const cacheClear = h("button", {
       class: "ym-sl-import ym-sl-cache-clear",
       type: "button",
@@ -385,7 +386,7 @@
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";
-        console.warn("[SpicyLyrics] clear cache failed:", error);
+        console.warn("[AuroraLyrics] clear cache failed:", error);
       }
       cacheDelete.disabled = false;
       cacheCancel.disabled = false;
@@ -410,11 +411,32 @@
       h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
       videoOffsetWrap
     );
+    // Per-SONG cache controls, in the File tab next to the import buttons. The
+    // global purge lives in the Cache tab; this one only ever touches the track
+    // that is on screen, and it cannot run while that track is playing — see
+    // queueSongCacheClear() in 12-track-offset-sync.
+    fileImportedNote = h("div", { class: "ym-sl-file-note hidden" });
+    songCacheStatus = h("div", { class: "ym-sl-file-note ym-sl-song-cache-status" });
+    songCacheClearButton = h("button", {
+      class: "ym-sl-import ym-sl-song-cache-clear hidden",
+      type: "button",
+      title: "Drop this song's cached lyrics once it has finished playing",
+      "aria-label": "Clear this song's cached lyrics",
+      text: "Clear cache for this song",
+    });
+    songCacheClearButton.addEventListener("click", () => {
+      if (songCacheClearButton.disabled) return;
+      queueSongCacheClear();
+    });
     const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
       importMode,
       h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
-      exportActions
+      exportActions,
+      fileImportedNote,
+      h("hr", { class: "ym-sl-options-divider" }),
+      songCacheClearButton,
+      songCacheStatus
     );
     const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
@@ -525,7 +547,7 @@
       const opening = optionsOverlay.classList.contains("hidden");
       optionsOverlay.classList.toggle("hidden");
       if (opening) {
-        refreshPermanentDeleteState();
+        refreshFileTabState();
         if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
       }
     });

@@ -9,7 +9,6 @@
   "host_permissions": [
     "https://music.youtube.com/*",
     "https://lrclib.net/*",
-    "https://unison.boidu.dev/*",
     "https://itunes.apple.com/*",
     "https://api.deezer.com/*",
     "https://musicbrainz.org/*",

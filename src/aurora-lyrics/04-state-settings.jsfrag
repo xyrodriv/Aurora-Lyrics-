@@ -32,6 +32,16 @@
   // strands the panel on screen. null = nothing parked.
   let fsSavedPanelVisible = null;
   let fsOverlay = null;
+  // <html> inline overflow parked while in-page fullscreen locks page scrolling;
+  // null = not locked. Restored verbatim on exit rather than cleared.
+  let fsSavedHtmlOverflow = null;
+  // True only when THIS overlay asked for native fullscreen. The fullscreenchange
+  // watcher must not mistake the user's own F11 for ours.
+  let fsNativeRequested = false;
+  // In-page fullscreen entrance/exit animations, so a second toggle can cancel
+  // the first instead of stacking two opacity animations on one element.
+  let fsEnterAnimation = null;
+  let fsExitAnimation = null;
   let fsMediaHost = null;
   let fsLyricsHost = null;
   let fsSavedVideo = null; // { node, parent, next }
@@ -138,7 +148,7 @@
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
   let fsKawarpResizeObserver = null;
-  let fsLyricsShade = null; // adaptive readability gradient in video-background mode
+  let fsLyricsShade = null; // always-on readability shade + blur behind the lyrics
   let fsLyricsShadeTimer = 0;
   let fsLyricsShadeLevel = 0;
   let fsLyricsShadeTarget = 0;
@@ -198,12 +208,12 @@
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
   // Shade sampling geometry. The sample covers the FULL lyric band: from the
   // left edge of the shade/lyric region, bottom to top, through to the right
-  // edge. .ym-sl-fs-lyrics-shade is `left: 53%; right: 0; top: 0; bottom: 0`,
-  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 53% is
+  // edge. .ym-sl-fs-lyrics-shade is `left: 57%; right: 0; top: 0; bottom: 0`,
+  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 57% is
   // the true start of the area that gets darkened.
   const FS_SHADE_SAMPLE_W = 48;
   const FS_SHADE_SAMPLE_H = 32;
-  const FS_SHADE_REGION_LEFT = 0.53; // matches the shade element's left: 53%
+  const FS_SHADE_REGION_LEFT = 0.57; // matches the shade element's left: 57%
   // Fallback band used only when the video/overlay geometry is unavailable.
   const FS_SHADE_SAMPLE_X = Math.floor(FS_SHADE_SAMPLE_W * FS_SHADE_REGION_LEFT);
   const FS_SHADE_SAMPLE_SW = FS_SHADE_SAMPLE_W - FS_SHADE_SAMPLE_X;
@@ -247,6 +257,14 @@
   // because both callers are `async`, surfaced only as an unhandled rejection in
   // the console while silently breaking the whole "Delete saved" button.
   let deletePermanentButton = null;
+  // File-tab state. Same rule as deletePermanentButton above: refreshFileTabState()
+  // and the queue/clear helpers live outside buildUI(), so the refs have to.
+  let fileImportedNote = null;      // "Imported TTML · …" line in the File tab
+  let songCacheStatus = null;       // this-song cache line
+  let songCacheClearButton = null;  // "Clear cache for this song"
+  // { trackKey, track } queued by that button and released on the next track
+  // change, so a clear can never blank the lyrics of the song you are on.
+  let pendingSongCacheClear = null;
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
@@ -303,6 +321,11 @@
   // the original file. Auto-fetched lyrics never populate this value.
   let importedTTMLXml = "";
   let currentTTMLSource = "none";
+  // True only while the lines on screen were loaded from the track's PERMANENT
+  // saved TTML. Those load through the generic "external" path, so source alone
+  // cannot tell them apart from an API result — and "Delete saved" must offer
+  // itself only when the file it would delete is the one being displayed.
+  let currentLyricsFromSavedTTML = false;
   // True when the currently displayed lyrics are plain (unsynced) text loaded
   // from an LRCLIB result that had no synced lyrics. Static lines render fully
   // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
@@ -334,7 +357,7 @@
   let adaptiveLayoutLastAt = 0;
   // Defaults track the Synced Lyrics settings popup so a fresh install (and the
   // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
-  // pushed up, full-strength background vocals, adaptive spacing + romanization
+  // pushed up, full-strength background vocals, adaptive spacing
   // on. The popup schema in src/content/content.js mirrors these values; if you
   // change one, change both.
   //
@@ -357,7 +380,10 @@
     syllableAnimation: 1.0,
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
-    romanizationEnabled: true,
+    // On-device English translation of non-English lines (Chrome 138+ desktop).
+    // OFF by default: the first foreign song would otherwise download a language
+    // pack and add a second line of text to lyrics the user already knows.
+    autoTranslate: false,
     legibilityBackdrop: false,
     // Animated Apple Music cover art (m8tec HLS) — the player view's cover AND the
     // fullscreen pane. OFF by default (AJ, 2026-10-07): it is a network-backed
@@ -366,8 +392,9 @@
     animatedArt: false,
     // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
     // prefers the eased glide into the active line. (It was flipped OFF on
-    // 2026-09-28 to match an older screenshot; that is reverted.) Ignored
-    // entirely while simpleLyrics is ON, which forces its own spring scroll.
+    // 2026-09-28 to match an older screenshot; that is reverted.) The Apple
+    // engine springs its own scroll and ignores it; the Spicy renderer honours
+    // it, whichever kind of track Spicy is drawing.
     smoothScrolling: true,
     scrollLeadEnabled: false,
     scrollLeadMs: 250,
@@ -386,16 +413,28 @@
     // (Official Audio / Lyric Video) use Kawarp — see FS_STATIC_VIDEO_RE.
     // AJ, 2026-09-28.
     preferKawarpAlways: false,
-    // Extend the adaptive lyric readability shade (the black gradient behind
-    // the lyrics) to the SIDE layout for music videos, where the lyrics sit
-    // over the blurred video backdrop — not just Video Background. ON by
-    // default (AJ, 2026-09-28: "i would default it to on").
-    mvLyricsShade: true,
+    // Fullscreen without the Fullscreen API: the overlay is a fixed, inset-0
+    // surface already, so requesting native fullscreen is the ONLY thing that
+    // takes over the display. OFF by default, which keeps the previous behaviour
+    // (and Chrome's Escape/F11 path) exactly as it was. ON keeps the tab strip
+    // and every other tab usable while the fullscreen view is up (AJ, 2026-10-22).
+    fullscreenInPage: false,
     // Apple-Music-style rendering (schema row lives in content.js). OFF by default
     // so the existing karaoke look is unchanged until the user opts in. When ON,
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
-    simpleLyrics: false,
+    // PINNED, not user-facing (AJ, 2026-10-23). "Apple style" stopped being a
+    // master switch when the renderer became per-kind; what is left of it is the
+    // LOOK question (which splines, which body class), and that is derived from
+    // who owns the track. Pinned like `offset` below, so a value stored back when
+    // this was a toggle cannot leave half the renderer switched off.
+    simpleLyrics: true,
+    // Which renderer draws which KIND of track (the Renderer rows in the panel).
+    // Each row names its own renderer, so these are not inverses of one setting:
+    // both false = Spicy for words, engine for lines, which is the default and
+    // the behaviour that was hard-coded before. Both true swaps them.
+    amllWordTracks: false,
+    spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
     // per-letter syllable karaoke, so a word lights up whole with no syllable
     // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
@@ -408,11 +447,6 @@
     // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
     // ON — joinApplies() checks the master switch first.
     joinBgSyllables: true,
-    // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
-    // those runs into words at PARSE time so the fill/glow covers the whole
-    // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
-    // renderer toggle above, which only changes how each word is painted.
-    joinLrcRedSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
@@ -426,13 +460,13 @@
     // bottom and stops at the first source that has the track. (The user-facing
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
-    sourceOrder: ["spicy", "lrc.red", "unison", "lrclib"],
+    sourceOrder: ["spicy", "lrclib"],
   };
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
   function normalizeSourceOrder(value) {
-    const all = ["spicy", "lrc.red", "unison", "lrclib"];
+    const all = ["spicy", "lrclib"];
     const seen = new Set();
     const out = [];
     if (Array.isArray(value)) {
@@ -493,9 +527,8 @@
   }
 
   function applySettings(next) {
-    const prevRomanization = currentSettings.romanizationEnabled;
+    const prevAutoTranslate = currentSettings.autoTranslate;
     const prevSize = currentSettings.size;
-    const prevSimpleLyrics = currentSettings.simpleLyrics;
     const prevJoinSyllables = currentSettings.joinSyllables;
     const prevAnimatedArt = currentSettings.animatedArt;
     // Only merge a plain object. `Object.assign` will happily spread a string or
@@ -539,10 +572,14 @@
       currentSettings.adaptiveSpacing,
       DEFAULT_SETTINGS.adaptiveSpacing
     );
-    currentSettings.romanizationEnabled = booleanValue(
-      currentSettings.romanizationEnabled,
-      DEFAULT_SETTINGS.romanizationEnabled
+    currentSettings.autoTranslate = booleanValue(
+      currentSettings.autoTranslate,
+      DEFAULT_SETTINGS.autoTranslate
     );
+    // Turning translation off must release the translator and the chip now,
+    // not on the next track: the language pack is the largest thing this add-on
+    // holds in memory.
+    if (!currentSettings.autoTranslate) autoTranslateShutdown();
     currentSettings.legibilityBackdrop = booleanValue(
       currentSettings.legibilityBackdrop,
       DEFAULT_SETTINGS.legibilityBackdrop
@@ -574,21 +611,24 @@
       currentSettings.preferKawarpAlways,
       DEFAULT_SETTINGS.preferKawarpAlways
     );
-    currentSettings.mvLyricsShade = booleanValue(
-      currentSettings.mvLyricsShade,
-      DEFAULT_SETTINGS.mvLyricsShade
+    // Pinned: the Apple look is chosen per track by the renderer rows now, so
+    // this can no longer be turned off from the UI (see DEFAULT_SETTINGS).
+    currentSettings.simpleLyrics = true;
+    currentSettings.amllWordTracks = booleanValue(
+      currentSettings.amllWordTracks,
+      DEFAULT_SETTINGS.amllWordTracks
     );
-    currentSettings.simpleLyrics = booleanValue(
-      currentSettings.simpleLyrics,
-      DEFAULT_SETTINGS.simpleLyrics
+    currentSettings.spicyLineTracks = booleanValue(
+      currentSettings.spicyLineTracks,
+      DEFAULT_SETTINGS.spicyLineTracks
+    );
+    currentSettings.fullscreenInPage = booleanValue(
+      currentSettings.fullscreenInPage,
+      DEFAULT_SETTINGS.fullscreenInPage
     );
     currentSettings.joinSyllables = booleanValue(
       currentSettings.joinSyllables,
       DEFAULT_SETTINGS.joinSyllables
-    );
-    currentSettings.joinLrcRedSyllables = booleanValue(
-      currentSettings.joinLrcRedSyllables,
-      DEFAULT_SETTINGS.joinLrcRedSyllables
     );
     currentSettings.joinBgSyllables = booleanValue(
       currentSettings.joinBgSyllables,
@@ -625,8 +665,6 @@
     // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
     // re-publish would be a silent no-op (AJ, 2026-10-07).
     try { publishRendererKit(true); } catch (e) {}
-    // Reflect the MV-shade option on the overlay (no-op before fullscreen).
-    syncFsMvShadeClass();
     // Animated cover art toggle, applied LIVE (AJ, 2026-10-03). OFF tears the
     // stream down immediately; ON re-runs the lookup for the current track.
     if (currentSettings.animatedArt === false) {
@@ -635,32 +673,26 @@
       refreshAnimatedArt(getCurrentTrack());
     }
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
+    // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
+    // being installed (AJ, 2026-10-22).
     // Simple lyrics is a RENDER MODE, not a per-element tweak, so it is a BODY
     // class — the same shape as the legibility backdrop above. A body class also
     // covers the fullscreen overlay, which reparents the panel but leaves body
     // alone, so the mode follows the lyrics into fullscreen for free.
-    document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
-    // Simple lyrics now renders through the REAL AMLL engine (see 22-amll-integration).
-    // When the mode flips, activate/deactivate it; when it stays on, just ensure it
-    // is shown. On any failure the engine falls back to Aurora's glow-free Simple
-    // renderer, so this can never break the lyrics view.
-    if (prevSimpleLyrics !== currentSettings.simpleLyrics) {
-      if (currentSettings.simpleLyrics) amllActivate();
-      else amllDeactivate();
-    } else if (currentSettings.simpleLyrics) {
-      amllShow();
-    }
-    // When Simple Lyrics is switched OFF, drop the per-line depth alpha that
-    // animate() injected while it was on, so normal mode's state-class alpha
-    // (NotSung/Sung/Active) takes over again instead of a stale inline value.
-    if (!currentSettings.simpleLyrics && prevSimpleLyrics) {
-      for (const ln of modelLines) {
-        if (ln.HTMLElement) {
-          ln.HTMLElement.style.removeProperty("--ym-sl-line-alpha");
-          ln.HTMLElement.style.removeProperty("--amll-depth-scale");
-        }
-      }
-    }
+    // Which renderer owns the current content decides the LOOK as well as the
+    // engine, and it is the user's per-kind choice (the two Renderer rows:
+    // amllWordTracks / spicyLineTracks). Recompute before the body class so a
+    // settings change can never leave a track dressed in the other renderer's
+    // clothing.
+    let rendererChanged = false;
+    try {
+      rendererChanged = amllApplyTrackRenderer(lastRendererContent) === true;
+    } catch (e) {}
+    document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
+    // amllApplyTrackRenderer above already started, showed or hid the engine for
+    // the renderer the settings now point at. Every path into the engine goes
+    // through it, so there is no separate "mode" to flip here.
     // Turning Smooth Scrolling off mid-glide hands the move off to the instant
     // path (upstream does the same — their $smoothScrolling listener calls
     // _handOffSmoothScroll). Stopping here means the glide cannot keep steering
@@ -676,6 +708,9 @@
         window.YTMod.bus.emit("lyrics:settings", {
           smoothScrolling: currentSettings.smoothScrolling !== false,
           simpleLyrics: currentSettings.simpleLyrics === true,
+          // Flipping a Renderer row re-homes the CURRENT track, so the PiP has to
+          // switch renderer now rather than on the next song.
+          renderer: amllTrackUsesEngine(lastRendererContent) ? "amll" : "spicy",
           scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
           scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
         });
@@ -695,22 +730,24 @@
     // a window open and re-pins each frame, which is what covers the reflow
     // actually landing a frame after the custom property is set.
     if (prevSize !== currentSettings.size) recentreActiveLine();
-    // Romanization is computed at build time, so toggling it means rebuilding the
-    // current lines. No lines yet (e.g. first init) -> nothing to do.
-    if (prevRomanization !== currentSettings.romanizationEnabled && lastRendererContent) {
-      buildRendererLines(lastRendererContent);
-    }
-    // Simple lyrics changes how the gradient is DRIVEN, and existing words hold
-    // their old inline --gradient-position. The CSS redirect is !important so it
-    // beats those, but an already-Sung word would then fall back to the registered
-    // property's -50% default and read as un-sung until it next changed state. A
-    // rebuild puts every word back through the animator under the new mode.
-    if (prevSimpleLyrics !== currentSettings.simpleLyrics && lastRendererContent) {
+    // Translation slots are per line, so turning it on or off has to rebuild the
+    // current lines rather than wait for the next song.
+    if (prevAutoTranslate !== currentSettings.autoTranslate && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
     // Join syllables flips makeWord between letterGroup (per-letter karaoke) and
     // plain .word (whole-word fill), so the current lines must rebuild too.
     if (prevJoinSyllables !== currentSettings.joinSyllables && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+    // The renderer choice (the mode itself, or WHICH KIND of track it draws)
+    // changes how the gradient is driven and which spline set is installed, and
+    // existing words hold their old inline --gradient-position. The CSS redirect
+    // is !important so it beats those, but an already-Sung word would then fall
+    // back to the registered property's -50% default and read as un-sung until
+    // its next state flip. A rebuild puts every word back through the animator
+    // under the new owner.
+    if (rendererChanged && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
   }

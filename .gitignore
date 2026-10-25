@@ -155,3 +155,7 @@ DEVELOPERS/
 # resolver-worker/mutate-spline-guard.mjs. Neither belongs in the repo.
 .scratch/
 .mutation/
+
+# The marketing site is built and deployed from this checkout, but it is not
+# part of the extension and is not published with the source.
+website/

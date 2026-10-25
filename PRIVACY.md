@@ -1,6 +1,6 @@
-# Privacy Policy — Aurora Lyrics
+# Aurora Lyrics privacy policy
 
-**Last updated:** 26 September 2026
+**Last updated:** 23 October 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -29,7 +29,7 @@ This data never leaves your browser. Uninstalling the extension removes it.
 ## What is transmitted, and to whom
 
 To find lyrics and artwork for the track you are playing, Aurora Lyrics sends
-**the track's metadata** — title, artist, album, and duration — to third-party
+**the track's metadata** (title, artist, album, and duration) to third-party
 lyric and artwork services. This is necessary: a lyric service cannot return
 lyrics without being told which song you want.
 
@@ -42,7 +42,6 @@ The services contacted are:
 |---|---|
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
-| `unison.boidu.dev` | Synced lyrics |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
 | `itunes.apple.com` | Artwork lookup |
 | `api.deezer.com` | Artwork lookup |
@@ -51,6 +50,19 @@ The services contacted are:
 
 Each of these is an independent third party with its own privacy policy. Aurora
 Lyrics does not control them and is not responsible for their practices.
+
+## This website
+
+The site you are reading is a static page. It sets no cookies, runs no
+analytics, and serves its fonts and images from its own origin.
+
+One panel on the home page lists who is online in the community Discord. When
+that panel comes close to the viewport, the page asks `discord.com` for the
+server's public widget data, and the avatars it draws come from
+`cdn.discordapp.com`. Discord therefore sees that request and the IP address it
+came from. Nothing travels the other way: no account, no identifier, and no
+record of what you clicked. If you never scroll as far as the panel, the
+request is never made.
 
 ## What we do NOT do
 
@@ -63,10 +75,19 @@ Lyrics does not control them and is not responsible for their practices.
 
 ## Permissions, and why each is needed
 
-- **`storage`** — saves your settings, lyric cache, and imported TTML locally on
+- **`storage`**: saves your settings, lyric cache, and imported TTML locally on
   your device.
-- **Host permissions** — allow the extension to request lyrics and artwork from
+- **Host permissions**: allow the extension to request lyrics and artwork from
   the services listed above, and to run on YouTube Music.
+
+## Limited Use
+
+Aurora Lyrics uses the information it accesses only to provide its single
+purpose: synced lyrics and the artwork that goes with them. It does not sell
+that information, use it for advertising, or transfer it to anyone except the
+lyric and artwork services listed above, or where the law requires it. This use
+follows the Chrome Web Store User Data Policy, including the Limited Use
+requirements.
 
 ## Children
 
@@ -79,4 +100,6 @@ If this policy changes, the "last updated" date above will change with it.
 
 ## Contact
 
-Questions or concerns: **REPLACE_WITH_YOUR_CONTACT_EMAIL**
+Questions or concerns: open an issue at
+[github.com/xyrodriv/Aurora-Lyrics-](https://github.com/xyrodriv/Aurora-Lyrics-/issues)
+or join the [Discord](https://discord.gg/wsZxTSnaMa).

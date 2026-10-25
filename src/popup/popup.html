@@ -6,27 +6,44 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header>
-      <img class="logo" src="../../assets/manifest-logo.webp" alt="" />
-      <span class="name">Aurora Lyrics</span>
-    </header>
+    <div class="shell">
+      <header class="head">
+        <img class="logo" src="../../assets/manifest-logo.webp" alt="" />
+        <span class="name">Aurora Lyrics</span>
+        <span class="ver" id="ver"></span>
+      </header>
 
-    <p class="lede">Add-ons and settings live inside YouTube Music.</p>
-
-    <div class="tip">
-      <svg class="waffle" viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          fill-rule="evenodd"
-          d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"
-        />
-      </svg>
-      <p>
-        Click the <strong>apps icon</strong> at the top right of YouTube Music to
-        open the marketplace.
+      <p class="status" id="status" data-state="checking" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="status-text" id="statusText">Checking this tab&hellip;</span>
       </p>
-    </div>
 
-    <p class="hint" id="hint" hidden></p>
+      <section class="now" id="now" hidden>
+        <img class="art" id="art" alt="" hidden />
+        <span class="art-fallback" id="artFallback" aria-hidden="true"></span>
+        <div class="meta">
+          <p class="track" id="trackTitle"></p>
+          <p class="artist" id="trackArtist"></p>
+        </div>
+      </section>
+
+      <dl class="facts" id="facts" hidden>
+        <div class="fact"><dt>Renderer</dt><dd id="fRenderer">&mdash;</dd></div>
+        <div class="fact"><dt>Lyric panel</dt><dd id="fPanel">&mdash;</dd></div>
+        <div class="fact"><dt>Add-ons</dt><dd id="fAddons">&mdash;</dd></div>
+        <div class="fact error-row" id="errorRow" hidden><dt>Last error</dt><dd id="fError">&mdash;</dd></div>
+      </dl>
+
+      <div class="actions">
+        <button class="btn primary" id="openBtn" type="button">Open marketplace</button>
+        <button class="btn ghost copy" id="copyBtn" type="button" aria-label="Copy diagnostics">
+          <span class="swap">
+            <span class="swap-face swap-idle">Copy diagnostics</span>
+            <span class="swap-face swap-done">Copied</span>
+          </span>
+        </button>
+      </div>
+    </div>
 
     <script src="popup.js"></script>
   </body>

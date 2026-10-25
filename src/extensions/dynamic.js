@@ -63,7 +63,6 @@
   let pageBgRoot = null;
   let pageBgHost = null;
   let pageBarBlur = null;
-  let pageDivider = null;
   let pageScrollHandler = null;
   let rootObserver = null;
   let resizeObserver = null;
@@ -178,23 +177,6 @@
           rgba(5,5,8,.32)
         );
     }
-    .ym-dynamic-page-divider {
-      position: absolute;
-      top: 84px;
-      bottom: 72px;
-      left: 68%;
-      width: 1px;
-      z-index: 2;
-      background: linear-gradient(
-        180deg,
-        transparent,
-        rgba(255,255,255,.38) 12%,
-        rgba(255,255,255,.38) 88%,
-        transparent
-      );
-      box-shadow: 0 0 8px rgba(255,255,255,.1);
-      opacity: .56;
-    }
     .ym-dynamic-page-bg-root ytmusic-app-layout,
     .ym-dynamic-page-bg-root ytmusic-nav-bar,
     .ym-dynamic-page-bg-root ytmusic-player-page,
@@ -237,7 +219,14 @@
       left: 0;
       right: 0;
       bottom: 0;
-      height: 72px;
+      /* Exactly the player bar, never a fixed 72px: YouTube Modifications can
+         shrink the bar (compact mode), and a taller frost layer then pokes its
+         1px top border out ABOVE the bar as a line across the whole window
+         (AJ, 2026-10-22 — measured at 882 while the compact bar started at
+         896). Following the variable keeps the frost on the surface and the
+         border on the bar's real edge. */
+      height: var(--ytmusic-player-bar-height, 64px);
+      box-sizing: border-box;
       z-index: 3 !important;
       pointer-events: none;
       background: rgba(6,6,10,.22);
@@ -408,9 +397,6 @@
     .ym-dynamic-page-bg-root ytmusic-app-layout[player-page-open] ytmusic-search-page {
       display: none !important;
     }
-    .ym-dynamic-page-bg-root:not(.ym-dynamic-song-mode) .ym-dynamic-page-divider {
-      display: none !important;
-    }
     .ym-dynamic-page-bg-root.ym-dynamic-home-mode
       ytmusic-search-page > ytmusic-tabbed-search-results-renderer > ytmusic-tabs {
       background: rgba(6,6,10,.18) !important;
@@ -559,58 +545,6 @@
     return kawarpModulePromise;
   }
 
-  let dividerObserver = null;
-  let dividerWatchTarget = null;
-
-  // Places the 1px page divider just left of the lyric/tab column.
-  //
-  // This used to live inside sizeKawarpCanvas(), which only runs when the
-  // full-viewport backdrop host resizes. That host does NOT change size when the
-  // NPV panel opens or when the guide (Home / Explore / Library) collapses — the
-  // PLAYER PAGE narrows or shifts instead — so the line kept its old x and drifted
-  // behind the lyrics (AJ, 2026-10-20). It is its own function now, driven by a
-  // ResizeObserver on the player page.
-  function positionPageDivider() {
-    if (!pageDivider) return;
-    const tab = document.querySelector("ytmusic-player-page tp-yt-paper-tabs") ||
-      document.querySelector("tp-yt-paper-tabs");
-    const tabRect = tab && tab.getBoundingClientRect();
-    const nav = document.querySelector("ytmusic-nav-bar");
-    const playerBar = document.querySelector("ytmusic-player-bar");
-    const navRect = nav && nav.getBoundingClientRect();
-    const playerBarRect = playerBar && playerBar.getBoundingClientRect();
-    // Anchor the divider to the lyric/tab column's left edge ONLY. The old
-    // midpoint branch fed the video's rect into the calculation, so the line
-    // drifted with the video's aspect ratio and could land inside the video's
-    // letterbox area (AJ-confirmed 2026-09-16: "it moves according to the
-    // aspect ratio... behind the music video"). Dropping the video rect makes
-    // the separator stable for every video.
-    const dividerLeft = tabRect && tabRect.width ? tabRect.left - 24 : null;
-    pageDivider.style.left = Number.isFinite(dividerLeft)
-      ? `${Math.round(dividerLeft)}px`
-      : "66%";
-    pageDivider.style.top = navRect && navRect.height
-      ? `${Math.max(0, Math.round(navRect.bottom))}px`
-      : "84px";
-    pageDivider.style.bottom = playerBarRect && playerBarRect.height
-      ? `${Math.max(0, Math.round(window.innerHeight - playerBarRect.top))}px`
-      : "72px";
-  }
-
-  // (Re)attach the divider observer to the CURRENT player page. YouTube replaces
-  // that element on some navigations, so this is idempotent and re-checks cheaply.
-  function watchPlayerPageForDivider() {
-    if (!dividerObserver) return;
-    const page = document.querySelector("ytmusic-player-page");
-    if (!page || page === dividerWatchTarget) return;
-    if (dividerWatchTarget) {
-      try { dividerObserver.unobserve(dividerWatchTarget); } catch (_) {}
-    }
-    dividerWatchTarget = page;
-    dividerObserver.observe(page);
-    positionPageDivider();
-  }
-
   function sizeKawarpCanvas() {
     if (!kawarpCanvas || !pageBgHost) return;
     const rect = pageBgHost.getBoundingClientRect();
@@ -618,8 +552,6 @@
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
-
-    positionPageDivider();
 
     if (kawarpCanvas.width === width && kawarpCanvas.height === height) return;
     kawarpCanvas.width = width;
@@ -905,10 +837,7 @@
     const shade = document.createElement("div");
     shade.className = "ym-dynamic-kawarp-shade";
     shade.setAttribute("aria-hidden", "true");
-    pageDivider = document.createElement("div");
-    pageDivider.className = "ym-dynamic-page-divider";
-    pageDivider.setAttribute("aria-hidden", "true");
-    pageBgHost.append(kawarpCanvas, shade, pageDivider);
+    pageBgHost.append(kawarpCanvas, shade);
 
     document.body.appendChild(pageBgHost);
     pageBarBlur = document.createElement("div");
@@ -919,11 +848,6 @@
     if (typeof ResizeObserver === "function") {
       resizeObserver = new ResizeObserver(() => sizeKawarpCanvas());
       resizeObserver.observe(pageBgHost);
-      // The divider tracks the PLAYER PAGE, not the backdrop host: opening the NPV
-      // or collapsing the guide changes the player page's box while the host stays
-      // put (AJ, 2026-10-20).
-      dividerObserver = new ResizeObserver(() => positionPageDivider());
-      watchPlayerPageForDivider();
     }
 
     if (pageBgRoot) {
@@ -931,7 +855,6 @@
         mountPageBackground();
         syncPageChrome();
         sizeKawarpCanvas();
-        watchPlayerPageForDivider(); // re-attach if YouTube swapped the player page
       });
       rootObserver.observe(pageBgRoot, { childList: true, subtree: true });
     }
@@ -988,16 +911,12 @@
     raf = 0;
     if (rootObserver) rootObserver.disconnect();
     if (resizeObserver) resizeObserver.disconnect();
-    if (dividerObserver) dividerObserver.disconnect();
     rootObserver = null;
     resizeObserver = null;
-    dividerObserver = null;
-    dividerWatchTarget = null;
     ++kawarpRequestSeq;
     if (kawarpInstance) kawarpInstance.dispose();
     kawarpInstance = null;
     kawarpCanvas = null;
-    pageDivider = null;
     kawarpArtworkUrl = "";
     requestedKawarpArtworkUrl = "";
     if (pageBarBlur) pageBarBlur.remove();

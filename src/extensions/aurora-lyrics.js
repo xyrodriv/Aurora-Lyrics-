@@ -23,11 +23,10 @@
   // the page. If this line does NOT appear in the DevTools console after a full
   // extension + tab reload, the new code is not being loaded (stale cache /
   // wrong reload procedure), and any lyric-rendering change will have no effect.
-  console.log("[Aurora Lyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
+  console.log("[AuroraLyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
 
   // Keep the original internal ID so existing installs and saved lyrics remain active.
   const EXT_ID = "ytmod-spicy-lyrics";
-  const UNISON_API = "https://unison.boidu.dev/lyrics";
   const LRCLIB_API = "https://lrclib.net/api/get";
   const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
   const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
@@ -73,8 +72,11 @@
   // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
   // relative URL is all we need.
   const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
-  // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
-  // the page-wide one. animationSpeed is overridden per playback state.
+  // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
+  // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
+  // These are what the backdrop uses before that handshake lands, and they
+  // match Bloom's shipped defaults. animationSpeed is overridden per playback
+  // state.
   const FS_KAWARP_OPTIONS = {
     warpIntensity: 1,
     blurPasses: 6,
@@ -981,7 +983,7 @@
   // these every frame to set their goals, so re-pointing is enough — there is no
   // spring to rebuild.
   function applySimpleLyricsSplines() {
-    const simple = !!currentSettings.simpleLyrics;
+    const simple = amllSimpleLookActive();
     LetterScaleSpline = getSpline(simple ? SIMPLE_LETTER_SCALE_RANGE : LETTER_SCALE_RANGE);
     YOffsetSpline = getSpline(simple ? SIMPLE_Y_OFFSET_RANGE : Y_OFFSET_RANGE);
     LetterYOffsetSpline = getSpline(simple ? SIMPLE_LETTER_Y_OFFSET_RANGE : LETTER_Y_OFFSET_RANGE);
@@ -1033,7 +1035,7 @@
   });
 
   function createWordSprings(word) {
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         // A LINE-TIMED word must rest at scale 1, not the 0.95 word resting
         // value: its scale goal is a constant 1 (animateWord pins it), and with
@@ -1066,7 +1068,7 @@
     // is the per-syllable highlight this mode exists to remove. The springs stay
     // real otherwise, so the progress-driven goals keep the letters awake and
     // writing (see the selfAwake note in animateWord).
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         Scale: new Spring(LetterScaleSpline.at(0), 0.88, 0.64),
         YOffset: new Spring(LetterYOffsetSpline.at(0), 1.45, 0.4),
@@ -1081,7 +1083,7 @@
   }
 
   function createDotSprings() {
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         // Scale stays REAL in Simple mode: the dots' entrance zoom (0.75 -> 1) is
         // how they arrive, and stubbing it made them hard-pop in with no
@@ -1192,6 +1194,13 @@
   // In-memory lrclibCache (above) is lost on every page reload, so the same
   // songs get re-fetched. This layer persists the last N songs in localStorage
   // (origin: music.youtube.com) so playback/reload reuses them. LRU eviction.
+  //
+  // A search result the user PICKED is stored wrapped (`{ manual, data }`).
+  // That flag is the difference between "this is one automatic answer among
+  // several sources" and "the user told us this is the right file" — the
+  // resolver serves a manual entry before it asks any API again (AJ, 2026-10-22).
+  // Automatic entries keep the bare data shape older installs already hold, so
+  // nothing stored earlier needs a migration.
   const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";
   const LYRICS_CACHE_LIMIT = 15;
 
@@ -1218,23 +1227,70 @@
 
   const persistentLyricsCache = loadPersistentLyricsCache();
 
-  function cacheLyricsPersistent(key, data) {
-    if (!key || !data) return;
-    persistentLyricsCache.delete(key);
-    persistentLyricsCache.set(key, data);
+  function isManualPickEntry(value) {
+    return !!(value && typeof value === "object" && value.manual === true && value.data);
+  }
+
+  function unwrapPersistedLyrics(value) {
+    return isManualPickEntry(value) ? value.data : value;
+  }
+
+  // Automatic entries are evicted before manual picks. A pick is the only copy
+  // of lyrics the API could not supply for that track, so losing it to a burst
+  // of skipped songs would put the track straight back to "No lyrics found".
+  // LRU order still picks the victim within each class.
+  function trimPersistentLyricsCache() {
     while (persistentLyricsCache.size > LYRICS_CACHE_LIMIT) {
-      persistentLyricsCache.delete(persistentLyricsCache.keys().next().value);
+      let victim = null;
+      for (const [key, value] of persistentLyricsCache) {
+        if (!isManualPickEntry(value)) { victim = key; break; }
+      }
+      if (victim == null) victim = persistentLyricsCache.keys().next().value;
+      persistentLyricsCache.delete(victim);
     }
+  }
+
+  function cacheLyricsPersistent(key, data, options) {
+    if (!key || !data) return;
+    const manual = !!(options && options.manual);
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, manual ? { manual: true, data } : data);
+    trimPersistentLyricsCache();
     persistLyricsCache();
+  }
+
+  // Non-mutating presence check for the options panel: getLyricsPersistent()
+  // rewrites localStorage to refresh the LRU order, which is wasted work on a
+  // status read.
+  function hasLyricsPersistent(key) {
+    return !!key && persistentLyricsCache.has(key);
+  }
+
+  function isManualLyricsPersistent(key) {
+    return !!key && isManualPickEntry(persistentLyricsCache.get(key));
+  }
+
+  function getManualLyricsPersistent(key) {
+    if (!key) return null;
+    const stored = persistentLyricsCache.get(key);
+    return isManualPickEntry(stored) ? stored.data : null;
+  }
+
+  function removeLyricsPersistent(key) {
+    if (!key || !persistentLyricsCache.has(key)) return false;
+    const removed = persistentLyricsCache.delete(key);
+    if (removed) persistLyricsCache();
+    return removed;
   }
 
   function getLyricsPersistent(key) {
     if (!key) return null;
     if (!persistentLyricsCache.has(key)) return null;
-    const data = persistentLyricsCache.get(key);
+    const stored = persistentLyricsCache.get(key);
+    const data = unwrapPersistedLyrics(stored);
     // Refresh LRU position (most-recently-used) and persist the new order.
     persistentLyricsCache.delete(key);
-    persistentLyricsCache.set(key, data);
+    persistentLyricsCache.set(key, stored);
     persistLyricsCache();
     return data;
   }
@@ -1273,6 +1329,16 @@
   // strands the panel on screen. null = nothing parked.
   let fsSavedPanelVisible = null;
   let fsOverlay = null;
+  // <html> inline overflow parked while in-page fullscreen locks page scrolling;
+  // null = not locked. Restored verbatim on exit rather than cleared.
+  let fsSavedHtmlOverflow = null;
+  // True only when THIS overlay asked for native fullscreen. The fullscreenchange
+  // watcher must not mistake the user's own F11 for ours.
+  let fsNativeRequested = false;
+  // In-page fullscreen entrance/exit animations, so a second toggle can cancel
+  // the first instead of stacking two opacity animations on one element.
+  let fsEnterAnimation = null;
+  let fsExitAnimation = null;
   let fsMediaHost = null;
   let fsLyricsHost = null;
   let fsSavedVideo = null; // { node, parent, next }
@@ -1379,7 +1445,7 @@
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
   let fsKawarpResizeObserver = null;
-  let fsLyricsShade = null; // adaptive readability gradient in video-background mode
+  let fsLyricsShade = null; // always-on readability shade + blur behind the lyrics
   let fsLyricsShadeTimer = 0;
   let fsLyricsShadeLevel = 0;
   let fsLyricsShadeTarget = 0;
@@ -1439,12 +1505,12 @@
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
   // Shade sampling geometry. The sample covers the FULL lyric band: from the
   // left edge of the shade/lyric region, bottom to top, through to the right
-  // edge. .ym-sl-fs-lyrics-shade is `left: 53%; right: 0; top: 0; bottom: 0`,
-  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 53% is
+  // edge. .ym-sl-fs-lyrics-shade is `left: 57%; right: 0; top: 0; bottom: 0`,
+  // and the lyric column sits inside that at `left: 61%; width: 39%`, so 57% is
   // the true start of the area that gets darkened.
   const FS_SHADE_SAMPLE_W = 48;
   const FS_SHADE_SAMPLE_H = 32;
-  const FS_SHADE_REGION_LEFT = 0.53; // matches the shade element's left: 53%
+  const FS_SHADE_REGION_LEFT = 0.57; // matches the shade element's left: 57%
   // Fallback band used only when the video/overlay geometry is unavailable.
   const FS_SHADE_SAMPLE_X = Math.floor(FS_SHADE_SAMPLE_W * FS_SHADE_REGION_LEFT);
   const FS_SHADE_SAMPLE_SW = FS_SHADE_SAMPLE_W - FS_SHADE_SAMPLE_X;
@@ -1488,6 +1554,14 @@
   // because both callers are `async`, surfaced only as an unhandled rejection in
   // the console while silently breaking the whole "Delete saved" button.
   let deletePermanentButton = null;
+  // File-tab state. Same rule as deletePermanentButton above: refreshFileTabState()
+  // and the queue/clear helpers live outside buildUI(), so the refs have to.
+  let fileImportedNote = null;      // "Imported TTML · …" line in the File tab
+  let songCacheStatus = null;       // this-song cache line
+  let songCacheClearButton = null;  // "Clear cache for this song"
+  // { trackKey, track } queued by that button and released on the next track
+  // change, so a clear can never blank the lyrics of the song you are on.
+  let pendingSongCacheClear = null;
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
@@ -1544,6 +1618,11 @@
   // the original file. Auto-fetched lyrics never populate this value.
   let importedTTMLXml = "";
   let currentTTMLSource = "none";
+  // True only while the lines on screen were loaded from the track's PERMANENT
+  // saved TTML. Those load through the generic "external" path, so source alone
+  // cannot tell them apart from an API result — and "Delete saved" must offer
+  // itself only when the file it would delete is the one being displayed.
+  let currentLyricsFromSavedTTML = false;
   // True when the currently displayed lyrics are plain (unsynced) text loaded
   // from an LRCLIB result that had no synced lyrics. Static lines render fully
   // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
@@ -1575,7 +1654,7 @@
   let adaptiveLayoutLastAt = 0;
   // Defaults track the Synced Lyrics settings popup so a fresh install (and the
   // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
-  // pushed up, full-strength background vocals, adaptive spacing + romanization
+  // pushed up, full-strength background vocals, adaptive spacing
   // on. The popup schema in src/content/content.js mirrors these values; if you
   // change one, change both.
   //
@@ -1598,7 +1677,10 @@
     syllableAnimation: 1.0,
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
-    romanizationEnabled: true,
+    // On-device English translation of non-English lines (Chrome 138+ desktop).
+    // OFF by default: the first foreign song would otherwise download a language
+    // pack and add a second line of text to lyrics the user already knows.
+    autoTranslate: false,
     legibilityBackdrop: false,
     // Animated Apple Music cover art (m8tec HLS) — the player view's cover AND the
     // fullscreen pane. OFF by default (AJ, 2026-10-07): it is a network-backed
@@ -1607,8 +1689,9 @@
     animatedArt: false,
     // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
     // prefers the eased glide into the active line. (It was flipped OFF on
-    // 2026-09-28 to match an older screenshot; that is reverted.) Ignored
-    // entirely while simpleLyrics is ON, which forces its own spring scroll.
+    // 2026-09-28 to match an older screenshot; that is reverted.) The Apple
+    // engine springs its own scroll and ignores it; the Spicy renderer honours
+    // it, whichever kind of track Spicy is drawing.
     smoothScrolling: true,
     scrollLeadEnabled: false,
     scrollLeadMs: 250,
@@ -1627,16 +1710,28 @@
     // (Official Audio / Lyric Video) use Kawarp — see FS_STATIC_VIDEO_RE.
     // AJ, 2026-09-28.
     preferKawarpAlways: false,
-    // Extend the adaptive lyric readability shade (the black gradient behind
-    // the lyrics) to the SIDE layout for music videos, where the lyrics sit
-    // over the blurred video backdrop — not just Video Background. ON by
-    // default (AJ, 2026-09-28: "i would default it to on").
-    mvLyricsShade: true,
+    // Fullscreen without the Fullscreen API: the overlay is a fixed, inset-0
+    // surface already, so requesting native fullscreen is the ONLY thing that
+    // takes over the display. OFF by default, which keeps the previous behaviour
+    // (and Chrome's Escape/F11 path) exactly as it was. ON keeps the tab strip
+    // and every other tab usable while the fullscreen view is up (AJ, 2026-10-22).
+    fullscreenInPage: false,
     // Apple-Music-style rendering (schema row lives in content.js). OFF by default
     // so the existing karaoke look is unchanged until the user opts in. When ON,
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
-    simpleLyrics: false,
+    // PINNED, not user-facing (AJ, 2026-10-23). "Apple style" stopped being a
+    // master switch when the renderer became per-kind; what is left of it is the
+    // LOOK question (which splines, which body class), and that is derived from
+    // who owns the track. Pinned like `offset` below, so a value stored back when
+    // this was a toggle cannot leave half the renderer switched off.
+    simpleLyrics: true,
+    // Which renderer draws which KIND of track (the Renderer rows in the panel).
+    // Each row names its own renderer, so these are not inverses of one setting:
+    // both false = Spicy for words, engine for lines, which is the default and
+    // the behaviour that was hard-coded before. Both true swaps them.
+    amllWordTracks: false,
+    spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
     // per-letter syllable karaoke, so a word lights up whole with no syllable
     // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
@@ -1649,11 +1744,6 @@
     // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
     // ON — joinApplies() checks the master switch first.
     joinBgSyllables: true,
-    // lrc.red TTML often ships one span per syllable ("shi" + "ning"). Merge
-    // those runs into words at PARSE time so the fill/glow covers the whole
-    // word. ON by default (AJ, 2026-10-20); separate from the global whole-word
-    // renderer toggle above, which only changes how each word is painted.
-    joinLrcRedSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
@@ -1667,13 +1757,13 @@
     // bottom and stops at the first source that has the track. (The user-facing
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
-    sourceOrder: ["spicy", "lrc.red", "unison", "lrclib"],
+    sourceOrder: ["spicy", "lrclib"],
   };
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
   function normalizeSourceOrder(value) {
-    const all = ["spicy", "lrc.red", "unison", "lrclib"];
+    const all = ["spicy", "lrclib"];
     const seen = new Set();
     const out = [];
     if (Array.isArray(value)) {
@@ -1734,9 +1824,8 @@
   }
 
   function applySettings(next) {
-    const prevRomanization = currentSettings.romanizationEnabled;
+    const prevAutoTranslate = currentSettings.autoTranslate;
     const prevSize = currentSettings.size;
-    const prevSimpleLyrics = currentSettings.simpleLyrics;
     const prevJoinSyllables = currentSettings.joinSyllables;
     const prevAnimatedArt = currentSettings.animatedArt;
     // Only merge a plain object. `Object.assign` will happily spread a string or
@@ -1780,10 +1869,14 @@
       currentSettings.adaptiveSpacing,
       DEFAULT_SETTINGS.adaptiveSpacing
     );
-    currentSettings.romanizationEnabled = booleanValue(
-      currentSettings.romanizationEnabled,
-      DEFAULT_SETTINGS.romanizationEnabled
+    currentSettings.autoTranslate = booleanValue(
+      currentSettings.autoTranslate,
+      DEFAULT_SETTINGS.autoTranslate
     );
+    // Turning translation off must release the translator and the chip now,
+    // not on the next track: the language pack is the largest thing this add-on
+    // holds in memory.
+    if (!currentSettings.autoTranslate) autoTranslateShutdown();
     currentSettings.legibilityBackdrop = booleanValue(
       currentSettings.legibilityBackdrop,
       DEFAULT_SETTINGS.legibilityBackdrop
@@ -1815,21 +1908,24 @@
       currentSettings.preferKawarpAlways,
       DEFAULT_SETTINGS.preferKawarpAlways
     );
-    currentSettings.mvLyricsShade = booleanValue(
-      currentSettings.mvLyricsShade,
-      DEFAULT_SETTINGS.mvLyricsShade
+    // Pinned: the Apple look is chosen per track by the renderer rows now, so
+    // this can no longer be turned off from the UI (see DEFAULT_SETTINGS).
+    currentSettings.simpleLyrics = true;
+    currentSettings.amllWordTracks = booleanValue(
+      currentSettings.amllWordTracks,
+      DEFAULT_SETTINGS.amllWordTracks
     );
-    currentSettings.simpleLyrics = booleanValue(
-      currentSettings.simpleLyrics,
-      DEFAULT_SETTINGS.simpleLyrics
+    currentSettings.spicyLineTracks = booleanValue(
+      currentSettings.spicyLineTracks,
+      DEFAULT_SETTINGS.spicyLineTracks
+    );
+    currentSettings.fullscreenInPage = booleanValue(
+      currentSettings.fullscreenInPage,
+      DEFAULT_SETTINGS.fullscreenInPage
     );
     currentSettings.joinSyllables = booleanValue(
       currentSettings.joinSyllables,
       DEFAULT_SETTINGS.joinSyllables
-    );
-    currentSettings.joinLrcRedSyllables = booleanValue(
-      currentSettings.joinLrcRedSyllables,
-      DEFAULT_SETTINGS.joinLrcRedSyllables
     );
     currentSettings.joinBgSyllables = booleanValue(
       currentSettings.joinBgSyllables,
@@ -1866,8 +1962,6 @@
     // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
     // re-publish would be a silent no-op (AJ, 2026-10-07).
     try { publishRendererKit(true); } catch (e) {}
-    // Reflect the MV-shade option on the overlay (no-op before fullscreen).
-    syncFsMvShadeClass();
     // Animated cover art toggle, applied LIVE (AJ, 2026-10-03). OFF tears the
     // stream down immediately; ON re-runs the lookup for the current track.
     if (currentSettings.animatedArt === false) {
@@ -1876,32 +1970,26 @@
       refreshAnimatedArt(getCurrentTrack());
     }
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
+    // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
+    // being installed (AJ, 2026-10-22).
     // Simple lyrics is a RENDER MODE, not a per-element tweak, so it is a BODY
     // class — the same shape as the legibility backdrop above. A body class also
     // covers the fullscreen overlay, which reparents the panel but leaves body
     // alone, so the mode follows the lyrics into fullscreen for free.
-    document.body.classList.toggle("ym-sl-simple-lyrics", !!currentSettings.simpleLyrics);
-    // Simple lyrics now renders through the REAL AMLL engine (see 22-amll-integration).
-    // When the mode flips, activate/deactivate it; when it stays on, just ensure it
-    // is shown. On any failure the engine falls back to Aurora's glow-free Simple
-    // renderer, so this can never break the lyrics view.
-    if (prevSimpleLyrics !== currentSettings.simpleLyrics) {
-      if (currentSettings.simpleLyrics) amllActivate();
-      else amllDeactivate();
-    } else if (currentSettings.simpleLyrics) {
-      amllShow();
-    }
-    // When Simple Lyrics is switched OFF, drop the per-line depth alpha that
-    // animate() injected while it was on, so normal mode's state-class alpha
-    // (NotSung/Sung/Active) takes over again instead of a stale inline value.
-    if (!currentSettings.simpleLyrics && prevSimpleLyrics) {
-      for (const ln of modelLines) {
-        if (ln.HTMLElement) {
-          ln.HTMLElement.style.removeProperty("--ym-sl-line-alpha");
-          ln.HTMLElement.style.removeProperty("--amll-depth-scale");
-        }
-      }
-    }
+    // Which renderer owns the current content decides the LOOK as well as the
+    // engine, and it is the user's per-kind choice (the two Renderer rows:
+    // amllWordTracks / spicyLineTracks). Recompute before the body class so a
+    // settings change can never leave a track dressed in the other renderer's
+    // clothing.
+    let rendererChanged = false;
+    try {
+      rendererChanged = amllApplyTrackRenderer(lastRendererContent) === true;
+    } catch (e) {}
+    document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
+    // amllApplyTrackRenderer above already started, showed or hid the engine for
+    // the renderer the settings now point at. Every path into the engine goes
+    // through it, so there is no separate "mode" to flip here.
     // Turning Smooth Scrolling off mid-glide hands the move off to the instant
     // path (upstream does the same — their $smoothScrolling listener calls
     // _handOffSmoothScroll). Stopping here means the glide cannot keep steering
@@ -1917,6 +2005,9 @@
         window.YTMod.bus.emit("lyrics:settings", {
           smoothScrolling: currentSettings.smoothScrolling !== false,
           simpleLyrics: currentSettings.simpleLyrics === true,
+          // Flipping a Renderer row re-homes the CURRENT track, so the PiP has to
+          // switch renderer now rather than on the next song.
+          renderer: amllTrackUsesEngine(lastRendererContent) ? "amll" : "spicy",
           scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
           scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
         });
@@ -1936,22 +2027,24 @@
     // a window open and re-pins each frame, which is what covers the reflow
     // actually landing a frame after the custom property is set.
     if (prevSize !== currentSettings.size) recentreActiveLine();
-    // Romanization is computed at build time, so toggling it means rebuilding the
-    // current lines. No lines yet (e.g. first init) -> nothing to do.
-    if (prevRomanization !== currentSettings.romanizationEnabled && lastRendererContent) {
-      buildRendererLines(lastRendererContent);
-    }
-    // Simple lyrics changes how the gradient is DRIVEN, and existing words hold
-    // their old inline --gradient-position. The CSS redirect is !important so it
-    // beats those, but an already-Sung word would then fall back to the registered
-    // property's -50% default and read as un-sung until it next changed state. A
-    // rebuild puts every word back through the animator under the new mode.
-    if (prevSimpleLyrics !== currentSettings.simpleLyrics && lastRendererContent) {
+    // Translation slots are per line, so turning it on or off has to rebuild the
+    // current lines rather than wait for the next song.
+    if (prevAutoTranslate !== currentSettings.autoTranslate && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
     // Join syllables flips makeWord between letterGroup (per-letter karaoke) and
     // plain .word (whole-word fill), so the current lines must rebuild too.
     if (prevJoinSyllables !== currentSettings.joinSyllables && lastRendererContent) {
+      buildRendererLines(lastRendererContent);
+    }
+    // The renderer choice (the mode itself, or WHICH KIND of track it draws)
+    // changes how the gradient is driven and which spline set is installed, and
+    // existing words hold their old inline --gradient-position. The CSS redirect
+    // is !important so it beats those, but an already-Sung word would then fall
+    // back to the registered property's -50% default and read as un-sung until
+    // its next state flip. A rebuild puts every word back through the animator
+    // under the new owner.
+    if (rendererChanged && lastRendererContent) {
       buildRendererLines(lastRendererContent);
     }
   }
@@ -2005,6 +2098,11 @@
       overflow: hidden;
       background: transparent !important;
       color: #fff;
+      /* Pinned to YouTube's own root size, captured by content.js before it
+         applies the YouTube page's Interface text size: the panel keeps the
+         inherited size it has always had and never scales with the site
+         (AJ, 2026-10-22). */
+      font-size: var(--ym-yt-root-fs, 10px);
       /* The panel's own chrome (credits, chips, buttons, the options overlay)
          keeps the bundled face. The custom font is scoped to .LyricsContent
          below, so it only reaches the lyric lines (AJ, 2026-10-20). */
@@ -2721,6 +2819,33 @@
       justify-content: center;
       text-align: center;
     }
+    /* This stylesheet has NO global .hidden rule, so the class the JS toggles on
+       this button was cosmetic and "Delete saved" stayed on screen even with a
+       track saved. Made it real here, scoped to the button (AJ, 2026-10-22). */
+    .ym-sl-delete-permanent-button.hidden { display: none; }
+    /* With nothing saved to delete, Upload must not sit in half of a two-column
+       row next to an empty cell. */
+    .ym-sl-options-file-actions:has(.ym-sl-delete-permanent-button.hidden) {
+      grid-template-columns: 1fr;
+    }
+    /* File tab: the per-song cache row under the import actions. One caption
+       line whose copy carries the state (cached · N days / queued), plus the
+       full-width action. */
+    .ym-sl-file-note {
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255,255,255,.6);
+      padding: 0 2px;
+    }
+    .ym-sl-file-note.hidden { display: none; }
+    /* Queued state reads as a commitment, not as dim helper copy. */
+    .ym-sl-song-cache-status.pending { color: rgba(255,255,255,.82); }
+    .ym-sl-options-panel .ym-sl-song-cache-clear {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
+    }
+    .ym-sl-song-cache-clear.hidden { display: none; }
     .ym-sl-options-body .ym-sl-track { width: 100%; }
     /* The offset row is a wide horizontal rail; let it wrap and give the slider
        its own line so nothing overflows the 340px panel. */
@@ -2831,6 +2956,9 @@
       background: #0a0a0c;
       color: #fff;
       overflow: hidden;
+      /* Same pin as .ym-sl-panel: the overlay is appended to <body>, which
+         inherits YouTube's scaled root size (AJ, 2026-10-22). */
+      font-size: var(--ym-yt-root-fs, 10px);
     }
     /* Media and lyrics are ALWAYS absolute and animate their geometry. The
        transition list covers every property that changes between layouts.
@@ -2890,10 +3018,33 @@
       width: 50%;
     }
     .ym-sl-fs-overlay .ym-sl-fs-lyrics {
-      left: 57.4%;
-      width: 42.6%;
-      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px);
+      /* 52.5% hugs the media column: its box is 2% + 50% wide at EVERY video
+         aspect ratio (aspect-ratio only drives the height, and max-height
+         clamps that instead of the width), so the pane's right edge is a flat
+         52% and 0.5% (~10px at 1920) is the whole safety margin. The lyrics
+         can therefore never sit on top of the video, no matter what the video
+         is shaped like — that is the "push it right if it would overlap"
+         requirement, guaranteed by construction rather than measured.
+         If the media column moves, this number moves with it (51% + 50%).
+         The visible air between the two is the left padding below (AJ asked
+         for the words to sit near the video with a little space, 2026-10-21). */
+      left: 52.5%;
+      /* Runs to the right edge, exactly as the old 57.4% / 42.6% pair did, so
+         the wider pane only buys space for the words instead of leaving a
+         dead strip at the screen edge. */
+      width: 47.5%;
+      /* No vertical inset (AJ, 2026-10-23). The pane used to start 84px inside
+         the screen, so the scrollport ended on a padded edge and a line leaving
+         it read as chopped off rather than as leaving the monitor. With the
+         inset gone the words run edge to edge and the mask does the fading. */
+      padding: 0 clamp(24px, 4vw, 72px);
       box-sizing: border-box;
+    }
+    /* Music videos only: the words start just past the video's own edge instead
+       of the standard 4vw inset, which is what put the old 176px void there.
+       Scoped to has-video so cover art keeps its 4vw text inset. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      padding-left: clamp(18px, 2vw, 36px);
     }
     /* "Background" layout: media fills the overlay (3% padding = card inset
        via the video's inline padding-box sizing); lyrics float on the right
@@ -2912,17 +3063,18 @@
       left: 61%;
       width: 39%;
       min-width: 320px;
-      /* Asymmetric padding so lyric text starts past the left-edge fade. */
-      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px) clamp(28px, 6vh, 84px) clamp(80px, 6vw, 120px);
+      /* Asymmetric padding so lyric text starts past the left-edge fade.
+         No vertical inset, same as the side layout: the column owns the full
+         screen height and dissolves at the monitor's own edges. */
+      padding: 0 clamp(24px, 4vw, 72px) 0 clamp(80px, 6vw, 120px);
       box-sizing: border-box;
-      /* No permanent black surface: the shade layer below activates only when
-         the sampled video behind the lyrics is genuinely near-white. */
+      /* No permanent black surface: the shade layer below is the readability
+         layer (shade + blur), and it is always on while the lyrics are. */
       background: transparent;
       -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
       mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
-      --ym-sl-fs-lyrics-shade-opacity: 0;
       transition:
         opacity 1.1s ease,
         left .45s cubic-bezier(.22, .61, .36, 1),
@@ -2936,7 +3088,10 @@
       top: 0;
       right: 0;
       bottom: 0;
-      left: 53%;
+      /* Starts just left of the lyric pane (which begins at 61%), not out in the
+         middle of the video: a deep blur that begins 4% early reads as a haze
+         over the picture rather than a frost behind the words. */
+      left: 57%;
       z-index: 2;
       pointer-events: none;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
@@ -2949,27 +3104,42 @@
       );
       -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
       mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      /* The blur rides ON this layer, so it fades exactly with the black
+         gradient: the layer's opacity scales the backdrop-filter output and the
+         background together, and the mask clips both to the same left-edge
+         fade. No separate element, no second timing to keep in sync. Radius is
+         deliberately LIGHT: AJ tuned it down three times (30-56px, then 24-46px,
+         then 16-30px all still read as too much frost over the picture), so this
+         is a soft-focus veil rather than a deep blur. Saturation stays lifted so
+         colour survives it - a plain blur greys the video out. */
+      -webkit-backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
+      backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
       transition: opacity .22s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics-shade {
       display: block;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
     }
-    /* Opt-in: the SAME adaptive readability shade, but for a music video in
-       the SIDE layout, where the lyrics column sits over the blurred video
-       backdrop. Driven by the "Shade lyrics over bright music video" setting
-       (-> .ym-sl-fs-mv-shade on the overlay, see syncFsMvShadeClass). No video
-       means no shade, so Lyrics Only and cover-art tracks are untouched. */
-    .ym-sl-fs-overlay.ym-sl-fs-mv-shade.ym-sl-fs-has-video .ym-sl-fs-lyrics-shade {
+    /* Video + Lyrics: the lyric column floats over the ambient backdrop too
+       (Kawarp for songs and still uploads, a blurred frame for live MVs), and
+       that backdrop can be just as bright as a full-bleed video. Same shade and
+       blur, sized to each variant's own column: cover art starts at 44%, MVs at
+       52.5%. Portrait hides it further down, where both compositions drop the
+       column and the words no longer sit beside the picture. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
       display: block;
+      left: 44%;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+      left: 52.5%;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
       position: relative;
       z-index: 3;
     }
-    /* The readability shade is adaptive: it is transparent unless the video
-       under the lyric column contains enough near-white pixels. */
+    /* The readability layer is constant (see syncFullscreenLyricsShade); only
+       its state - lyrics visible or not - moves its opacity. */
     /* During a long intro or instrumental gap, dim rather than remove the
        lyrics so the video remains the visual focus. The hidden-toggle rule
        below still wins when the user explicitly hides lyrics. */
@@ -3239,6 +3409,22 @@
       /* No reserved width on the chip: the custom <div> slider expands via a
          composited transform, which never reflows the chip and leaves no gap. */
       flex: 0 0 auto;
+    }
+    /* Scale glyphs bracketing the volume bar. They are markers, not controls:
+       the slider itself stays the only thing that takes a drag or a key. Only the
+       cover-art column reveals them (see its layout block) - the video and
+       video-background layouts keep the bare bar beside the time row. */
+    .ym-sl-fs-volume-icon {
+      display: none;
+      fill: none;
+      stroke: currentColor;
+      /* 2.6 on the 24-grid draws at ~2.4px once the glyph is 22px, which is the
+         weight of the transport's redrawn shuffle / repeat strokes. At 1.7 the
+         speaker vanished beside the 3px bar (AJ, 2026-10-23). */
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
     }
     /* Bottom scrubber: a full-width thin line pinned to the bottom edge. It is
        hidden by default and only appears while the overlay is hovered/focused,
@@ -3518,6 +3704,14 @@
     }
     .ym-sl-fs-player-controls .ym-sl-fs-player-prev svg,
     .ym-sl-fs-player-controls .ym-sl-fs-player-next svg {
+      width: 26px;
+      height: 26px;
+    }
+    /* Shuffle / repeat are redrawn as thick strokes, so they need a little more
+       room than the old solid 22px glyphs to carry the same weight beside the
+       prev/next triangles and the play button. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat svg {
       width: 26px;
       height: 26px;
     }
@@ -4355,7 +4549,21 @@
       padding-left: 0;
       border-left: 0;
       width: 100%;
+      /* Room for the two scale glyphs: they sit INSIDE the artwork's width, so
+         the bar shortens by their size and gaps rather than spilling past the
+         cover (AJ, 2026-10-23). */
+      gap: 12px;
       pointer-events: auto;
+    }
+    /* The glyphs ride the bar's own line: quiet speaker on the left, loud one on
+       the right, both at the low opacity of unplayed chrome. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-icon {
+      display: block;
+      flex: 0 0 auto;
+      width: 22px;
+      height: 22px;
+      color: rgba(255, 255, 255, .62);
+      pointer-events: none;
     }
     /* No hover grow on the volume bar here (AJ, 2026-10-03). */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
@@ -4780,11 +4988,15 @@
        static card is shown while the animated art loads — deliberately, so the
        pane is never blank — and the card is only REMOVED once the video has been
        attached, which is what left both visible at once. Hide the card the moment
-       a READY art video exists in the pane, so it crossfades instead of
-       double-exposing. :has() keeps this pure CSS: no extra JS timing to desync. */
+       a READY art video exists in the pane. :has() keeps this pure CSS: no extra
+       JS timing to desync.
+
+       display:none, NOT opacity (AJ, 2026-10-21): the pane is a flex row, so an
+       opacity-0 card still reserved its ~583px of space and squeezed the ready
+       video to half width until JS hid the card two seconds later — the two
+       covers sitting side by side. The video's own 0.5s fade is the crossfade. */
     .ym-sl-fs-media:has(> video.ym-sl-fs-art-video.ym-sl-fs-art-video-ready) > img {
-      opacity: 0;
-      transition: opacity .3s ease;
+      display: none;
     }
     .ym-sl-fs-media > img,
     .ym-sl-fs-media > video.ym-sl-fs-art-video {
@@ -5201,6 +5413,17 @@
     }
     .ym-sl-import:hover { background: rgba(255,255,255,.14); }
     .ym-sl-import:active { transform: scale(.97); }
+    /* The lyric search button after three empty answers: greyed and inert, with
+       the reason spelled out in the status line above it. */
+    .ym-sl-import:disabled {
+      opacity: .38;
+      cursor: not-allowed;
+      background: rgba(255,255,255,.05);
+      border-color: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.6);
+    }
+    .ym-sl-import:disabled:hover { background: rgba(255,255,255,.05); }
+    .ym-sl-import:disabled:active { transform: none; }
     /* Inside the OPTIONS panel, match the selects they sit beside: same radius,
        slightly larger type. Scoped, so the panel's own toolbar buttons keep their
        compact sizing (AJ, 2026-10-01). */
@@ -5224,7 +5447,7 @@
       align-items: center;
       justify-content: safe center;
       gap: 0;
-      padding: 2rem 8%;
+      padding: 20px 8%;
       text-align: center;
       animation: ym-sl-notice-in .35s cubic-bezier(.22,1,.36,1) both;
     }
@@ -5399,7 +5622,22 @@
     .ym-sl-search-status {
       min-height: 14px;
       font-size: 11px;
+      line-height: 1.45;
       color: rgba(255,255,255,.55);
+    }
+    /* The empty state's Discord invite: the status line is the only place the
+       panel explains a miss, so the link has to read as one at 11px. */
+    .ym-sl-search-link {
+      color: rgba(63,224,197,.95);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      cursor: pointer;
+    }
+    .ym-sl-search-link:hover { color: #3fe0c5; }
+    /* Shown once the three tries are spent, under the empty-state sentence. */
+    .ym-sl-search-empty-note {
+      margin-top: 4px;
+      color: rgba(255,255,255,.72);
     }
     .ym-sl-search-foot {
       font-size: 10.5px;
@@ -5816,7 +6054,10 @@
          The user's size setting still multiplies via --ym-sl-lyrics-scale.
          NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK -- this CSS lives inside a
          JS template literal, so a stray backtick terminates it early. */
-      --DefaultLyricsSize: calc(clamp(1.7rem, calc(1cqw * 7), 3.5rem) * var(--ym-sl-lyrics-scale));
+      /* px, not rem: the root font-size is now user-scalable from the panel's
+         YouTube page, and the lyrics must not grow with YouTube's own UI —
+         their size has its own setting (AJ, 2026-10-22). */
+      --DefaultLyricsSize: calc(clamp(17px, calc(1cqw * 7), 35px) * var(--ym-sl-lyrics-scale));
       --amll-lyric-player-font-size: var(--DefaultLyricsSize);
       --vertical-gap: 0px;
       width: 100%;
@@ -5850,6 +6091,16 @@
       -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       transition: opacity .25s ease;
+    }
+    /* Fullscreen: the scrollport is now the whole screen height, so the fade
+       belongs to the monitor edge, not to a padded box inside it. Keep the top
+       ramp short — it only softens a line climbing out of the top edge — and
+       let the bottom keep fading down to the very last pixel, where upcoming
+       lines leave for the controls. The active line rests at the halfway point,
+       clear of both (AJ, 2026-10-23). */
+    .ym-sl-fs-lyrics #ym-sl-panel.SpicyRenderer .LyricsContent {
+      -webkit-mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
+      mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
     }
     /* Honour a reduced-motion request: the native ease above is a scroll
        animation like any other. The spring path is already off for these users
@@ -5904,6 +6155,62 @@
       transform-origin: left center;
       animation: ym-sl-mv-sync-timer 5s linear forwards;
     }
+    /* On-device translation setup. Unlike the notice chips above this one can
+       carry a button (Chrome needs a click before a language pack may
+       download), so it takes pointer events and is its own flex row. */
+    .ym-sl-translate-chip {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 6;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      max-width: calc(100% - 28px);
+      padding: 6px 6px 6px 12px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, .62);
+      color: rgba(255, 255, 255, .84);
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      white-space: nowrap;
+      opacity: 1;
+      transition: opacity .45s ease;
+      -webkit-backdrop-filter: blur(10px);
+      backdrop-filter: blur(10px);
+    }
+    .ym-sl-translate-chip.ym-sl-fading {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-translate-chip-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ym-sl-translate-chip-action {
+      flex: none;
+      padding: 4px 9px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .14);
+      color: #fff;
+      font: inherit;
+      letter-spacing: inherit;
+      cursor: pointer;
+      transition: background .18s ease;
+    }
+    .ym-sl-translate-chip-action:hover {
+      background: rgba(255, 255, 255, .24);
+    }
+    .ym-sl-translate-chip-action:active {
+      background: rgba(255, 255, 255, .3);
+    }
+    .ym-sl-translate-chip-action:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .8);
+      outline-offset: 2px;
+    }
     @keyframes ym-sl-mv-sync-timer {
       from { transform: scaleX(1); }
       to   { transform: scaleX(0); }
@@ -5931,6 +6238,7 @@
     #ym-sl-panel.SpicyRenderer .line {
       --font-size: var(--DefaultLyricsSize);
       --BlurAmount: 0px;
+
       --DefaultLyricsScale: .95;
       --DefaultEmphasisLyricsScale: .95;
       --DefaultLineScale: 1;
@@ -5955,8 +6263,13 @@
       /* Fade the gradient paint. Group opacity briefly blanks clipped glyphs
          while their per-word sweep repaints at the line's onset. */
       transition:
+        filter .4s cubic-bezier(.22,.61,.36,1),
         --ym-sl-line-alpha .2s cubic-bezier(.61,1,.88,1),
         --ym-sl-entry-shadow-alpha .2s cubic-bezier(.61,1,.88,1);
+      /* Depth blur. animate() writes the filter per line with the engine's own
+         spacing (1px per line away, capped at 5px) and clears it on the
+         playing line, exactly like the Apple-Music renderer, so the sharp line
+         never pays for a filter layer. */
       font-size: var(--font-size) !important;
       /* SF Pro's descenders need a little more line-box room than the
          original SpicyLyrics font, especially while the glyphs are lifted. */
@@ -6015,23 +6328,45 @@
       position: relative;
       z-index: 1;
     }
-    #ym-sl-panel.SpicyRenderer .line .romaji {
+    /* On-device English translation of a foreign line (23-auto-translate).
+       Deliberately a smaller, quieter line than the lyric it explains: it is
+       meaning, not pronunciation, so it must never compete with the sung
+       words. Empty until the translation arrives, and display:none while empty
+       so a pending line keeps its exact old height. */
+    #ym-sl-panel.SpicyRenderer .line .translation {
       flex-basis: 100%;
       width: 100%;
-      order: 99;
-      font-size: .52em;
-      line-height: 1.25;
+      order: 100;
+      font-size: .5em;
+      line-height: 1.3;
       font-weight: 500;
-      letter-spacing: .04em;
+      letter-spacing: .01em;
       text-transform: none;
-      margin-top: .28em;
-      color: rgba(255,255,255,.62);
+      /* The gloss is English even when the lyric is Hebrew or Arabic. Isolate
+         it so an RTL line cannot reverse the order of its words. */
+      direction: ltr;
+      unicode-bidi: isolate;
+      margin-top: .16em;
+      color: rgba(255,255,255,.58);
       text-shadow: 0 1px 3px rgba(0,0,0,.45);
       opacity: var(--ym-sl-line-alpha);
       pointer-events: none;
     }
-    #ym-sl-panel.SpicyRenderer .line.Active .romaji {
-      opacity: calc(.85 * var(--ym-sl-line-alpha));
+    #ym-sl-panel.SpicyRenderer .line .translation:empty {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .translation {
+      opacity: calc(.9 * var(--ym-sl-line-alpha));
+      color: rgba(255,255,255,.7);
+    }
+    /* AMLL draws translations through the engine's own sub-line, which upstream
+       keeps at .3 opacity, which is too faint for the line's meaning, so lift it
+       one step. */
+    #ym-sl-panel #ym-sl-amll-host .FmKaba_lyricSubLine {
+      opacity: .4;
+      /* Same rule as the Spicy translation above: the sub-line is English. */
+      direction: ltr;
+      unicode-bidi: isolate;
     }
     #ym-sl-panel.SpicyRenderer .line:hover {
       z-index: 2;
@@ -6081,12 +6416,35 @@
       text-align: right;
       transform-origin: right center;
     }
+    /* Per-kind weight (AJ, 2026-10-22). The bundled face tops out at 700, so
+       extra weight comes from a hairline text-stroke rather than a synthetic
+       bold. The stroke is TRANSPARENT on purpose: a stroke is still part of the
+       background-clip:text region, so the clipped gradient grows by the stroke
+       width and the letters genuinely get heavier, while the stroke itself
+       paints nothing. A white stroke (at ANY alpha) is painted OVER the clipped
+       gradient, so the glyph edge becomes fill + stroke * (1 - fill): on a dim
+       .25-alpha word that is .44, almost double — a white outline around grey
+       letters, the "bright outer layer" AJ reported twice (2026-10-22).
+       Lowering the alpha only scaled that rim down; it cannot remove it.
+       #ym-sl-amll-host gets away with a white stroke because its fill is opaque.
+       Word-by-word gets the heaviest cut, line-synced matches AMLL's 0.6px,
+       and plain (static) TTML only a touch heavier than before. */
+    #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static) {
+      --ym-sl-lyric-stroke: 0.75px;
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed {
+      --ym-sl-lyric-stroke: 0.6px;
+    }
+    #ym-sl-panel.SpicyRenderer .line.static {
+      --ym-sl-lyric-stroke: 0.35px;
+    }
     #ym-sl-panel.SpicyRenderer .line .word,
     #ym-sl-panel.SpicyRenderer .line .letter,
     #ym-sl-panel.SpicyRenderer .line .letterGroup {
       position: relative;
       display: inline-block;
       font-weight: 700 !important;
+      -webkit-text-stroke: var(--ym-sl-lyric-stroke, 0) transparent;
       transform-origin: center center;
       --gradient-position: -20%;
       --gradient-color: 255;
@@ -6131,6 +6489,16 @@
       inherits: true;
       initial-value: 1;
     }
+    /* Registered so the font can actually FADE between the sung and unsung
+       fill strengths. Unregistered custom properties cannot be animated, which
+       is why a line's fill used to vanish in one frame when the line ended.
+       Only the Apple-style word track opts into the transition below, so no
+       other mode changes. */
+    @property --gradient-alpha-end {
+      syntax: "<number>";
+      inherits: true;
+      initial-value: .5;
+    }
     @property --ym-sl-line-alpha {
       syntax: "<number>";
       inherits: true;
@@ -6151,6 +6519,17 @@
       syntax: "<length>";
       inherits: false;
       initial-value: 0px;
+    }
+    /* Ease the fill strength when a line crosses Sung/NotSung. The karaoke
+       sweep is driven per word, but the STATE flip (bright -> dim) replaced the
+       gradient alpha instantly, so the fill snapped off at the line end instead
+       of receding. Both vars are registered, so a transition is legal here, and
+       neither is ever written per frame (only the state classes set them), so
+       this cannot lag the karaoke sweep itself. */
+    #ym-sl-panel.SpicyRenderer .line :is(.word, .letter) {
+      transition:
+        --gradient-alpha .42s cubic-bezier(.61, 1, .88, 1),
+        --gradient-alpha-end .42s cubic-bezier(.61, 1, .88, 1);
     }
     /* Simple lyrics — Apple Music / AMLL style. The spring factories are stubbed
        and the splines swapped in JS (applySimpleLyricsSplines). The look is the
@@ -6372,7 +6751,14 @@
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .word,
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letter,
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letterGroup {
-      transition: text-shadow .3s ease;
+      /* The gradient alphas ride along so a background row's fill recedes at
+         the line end instead of vanishing in one frame. Both are driven only by
+         state classes (never per frame), so transitioning them cannot lag the
+         karaoke sweep. */
+      transition:
+        text-shadow .3s ease,
+        --gradient-alpha .42s cubic-bezier(.61, 1, .88, 1),
+        --gradient-alpha-end .42s cubic-bezier(.61, 1, .88, 1);
     }
     #ym-sl-panel.SpicyRenderer .line.musical-line {
       --ym-sl-line-alpha: 1 !important;
@@ -6389,7 +6775,7 @@
       opacity: 1;
     }
     #ym-sl-panel.SpicyRenderer .line.musical-line .dotGroup {
-      --dot-gap: clamp(.005rem, 1.7cqw, .18rem);
+      --dot-gap: clamp(.05px, 1.7cqw, 1.8px);
       display: flex;
       flex-direction: row;
       gap: var(--dot-gap);
@@ -6443,7 +6829,7 @@
       font-size: 14px;
       line-height: 1.5;
       text-align: center;
-      padding: 2rem 6%;
+      padding: 20px 6%;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
       margin: 48px 4px 22px;
@@ -6487,10 +6873,6 @@
       color: rgba(255,255,255,.5);
       font-weight: 600;
       letter-spacing: .02em;
-      /* Keep the label above the pill's glow halo (the halo is a negative-z
-         pseudo that would otherwise wash over this text). */
-      position: relative;
-      z-index: 1;
     }
     /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
        caused the conic to fill the pill interior; reverting to the direct link). */
@@ -6525,77 +6907,6 @@
       flex: none;
       background: rgba(255,255,255,.12);
     }
-    /* Registered so Chrome definitely re-resolves the conic when the JS rAF loop
-       updates the angle on :root (AJ's Chrome would not reliably repaint a conic
-       driven by an UNregistered custom property — the v6 failure). inherits:true
-       so the :root value cascades to every pill's ::before/::after. No CSS
-       animation targets it, so it simply follows the JS-set value. */
-    @property --ym-sl-pfp-spin {
-      syntax: "<angle>";
-      inherits: true;
-      initial-value: 0deg;
-    }
-    /* Attribution glow v9 (AJ, 2026-09-28): two colours as a THIN BAND HUGGING
-       the pill's EDGE. The pill itself stays pill-shaped and STATIC — only the
-       COLOUR SEAM glides around the perimeter (a light travelling round the
-       border), so it reads as "gliding", never a rigid spin.
-
-       Mechanism: a masked pill-shaped ring (XOR mask; padding = ring
-       thickness) painted with a conic-gradient whose 'from' angle is the
-       registered --ym-sl-pfp-spin (inherits). A single CSS animation on the
-       PANEL drives that angle — pure CSS, no JS rAF, no per-frame style
-       invalidation (v8's rAF loop tanked fps to ~20 by setProperty-ing the root
-       every frame; v9 is compositor-friendly). The soft glow is a SECOND masked
-       ring, wider (10px) and blurred (10px), so the halo follows the seam.
-       No fill inside the pill. --ym-sl-pfp-accent-a/-b set on the ROW by
-       buildPersonRow (complementary default pair; sampleAvatarColor() upgrades
-       when the canvas is readable). */
-    /* Glide driver (v10, AJ, 2026-09-28): a JS rAF (startPfpGlowEngine())
-       sets --ym-sl-pfp-spin on EACH .ym-sl-uploader-link every frame — scoped
-       to the pill (NOT :root), so only the pill + its pseudos get invalidated
-       (v8's root-level setProperty tanked fps to ~20 by cascade-invalidating
-       the whole tree). JS-driven because AJ's Chrome reliably repaints the
-       conic on JS setProperty but NOT on CSS @keyframes animation of the
-       same registered @property (v6/v9 freeze). Crisp ::before ring (z:-1)
-       sits on top; soft glow ::after (z:-2) paints behind it.
-       prefers-reduced-motion is handled in the JS engine. */
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::before {
-      content: "";
-      position: absolute;
-      inset: -2px;
-      border-radius: inherit;
-      padding: 2px;
-      background: conic-gradient(
-        from var(--ym-sl-pfp-spin, 0deg),
-        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
-        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
-      );
-      -webkit-mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      -webkit-mask-composite: xor;
-      mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      mask-composite: exclude;
-      pointer-events: none;
-      z-index: -1;
-    }
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::after {
-      content: "";
-      position: absolute;
-      inset: -8px;
-      border-radius: inherit;
-      background: conic-gradient(
-        from var(--ym-sl-pfp-spin, 0deg),
-        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
-        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
-      );
-      filter: blur(6px);
-      opacity: .35;
-      pointer-events: none;
-      z-index: -2;
-    }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
       font-weight: 600;
       line-height: 1;
@@ -6622,7 +6933,7 @@
       color: rgba(255,255,255,.85);
       font-weight: 600;
     }
-    /* Provider name as a link (lrc.red / Unison / LRCLIB) — keeps the same
+    /* Provider name as a link (LRCLIB) — keeps the same
        weight and colour, underlines only on hover. */
     #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name {
       text-decoration: none;
@@ -6818,6 +7129,220 @@
       pointer-events: auto;
     }
 
+    /* ===== PORTRAIT SIDE LAYOUT (AJ, 2026-10-21) =========================
+       The side composition assumes the artwork is SHORTER than the column it
+       sits in. That holds at 16:9 and stops holding on a tall window: the art
+       is sized min(50%, 54vh), so past roughly 0.78 the art grows wider than
+       the fixed 44% lyric inset and the words paint on top of it (measured on
+       1080x1920: art ends at x=562, lyric text starts at x=518). The chrome
+       stack is pinned to that same 2% / 50% column, so the words crossed that
+       too (controls at x=22-562, lyrics from x=475, full height).
+       Rather than add more offsets to a horizontal idea, square and taller
+       windows get their own composition: the WORDS keep the screen, the art
+       shrinks to a now-playing card in the bottom-left corner, and the
+       transport sits beside it in one bottom band. Scoped to the cover-art
+       side layout - Video Background is an overlay by design and Lyrics Only
+       has no media at all. */
+    @media (max-aspect-ratio: 1 / 1) {
+      /* Both portrait compositions share one edge treatment: the lyric pane
+         has real top/bottom edges here (unlike the thin side columns), and a
+         clipped line at either one reads as broken, so the words dissolve
+         before they reach them. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        --ym-sl-fs-portrait-fade-top: clamp(64px, 10vh, 190px);
+        --ym-sl-fs-portrait-fade-bottom: clamp(88px, 14vh, 270px);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        /* One number drives both the card and the chrome's left inset, so the
+           two can never drift apart. */
+        --ym-sl-fs-portrait-art: clamp(96px, 14vh, 176px);
+      }
+      /* Lyrics first: full width, and the pane STOPS above the bottom band so
+         no line can be painted under the transport (the other half of the
+         overlap). The reserve tracks the chrome, whose title is vh-sized. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 0;
+        width: 100%;
+        bottom: clamp(190px, calc(22vh + 18px), 320px);
+        /* MUST be explicit: the later .ym-sl-fs-lyrics rule sets height:100%,
+           and a non-auto height wins over top+bottom, so the inset was being
+           ignored and the pane stayed full-screen (verified live: bottom did
+           not shorten the box). */
+        height: auto;
+        padding: clamp(44px, 7vh, 96px) clamp(40px, 7vw, 120px);
+        /* Top and bottom dissolve instead of ending on a cut line. The bottom
+           fade is taller because it is what keeps approaching lines from
+           crowding the transport below the pane. */
+        -webkit-mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+        mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+      }
+      /* The artwork, demoted to a small square card. top:auto matters: the base
+         pane is stretched top-to-bottom, and leaving that in place would keep
+         a full-height flex box behind the card. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        top: auto;
+        bottom: 24px;
+        left: 24px;
+        width: var(--ym-sl-fs-portrait-art);
+        height: var(--ym-sl-fs-portrait-art);
+        border-radius: 14px;
+      }
+      /* The card must FILL its new box: the landscape rules still ask for
+         min(100%, 54vh), which would crop it to a short strip. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        max-height: 100%;
+        transform: none;
+        border-radius: 14px;
+        object-fit: cover;
+      }
+      /* Chrome: one bottom band, starting to the right of the art. Same 24px
+         bottom as the card, so the two sit on one line. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        top: auto;
+        bottom: 24px;
+        left: calc(48px + var(--ym-sl-fs-portrait-art));
+        right: clamp(24px, 5vw, 72px);
+        width: auto;
+        height: auto;
+      }
+      /* A full-band volume slider reads as a stray line at this width; cap it
+         and keep it with the transport. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+        max-width: 320px;
+        align-self: flex-start;
+      }
+
+      /* ===== music video in portrait ======================================
+         A 16:9 video has nowhere to go in a vertical window: the side split
+         gives it half the width and the words start before it ends. Portrait
+         puts the video across the FULL width at the very top (its own aspect
+         ratio decides the height, capped for tall clips), the words fill the
+         space under it, and the transport becomes a player overlay that fades
+         in when the video is hovered - like every other video player. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        --ym-sl-fs-portrait-video-h: min(calc(100vw / var(--ym-sl-fs-video-ratio, 1.7777778)), 46vh);
+        /* The seam under the video is a real edge; the bottom fade is shorter
+           here because nothing sits below the pane. */
+        --ym-sl-fs-portrait-fade-top: clamp(40px, 5vh, 90px);
+        --ym-sl-fs-portrait-fade-bottom: clamp(56px, 9vh, 160px);
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--ym-sl-fs-portrait-video-h);
+        bottom: auto;
+        transform: none;
+        max-height: none;
+        border-radius: 0;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video {
+        border-radius: 0;
+      }
+      /* The words own everything below the video. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 0;
+        width: 100%;
+        top: calc(var(--ym-sl-fs-portrait-video-h) + 28px);
+        bottom: 0;
+        height: auto;
+        padding: clamp(24px, 4vh, 56px) clamp(40px, 7vw, 120px) clamp(64px, 10vh, 180px);
+        -webkit-mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+        mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+      }
+      /* The horizontal readability shade is for a COLUMN of words beside a
+         picture. Both portrait compositions abandon the column (video on top
+         with the words full-width under it; cover art as a corner card), so the
+         half-width band has nothing left to protect. Video Background keeps
+         its shade - there the video is still the full-bleed backdrop. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+        display: none;
+      }
+      /* Player-style scrim: only under the controls, only on hover, so the
+         video stays untouched at rest. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 45%;
+        background: linear-gradient(to top, rgba(0, 0, 0, .68), rgba(0, 0, 0, 0));
+        opacity: 0;
+        transition: opacity .2s ease;
+        pointer-events: none;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-media::after {
+        opacity: 1;
+      }
+      /* Transport over the video's bottom edge, hidden until the pointer is on
+         the video (or on the controls themselves, which is what keeps them
+         alive while moving down to the seek bar). Nothing invisible may eat
+         clicks on the video, so the children are inert while hidden too. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        top: auto;
+        bottom: calc(100% - var(--ym-sl-fs-portrait-video-h) + 24px);
+        left: clamp(24px, 4vw, 64px);
+        right: clamp(24px, 4vw, 64px);
+        width: auto;
+        height: auto;
+        opacity: 0;
+        transition: opacity .2s ease;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls * {
+        pointer-events: none;
+      }
+      /* The idle class must WIN over hover: the pointer can rest on the video
+         while the overlay hides the cursor, and chrome that stays up after the
+         cursor has gone is the exact thing the idle state exists to prevent. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within {
+        opacity: 1;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within * {
+        pointer-events: auto;
+      }
+    }
+
     /* ===== media-mode swap: NO CROSSFADE (AJ, 2026-10-20) ==================
        The .ym-sl-fs-swapping class and its two rules (title filter fade +
        player-controls opacity fade) are REMOVED. syncFsVideoMode() no longer
@@ -6825,6 +7350,106 @@
        the outgoing image stays up until the incoming one can paint (the cover
        card is held until the video is ready), then both swap in one frame.
        Nothing to fade, nothing to time. */
+
+    /* NOTE: the page-wide YouTube font swap now lives in content/styles.css
+       (html.ym-yt-font) and is driven by the panel's own YouTube page, so it no
+       longer depends on this add-on running at all (AJ, 2026-10-22). */
+
+    /* ===== PiP control surface ==========================================
+       While the lyrics float in a Document Picture-in-Picture window, the
+       panel's lyric surface would just be a second, hidden copy. Instead the
+       panel becomes the control surface: a status block, with the REAL Options
+       card docked underneath so sync/offset stay editable while the window is
+       open. The card is the same node the Options button shows; pip-lyrics.js
+       moves it in from <body> and puts it back on close.
+       NO BACKTICKS ANYWHERE IN THIS BLOCK -- it lives inside a template literal. */
+    .ym-sl-panel.ym-pip-open .LyricsContainer,
+    .ym-sl-panel.ym-pip-open .ym-sl-tools,
+    .ym-sl-panel.ym-pip-open .ym-sl-jump { display: none !important; }
+    .ym-pip-open-view {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      box-sizing: border-box;
+      padding: clamp(22px, 4.4cqw, 38px) clamp(18px, 4.4cqw, 34px) 26px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .ym-pip-open-view::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    /* Centred like the header. text-align lives on the two text blocks, not on
+       the view, or the docked Options card would inherit it. */
+    .ym-pip-open-title {
+      text-align: center;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      /* Big on purpose: the panel is now a status surface, not a lyric sheet. */
+      font-size: clamp(25px, 5.2cqw, 36px);
+      font-weight: 700;
+      line-height: 1.06;
+      letter-spacing: -.02em;
+      color: #fff;
+      max-width: 22ch;
+      text-wrap: balance;
+    }
+    .ym-pip-open-note {
+      text-align: center;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, .56);
+      max-width: 52ch;
+      margin-bottom: 2px;
+    }
+    /* The floating Options card, docked. Every fixed/anchor/drag style is
+       neutralised (the card is moved out of <body> while docked), but its
+       frosted shell and tabbed body are kept so it reads as the same surface. */
+    .ym-sl-options-overlay.ym-sl-options-docked {
+      position: relative !important;
+      inset: auto !important;
+      left: auto !important;
+      top: auto !important;
+      right: auto !important;
+      bottom: auto !important;
+      z-index: auto !important;
+      flex: 0 0 auto;
+      width: 100%;
+      max-width: 620px;
+      /* The floating card had no border-box need; docked, width:100% would add
+         its 1px borders on top of the content box and overflow the pane by 2px. */
+      box-sizing: border-box;
+      margin: 0 auto 4px;
+      transform: none !important;
+      border-radius: 18px;
+      background: rgba(14, 16, 21, .5);
+      -webkit-backdrop-filter: blur(18px) saturate(1.5);
+      backdrop-filter: blur(18px) saturate(1.5);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1), 0 24px 60px -40px rgba(0, 0, 0, .7);
+    }
+    /* The header is the drag handle + close button; neither makes sense docked. */
+    .ym-sl-options-docked .ym-sl-options-header { display: none; }
+    /* Docked, the card is part of the surface, not a dismissible popover. Other
+       code closes the floating overlay (e.g. entering fullscreen); that must not
+       leave the PiP state with a status block and no controls. */
+    .ym-sl-options-overlay.ym-sl-options-docked.hidden {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-options-docked.hidden .ym-sl-options-panel.active {
+      visibility: visible;
+      pointer-events: auto;
+    }
+
   `;
 
   function findTabBar() {
@@ -7136,14 +7761,15 @@
        left in place but dormant — nothing calls enterPausePickMode() now, and
        every pauseUi/pauseBanner consumer is null-safe. */
 
-    // (H) Cache section. Spicy Lyrics (API) results are cached for 3 days; this
-    // exposes an explicit purge so a stale or wrong match can be cleared without
-    // nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored Lyrics
-    // Cache" row.
+    // (H) Cache section. Spicy Lyrics (API) results are cached for 30 days (the
+    // Terms of Service s7 ceiling — see SPICY_CACHE_TTL_MS in 14-lyrics-sources);
+    // this exposes an explicit purge so a stale or wrong match can be cleared
+    // without nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored
+    // Lyrics Cache" row.
     const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
     const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
-    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 3 days." });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 30 days." });
     const cacheClear = h("button", {
       class: "ym-sl-import ym-sl-cache-clear",
       type: "button",
@@ -7214,7 +7840,7 @@
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";
-        console.warn("[SpicyLyrics] clear cache failed:", error);
+        console.warn("[AuroraLyrics] clear cache failed:", error);
       }
       cacheDelete.disabled = false;
       cacheCancel.disabled = false;
@@ -7239,11 +7865,32 @@
       h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
       videoOffsetWrap
     );
+    // Per-SONG cache controls, in the File tab next to the import buttons. The
+    // global purge lives in the Cache tab; this one only ever touches the track
+    // that is on screen, and it cannot run while that track is playing — see
+    // queueSongCacheClear() in 12-track-offset-sync.
+    fileImportedNote = h("div", { class: "ym-sl-file-note hidden" });
+    songCacheStatus = h("div", { class: "ym-sl-file-note ym-sl-song-cache-status" });
+    songCacheClearButton = h("button", {
+      class: "ym-sl-import ym-sl-song-cache-clear hidden",
+      type: "button",
+      title: "Drop this song's cached lyrics once it has finished playing",
+      "aria-label": "Clear this song's cached lyrics",
+      text: "Clear cache for this song",
+    });
+    songCacheClearButton.addEventListener("click", () => {
+      if (songCacheClearButton.disabled) return;
+      queueSongCacheClear();
+    });
     const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
       importMode,
       h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
-      exportActions
+      exportActions,
+      fileImportedNote,
+      h("hr", { class: "ym-sl-options-divider" }),
+      songCacheClearButton,
+      songCacheStatus
     );
     const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
@@ -7354,7 +8001,7 @@
       const opening = optionsOverlay.classList.contains("hidden");
       optionsOverlay.classList.toggle("hidden");
       if (opening) {
-        refreshPermanentDeleteState();
+        refreshFileTabState();
         if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
       }
     });
@@ -7457,13 +8104,22 @@
     return url + "=w1024-h1024";
   }
 
+  // Full strength for the always-on readability layer. The gradient inside it
+  // does the shaping (transparent at the column's left edge, near-solid black at
+  // the screen edge), so this is the layer's own opacity, not a black level.
+  // Keep it at 1: a translucent layer composites the SHARP backdrop over the
+  // blurred one, which is what makes a deep blur read as a tint instead of a
+  // frost. The fade in/out still runs through the opacity transition.
+  const FS_LYRICS_SHADE_ON = 1;
+
   function setFullscreenLyricsShadeTarget(target) {
-    // Do not smooth this in JavaScript. The CSS opacity transition already
-    // provides a short visual fade, while assigning the sampled value directly
-    // prevents the old brightness sample from keeping a stale black gradient
-    // visible after the video has returned to a dark or colorful frame.
-    fsLyricsShadeTarget = Math.max(0, Math.min(0.9, target));
-    fsLyricsShadeLevel = fsLyricsShadeTarget;
+    // Do not smooth this in JavaScript: the CSS opacity transition already
+    // provides the fade, and this layer now carries a backdrop blur whose
+    // strength must fade in lockstep with the black gradient.
+    const next = Math.max(0, Math.min(1, target));
+    if (next === fsLyricsShadeTarget) return;
+    fsLyricsShadeTarget = next;
+    fsLyricsShadeLevel = next;
     if (fsOverlay) {
       const opacity = fsLyricsShadeLevel.toFixed(3);
       fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", opacity);
@@ -7492,25 +8148,20 @@
     return count ? bright / count : 0;
   }
 
-  function applyFullscreenShadePixels(pixels, shadeAllowed) {
-    const response = getBrightResponse(pixels);
-    // Bright colours are far more common than near-white, so require a slightly
-    // larger share of the panel before the gradient starts, then ramp to full.
-    // Skipped when the lyrics are hidden/dimmed — the sample is then only
-    // feeding the controls scrim below.
-    if (shadeAllowed !== false) {
-      const target = Math.max(0, Math.min(1, (response - 0.2) / 0.45)) * 0.9;
-      setFullscreenLyricsShadeTarget(target);
-    }
-    setFullscreenBrightVideo(response);
+  // The sample's only remaining job is the controls scrim. The lyric shade used
+  // to be driven by this same reading, which is why it vanished on a dark frame
+  // and pumped on gradients; it is now a constant layer (see
+  // syncFullscreenLyricsShade) so it never has to chase the picture.
+  function applyFullscreenBrightPixels(pixels) {
+    setFullscreenBrightVideo(getBrightResponse(pixels));
   }
 
   // Toggle the controls scrim with hysteresis: ON above 0.5 bright-pixel share,
   // OFF below 0.38. The gap keeps a video that sits near the threshold from
   // flickering the scrim on and off every sample.
   function setFullscreenBrightVideo(response) {
-    // The scrim is a Video Background thing only; ignore samples that were
-    // taken purely for the MV side-layout lyric shade.
+    // The scrim is a Video Background thing only; the sampler also runs nowhere
+    // else, but keep this guard so a layout switch cannot leave it behind.
     if (fsLayoutMode !== "background") { clearFullscreenBrightVideo(); return; }
     let on = fsBrightVideo;
     if (!on && response > 0.5) on = true;
@@ -7526,20 +8177,34 @@
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-bright-video");
   }
 
-  // Opt-in MV lyric shade: a class on the overlay turns the readability shade
-  // on in the SIDE layout too (see the .ym-sl-fs-mv-shade CSS rule). No-op
-  // before the overlay exists; applyFullscreenLayout() re-syncs it on entry.
-  function syncFsMvShadeClass() {
-    if (!fsOverlay) return;
-    fsOverlay.classList.toggle("ym-sl-fs-mv-shade", !!currentSettings.mvLyricsShade);
+  // The lyric shade is unconditional now, in BOTH layouts where lyrics float
+  // over a picture: Video Background (full-bleed video) and Video + Lyrics (the
+  // column sits on the Kawarp / blurred-frame backdrop, which can be just as
+  // bright). Lyrics Only has nothing behind the words but the overlay itself, so
+  // it never shows the layer. Portrait side compositions drop the column and
+  // hide the layer in CSS; leaving the target on costs nothing there.
+  function fsShadeLayoutActive() {
+    return fsLayoutMode === "background" || fsLayoutMode === "side";
   }
 
-  // True when the current layout should run the adaptive lyric shade: always in
-  // Video Background, plus the SIDE layout for music videos when the opt-in
-  // mvLyricsShade setting is on. Shared by the sampler and applyFullscreenLayout.
-  function fsShadeLayoutActive() {
-    if (fsLayoutMode === "background") return true;
-    return !!currentSettings.mvLyricsShade && fsLayoutMode === "side" && hasFsVideo();
+  // Drive the shade from STATE, not from a brightness sample. Always on while
+  // the lyrics are actually visible; fades out for the hide toggle and for the
+  // intro / gap / final dim states, where there is nothing to protect. The CSS
+  // opacity transition (and the blur riding on the same element) does the fade.
+  function syncFullscreenLyricsShade() {
+    // fsLyricsHidden only hides the column in Video Background (the class is
+    // scoped there), so in Video + Lyrics the words are still on screen and the
+    // shade must stay with them.
+    const lyricsHidden = fsLayoutMode === "background" && fsLyricsHidden;
+    const visible =
+      !!fsActive &&
+      !!fsOverlay &&
+      fsShadeLayoutActive() &&
+      !lyricsHidden &&
+      !fsLyricsGapDimmed &&
+      !fsLyricsIntroDimmed &&
+      !fsLyricsFinalDimmed;
+    setFullscreenLyricsShadeTarget(visible ? FS_LYRICS_SHADE_ON : 0);
   }
 
   // Map the on-screen lyric band to sample-canvas coordinates.
@@ -7551,15 +8216,10 @@
   // screen percentage alone still drifts whenever the video aspect differs
   // from the overlay's, so convert the screen band (53%..100%, full height)
   // into frame pixels first, then scale into the canvas, which always holds
-  // the whole frame.
+  // the whole frame. Only Video Background samples now, and there the video
+  // does fill the overlay.
   function getShadeSampleRect() {
     const fallback = { x: FS_SHADE_SAMPLE_X, y: 0, w: FS_SHADE_SAMPLE_SW, h: FS_SHADE_SAMPLE_H };
-    // MV side layout: the lyrics sit over the AMBIENT CANVAS, which is a
-    // full-stretch copy of the frame (drawBgFrame draws it to fill the canvas),
-    // so screen x% maps straight to frame x%. The cover math below assumes the
-    // video fills the overlay, which is only true in Video Background — use the
-    // raw 53%..100% band here.
-    if (fsLayoutMode !== "background") return fallback;
     const video = fsSavedVideo && fsSavedVideo.node;
     if (!fsOverlay || !video || !video.videoWidth || !video.videoHeight) return fallback;
     const overlayW = fsOverlay.clientWidth;
@@ -7610,26 +8270,13 @@
 
   async function sampleFullscreenLyricsBrightness() {
     if (fsLyricsShadeSampleInFlight) return;
-    // The shade normally runs only in Video Background (lyrics over the
-    // full-bleed video). The opt-in mvLyricsShade extends it to the SIDE
-    // layout for music videos, where the lyrics sit over the blurred video
-    // backdrop. Anywhere else there is nothing to measure: clear both the
-    // lyric shade and the controls scrim.
-    if (!fsActive || !fsShadeLayoutActive() || !fsSavedVideo) {
-      setFullscreenLyricsShadeTarget(0);
+    // Sampling now feeds the CONTROLS scrim only, and that scrim only exists in
+    // Video Background. The lyric shade is a constant layer driven by state, so
+    // nothing else reads the sample any more.
+    if (!fsActive || fsLayoutMode !== "background" || !fsSavedVideo) {
       clearFullscreenBrightVideo();
       return;
     }
-    // The LYRIC shade is pointless whenever the lyrics are not actually visible:
-    // the manual hide toggle plus the intro / gap / final dim states all set the
-    // lyric column to opacity:0 and show only the "..." dots, so a shade over a
-    // bright video would read as a stray black band behind the dots. But the
-    // CONTROLS scrim still needs a brightness reading in exactly that case (AJ:
-    // bright video, lyrics hidden, controls invisible), so keep sampling and
-    // only suppress the shade.
-    const shadeAllowed =
-      !fsLyricsHidden && !fsLyricsGapDimmed && !fsLyricsIntroDimmed && !fsLyricsFinalDimmed;
-    if (!shadeAllowed) setFullscreenLyricsShadeTarget(0);
     const now = performance.now();
     if (now - fsLyricsShadeLastSampleAt < FS_LYRICS_SHADE_SAMPLE_MS) return;
     fsLyricsShadeLastSampleAt = now;
@@ -7647,9 +8294,8 @@
         try {
           fsLyricsShadeCtx.drawImage(video, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
           const rect = getShadeSampleRect();
-          applyFullscreenShadePixels(
-            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
-            shadeAllowed
+          applyFullscreenBrightPixels(
+            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
           );
           return;
         } catch (_) {
@@ -7657,7 +8303,6 @@
         }
       }
       if (!ensureFullscreenShadeCapture()) {
-        setFullscreenLyricsShadeTarget(0);
         clearFullscreenBrightVideo();
         return;
       }
@@ -7669,19 +8314,16 @@
         frame = await fsLyricsShadeCapture.grabFrame();
       }
       if (!frame) {
-        setFullscreenLyricsShadeTarget(0);
         clearFullscreenBrightVideo();
         return;
       }
       fsLyricsShadeCtx.drawImage(frame, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
       const rect = getShadeSampleRect();
-      applyFullscreenShadePixels(
-        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
-        shadeAllowed
+      applyFullscreenBrightPixels(
+        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
       );
       if (typeof frame.close === "function") frame.close();
     } catch (_) {
-      setFullscreenLyricsShadeTarget(0);
       clearFullscreenBrightVideo();
     } finally {
       fsLyricsShadeSampleInFlight = false;
@@ -7702,6 +8344,16 @@
   // away for performance.
   function drawBgFrame() {
     if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    // Kawarp OWNS the backdrop while it is up, and the stylesheet hides this
+    // canvas behind it (.ym-sl-fs-has-kawarp .ym-sl-fs-bg-canvas: display none).
+    // Drawing into it anyway was the most expensive thing in portrait music
+    // video: assigning ctx.filter takes the 2D canvas off the GPU path, and
+    // drawImage(<video>) copies each decoded frame back out of GPU memory.
+    // Measured in a 1080x1920 window, same overlay, same lyrics, same canvas:
+    // 14.8 fps playing vs 121 fps paused, with 0.3ms of our own JS per frame.
+    // Every music video starts Kawarp from the live video, so this is the
+    // normal branch, not a fallback.
+    if (fsKawarpActive) return;
     const now = performance.now();
     if (now - fsBgLastDrawAt < FS_BG_FRAME_INTERVAL_MS) return;
     fsBgLastDrawAt = now;
@@ -7806,6 +8458,7 @@
         fsLyricsIntroDimmed = false;
         fsLyricsFinalDimmed = false;
       }
+      syncFullscreenLyricsShade();
       return;
     }
 
@@ -7846,13 +8499,9 @@
       fsOverlay.classList.toggle("ym-sl-fs-final-dim", finalExpired);
     }
     // No lyrics are on screen in any hidden / intro / gap / final state, so the
-    // readability shade has nothing to protect. Clear it immediately so a bright
-    // video doesn't leave a black band behind the "..." dots until the next
-    // 240ms brightness sample. The sampler also guards on these flags, this just
-    // removes the stale-gradient delay.
-    if (fsLyricsHidden || fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
-      setFullscreenLyricsShadeTarget(0);
-    }
+    // readability layer has nothing to protect. It is state-driven, so this
+    // clears it on the same frame instead of waiting for a brightness sample.
+    syncFullscreenLyricsShade();
   }
 
   const FS_LAYOUT_NAMES = {
@@ -7912,14 +8561,12 @@
       fsLyricsFinalDimmed = false;
       fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
     }
-    // Clear the lyric shade only when the NEW layout cannot show it — the MV
-    // side layout can, when mvLyricsShade is on.
-    if (!fsShadeLayoutActive()) setFullscreenLyricsShadeTarget(0);
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
     fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
-    // Keep the opt-in MV-shade class in step with the setting on entry/switches.
-    syncFsMvShadeClass();
+    // Background and Video + Lyrics both keep the readability layer on; Lyrics
+    // Only has no picture behind the words and fades it out.
+    syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
     // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
     // are static — this only moves the volume node between the chip and the
@@ -8275,15 +8922,51 @@
   // Icons.ts — Spicy's transport set has no equivalent — so they are plain 24x24
   // solid paths, square like the chip's own buttons, and Repeat-one carries its
   // state in the glyph rather than needing a second badge.
-  const FS_ICON_SHUFFLE = [
-    { tag: "path", attrs: { d: "M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
-  const FS_ICON_REPEAT = [
-    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
-  const FS_ICON_REPEAT_ONE = [
-    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
+  // Thick rounded stroke on the 24 grid, the same drawn weight as the volume
+  // glyphs and the transport's own icons at 22px. Filled heads are the SF
+  // Symbols trick: one solid triangle reads sharper at this size than an open
+  // chevron, and it survives the 1.08 hover scale without turning into a notch.
+  const FS_ICON_STROKE = 2.6;
+  function fsThickIcon(parts) {
+    return parts.map((part) => ({
+      tag: part.tag,
+      attrs: Object.assign(
+        {
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": String(FS_ICON_STROKE),
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        },
+        part.attrs
+      ),
+    }));
+  }
+  // Two crossed rails with a solid head on each right-hand end. The glyph uses
+  // 3..21 of the grid (not the usual 5..19) so it carries the same visual
+  // weight as the Spicy prev/next triangles at the same rendered size.
+  const FS_ICON_SHUFFLE = fsThickIcon([
+    { tag: "path", attrs: { d: "M3 7h3.6l9.4 10h0.8" } },
+    { tag: "path", attrs: { d: "M3 17h3.6l9.4-10h0.8" } },
+    { tag: "path", attrs: { d: "M16.9 13.8 21.6 17 16.9 20.2Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M16.9 3.8 21.6 7 16.9 10.2Z", fill: "currentColor", stroke: "none" } },
+  ]);
+  // Rounded loop, open at the top-left and bottom-right, with heads pointing
+  // along the loop (right at the top, left at the bottom).
+  const FS_ICON_REPEAT = fsThickIcon([
+    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
+    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
+    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
+  ]);
+  // Same loop with the numeral riding inside it, so the state lives in the glyph.
+  const FS_ICON_REPEAT_ONE = fsThickIcon([
+    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
+    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
+    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M10.6 10.6 12.5 9.3V15" } },
+  ]);
   // Spicy Lyrics' Volume SVG, namespaced so it does not collide with the
   // upstream extension if both happen to load. All four sub-paths ship at once
   // and CSS toggles their visibility based on .ym-sl-fs-volume-{muted,low,high}
@@ -8530,6 +9213,10 @@
   function refreshFsRatingState() {
     const videoId = getCurrentFsVideoId();
     if (!videoId) return;
+    // Keep the dissolve's track identity current. A change that arrived without
+    // a fade (a skip suppressed while repeat-one is on) must become the new
+    // baseline, or its own loop restarts would start dissolving again.
+    if (!fsMediaFadingOut) fsFadeTrackId = videoId;
     if (videoId !== fsCurrentFsVideoId) {
       fsCurrentFsVideoId = videoId;
       if (fsRatings[videoId] === undefined) {
@@ -8629,10 +9316,12 @@
       overlay.classList.toggle("hidden");
       if (opening && overlay._staggerOpen) overlay._staggerOpen();
     });
-    // Order: Exit (left) · Hide lyrics · Layout · Options (right). Cycling the
-    // layout must never sit next to Exit, or a mis-click exits fullscreen
-    // (AJ, 2026-10-19).
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLyricsToggle, fsLayoutSelect, fsOptionsButton);
+    // Order: Exit · Options · Layout · Hide lyrics (right). Options sits right
+    // next to Exit so the two most-used controls are adjacent, and cycling the
+    // layout still never sits next to Exit, or a mis-click exits fullscreen
+    // (AJ, 2026-10-19). Hide lyrics expands only in Video Background, so for
+    // every other layout the visible row is exactly Exit · Options · Layout.
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLayoutSelect, fsLyricsToggle);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -8689,9 +9378,25 @@
     const fsVolumeFill = h("div", { class: "ym-sl-fs-volume-fill" });
     const fsVolumeKnob = h("div", { class: "ym-sl-fs-volume-knob" });
     fsPlayerVolumeRange.append(fsVolumeFill, fsVolumeKnob);
-    // Only the slider remains (the mute button was removed); the wrapper keeps
-    // the border-left divider and spacing beside the chip.
-    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, fsPlayerVolumeRange);
+    // Cover-art layout only: a quiet glyph and a loud glyph bracket the bar so
+    // it reads as a scale instead of a stray line under the transport. They are
+    // markers, not buttons — the slider is the control — so they are hidden from
+    // assistive tech and never take a pointer (see .ym-sl-fs-volume-icon).
+    const volumeLowIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
+      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
+    ]);
+    volumeLowIcon.setAttribute("class", "ym-sl-fs-volume-icon");
+    const volumeHighIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
+      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
+      { tag: "path", attrs: { d: "M17.9 6.6a7.5 7.5 0 0 1 0 10.8" } },
+      { tag: "path", attrs: { d: "M20.6 4.2a11 11 0 0 1 0 15.6" } },
+    ]);
+    volumeHighIcon.setAttribute("class", "ym-sl-fs-volume-icon");
+    // Only the slider remains interactive (the mute button was removed); the
+    // wrapper keeps the border-left divider and spacing beside the chip.
+    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, volumeLowIcon, fsPlayerVolumeRange, volumeHighIcon);
     // Transport wrapped in its own group so the side layout can centre the
     // TRANSPORT on the title. The wrapper is a plain 14px flex row, so every other
     // layout is unchanged: the chip's own gap used to space these buttons, and now
@@ -8747,7 +9452,11 @@
     // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
-    exit.addEventListener("click", exitFullscreenMode);
+    // Wrapped, not passed by reference: a listener receives the MouseEvent as
+    // its first argument, and exitFullscreenMode() reads a truthy `immediate`
+    // as "skip the close animation". This is why the overlay used to vanish
+    // without its fade (AJ, 2026-10-22).
+    exit.addEventListener("click", () => exitFullscreenMode());
     previousButton.addEventListener("click", () => clickPlayerButton("previous"));
     playButton.addEventListener("click", () => clickPlayerButton("play"));
     nextButton.addEventListener("click", () => clickPlayerButton("next"));
@@ -8882,10 +9591,7 @@
       fsLyricsHidden = !fsLyricsHidden;
       if (fsOverlay) {
         fsOverlay.classList.toggle("ym-sl-fs-lyrics-hidden", fsLyricsHidden);
-        if (fsLyricsHidden) {
-      setFullscreenLyricsShadeTarget(0);
-      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", "0");
-    }
+        syncFullscreenLyricsShade();
       }
       // Update the LABEL span only. Writing textContent straight onto the
       // button would wipe the icon SVG that now also lives inside it.
@@ -9151,6 +9857,61 @@
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
+  /* ---- Bloom's settings, borrowed for the fullscreen backdrop -------------
+     This is the SAME Kawarp the Aurora Bloom theme runs page-wide, so it has to
+     run with the same numbers. It used to be constructed with the hard-coded
+     FS_KAWARP_OPTIONS (saturation 1.5, no brightness/contrast at all), which
+     made fullscreen read flat and dull next to the page the user had tuned
+     (AJ, 2026-10-23). Bloom publishes its live settings on
+     window.__ymAuroraDynamic.getSettings() for exactly this kind of reuse; the
+     hard-coded block stays only as the value before that lands. */
+  function bloomSettings() {
+    const dyn = window.__ymAuroraDynamic;
+    if (!dyn || typeof dyn.getSettings !== "function") return null;
+    try { return dyn.getSettings() || null; } catch (_) { return null; }
+  }
+  function clampOption(value, lo, hi, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(hi, Math.max(lo, n));
+  }
+  function fullscreenKawarpOptions() {
+    const opts = Object.assign({}, FS_KAWARP_OPTIONS);
+    const s = bloomSettings();
+    if (!s) return opts;
+    opts.saturation = clampOption(s.saturation, 0.5, 2.5, opts.saturation);
+    opts.warpIntensity = clampOption(s.warpIntensity, 0.2, 1, opts.warpIntensity);
+    opts.blurPasses = Math.round(clampOption(s.blurPasses, 2, 8, opts.blurPasses));
+    return opts;
+  }
+  // dynamic.js splits the look in two: the shader gets saturation, warp and
+  // blur passes, and the canvas carries saturate/brightness/contrast as a CSS
+  // filter on top. Without the filter half, fullscreen came out dimmer and
+  // less saturated than the page even at the same slider values.
+  function fullscreenKawarpFilter() {
+    const s = bloomSettings();
+    if (!s) return "";
+    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.5) +
+      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.78) +
+      ") contrast(" + clampOption(s.contrast, 0.6, 1.6, 1) + ")";
+  }
+  function applyFullscreenKawarpLook() {
+    if (fsKawarpCanvas) {
+      const filter = fullscreenKawarpFilter();
+      if (filter) fsKawarpCanvas.style.filter = filter;
+      else fsKawarpCanvas.style.removeProperty("filter");
+    }
+    if (!fsKawarp) return;
+    const opts = fullscreenKawarpOptions();
+    try {
+      fsKawarp.setOptions({
+        saturation: opts.saturation,
+        warpIntensity: opts.warpIntensity,
+        blurPasses: opts.blurPasses,
+      });
+    } catch (_) {}
+  }
+
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
     // Gate on the Dynamic add-on: its handshake object is our signal that the
@@ -9174,7 +9935,8 @@
       const Kawarp = await getKawarpConstructor();
       if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return false;
       sizeFullscreenKawarp();
-      fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
+      fsKawarp = new Kawarp(fsKawarpCanvas, fullscreenKawarpOptions());
+      applyFullscreenKawarpLook();
       if (videoEl) {
         // Music videos: feed the LIVE <video> so the backdrop reacts to the
         // picture instead of a heavily blurred + dimmed copy of it (AJ,
@@ -9201,7 +9963,7 @@
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
-      console.warn("[Aurora Lyrics] Kawarp backdrop failed:", error);
+      console.warn("[AuroraLyrics] Kawarp backdrop failed:", error);
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
       if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
       fsKawarp = null;
@@ -9516,12 +10278,19 @@
         return;
       } else if (!want && ha) {
         if (byTypeNow === null) {
-          // No type signal on this build, so `want` is only !!lv. Debounce: a
-          // zero videoWidth that has lasted less than FS_VIDEO_ZERO_DEBOUNCE_MS
-          // is a RELOAD, not an audio track. Without this, MV -> MV detached the
-          // video mid-skip, which dropped has-video and restacked the controls.
+          // No type signal on this build, so `want` is only !!lv — a READINESS
+          // answer. A skip reloads the reused <video>, so videoWidth reads 0
+          // while the NEW source is still loading; a plain time debounce could
+          // not tell that from an audio track and detached mid-reload, which
+          // restacked the chrome into the cover-art layout and faded it out a
+          // second time. Hold the video while its new source has no metadata
+          // (readyState HAVE_NOTHING) and only read a LOADED source with no
+          // picture as "audio".
+          const attached = fsSavedVideo && fsSavedVideo.node;
+          const loadingSource = !!attached && attached.readyState < 1;
           if (!fsVideoZeroSince) fsVideoZeroSince = performance.now();
-          if (performance.now() - fsVideoZeroSince < FS_VIDEO_ZERO_DEBOUNCE_MS) {
+          const limit = loadingSource ? FS_VIDEO_SOURCE_LOAD_MAX_MS : FS_VIDEO_ZERO_DEBOUNCE_MS;
+          if (performance.now() - fsVideoZeroSince < limit) {
             retryVideoModeUntilReady();
             return;
           }
@@ -9637,6 +10406,9 @@
     // emptied / loadstart: a source was torn down and a new one is loading. This
     // is ONE of the two track-change signals (see fsMaybeFadeForTrackChange); it
     // is the fast one for cover -> *, and the LATE one for MV -> cover.
+    // Restart the zero-width clock with the reload, so the readiness gate in
+    // syncFsVideoMode measures THIS load instead of an older zero reading.
+    fsVideoZeroSince = performance.now();
     // Pass the CURRENT id, not "": an id match is a stronger dedupe than the time
     // window, so a late loadstart from our own re-attach can never fade twice.
     fsMaybeFadeForTrackChange("");
@@ -9657,8 +10429,10 @@
     document.addEventListener("emptied", handleFsMediaEvent, true);
     document.addEventListener("loadstart", handleFsMediaEvent, true);
     document.addEventListener("loadedmetadata", handleFsMediaEvent, true);
-    // Seed so entering fullscreen mid-song never fades the media out.
+    // Seed so entering fullscreen mid-song never fades the media out, and so
+    // the repeat-one check below has an identity to compare against.
     fsFadeAt = 0;
+    fsFadeTrackId = getCurrentFsVideoId() || "";
     // ⚠️ The videoId poll that used to live here is GONE. The probe proved
     // `getPlayerResponse()` returns null on this build (vdKeys=NONE), so the id
     // was always "" and the poll could never detect a change — it was 8Hz of
@@ -9719,6 +10493,11 @@
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
   const FS_VIDEO_ZERO_DEBOUNCE_MS = 450;
+  // The reused <video> reports videoWidth 0 for the WHOLE reload, not for a beat:
+  // its new source has no metadata until YTM finishes loading it. While
+  // readyState is 0 the zero means "still loading", so the detach waits this
+  // long for metadata before it gives up and treats the track as cover art.
+  const FS_VIDEO_SOURCE_LOAD_MAX_MS = 6000;
   // Minimum time the chrome must stay dissolved on a mode change before it is
   // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
   // ready (which on a cover -> MV skip is the same tick the fade-out started), and
@@ -9841,7 +10620,16 @@
   }
 
   function fsFadeInMedia() {
-    if (!fsOverlay || !fsMediaFadingOut) return;
+    // The chrome fade lives on this path because a mode swap reveals the media
+    // and the control column together. A swap that lands AFTER the media has
+    // settled calls this with nothing to fade in, and returning early skipped
+    // the chrome half of the deal: the controls stayed dissolved until
+    // fsChromeFadeOut's 9s heal timer restored them (AJ, 2026-10-23).
+    if (!fsOverlay) return;
+    if (!fsMediaFadingOut) {
+      fsChromeFadeIn();
+      return;
+    }
     fsMediaFadingOut = false;
     if (fsMediaFadeSafetyTimer) { clearTimeout(fsMediaFadeSafetyTimer); fsMediaFadeSafetyTimer = 0; }
     // Never cut the fade-out short: if the incoming media is ready before the
@@ -9851,6 +10639,10 @@
     if (fsMediaFadeTimer) { clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
     const run = () => {
       if (!fsOverlay || fsMediaFadingOut) return;
+      // The incoming media has settled: this is now the track the repeat-one
+      // check compares against.
+      const settledId = getCurrentFsVideoId();
+      if (settledId) fsFadeTrackId = settledId;
       // Removing the class lets each layer return to its own natural opacity via
       // its own transition (media .25s, Kawarp .6s) — no inline values to clean up.
       fsOverlay.classList.remove("ym-sl-fs-dissolving");
@@ -9874,6 +10666,22 @@
   const FS_MEDIA_FADE_DEDUPE_MS = 1200;
 
   function fsMaybeFadeForTrackChange(id) {
+    // Repeat-one restarts the SAME stream, and YTM reloads it, so we get the
+    // same emptied/loadstart a real skip produces. Nothing on screen is being
+    // replaced, so dissolving the cover and the chrome is pure noise — the
+    // user sees a pointless dip once per loop (AJ, 2026-10-22).
+    //
+    // Identity is the URL's ?v=. It does not change when the loop restarts, and
+    // it DOES change on a real skip. fsFadeTrackId holds the id of the last
+    // track whose media settled, refreshed in fsFadeInMedia().
+    const urlId = getCurrentFsVideoId() || "";
+    if (
+      urlId &&
+      urlId === fsFadeTrackId &&
+      readPlayerToggle("repeat") === "one"
+    ) {
+      return;
+    }
     if (id && id === fsFadeTrackId) return; // same track — nothing to do
     const now = performance.now();
     if (now - fsFadeAt < FS_MEDIA_FADE_DEDUPE_MS) {
@@ -9893,14 +10701,19 @@
     } else if (fsOverlay && fsSavedVideo) {
       // LEAVING a music video: an MV -> MV reload and an MV -> cover look
       // identical at the skip instant (both still have a live player video). The
-      // restructure is gated by the debounce below so a reload is never mistaken
-      // for a cover, but the control fade should NOT wait that long. Probe a beat
-      // later: if the player video is GONE by then it is a cover -> dissolve the
-      // controls now, synced with the video leaving; if it survived it is MV -> MV
-      // and the controls must stay perfectly still.
+      // restructure is gated by the source-load wait below so a reload is never
+      // mistaken for a cover, but the control fade should NOT wait that long.
+      // Probe a beat later: if the player video is GONE by then it is a cover ->
+      // dissolve the controls now, synced with the video leaving; if it survived
+      // it is MV -> MV and the controls must stay perfectly still.
       window.setTimeout(() => {
         if (!fsActive || !fsSavedVideo) return;
-        if (!findPlayerVideo()) fsChromeFadeOut();
+        // Readiness, not intent: on an MV -> MV skip the reused element reports
+        // videoWidth 0 for the whole reload, so findPlayerVideo() alone read as
+        // "the video is gone" and dissolved the controls that must stay still.
+        const node = fsSavedVideo.node;
+        const reloading = !!node && node.readyState < 1;
+        if (!reloading && !findPlayerVideo()) fsChromeFadeOut();
       }, 170);
     }
     fsFadeOutMedia();
@@ -10449,7 +11262,7 @@
       const swept = sweepArtCache(Date.now());
       // Page-world log so it is visible in the console alongside the lyrics cache
       // lines (the isolated-world copy of this log is not surfaced).
-      console.log(`[SpicyLyrics] art cache init: ${Object.keys(artCache).length} entries${swept ? " (expired swept)" : ""}.`);
+      console.log(`[AuroraLyrics] art cache init: ${Object.keys(artCache).length} entries${swept ? " (expired swept)" : ""}.`);
       return artCache;
     }).catch(() => { artCache = {}; return artCache; });
     return artCacheLoad;
@@ -10581,12 +11394,12 @@
       if (fsArtNoAlbumKey !== rough) { fsArtNoAlbumKey = rough; fsArtNoAlbumTries = 0; }
       if (fsArtNoAlbumTries < 3) {
         fsArtNoAlbumTries++;
-        console.log(`[SpicyLyrics] animated art: album not settled for "${rough}" (try ${fsArtNoAlbumTries}) — holding the backdrop.`);
+        console.log(`[AuroraLyrics] animated art: album not settled for "${rough}" (try ${fsArtNoAlbumTries}) — holding the backdrop.`);
         suppressStaticCardForAnimated();
         window.setTimeout(() => { try { refreshAnimatedArt(getCurrentTrack()); } catch (_) {} }, 300);
         return;
       }
-      console.log(`[SpicyLyrics] animated art: no album for "${rough}" — showing the static cover.`);
+      console.log(`[AuroraLyrics] animated art: no album for "${rough}" — showing the static cover.`);
       hideAnimatedArt();
       return;
     }
@@ -10617,7 +11430,7 @@
     await loadArtCache();
     const storedUrl = artCacheGet(key);
     if (storedUrl) {
-      console.log(`[SpicyLyrics] animated art from CACHE (no API call): ${key}`);
+      console.log(`[AuroraLyrics] animated art from CACHE (no API call): ${key}`);
       fsArtVideoCache.set(key, storedUrl);
       fsArtVideoKey = key;
       suppressStaticCardForAnimated();
@@ -10667,7 +11480,7 @@
     } catch (err) {
       // Logged so the console distinguishes "this track has no animated art" from
       // "the lookup never ran" — the two look identical from the pane.
-      console.log(`[SpicyLyrics] no animated art for ${key} (${(err && err.message) || err}); static cover kept.`);
+      console.log(`[AuroraLyrics] no animated art for ${key} (${(err && err.message) || err}); static cover kept.`);
       fsArtVideoCache.set(key, false);
       fsArtVideoFail.add(key);
       fsArtVideoLoadingKey = "";
@@ -10804,6 +11617,15 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
+    // In-page fullscreen fades in (AJ, 2026-10-22). Native fullscreen deliberately
+    // gets no entrance: the browser is already repainting the whole display, so a
+    // fade on top of that reads as a late start rather than a transition.
+    if (currentSettings.fullscreenInPage && fsMotionOK() && typeof fsOverlay.animate === "function") {
+      fsEnterAnimation = fsOverlay.animate(
+        [{ opacity: 0, transform: "scale(.99)" }, { opacity: 1, transform: "none" }],
+        { duration: FS_ANIM_MS + 40, easing: "cubic-bezier(.22, .61, .36, 1)" }
+      );
+    }
     // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
     // applying the entry layout to them animates them sliding in from the CSS
     // default (side) — a visible "side layout" flash on cover-art entry. Hold
@@ -10880,13 +11702,28 @@
     // some Chrome versions when the element had just been appended. Done
     // before the rest of the setup so the activation token cannot be consumed
     // by anything else in this function first.
-    try {
-      const target = document.documentElement;
-      if (target.requestFullscreen) {
-        const p = target.requestFullscreen();
-        if (p && typeof p.catch === "function") p.catch(() => {});
-      }
-    } catch (_) {}
+    //
+    // In-page fullscreen skips this entirely (AJ, 2026-10-22). The overlay is
+    // already `position: fixed; inset: 0`, so it covers the viewport on its own;
+    // native fullscreen only adds taking over the whole display, which also
+    // strands the tab strip and every other tab. Escape still exits, because
+    // handleFsKeydown() exits whenever there is no fullscreenElement.
+    if (!currentSettings.fullscreenInPage) {
+      try {
+        const target = document.documentElement;
+        if (target.requestFullscreen) {
+          fsNativeRequested = true;
+          const p = target.requestFullscreen();
+          if (p && typeof p.catch === "function") p.catch(() => {});
+        }
+      } catch (_) {}
+    } else {
+      // In-page: the document behind is still scrollable, so lock it. Without
+      // this the page can scroll under the overlay and a scrollbar strip stays
+      // visible beside it (native fullscreen normally removes both).
+      fsSavedHtmlOverflow = document.documentElement.style.overflow;
+      document.documentElement.style.overflow = "hidden";
+    }
     fsLyricsShadeTimer = window.setInterval(() => sampleFullscreenLyricsBrightness(), FS_LYRICS_SHADE_SAMPLE_MS);
 
     // Left: YTM's real <video> when there is one, otherwise the cover art.
@@ -10959,9 +11796,28 @@
       const track = getCurrentTrack();
       const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
       if (artUrl) {
-        fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
-        fsMediaHost.appendChild(fsArtImg);
-        setFsArtSrc(fsArtImg, hiResArt(artUrl));
+        // CREATE-OR-REUSE, never create unconditionally. reconcileFsMediaArt()
+        // already ran above (it is kicked right after the art video is adopted)
+        // and it calls ensureFsArtImg(), so by the time we get here the card
+        // usually EXISTS already. Assigning a fresh <img> over it orphaned the
+        // first one in the pane: both are IMG.ym-sl-fs-art with the same src, the
+        // flex row squeezes them to half width each, and the orphan is only
+        // cleaned up by the next 2s tick — two covers side by side on entry.
+        // Live-captured on the real page (AJ, 2026-10-21):
+        //   'IMG.ym-sl-fs-art 583x583 block/1 | IMG.ym-sl-fs-art 583x583 block/1'
+        // then one card, ~2s later. ensureFsArtImg() also removes any stray card,
+        // so this is the same single-create point reconcile uses.
+        const card = ensureFsArtImg();
+        if (card) {
+          setFsArtSrc(card, hiResArt(artUrl));
+          // A warm animated cover is already ready for this track (it has been
+          // playing in the player view since the track started): do not put the
+          // static card beside it.
+          if (fsArtVideo && fsArtVideo.parentElement === fsMediaHost &&
+              fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")) {
+            card.style.display = "none";
+          }
+        }
       }
       // Song fullscreen: replace the blurred cover backdrop with Kawarp when the
       // Dynamic add-on is active (it suspends its page-wide instance for us).
@@ -11020,8 +11876,67 @@
     startFsMediaWatchers();
   }
 
-  function exitFullscreenMode() {
+  /* ---- in-page fullscreen: open/close motion (AJ, 2026-10-22) --------------
+     The in-tab fullscreen is a surface INSIDE the page, so it can enter and leave
+     like one. Native fullscreen does not get the closing fade: the browser has
+     already returned to the page, and a 220ms ghost over it reads as lag. */
+  const FS_ANIM_MS = 220;
+  function fsMotionOK() {
+    return !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  function exitFullscreenMode(immediate) {
     if (!fsActive) return;
+    // Strictly boolean. The Exit button used to bind this straight to the click
+    // handler, so `immediate` was a MouseEvent — truthy — and every click tore
+    // the overlay down without the fade. A caller that means "now" passes true.
+    immediate = immediate === true;
+    if (fsExitAnimation) {
+      if (!immediate) return;             // a close is already in flight
+      // Teardown must not wait for a fade that may never finish once the
+      // script's own UI is being removed.
+      try { fsExitAnimation.cancel(); } catch (_) {}
+      fsExitAnimation = null;
+    }
+    const overlay = fsOverlay;
+    const canAnimate = !immediate &&
+      currentSettings.fullscreenInPage &&
+      overlay && overlay.isConnected &&
+      typeof overlay.animate === "function" &&
+      fsMotionOK();
+    // Sample the entrance animation's CURRENT opacity before cancelling it:
+    // cancel() snaps the element straight back to 1, so closing while the fade-in
+    // is still running would flash the overlay at full strength first.
+    let startOpacity = 1;
+    if (canAnimate) {
+      try {
+        const raw = Number(getComputedStyle(overlay).opacity);
+        if (Number.isFinite(raw)) startOpacity = Math.min(1, Math.max(0, raw));
+      } catch (_) {}
+    }
+    if (fsEnterAnimation) {
+      try { fsEnterAnimation.cancel(); } catch (_) {}
+      fsEnterAnimation = null;
+    }
+    if (!canAnimate) {
+      finishFullscreenExit();
+      return;
+    }
+    fsExitAnimation = overlay.animate(
+      [{ opacity: startOpacity, transform: "none" }, { opacity: 0, transform: "scale(.985)" }],
+      { duration: FS_ANIM_MS, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" }
+    );
+    const done = () => {
+      fsExitAnimation = null;
+      finishFullscreenExit();
+    };
+    fsExitAnimation.finished.then(done).catch(done);
+  }
+
+  function finishFullscreenExit() {
+    if (!fsActive) return;
+    fsExitAnimation = null;
+    fsEnterAnimation = null;
     if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
     // Stop the pending-MV attach poll too, or it would keep calling
     // syncFsVideoMode() after the overlay is gone.
@@ -11034,6 +11949,7 @@
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
     // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;
+    fsNativeRequested = false;
     stopFsIdleTracking();
     document.removeEventListener("keydown", handleFsKeydown, true);
     stopFsMediaWatchers();
@@ -11132,6 +12048,10 @@
     }
     const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
     if (fsOptionsOverlay) fsOptionsOverlay.remove();
+    if (fsSavedHtmlOverflow !== null) {
+      document.documentElement.style.overflow = fsSavedHtmlOverflow;
+      fsSavedHtmlOverflow = null;
+    }
     if (fsOverlay) fsOverlay.remove();
     fsOverlay = null;
     fsMediaHost = null;
@@ -11224,7 +12144,10 @@
   // If the browser leaves native fullscreen by any other route (F11, browser
   // chrome), unwind our overlay too so nothing is left stranded on screen.
   function handleFsFullscreenChange() {
-    if (fsActive && !document.fullscreenElement) exitFullscreenMode();
+    // Only OUR native fullscreen ending unwinds the overlay. In-page fullscreen
+    // never asks for native, so an unrelated F11 out must leave it alone
+    // (AJ, 2026-10-22).
+    if (fsActive && fsNativeRequested && !document.fullscreenElement) exitFullscreenMode();
   }
 
   /* ---- redirect YTM's own video fullscreen button ------------------------
@@ -11722,10 +12645,6 @@
     warmAnimatedArt();
     const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
     if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
-    // Apple-Music-style lyrics are rendered by a separate engine that holds the
-    // previous track's lines until the new ones arrive. Blank it with a skeleton
-    // so a track change never shows the wrong song.
-    amllShowSkeleton();
   }
 
   function getCurrentTrack() {
@@ -12079,6 +12998,11 @@
 
   // (G) Delete the permanently-saved TTML for the current track. Lets the user
   // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  //
+  // The file being deleted is the one RENDERED right now, so deleting it has to
+  // take it off the screen too. Re-resolve the track exactly like a fresh play
+  // (force=true also skips the permanent-TTML read), and the API result replaces
+  // the imported lines instead of leaving them stranded under a hidden file.
   async function deletePermanentTTMLForCurrentTrack() {
     const key = currentTrackKey || getTrackKey(getCurrentTrack());
     if (!key) {
@@ -12087,13 +13011,25 @@
     }
     try {
       await removePermanentTTML(key);
-      manualLyricsIsPermanent = false;
-      showLyricsMessage("Permanently-saved TTML removed for this track.");
     } catch (error) {
-      console.warn("[SpicyLyrics] Could not delete permanent TTML:", error);
+      console.warn("[AuroraLyrics] Could not delete permanent TTML:", error);
       showLyricsMessage("Could not delete the saved TTML for this track.");
+      refreshFileTabState();
+      return;
     }
-    refreshPermanentDeleteState();
+    manualLyricsIsPermanent = false;
+    currentLyricsFromSavedTTML = false;
+    manualLyricsTrackKey = "";
+    currentTTMLSource = "none";
+    importedTTMLXml = "";
+    setTTMLExportVisibility();
+    // Clearing the loaded-track key takes syncTrackLyrics past its
+    // `key === currentTrackKey` guard, which would otherwise keep the deleted
+    // file on screen until the next song.
+    currentTrackKey = "";
+    refreshFileTabState();
+    showLyricsMessage("Saved TTML removed. Searching for lyrics…");
+    syncTrackLyrics(true);
   }
 
   // Shows the "Delete saved" button only when a permanent TTML actually exists
@@ -12112,7 +13048,117 @@
     } catch (error) {
       saved = null;
     }
-    btn.classList.toggle("hidden", !saved);
+    // Offer the button only when the file it would delete is what is on screen.
+    // It used to appear for ANY track that had a permanent TTML stored, even when
+    // that track was playing API lyrics — so a song with no TTML in sight still
+    // showed "Delete saved".
+    const showingSaved = !!saved && (manualLyricsIsPermanent || currentLyricsFromSavedTTML);
+    btn.classList.toggle("hidden", !showingSaved);
+    refreshFileImportedNote(saved);
+  }
+
+  // The File tab says where the lyrics on screen came from whenever that was not
+  // the API: a file uploaded during this session (permanent or one-play), or one
+  // saved earlier and loaded automatically on this track.
+  function refreshFileImportedNote(savedTTML) {
+    if (!fileImportedNote) return;
+    let text = "";
+    if (currentTTMLSource === "imported" && importedTTMLXml) {
+      text = manualLyricsIsPermanent
+        ? "Imported TTML · Permanent — saved for this song."
+        : "Imported TTML · Temporary — this session only.";
+    } else if (savedTTML) {
+      text = "Saved TTML · Permanent — loaded automatically for this song.";
+    }
+    fileImportedNote.textContent = text;
+    fileImportedNote.classList.toggle("hidden", !text);
+  }
+
+  // "Clear cache for this song" must not run while that song is on screen: the
+  // next lookup would re-resolve and repaint it mid-play. So a click only QUEUES
+  // the clear, the entry is stamped to die when the song does (so the promise
+  // survives a reload too), and the queued clear runs at the first track change
+  // or replay after it — see syncTrackLyrics in 15-prefetch-search.
+  function queueSongCacheClear() {
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !key) return;
+    pendingSongCacheClear = { trackKey: key, track };
+    // LRCLIB entries (including a saved search pick) can go now: the lyrics on
+    // screen are already parsed, and nothing reads the entry again until this
+    // song restarts or is replayed. Only the Spicy entry has to wait for the
+    // song to end, because its resolve happens through the id-mapped keys.
+    lrclibCache.delete(key);
+    removeLyricsPersistent(key);
+    refreshSongCacheRow();
+    deferSpicyCacheForTrack(track, songRemainingMs(track)).catch(() => {});
+  }
+
+  function songRemainingMs(track) {
+    const player = window.YTMod && window.YTMod.player;
+    const pos = player && typeof player.getPositionMs === "function"
+      ? Number(player.getPositionMs())
+      : NaN;
+    const total = Number(track && track.durationMs);
+    if (!Number.isFinite(pos) || !Number.isFinite(total) || total <= 0) return 0;
+    return Math.max(0, total - pos);
+  }
+
+  async function flushPendingSongCacheClear() {
+    const pending = pendingSongCacheClear;
+    if (!pending) return;
+    pendingSongCacheClear = null;
+    try {
+      await clearSpicyCacheForTrack(pending.track);
+    } catch (error) {
+      console.warn("[AuroraLyrics] could not clear this song's cache:", error);
+    }
+    refreshSongCacheRow();
+  }
+
+  async function refreshSongCacheRow() {
+    if (!songCacheStatus || !songCacheClearButton) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !key) {
+      songCacheStatus.textContent = "";
+      songCacheStatus.classList.remove("pending");
+      songCacheClearButton.classList.add("hidden");
+      return;
+    }
+    if (pendingSongCacheClear && pendingSongCacheClear.trackKey === key) {
+      songCacheStatus.textContent = "Cache will be cleared after this song ends.";
+      songCacheStatus.classList.add("pending");
+      songCacheClearButton.classList.add("hidden");
+      return;
+    }
+    songCacheStatus.classList.remove("pending");
+    let status = null;
+    try {
+      status = await spicyCacheStatusForTrack(track);
+    } catch (error) {
+      status = null;
+    }
+    // The panel may have been rebuilt while that read was in flight.
+    if (!songCacheStatus.isConnected) return;
+    const spicyCached = !!(status && status.cached);
+    // LRCLIB keeps its own layer. Counting only Spicy made a track whose lyrics
+    // came from LRCLIB read "Not cached" while its result (or a search pick)
+    // was sitting in the persistent cache, and hid the only way to clear it
+    // (AJ, 2026-10-22).
+    const lrclibCached = lrclibCache.has(key) || hasLyricsPersistent(key);
+    const cached = spicyCached || lrclibCached;
+    songCacheStatus.textContent = spicyCached
+      ? `Cached for this song · ${status.daysLeft} ${status.daysLeft === 1 ? "day" : "days"} left.`
+      : lrclibCached
+        ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
+        : "Not cached for this song.";
+    songCacheClearButton.classList.toggle("hidden", !cached);
+  }
+
+  async function refreshFileTabState() {
+    await refreshPermanentDeleteState();
+    await refreshSongCacheRow();
   }
 
   // Shared teardown for "the panel is no longer showing a lyric line". Called by
@@ -12170,6 +13216,18 @@
     // forever, because only the success paths ever called hideFsSpinner()
     // (AJ, 2026-10-01).
     hideFsSpinner();
+    // Same for the AMLL loading skeleton: a message is a terminal state, so no
+    // shimmer may be left behind. A genuine "no lyrics" / "didn't load" also has
+    // to hand the panel back to the built-in renderer, because the AMLL host is
+    // still showing the previous track's lines and would cover this empty state.
+    amllHideSkeleton();
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+      amllHide();
+      // The cached content still belongs to the PREVIOUS track. Without this a
+      // later re-activation (toggling Apple Music style off and on) would hand it
+      // back to the engine and resurrect the wrong song over this empty state.
+      amllLastContent = null;
+    }
     lastLyricsError = message === LOAD_FAILED_MESSAGE ? "rate" : "";
     if (searchPanelEl && searchPanelEl._foot) {
       searchPanelEl._foot.textContent = lastLyricsError
@@ -12391,6 +13449,15 @@
   }
 
   function onJumpButtonClick() {
+    // Apple-style lyrics: the engine owns the scroll offset of its own DOM, so
+    // the built-in camera has nothing to move here. resetScroll() is the engine's
+    // supported "back to the playing line" (it clears the manual offset and
+    // un-suspends auto-align), which is exactly what this button promises.
+    if (amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
+      try { amllPlayer.resetScroll(); } catch (e) {}
+      setJumpButtonVisible(false);
+      return;
+    }
     if (staticLyricsActive) {
       // Resume the smooth auto-scroll that the manual scroll interrupted.
       autoScrollUserPaused = false;
@@ -12683,7 +13750,10 @@
       writeScrollTop(clamped, true);
       return;
     }
-    if ((currentSettings.smoothScrolling || currentSettings.simpleLyrics) && !scrollGlideReducedMotion()) {
+    // amllSimpleLookActive(), not the raw setting: a word-synced track under
+    // Apple-style lyrics renders through this renderer and must respect the
+    // user's Smooth Scrolling choice like any other Spicy track.
+    if ((currentSettings.smoothScrolling || amllSimpleLookActive()) && !scrollGlideReducedMotion()) {
       // The SPRING GLIDE (upstream 6.3.153's model). The spring is REUSED, so a
       // line change arriving mid-flight bends the curve and keeps its velocity
       // instead of restarting — that is what makes fast songs read as one glide.
@@ -12932,6 +14002,13 @@
       return false;
     }
     const content = toSyllableContent(parsed);
+    // Pick the renderer BEFORE the lines are built: the spline set and the word
+    // markup are chosen at build time, so the owner has to be settled first.
+    // amllApplyTrackRenderer also starts the engine when THIS track is the first
+    // one it should draw (the previous track may have gone to Spicy, which never
+    // starts it) - without that the new track stayed on Spicy until the mode was
+    // toggled. See amllContentGoesToSpicy.
+    amllApplyTrackRenderer(content);
     buildRendererLines(content);
     // Feed the parsed content to the AMLL engine when Simple lyrics (Apple-Music
     // style) mode is active. amllSyncLyrics is a no-op unless the engine is ready,
@@ -12955,20 +14032,11 @@
     exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
   }
 
-  function loadTTML(xml, source, provider) {
+  function loadTTML(xml, source) {
     const rawXml = String(xml || "");
+    // Set again by the caller when this load IS the permanent save (15-prefetch).
+    currentLyricsFromSavedTTML = false;
     let parsed = parseTTML(rawXml);
-    // lrc.red ships syllable-level spans; join them into words unless the user
-    // turned the toggle off. Word-level files have no syllables to join, so
-    // skip them entirely (AJ, 2026-10-20).
-    const lrcRedWordTiming = /lrc:timing\s*=\s*["']Word["']/i.test(rawXml);
-    if (
-      provider === "lrc.red" &&
-      !lrcRedWordTiming &&
-      currentSettings.joinLrcRedSyllables !== false
-    ) {
-      parsed = joinTTMLSyllables(parsed);
-    }
     if (!parsed.length) {
       staticLyricsActive = false;
       currentLyricsIsTTML = false;
@@ -12982,8 +14050,8 @@
     staticLyricsActive = false;
     currentSongwriters = extractSongwriters(rawXml);
     // Consume any credits the caller staged for this load (Spicy Lyrics API
-    // results only). Clearing here means imports, cached TTML and Unison never
-    // inherit a stale uploader from a previous track.
+    // results only). Clearing here means imports and cached TTML never inherit
+    // a stale uploader from a previous track.
     if (pendingSpicyCredits) {
       const attr = pendingSpicyCredits.attribution || null;
       currentProvider = (attr && attr.provider) || "";
@@ -13003,10 +14071,9 @@
       currentMaker = null;
       currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
     } else {
-      // Unison can return TTML too, but it has no Spicy UploadAttribution
-      // object. The caller supplies its provider explicitly so the footer still
-      // says where these lyrics came from.
-      currentProvider = typeof provider === "string" ? provider : "";
+      // A TTML load with no staged credits and no local file: show no provider
+      // rather than inheriting one from the previous track.
+      currentProvider = "";
       currentMaker = null;
       currentUploader = null;
     }
@@ -13047,45 +14114,6 @@
     showLyricsMessage(NO_LYRICS_MESSAGE);
     setTTMLExportVisibility();
     return false;
-  }
-
-  function unwrapUnisonResult(data) {
-    if (!data) return null;
-    if (data.success && data.data) return data.data;
-    return data.lyrics ? data : null;
-  }
-
-  function normalizeUnisonLyrics(data) {
-    const result = unwrapUnisonResult(data);
-    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
-    const format = String(result.format || "").toLowerCase();
-    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics };
-    if (format === "ttml") return { format: "ttml", lyrics: result.lyrics };
-    // Plain lyrics are deliberately not considered a synced hit. The next
-    // provider (LRCLIB) gets the chance to return timed lyrics instead.
-    if (format === "plain") return null;
-    // Be conservative with servers omitting format: accept only timestamped LRC.
-    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
-      ? { format: "lrc", lyrics: result.lyrics }
-      : null;
-  }
-
-  async function fetchUnisonLyrics(track, key, controller) {
-    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
-    const params = new URLSearchParams();
-    if (track.videoId) params.set("v", track.videoId);
-    else {
-      params.set("song", track.title);
-      if (track.artist) params.set("artist", track.artist);
-      if (track.album) params.set("album", track.album);
-      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
-        params.set("duration", String(Math.round(track.durationMs / 1000)));
-      }
-    }
-    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
-    if (!response.ok || !response.data) return null;
-    return normalizeUnisonLyrics(response.data);
   }
 
   function normalizeLookupText(value) {
@@ -13208,7 +14236,7 @@
 
   async function loadSpicyCache() {
     if (spicyCache) {
-      console.log(`[SpicyLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
+      console.log(`[AuroraLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
       return Promise.resolve(spicyCache);
     }
     if (spicyCacheLoad) return spicyCacheLoad;
@@ -13216,17 +14244,17 @@
       // Without the bridge every lookup is a guaranteed miss and every result
       // is thrown away — a failure mode that looks exactly like a working
       // resolver feeding a broken API call.
-      console.warn("[SpicyLyrics] cache bridge unavailable; nothing will be cached this session.");
+      console.warn("[AuroraLyrics] cache bridge unavailable; nothing will be cached this session.");
       spicyCache = {};
       return Promise.resolve(spicyCache);
     }
     spicyCacheLoad = window.YTMod.getSpicyCache().then((stored) => {
       spicyCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
-      console.log(`[SpicyLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
+      console.log(`[AuroraLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
       invalidateStaleSpicyEntries();
       return spicyCache;
     }).catch((error) => {
-      console.warn("[SpicyLyrics] cache read failed; starting empty:", error && error.message);
+      console.warn("[AuroraLyrics] cache read failed; starting empty:", error && error.message);
       spicyCache = {};
       return spicyCache;
     });
@@ -13241,7 +14269,7 @@
     if (!window.YTMod || typeof window.YTMod.setSpicyCache !== "function") return;
     const snapshot = spicyCache;
     Promise.resolve(window.YTMod.setSpicyCache(snapshot)).catch((error) => {
-      console.warn("[SpicyLyrics] could not persist lyrics cache:", error);
+      console.warn("[AuroraLyrics] could not persist lyrics cache:", error);
     });
   }
 
@@ -13302,7 +14330,7 @@
     if (!drops.length) return 0;
     drops.forEach((k) => { delete spicyCache[k]; });
     markSpicyCacheDirty();
-    console.log(`[SpicyLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
+    console.log(`[AuroraLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
     return drops.length;
   }
 
@@ -13369,8 +14397,76 @@
     try {
       await window.YTMod.clearSpicyCache();
     } catch (error) {
-      console.warn("[SpicyLyrics] could not clear lyrics cache:", error);
+      console.warn("[AuroraLyrics] could not clear lyrics cache:", error);
     }
+  }
+
+  // ---- one song's cache entries ----------------------------------------------
+  // A song owns up to three entries: the canonical `sp:<spotifyId>` payload (once
+  // an id is resolved), the `t:<title>|<artist>` entry used before that, and the
+  // `r:t:<title>|<artist>` resolver mapping that points the second at the first.
+  // Dropping only one leaves the song half-cached, and the next play then either
+  // re-hits the API through the id entry or serves the stale TTML from it.
+  async function spicyCacheKeysForTrack(track) {
+    const titleKey = spicyCacheKeyFor(track, "");
+    if (!titleKey) return [];
+    const cache = await loadSpicyCache();
+    const keys = [titleKey, `r:${titleKey}`];
+    const resolver = cache[`r:${titleKey}`];
+    if (resolver && resolver.spotifyId) keys.push(`sp:${resolver.spotifyId}`);
+    return keys;
+  }
+
+  // What the options panel shows for the song on screen. Only live entries count,
+  // so a swept or expired one reads as "not cached" here exactly as it would to
+  // the resolver.
+  async function spicyCacheStatusForTrack(track) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    const now = Date.now();
+    let exp = 0;
+    for (const key of keys) {
+      const entry = cache[key];
+      if (!entry || entry.v !== SPICY_CACHE_VERSION) continue;
+      if (!Number.isFinite(entry.exp) || entry.exp <= now) continue;
+      if (entry.exp > exp) exp = entry.exp;
+    }
+    return {
+      cached: exp > 0,
+      daysLeft: exp > 0 ? Math.max(1, Math.ceil((exp - now) / 86400000)) : 0,
+    };
+  }
+
+  async function clearSpicyCacheForTrack(track) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    let removed = 0;
+    for (const key of keys) {
+      if (!cache[key]) continue;
+      delete cache[key];
+      removed++;
+    }
+    if (removed) markSpicyCacheDirty();
+    return removed;
+  }
+
+  // Brings one song's expiry forward to `afterMs` from now. The panel's "cleared
+  // after this song ends" has to survive a reload to be honest: the in-memory
+  // delete runs at the next track change, but a reload before that would
+  // otherwise restore the entry's full 30-day window from storage.
+  async function deferSpicyCacheForTrack(track, afterMs) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    const exp = Date.now() + Math.max(0, Number(afterMs) || 0);
+    let touched = 0;
+    for (const key of keys) {
+      const entry = cache[key];
+      if (!entry) continue;
+      entry.exp = Math.min(Number.isFinite(entry.exp) ? entry.exp : exp, exp);
+      touched++;
+    }
+    if (touched) markSpicyCacheDirty();
+    return touched;
   }
 
   // Resolves a Spotify track id from the track's title + artist via
@@ -13550,7 +14646,7 @@
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) console.warn("[SpicyLyrics] ListenBrainz lookup failed:", error && error.message);
+      if (!userAborted) console.warn("[AuroraLyrics] ListenBrainz lookup failed:", error && error.message);
       return { ids: [], transient: !userAborted };
     } finally {
       clearTimeout(timer);
@@ -13560,12 +14656,12 @@
     // 400 = our parameters were rejected. That is our bug, not a flake, so it is
     // a definitive no rather than something worth retrying.
     if (response.status === 400) {
-      console.warn("[SpicyLyrics] ListenBrainz rejected the query (HTTP 400).");
+      console.warn("[AuroraLyrics] ListenBrainz rejected the query (HTTP 400).");
       return { ids: [], transient: false };
     }
     if (response.status === 429) {
       lbThrottledUntil = Date.now() + 30_000;
-      console.warn("[SpicyLyrics] ListenBrainz rate-limited us; backing off for 30s.");
+      console.warn("[AuroraLyrics] ListenBrainz rate-limited us; backing off for 30s.");
       return { ids: [], transient: true };
     }
     if (response.status >= 500) return { ids: [], transient: true };
@@ -13592,6 +14688,11 @@
     return web ? web[1] : "";
   }
 
+  /* Relations are attached by the host's lookup (content.js), not by the
+     search response — MusicBrainz's search endpoint never returns them. TYPE is
+     deliberately ignored: ordinary Spotify mappings are filed as
+     `free streaming`, and filtering for `streaming` would drop every one of
+     them (AJ, 2026-10-22). */
   function musicBrainzSpotifyId(recording) {
     const relations = recording && Array.isArray(recording.relations) ? recording.relations : [];
     for (const relation of relations) {
@@ -13614,6 +14715,16 @@
     const artistNames = Array.isArray(recording["artist-credit"])
       ? recording["artist-credit"].map((credit) => normLoose(credit && (credit.name || credit.artist && credit.artist.name)))
       : [];
+    // A different artist is a different song, however exactly the title matches.
+    // Once relations became readable this mattered: "Ready or Not" also exists
+    // by other artists, and a wrong-but-linked recording would otherwise beat
+    // the right one whenever its duration happened to be closer (AJ, 2026-10-22).
+    // Rejecting here also means we never fetch a Spotify id for a cover/remix by
+    // someone else and serve its lyrics under this track.
+    if (wantedArtist && artistNames.length &&
+        !artistNames.some((name) => name && (name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name)))) {
+      return -1;
+    }
     if (wantedArtist && artistNames.some((name) => name === wantedArtist)) score += 6;
     else if (wantedArtist && artistNames.some((name) => name && (name.includes(wantedArtist) || wantedArtist.includes(name)))) score += 3;
     const wantedDuration = Number(track.durationMs);
@@ -13639,7 +14750,10 @@
         track.durationMs
       );
       if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
-      if (!response || response.status === 429 || response.status >= 500) {
+      // status 0 = the host could not reach MusicBrainz at all (the relation
+      // lookup reports it that way), so it is a transport failure like 429/5xx,
+      // never evidence that the song has no mapping.
+      if (!response || response.status === 0 || response.status === 429 || response.status >= 500) {
         return { id: null, transient: true };
       }
       if (!response.ok || !response.data || !Array.isArray(response.data.recordings)) {
@@ -13651,15 +14765,15 @@
         .sort((a, b) => b.score - a.score);
       const best = candidates[0];
       if (!best) {
-        console.warn(`[SpicyLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
+        console.warn(`[AuroraLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
         return { id: null, transient: false };
       }
       const id = musicBrainzSpotifyId(best.recording);
-      console.log(`[SpicyLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
+      console.log(`[AuroraLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
       return { id, transient: false };
     } catch (error) {
       if (!controller.signal.aborted) {
-        console.warn("[SpicyLyrics] MusicBrainz fallback failed:", error && error.message);
+        console.warn("[AuroraLyrics] MusicBrainz fallback failed:", error && error.message);
       }
       return { id: null, transient: !controller.signal.aborted };
     }
@@ -13668,7 +14782,7 @@
   async function resolveSpotifyIdUncached(track, controller, key) {
     const title = track && track.title;
     if (!title) {
-      console.warn("[SpicyLyrics] no track title; cannot resolve Spotify id.");
+      console.warn("[AuroraLyrics] no track title; cannot resolve Spotify id.");
       return { id: null, transient: false };
     }
 
@@ -13698,13 +14812,13 @@
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
           if (lbThrottledUntil > Date.now()) {
-            console.warn("[SpicyLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
+            console.warn("[AuroraLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
             break lbLadder;
           }
           if (attempts >= LB_MAX_ATTEMPTS) {
             // Budget exhausted without a definitive answer, so the caller must
             // not record this as a permanent miss.
-            console.warn(`[SpicyLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
+            console.warn(`[AuroraLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
             break lbLadder;
           }
           attempts++;
@@ -13715,14 +14829,14 @@
 
           if (out.ids.length) {
             const id = out.ids[0];
-            console.log(`[SpicyLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
+            console.log(`[AuroraLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
             return { id, transient: false };
           }
         }
       }
     }
 
-    console.warn(`[SpicyLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
+    console.warn(`[AuroraLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
@@ -13731,7 +14845,7 @@
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
     if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      console.warn(`[SpicyLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; not caching a miss.`);
+      console.warn(`[AuroraLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
       return { id: null, transient: true };
     }
     return { id: null, transient: false };
@@ -13743,22 +14857,19 @@
    */
   async function resolveSpotifyId(track, controller, key) {
     const cacheKey = spicyCacheKeyFor(track, "");
-    let cachedMiss = false;
+    // Only HITS are cached. A miss used to be recorded for 12 hours and then
+    // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
+    // user added afterwards stayed invisible for half a day — the mapping is
+    // exactly what these lookups exist to find, and it can change at any time
+    // without our knowing (AJ, 2026-10-23). A lookup that fails now simply fails
+    // again next time; both layers are budgeted, so re-asking costs a handful of
+    // requests per play, not a loop.
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
-      if (cached) {
-        if (cached.spotifyId) {
-          console.log(`[SpicyLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
-          return cached.spotifyId;
-        }
-        // A recorded miss — don't re-run the whole search on every play of a
-        // song we already know is unresolvable.
-        cachedMiss = true;
+      if (cached && cached.spotifyId) {
+        console.log(`[AuroraLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
+        return cached.spotifyId;
       }
-    }
-    if (cachedMiss) {
-      console.log("[SpicyLyrics] resolver miss from cache; skipping ListenBrainz lookup.");
-      return null;
     }
     const outcome = await resolveSpotifyIdUncached(track, controller, key);
     const resolved = outcome && outcome.id ? outcome.id : null;
@@ -13771,19 +14882,10 @@
       controller.signal.aborted ||
       key !== currentTrackKey ||
       !spicyCache;
-    if (cacheKey && !stale) {
-      if (resolved) {
-        // A resolved id is durable — give it the full TTL and mark the entry
-        // positive (`hit`) so it isn't treated as a negative result.
-        setSpicyCacheEntry(`r:${cacheKey}`, { spotifyId: resolved, hit: true });
-      } else if (outcome && outcome.transient) {
-        // ListenBrainz was unreachable / rate-limited. That is NOT evidence the
-        // song is unresolvable, so don't poison the cache with a miss — the
-        // next play gets a clean attempt.
-        console.warn("[SpicyLyrics] resolver failed transiently; not caching this as a miss.");
-      } else {
-        setSpicyCacheEntry(`r:${cacheKey}`, { hit: false });
-      }
+    if (cacheKey && !stale && resolved) {
+      // A resolved id is durable — give it the full TTL and mark the entry
+      // positive (`hit`) so it isn't treated as a negative result.
+      setSpicyCacheEntry(`r:${cacheKey}`, { spotifyId: resolved, hit: true });
     }
     return resolved;
   }
@@ -13980,12 +15082,12 @@
 
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
-    if (!track || !track.title) { console.warn("[SpicyLyrics] no track title; skipping."); return null; }
-    console.log(`[SpicyLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
+    if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
+    console.log(`[AuroraLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
     const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
-      console.warn("[SpicyLyrics] no Spotify track id resolved; falling back.");
+      console.warn("[AuroraLyrics] no Spotify track id resolved; falling back.");
       return null;
     }
 
@@ -13996,20 +15098,20 @@
     const cached = await getSpicyCacheEntry(cacheKey);
     if (cached) {
       if (cached.ttml) {
-        console.log(`[SpicyLyrics] served TTML from cache (${spotifyId}).`);
+        console.log(`[AuroraLyrics] served TTML from cache (${spotifyId}).`);
         return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
       }
       if (cached.hit === false) {
-        console.log(`[SpicyLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
+        console.log(`[AuroraLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
         return null;
       }
       // An entry that is neither TTML nor a recorded miss is a half-written
       // record — exactly what a cache written while the page was being torn
       // down looks like. Log it, because otherwise this path is a silent
       // fall-through to the API and reads as "the cache did nothing".
-      console.warn(`[SpicyLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
+      console.warn(`[AuroraLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
     }
-    console.log(`[SpicyLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
+    console.log(`[AuroraLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
 
     // Every exit from here on logs. This function used to have several silent
     // `return null` paths, and because those are indistinguishable in the console
@@ -14017,7 +15119,7 @@
     // sent us chasing the resolver twice. A drop-in replacement for the guard
     // below, used everywhere so no branch can go quiet again.
     const bail = (why) => {
-      console.warn(`[SpicyLyrics] giving up on ${spotifyId} — ${why}`);
+      console.warn(`[AuroraLyrics] giving up on ${spotifyId} — ${why}`);
       return null;
     };
 
@@ -14028,7 +15130,7 @@
         credentials: "omit",
       });
     } catch (e) {
-      console.warn("[SpicyLyrics] request failed:", e);
+      console.warn("[AuroraLyrics] request failed:", e);
       return null;
     }
     // Report WHICH condition dropped the answer — aborted vs a changed track are
@@ -14039,7 +15141,7 @@
     if (key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
-    console.log(`[SpicyLyrics] answered HTTP ${response.status} for ${spotifyId}`);
+    console.log(`[AuroraLyrics] answered HTTP ${response.status} for ${spotifyId}`);
     if (response.status === 404) {
       // The API itself says it has no TTML for this id. That is a real answer
       // and safe to remember.
@@ -14093,231 +15195,8 @@
       songwriters: parsed.songwriters || [],
       spotifyId,
     });
-    console.log(`[SpicyLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    console.log(`[AuroraLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
     return parsed;
-  }
-
-  /* ---- lrc.red (AJ, 2026-10-19) -----------------------------------------
-     Static file host keyed by ISRC — no search endpoint, no auth, no key:
-       https://lrc.red/s/{ISRC}.ttml   word-level Apple-style TTML
-       https://lrc.red/s/{ISRC}.lrc    line-level fallback
-       https://lrc.red/s/{ISRC}.json   metadata
-     CORS is `access-control-allow-origin: *`, so the page can fetch it
-     directly. The hard part is the ISRC: YTM exposes it only sometimes, so a
-     MusicBrainz recording lookup is the fallback (MB search results already
-     carry `isrcs`, no extra `inc` needed).
-     Their docs ask for credit when the API is proxied — passing "lrc.red" as
-     the provider label satisfies that through the normal credits footer. */
-  const LRC_RED_BASE = "https://lrc.red/s/";
-  const LRC_RED_ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{2}\d{5}$/;
-  const lrcRedCache = new Map(); // isrc -> { ttml?, lrc? }
-  const lrcRedIsrcCache = new Map(); // track key -> isrc
-  // A dead lrc.red origin (Cloudflare 522) hangs until the network gives up,
-  // which made track changes feel frozen. Bound it, and after a failure skip
-  // the source entirely for a while instead of paying the timeout per track.
-  const LRC_RED_TIMEOUT_MS = 4000;
-  const LRC_RED_COOLDOWN_MS = 5 * 60 * 1000;
-  let lrcRedCooldownUntil = 0;
-
-  function lrcRedSignal(trackSignal) {
-    try {
-      if (
-        typeof AbortSignal !== "undefined" &&
-        typeof AbortSignal.any === "function" &&
-        typeof AbortSignal.timeout === "function"
-      ) {
-        return AbortSignal.any([trackSignal, AbortSignal.timeout(LRC_RED_TIMEOUT_MS)]);
-      }
-    } catch (_) {}
-    return trackSignal;
-  }
-
-  function normalizeIsrc(value) {
-    const compact = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-    return LRC_RED_ISRC_RE.test(compact) ? compact : "";
-  }
-
-  // Score a Deezer search hit against the track. Title dominates; artist and
-  // duration break ties (Deezer lists remixes/live versions separately, and
-  // picking the wrong one would fetch the wrong ISRC).
-  function deezerIsrcScore(candidate, track) {
-    const norm = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const candidateTitle = norm(candidate && candidate.title);
-    const trackTitle = norm(track && track.title);
-    if (!candidateTitle || !trackTitle) return 0;
-    let score = 0;
-    if (candidateTitle === trackTitle) score += 60;
-    else if (candidateTitle.indexOf(trackTitle) !== -1 || trackTitle.indexOf(candidateTitle) !== -1) score += 30;
-    else return 0;
-    const candidateArtist = norm(candidate.artist && candidate.artist.name);
-    const trackArtist = norm(track && track.artist);
-    if (candidateArtist && trackArtist) {
-      if (candidateArtist === trackArtist) score += 30;
-      else if (candidateArtist.indexOf(trackArtist) !== -1 || trackArtist.indexOf(candidateArtist) !== -1) score += 15;
-    }
-    const candidateDuration = Number(candidate.duration);
-    const trackDuration = Number(track && track.durationMs) / 1000;
-    if (candidateDuration > 0 && trackDuration > 0) {
-      const delta = Math.abs(candidateDuration - trackDuration);
-      if (delta <= 2) score += 25;
-      else if (delta <= 5) score += 12;
-      else if (delta > 15) score -= 20;
-    }
-    return score;
-  }
-
-  // ISRC for this track. YTM exposes none (verified against /player and /next),
-  // so: Deezer first — it carries new releases on release day and returns
-  // `isrc` on every hit — then MusicBrainz for older catalogue where Deezer
-  // misses (AJ, 2026-10-19).
-  async function resolveLrcRedIsrc(track, controller, key) {
-    const direct = normalizeIsrc(track && track.isrc);
-    if (direct) return direct;
-    const memo = lrcRedIsrcCache.get(key);
-    if (memo) return memo;
-    if (controller.signal.aborted || key !== currentTrackKey) return "";
-
-    if (window.YTMod && typeof window.YTMod.fetchDeezerTracks === "function") {
-      try {
-        // Cleaned title: Deezer's catalogue uses canonical names, not the
-        // uploader's "X (Official Video) [Lyrics]" styling.
-        const response = await window.YTMod.fetchDeezerTracks(
-          cleanSearchTitle(track.title, track.artist),
-          track.artist,
-          track.album
-        );
-        if (controller.signal.aborted || key !== currentTrackKey) return "";
-        if (response && response.ok && response.data && Array.isArray(response.data.data)) {
-          const best = response.data.data
-            .map((candidate) => ({ candidate, score: deezerIsrcScore(candidate, track) }))
-            .filter((entry) => entry.score >= 60 && normalizeIsrc(entry.candidate.isrc))
-            .sort((a, b) => b.score - a.score)[0];
-          if (best) {
-            const isrc = normalizeIsrc(best.candidate.isrc);
-            lrcRedIsrcCache.set(key, isrc);
-            console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via Deezer (score ${best.score}).`);
-            return isrc;
-          }
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return "";
-        console.warn("[SpicyLyrics] lrc.red: Deezer ISRC lookup failed:", error && error.message);
-      }
-    }
-
-    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") return "";
-    if (controller.signal.aborted || key !== currentTrackKey) return "";
-    try {
-      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        cleanSearchTitle(track.title, track.artist),
-        track.artist,
-        track.album,
-        track.durationMs
-      );
-      if (controller.signal.aborted || key !== currentTrackKey) return "";
-      if (!response || !response.ok || !response.data || !Array.isArray(response.data.recordings)) return "";
-      const best = response.data.recordings
-        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
-        .filter((candidate) =>
-          candidate.score > 0 &&
-          Array.isArray(candidate.recording.isrcs) &&
-          candidate.recording.isrcs.length
-        )
-        .sort((a, b) => b.score - a.score)[0];
-      const isrc = best ? normalizeIsrc(best.recording.isrcs[0]) : "";
-      if (!isrc) {
-        console.warn(`[SpicyLyrics] lrc.red: no ISRC for "${track.title}" from Deezer or MusicBrainz.`);
-        return "";
-      }
-      lrcRedIsrcCache.set(key, isrc);
-      console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via MusicBrainz (score ${best.score}).`);
-      return isrc;
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        console.warn("[SpicyLyrics] lrc.red: MusicBrainz ISRC lookup failed:", error && error.message);
-      }
-      return "";
-    }
-  }
-
-  async function fetchLrcRedLyrics(track, controller, key) {
-    const isrc = await resolveLrcRedIsrc(track, controller, key);
-    if (!isrc) return null;
-    const cached = lrcRedCache.get(isrc);
-    if (cached) return cached;
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
-    // Origin known to be unreachable right now — skip without paying the
-    // timeout again on this track (AJ, 2026-10-19).
-    if (Date.now() < lrcRedCooldownUntil) return null;
-    const result = {};
-    let unreachable = false;
-    // TTML first (word-level); LRC only if the TTML entry does not exist.
-    for (const ext of ["ttml", "lrc"]) {
-      try {
-        const response = await fetch(`${LRC_RED_BASE}${isrc}.${ext}`, {
-          headers: { Accept: ext === "ttml" ? "application/ttml+xml" : "text/plain" },
-          credentials: "omit",
-          signal: lrcRedSignal(controller.signal),
-        });
-        if (!response.ok) continue; // 404 -> try the next format
-        const text = await response.text();
-        if (!text || text.length < 40) continue;
-        // A 200 with an HTML body is Cloudflare's interstitial, not lyrics.
-        if (ext === "ttml" && text.indexOf("<tt") === -1) continue;
-        result[ext] = text;
-        break;
-      } catch (error) {
-        if (controller.signal.aborted) return null;
-        // A THROW here is not an HTTP status: it is CORS / DNS / a Cloudflare
-        // 522 page (which carries no Access-Control-Allow-Origin, so the
-        // browser reports it as a CORS failure), or our own timeout. The second
-        // extension would fail the same way, so stop instead of waiting twice.
-        unreachable = true;
-        break;
-      }
-    }
-    if (unreachable) {
-      lrcRedCooldownUntil = Date.now() + LRC_RED_COOLDOWN_MS;
-      console.warn(
-        `[SpicyLyrics] lrc.red is unreachable (CORS/522/timeout) — skipping it for ` +
-        `${Math.round(LRC_RED_COOLDOWN_MS / 60000)} min so playback is not delayed.`
-      );
-      return null;
-    }
-    if (!result.ttml && !result.lrc) {
-      console.log(`[SpicyLyrics] lrc.red: no lyrics for ISRC ${isrc}.`);
-      return null;
-    }
-    lrcRedCache.set(isrc, result);
-    console.log(`[SpicyLyrics] lrc.red: fetched ${result.ttml ? "TTML" : "LRC"} for ${isrc}.`);
-    return result;
-  }
-
-  // Does this TTML carry real per-WORD timing (Apple/Spicy <span ttm:role="x-word">
-  // structure, or lrc.red's Word mode)? Line-only TTML (lrc:timing="Line", plain <p>
-  // text) has NO word timing — rendering it through the karaoke path makes every
-  // line light at once, so it is shown as static auto-scroll instead (AJ, 2026-10-19).
-  function ttmlHasWordTiming(xml) {
-    const s = String(xml || "");
-    if (/lrc:timing\s*=\s*["']Word["']/i.test(s)) return true;
-    if (/<span\b[^>]*\bttm:role\s*=\s*["']x-word["']/i.test(s)) return true;
-    return /<span\b/i.test(s) && /\bbegin\s*=/.test(s);
-  }
-  // Flattens a line-level TTML to plain text (one <p> -> one line) for the static path.
-  function ttmlPlainText(xml) {
-    const s = String(xml || "");
-    const lines = [];
-    const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
-    let m;
-    while ((m = re.exec(s))) {
-      const text = decodeEntities(m[1].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
-      if (text) lines.push(text);
-    }
-    return lines.join("\n");
-  }
-  // A synced LRC line is prefixed with a [mm:ss(.xx)] timestamp; plain lyrics are not.
-  function isSyncedLRC(text) {
-    return /\[\s*\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\s*\]/.test(String(text || ""));
   }
 
   async function fetchLRCLyrics(track, key) {
@@ -14327,16 +15206,34 @@
     activeTrackAbort = controller;
 
     // Skeleton rather than a text message: this covers the network wait AND the
-    // synchronous DOM build that follows it (see showLyricsSkeleton).
+    // synchronous DOM build that follows it (see showLyricsSkeleton). The AMLL
+    // engine is a separate renderer, so its skeleton goes up alongside.
     showLyricsSkeleton();
+    amllShowSkeleton();
 
     const stale = () =>
       controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey;
 
-    /* One LRCLIB fetch, shared by the lrclib runner and by the lrc.red STATIC
-       fallback. The fallback needs the raw result (not a load) so it can decide
-       whether LRCLIB actually has a SYNCED set; if it only has plain lyrics we
-       keep lrc.red's static set instead of swapping one static for another. */
+    /* A result the user picked in Search lyrics is not a suggestion — it is the
+       answer. It outranks every source, including Spicy, because the pick only
+       exists when the automatic resolver already failed for this track. Served
+       from the persistent cache before any runner runs, so a replay or a page
+       reload loads it instantly instead of searching and landing on "no
+       lyrics" again (AJ, 2026-10-22). */
+    const manualPick = getManualLyricsPersistent(key);
+    if (manualPick) {
+      if (stale()) return;
+      if (loadLRCLyrics(manualPick, track.durationMs)) {
+        console.log("[AuroraLyrics] manual search pick served from cache.");
+        return;
+      }
+      // The entry no longer parses (corrupt or older shape): drop it and let
+      // the normal order try rather than failing the track silently.
+      removeLyricsPersistent(key);
+    }
+
+    /* One LRCLIB fetch, shared by the lrclib runner. It stays RAW (not a load)
+       so the caller can tell a synced result from a plain-only one. */
     const fetchLrclibData = async () => {
       const cached = lrclibCache.get(key);
       if (cached) {
@@ -14400,7 +15297,7 @@
             // Silence here was a real dead end: the TTML was fetched and parsed,
             // then dropped on the floor with no output, which reads as "the fetch
             // failed".
-            console.warn(`[SpicyLyrics] discarding the Spicy result — ${
+            console.warn(`[AuroraLyrics] discarding the Spicy result — ${
               controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
             return true;
           }
@@ -14412,103 +15309,17 @@
               songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
             };
             if (loadTTML(spicyResult.ttml, "external")) {
-              console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
+              console.log("[AuroraLyrics] TTML rendered from the Spicy Lyrics API.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[SpicyLyrics] API returned TTML we could not parse; trying the next source.");
+            console.warn("[AuroraLyrics] API returned TTML we could not parse; trying the next source.");
           } else {
-            console.warn("[SpicyLyrics] no Spicy TTML for this track; trying the next source.");
+            console.warn("[AuroraLyrics] no Spicy TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] lookup failed; trying the next source:", error);
-        }
-        return false;
-      },
-
-      "lrc.red": async () => {
-        try {
-          const lrcRed = await fetchLrcRedLyrics(track, controller, key);
-          if (stale()) return true;
-          if (!lrcRed || (!lrcRed.ttml && !lrcRed.lrc)) return false;
-
-          const hasWordTiming = !!(lrcRed.ttml && ttmlHasWordTiming(lrcRed.ttml));
-          const hasSyncedLRC = !!(lrcRed.lrc && isSyncedLRC(lrcRed.lrc));
-          const isStatic = !hasWordTiming && !hasSyncedLRC;
-
-          // lrc.red only had a STATIC set. Prefer a SYNCED LRCLIB result over
-          // static lyrics; only settle for lrc.red's static set when LRCLIB has
-          // nothing synced (AJ, 2026-10-20).
-          if (isStatic) {
-            let lrclibData = null;
-            try {
-              lrclibData = await fetchLrclibData();
-            } catch (error) {
-              if (error && error.name === "AbortError") return true;
-              console.warn("[SpicyLyrics] LRCLIB fallback for static lrc.red failed:", error);
-            }
-            if (stale()) return true;
-            if (lrclibData && lrclibData.syncedLyrics) {
-              loadLRCLyrics(lrclibData, track.durationMs);
-              return true;
-            }
-          }
-
-          let ok = false;
-          let loadedSynced = false;
-          if (hasWordTiming) {
-            // Word-level TTML -> normal word-by-word karaoke.
-            ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
-            if (ok) {
-              loadedSynced = true;
-              console.log("[SpicyLyrics] TTML rendered from lrc.red.");
-            }
-          }
-          if (!ok && hasSyncedLRC) {
-            ok = loadLRCLyrics({ syncedLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
-            if (ok) loadedSynced = true;
-          }
-          if (!ok && lrcRed.ttml) {
-            // Line-level-only TTML: no per-word timing. Present it as STATIC
-            // auto-scroll instead (AJ, 2026-10-19).
-            ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
-          }
-          if (!ok && lrcRed.lrc) {
-            // A plain (untimestamped) .lrc piling on one line is the "all fire at
-            // once" bug — feed it through the STATIC path, not syncedLyrics.
-            ok = loadLRCLyrics({ plainLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
-          }
-          if (ok) {
-            // Only warn about accuracy when the set that ACTUALLY loaded is
-            // synced; a static set has no timing to be out of sync
-            // (AJ, 2026-10-20).
-            if (loadedSynced) showSourceNotice("lrc.red lyrics may be slightly out of sync");
-            return true;
-          }
-          console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
-        } catch (error) {
-          if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] lrc.red lookup failed; trying the next source:", error);
-        }
-        return false;
-      },
-
-      unison: async () => {
-        try {
-          const unisonData = await fetchUnisonLyrics(track, key, controller);
-          if (stale()) return true;
-          if (unisonData && unisonData.format === "ttml") {
-            if (loadTTML(unisonData.lyrics, "external", "Unison")) return true;
-            console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; trying the next source.");
-          }
-          if (unisonData && unisonData.format === "lrc") {
-            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return true;
-            console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; trying the next source.");
-          }
-        } catch (error) {
-          if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] Unison lookup failed; trying the next source:", error);
+          console.warn("[AuroraLyrics] lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -14523,16 +15334,17 @@
         } catch (error) {
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
-          console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
+          console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
           return false;
         }
       },
     };
 
     // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
-    // was removed. Spicy Lyrics wins when both it and lrc.red carry the track;
-    // lrc.red is next for new releases; Unison + LRCLIB are last-resort fallbacks.
-    const order = ["spicy", "lrc.red", "unison", "lrclib"];
+    // was removed. Spicy Lyrics wins when it has the track; LRCLIB is the
+    // fallback. lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25:
+    // both are unmoderated, so a wrong sync was more common than a useful one.
+    const order = ["spicy", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;
@@ -14632,6 +15444,49 @@
   let searchAbortController = null;
   let searchRequestSeq = 0;
 
+  // Lyrics on LRCLIB are contributed by people, so a genuine gap is something a
+  // listener can close. The empty state points at the place they can do it.
+  const LRCLIB_DISCORD_INVITE = "https://discord.gg/stz5vZqczC";
+
+  // Empty answers before the Search button is spent. Three covers a typo and a
+  // reworded query; past that the same track keeps coming back empty, so the
+  // button greys out instead of asking LRCLIB the same question again.
+  const SEARCH_EMPTY_LIMIT = 3;
+
+  function setSearchSpent(panel, spent) {
+    if (!panel._submit) return;
+    panel._submit.disabled = spent;
+    panel._submit.title = spent
+      ? "No lyrics for this track on LRCLIB — search is off for now."
+      : "";
+  }
+
+  // The panel's two misses are different things and each gets its own answer:
+  //   - an empty list means LRCLIB has no lyrics for this track yet
+  //   - a thrown request means LRCLIB itself did not answer (it rate-limits
+  //     bursty clients, so a busy spell is the usual cause)
+  function showSearchEmptyState(panel) {
+    panel._status.replaceChildren(
+      h("span", {
+        text: "There are no lyrics for this track on LRCLIB yet — they may be added later. " +
+          "Want to contribute them yourself? Join our Discord: ",
+      }),
+      h("a", {
+        class: "ym-sl-search-link",
+        href: LRCLIB_DISCORD_INVITE,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: "discord.gg/stz5vZqczC",
+      })
+    );
+    if (panel._emptyTries >= SEARCH_EMPTY_LIMIT) {
+      panel._status.appendChild(h("div", {
+        class: "ym-sl-search-empty-note",
+        text: "Search is off for this track for now — try again in a little while.",
+      }));
+    }
+  }
+
   function ensureSearchPanel() {
     if (searchPanelEl) return searchPanelEl;
     const panel = h("div", {
@@ -14662,6 +15517,11 @@
 
     const rememberRow = h("label", { class: "ym-sl-search-remember" });
     const remember = h("input", { type: "checkbox", class: "ym-sl-search-remember-box" });
+    // ON by default. A manual pick exists precisely because the automatic
+    // resolver could not find this track, so without remembering it the next
+    // play (or a page reload) goes back to "No lyrics found" and the pick is
+    // lost — AJ's exact report (2026-10-22). Untick it for a one-off answer.
+    remember.checked = true;
     rememberRow.append(remember, h("span", { text: "Remember for this track" }));
 
     const status = h("div", { class: "ym-sl-search-status", role: "status" });
@@ -14679,6 +15539,8 @@
     panel._status = status;
     panel._results = results;
     panel._foot = foot;
+    panel._submit = submit;
+    panel._emptyTries = 0;
 
     // Click anywhere outside the sheet (or its Search trigger) to dismiss it.
     document.addEventListener("pointerdown", (event) => {
@@ -14726,6 +15588,10 @@
       panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
       panel._results.replaceChildren();
       panel._status.textContent = "";
+      // A fresh visit gets its three tries back, so a spent button is never a
+      // dead end for the rest of the session.
+      panel._emptyTries = 0;
+      setSearchSpent(panel, false);
       panel._foot.textContent = lastLyricsError
         ? "ERR: rate limited — try again in a couple of minutes."
         : "";
@@ -14739,6 +15605,8 @@
 
   async function runLyricSearch() {
     const panel = ensureSearchPanel();
+    // Enter in the input can still submit the form around a disabled button.
+    if (panel._submit && panel._submit.disabled) return;
     const query = (panel._input.value || "").trim();
     if (!query) {
       panel._status.textContent = "Type a song title or artist first.";
@@ -14763,23 +15631,30 @@
       if (!response.ok) throw new Error("LRCLIB search returned HTTP " + response.status);
       const list = Array.isArray(response.data) ? response.data : [];
       if (!list.length) {
-        panel._status.textContent = "No results found.";
+        panel._emptyTries = (panel._emptyTries || 0) + 1;
+        if (panel._emptyTries >= SEARCH_EMPTY_LIMIT) setSearchSpent(panel, true);
+        showSearchEmptyState(panel);
         return;
       }
+      // A hit clears the strike count, so a later miss on another query starts fresh.
+      panel._emptyTries = 0;
+      setSearchSpent(panel, false);
       panel._status.textContent = `${list.length} result${list.length === 1 ? "" : "s"} — pick one to load.`;
       list.slice(0, 25).forEach((item) => {
-        panel._results.appendChild(makeSearchResultRow(item, panel._remember.checked, panel._status));
+        panel._results.appendChild(makeSearchResultRow(item, panel, panel._status));
       });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       if (requestId !== searchRequestSeq) return;
       searchAbortController = null;
-      panel._status.textContent = "Search failed. Try again.";
-      console.warn("[SpicyLyrics] manual lyric search failed:", error);
+      panel._status.textContent = "LRCLIB is currently busy — please try a few more times.";
+      console.warn("[AuroraLyrics] manual lyric search failed:", error);
     }
   }
 
-  function makeSearchResultRow(item, remember, status) {
+  // `panel`, not a captured `remember` boolean: the tick can be changed after
+  // the rows render, so the state that counts is the one at click time.
+  function makeSearchResultRow(item, panel, status) {
     const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
     const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
     const hasSync = !!item.syncedLyrics;
@@ -14795,7 +15670,7 @@
         row.classList.add("no-sync-available");
         row.title = "Load unsynced lyrics (no timestamps)";
       }
-      row.addEventListener("click", () => applySearchResult(item, remember, status));
+      row.addEventListener("click", () => applySearchResult(item, panel._remember.checked, status));
     } else {
       row.classList.add("no-sync");
       row.disabled = true;
@@ -14807,12 +15682,38 @@
   function applySearchResult(item, remember, status) {
     const track = getCurrentTrack();
     const durationMs = track ? Number(track.durationMs) : 0;
-    const key = track ? getTrackKey(track) : "";
+    // currentTrackKey first: that is the key the resolver reads, so a pick made
+    // while the track object is briefly unavailable still lands on the entry
+    // the next play will look for.
+    const key = currentTrackKey || (track ? getTrackKey(track) : "");
+    // Kill any lookup still in flight. Without this, a slow automatic answer
+    // can land AFTER the pick and overwrite the lyrics the user just chose.
+    if (activeTrackAbort) {
+      activeTrackAbort.abort();
+      activeTrackAbort = null;
+    }
+    ++trackRequestSeq;
+    // The pick replaces whatever this track was showing before, including a
+    // permanent upload, so the File tab must stop offering to delete that file
+    // and the dormant pause-sync point must not survive into new line times.
+    manualLyricsIsPermanent = false;
+    manualLyricsTrackKey = "";
+    currentLyricsFromSavedTTML = false;
+    pauseSync = null;
     loadLRCLyrics(item, durationMs);
-    cacheLRCLyrics(key, item);
-    if (remember && key) cacheLyricsPersistent(key, item);
+    if (key) {
+      cacheLRCLyrics(key, item);
+      // Remembering writes the manual flag the resolver checks BEFORE it asks
+      // any source. Unticking removes an earlier manual pick, so the next play
+      // is answered by the normal source order again.
+      if (remember) cacheLyricsPersistent(key, item, { manual: true });
+      else removeLyricsPersistent(key);
+      // The File tab reports this track's cache state; update it now instead of
+      // waiting for the next track change.
+      refreshFileTabState();
+    }
     const isUnsynced = !item.syncedLyrics && item.plainLyrics;
-    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (remembered for this track)" : ""}.`;
+    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (saved for this track)" : ""}.`;
     toggleSearchPanel(false);
   }
 
@@ -14834,6 +15735,22 @@
       durationMs > 0 &&
       lastObservedPositionMs >= durationMs * 0.9 &&
       positionMs < 5000;
+
+    // A queued per-song cache clear belongs to the song that was playing when it
+    // was queued, so it is released here — on the change of track, or when the
+    // same song restarts from the top (a loop never changes the key).
+    if (pendingSongCacheClear) {
+      const pendingKey = pendingSongCacheClear.trackKey;
+      const queuedSongRestarted =
+        pendingKey === key &&
+        Number.isFinite(positionMs) &&
+        Number.isFinite(lastObservedPositionMs) &&
+        Number.isFinite(durationMs) &&
+        durationMs > 0 &&
+        lastObservedPositionMs >= durationMs * 0.9 &&
+        positionMs < 5000;
+      if (pendingKey !== key || queuedSongRestarted) flushPendingSongCacheClear();
+    }
 
     lastObservedTrackKey = key;
     lastObservedPositionMs = positionMs;
@@ -14864,27 +15781,37 @@
     }
     const requestId = ++trackRequestSeq;
     showLyricsSkeleton();
+    // Apple-Music-style lyrics render through a separate engine, so it needs its
+    // own skeleton at the same moment; otherwise it keeps the previous track's
+    // lines on screen for the whole lookup.
+    amllShowSkeleton();
 
     let savedTTML = null;
     try {
       savedTTML = await getPermanentTTML(key);
     } catch (error) {
-      console.warn("[SpicyLyrics] Could not read permanent TTML:", error);
+      console.warn("[AuroraLyrics] Could not read permanent TTML:", error);
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
     if (!force && savedTTML) {
-      if (loadTTML(savedTTML, "external")) return;
+      if (loadTTML(savedTTML, "external")) {
+        // This IS the permanently saved file, so the File tab may offer to delete
+        // it (and nothing else claims it once the TRACK changes).
+        currentLyricsFromSavedTTML = true;
+        refreshFileTabState();
+        return;
+      }
       try {
         await removePermanentTTML(key);
       } catch (error) {
-        console.warn("[SpicyLyrics] Could not remove invalid permanent TTML:", error);
+        console.warn("[AuroraLyrics] Could not remove invalid permanent TTML:", error);
       }
       if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
     }
 
     manualLyricsIsPermanent = false;
-    refreshPermanentDeleteState();
+    refreshFileTabState();
     fetchLRCLyrics(track, key);
   }
 
@@ -14937,155 +15864,6 @@
     return model;
   }
 
-  /* ===================== Romanization (JP + KR) ===================== */
-  // Rule-based kana -> romaji and Hangul -> romaja. Display-only, computed once
-  // at lyric build time (see appendRomaji / buildRendererLines), so it adds no
-  // per-frame or per-letter cost. No dictionary, no network, no bundle bloat.
-  // Chinese pinyin is intentionally excluded (it needs a dictionary) — see notes.
-
-  const HIRA_BASE = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわゐゑをん";
-  const HIRA_ROMA = ["a","i","u","e","o","ka","ki","ku","ke","ko","sa","shi","su","se","so","ta","chi","tsu","te","to","na","ni","nu","ne","no","ha","hi","fu","he","ho","ma","mi","mu","me","mo","ya","yu","yo","ra","ri","ru","re","ro","wa","wi","we","wo","n"];
-  const KATA_BASE = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヰヱヲン";
-
-  const KANA_MAP = {};
-  function dakutenize(roma) {
-    if (roma === "shi") return "ji";
-    if (roma === "chi") return "ji";
-    if (roma === "tsu") return "zu";
-    if (roma === "fu") return "bu";
-    const dm = { k: "g", s: "z", t: "d", h: "b" };
-    const c = roma[0];
-    return dm[c] ? dm[c] + roma.slice(1) : roma;
-  }
-  function handakutenize(roma) {
-    if (roma === "fu") return "pu";
-    return roma[0] === "h" ? "p" + roma.slice(1) : roma;
-  }
-  function buildKanaMap() {
-    for (let i = 0; i < HIRA_BASE.length; i++) {
-      const k = HIRA_BASE[i];
-      const r = HIRA_ROMA[i];
-      KANA_MAP[k] = r;
-      const cp = k.codePointAt(0);
-      const c0 = r[0];
-      if (c0 === "k" || c0 === "s" || c0 === "t" || c0 === "h" || c0 === "f") {
-        KANA_MAP[String.fromCodePoint(cp + 1)] = dakutenize(r);
-        if (c0 === "h" || c0 === "f") KANA_MAP[String.fromCodePoint(cp + 2)] = handakutenize(r);
-      }
-    }
-    for (let i = 0; i < KATA_BASE.length; i++) {
-      const k = KATA_BASE[i];
-      const r = HIRA_ROMA[i];
-      KANA_MAP[k] = r;
-      const cp = k.codePointAt(0);
-      const c0 = r[0];
-      if (c0 === "k" || c0 === "s" || c0 === "t" || c0 === "h" || c0 === "f") {
-        KANA_MAP[String.fromCodePoint(cp + 1)] = dakutenize(r);
-        if (c0 === "h" || c0 === "f") KANA_MAP[String.fromCodePoint(cp + 2)] = handakutenize(r);
-      }
-    }
-    Object.assign(KANA_MAP, {
-      "ぁ": "a", "ぃ": "i", "ぅ": "u", "ぇ": "e", "ぉ": "o",
-      "ゃ": "ya", "ゅ": "yu", "ょ": "yo", "ゎ": "wa", "ゕ": "ka", "ゖ": "ka",
-      "ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
-      "ャ": "ya", "ュ": "yu", "ョ": "yo", "ヮ": "wa", "ヵ": "ka", "ヶ": "ka",
-    });
-  }
-  buildKanaMap();
-
-  const SMALL_Y = { "ゃ": "a", "ゅ": "u", "ょ": "o", "ャ": "a", "ュ": "u", "ョ": "o" };
-  function isKanaCode(cp) {
-    return (cp >= 0x3040 && cp <= 0x309f) || (cp >= 0x30a0 && cp <= 0x30ff);
-  }
-  function isSmallYKana(ch) {
-    return Object.prototype.hasOwnProperty.call(SMALL_Y, ch);
-  }
-
-  // Hangul -> Revised Romanization (initial + medial + final jamo).
-  const CHOSEONG = ["g","kk","n","d","tt","r","m","b","pp","s","ss","","j","jj","ch","k","t","p","h"];
-  const JUNGSEONG = ["a","ae","ya","yae","eo","e","yeo","ye","o","wa","wae","oe","yo","u","wo","we","wi","yu","eu","ui","i"];
-  const JONGSEONG = ["","g","k","g","n","n","n","t","l","lk","lm","l","l","l","l","lp","m","b","p","s","ss","ng","j","ch","k","t","p","h"];
-  function hangulToRomaja(cp) {
-    const SBase = 0xac00, NCount = 588, TCount = 28;
-    const idx = cp - SBase;
-    const L = Math.floor(idx / NCount);
-    const V = Math.floor((idx % NCount) / TCount);
-    const T = idx % TCount;
-    let s = CHOSEONG[L] + JUNGSEONG[V];
-    if (T > 0) s += JONGSEONG[T];
-    return s;
-  }
-
-  function romanize(text) {
-    if (!text) return "";
-    const out = [];
-    const chars = Array.from(text);
-    for (let i = 0; i < chars.length; i++) {
-      const ch = chars[i];
-      const cp = ch.codePointAt(0);
-      if (cp >= 0xac00 && cp <= 0xd7a3) {
-        out.push(hangulToRomaja(cp));
-        continue;
-      }
-      if (!isKanaCode(cp)) {
-        out.push(ch);
-        continue;
-      }
-      // Grammatical particles は/へ/を read as wa/e/o when they close a kana run
-      // (followed by a non-kana or end of string). Still rule-based, no dictionary.
-      if (ch === "は" || ch === "へ" || ch === "を") {
-        const nextCh = chars[i + 1];
-        const nextKana = nextCh && isKanaCode(nextCh.codePointAt(0));
-        if (!nextKana) {
-          out.push(ch === "は" ? "wa" : ch === "へ" ? "e" : "o");
-          continue;
-        }
-      }
-      // sokuon (small tsu) -> double the next syllable's first consonant
-      if (ch === "っ" || ch === "ッ") {
-        const nr = chars[i + 1] ? KANA_MAP[chars[i + 1]] : null;
-        out.push(nr ? nr[0] : "tsu");
-        continue;
-      }
-      // chōonpu (long vowel mark) -> repeat the previous vowel
-      if (ch === "ー" || ch === "〜" || ch === "ｰ") {
-        const prev = out[out.length - 1];
-        if (prev && /[aiueo]$/.test(prev)) out[out.length - 1] = prev + prev[prev.length - 1];
-        continue;
-      }
-      const rom = KANA_MAP[ch];
-      if (!rom) { out.push(ch); continue; }
-      // small y-kana merges with the previous syllable ending in 'i'
-      if (isSmallYKana(ch) && out.length) {
-        const prev = out[out.length - 1];
-        if (prev.endsWith("i") && !prev.endsWith("ei")) {
-          const consonant = prev.slice(0, -1);
-          const yv = SMALL_Y[ch];
-          out[out.length - 1] = /^(sh|ch|j)$/.test(consonant) ? consonant + yv : consonant + "y" + yv;
-          continue;
-        }
-      }
-      out.push(rom);
-    }
-    return out.join("");
-  }
-
-  function appendRomaji(lineElement, syllables) {
-    if (!currentSettings.romanizationEnabled) return;
-    if (!syllables || !syllables.length) return;
-    const plain = syllables.map((w) => w.Text).join("");
-    if (!plain.trim()) return;
-    // Reading kanji needs a dictionary (out of scope), so strip Han characters
-    // first and show only the pronunciation of the readable kana underneath the
-    // original line. Pure-kana and Hangul lines still get full romanization.
-    const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
-    if (!kanaOnly.trim()) return;
-    const rom = romanize(kanaOnly);
-    if (!rom || rom === kanaOnly) return;
-    if (!/[A-Za-z]/.test(rom)) return;
-    lineElement.appendChild(h("div", { class: "romaji", text: rom }));
-  }
-
   // Does the whole-word join apply to this line? `joinSyllables` is the master
   // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
   // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
@@ -15130,7 +15908,7 @@
     // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
     // per-letter "wavy" karaoke group either — AMLL fills the whole word with one
     // clean gradient sweep. Force the plain-.word path so long words match AMLL.
-    if (joinApplies(background) || currentSettings.simpleLyrics) letterCapable = false;
+    if (joinApplies(background) || amllSimpleLookActive()) letterCapable = false;
     const element = letterCapable
       ? makeLetterGroup(word)
       : h("span", { class: "word", text: word.Text });
@@ -15299,18 +16077,16 @@
   }
 
   // "Lyrics provided by <provider>" — every API source owes this one, so it is
-  // plain text and never conditional on a person existing.
-  // lrc.red's docs explicitly ask for credit; a link is the strongest form of it
-  // and lets the user check the source (AJ, 2026-10-19).
+  // plain text and never conditional on a person existing. A link is the
+  // strongest form of that credit: it lets the user check the source.
   const PROVIDER_URLS = {
-    "lrc.red": "https://lrc.red",
-    "Unison": "https://unison.boidu.dev/",
     "LRCLIB": "https://lrclib.net/",
   };
   // Sources whose timing is machine-aligned rather than hand-synced get the
   // warning treatment: red pill + triangle. Persistent, unlike the transient
-  // chip above the lyrics (AJ, 2026-10-19).
-  const PROVIDER_WARN = { "lrc.red": true };
+  // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
+  // (2026-10-22); kept as the hook for any future machine-aligned source.
+  const PROVIDER_WARN = {};
 
   // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
   function buildProviderWarnIcon() {
@@ -15371,226 +16147,12 @@
     );
   }
 
-  // RGB <-> HSL, used only to push the two sampled colours apart when the avatar
-  // is too flat for the spin to read (see sampleAvatarColor).
-  function rgbToHsl(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    if (max === min) return { h: 0, s: 0, l: l };
-    const d = max - min;
-    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    let h;
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    return { h: h / 6, s: s, l: l };
-  }
-
-  function hslToRgb(h, s, l) {
-    const hue = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1 / 6) return p + (q - p) * 6 * t;
-      if (t < 1 / 2) return q;
-      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-      return p;
-    };
-    if (s === 0) {
-      const v = Math.round(l * 255);
-      return [v, v, v];
-    }
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    return [
-      Math.round(hue(p, q, h + 1 / 3) * 255),
-      Math.round(hue(p, q, h) * 255),
-      Math.round(hue(p, q, h - 1 / 3) * 255),
-    ];
-  }
-
-  // Average one vertical slice of the 24x24 avatar sample, chroma-weighted and
-  // skipping near-black / near-white pixels. Returns [r,g,b] or null.
-  function averageAvatarSlice(data, x0, x1) {
-    let r = 0, g = 0, b = 0, w = 0;
-    for (let y = 0; y < 24; y++) {
-      for (let x = x0; x < x1; x++) {
-        const i = (y * 24 + x) * 4;
-        const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-        const max = Math.max(pr, pg, pb);
-        const min = Math.min(pr, pg, pb);
-        const light = (max + min) / 510;
-        if (light < 0.12 || light > 0.92) continue;
-        const weight = 0.3 + ((max - min) / 255) * 1.7;
-        r += pr * weight; g += pg * weight; b += pb * weight; w += weight;
-      }
-    }
-    if (!w) return null;
-    return [Math.round(r / w), Math.round(g / w), Math.round(b / w)];
-  }
-
-  // Sample a credited person's avatar for the attribution glow (AJ, 2026-09-28) —
-  // the same idea as the Ambient add-on's artwork accent, but per person and
-  // returning TWO colours, because the pill's glow SPINS between them and one
-  // flat colour would have no motion. The avatar is split down the middle and
-  // each half averaged; if the two come out too alike (a flat avatar), the second
-  // is pushed round the hue wheel so the spin still reads. cdn.discordapp.com
-  // serves Access-Control-Allow-Origin: *, so the canvas is not tainted; ANY
-  // failure (broken / blocked / no CORS) resolves null and the caller leaves the
-  // neutral white fallback. Results are cached per URL.
-  const avatarColorCache = new Map();
-  function sampleAvatarColor(url) {
-    if (!url) return Promise.resolve(null);
-    if (avatarColorCache.has(url)) return Promise.resolve(avatarColorCache.get(url));
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.referrerPolicy = "no-referrer";
-      img.onload = () => {
-        let pair = null;
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = 24;
-          canvas.height = 24;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, 24, 24);
-            const data = ctx.getImageData(0, 0, 24, 24).data;
-            const left = averageAvatarSlice(data, 0, 12);
-            const right = averageAvatarSlice(data, 12, 24);
-            const first = left || right;
-            let second = right || left;
-            if (first && second) {
-              const dist = Math.abs(first[0] - second[0]) +
-                Math.abs(first[1] - second[1]) +
-                Math.abs(first[2] - second[2]);
-              if (dist < 70) {
-                // Too alike to read as motion: push the second colour round the
-                // hue wheel (lifting its saturation a little) so the spin shows.
-                const hsl = rgbToHsl(second[0], second[1], second[2]);
-                second = hslToRgb(
-                  (hsl.h + 0.11) % 1,
-                  Math.min(1, Math.max(0.45, hsl.s * 1.1 + 0.15)),
-                  Math.min(0.78, Math.max(0.42, hsl.l))
-                );
-              }
-              pair = {
-                a: "rgb(" + first[0] + ", " + first[1] + ", " + first[2] + ")",
-                b: "rgb(" + second[0] + ", " + second[1] + ", " + second[2] + ")",
-              };
-            }
-          }
-        } catch (_) { pair = null; }
-        if (avatarColorCache.size > 120) avatarColorCache.clear();
-        avatarColorCache.set(url, pair);
-        resolve(pair);
-      };
-      img.onerror = () => { avatarColorCache.set(url, null); resolve(null); };
-      img.src = url;
-    });
-  }
-
-  // Stable per-person two-tone glow when the avatar can't be sampled (AJ,
-  // 2026-09-28). Hashes the username to a base hue, then takes its COMPLEMENT
-  // (+180deg) for the second colour — so every pill gets a maximum-contrast
-  // pair regardless of where the hash lands, and the rotating seam is always
-  // unmistakably visible. Never white-on-white, which read as a static overlay
-  // with no motion. sampleAvatarColor() may upgrade these to the pfp's own
-  // colours when the canvas is readable.
-  function defaultPairFor(name) {
-    let h = 0;
-    name = String(name || "");
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    const base = h % 360;
-    const complementary = (base + 180) % 360;
-    return {
-      a: "hsl(" + base + ", 92%, 62%)",
-      b: "hsl(" + complementary + ", 92%, 62%)",
-    };
-  }
-
-  // AJ, 2026-09-28 (v10): drive the gliding colour seam with a single rAF,
-  // but SCOPED to each .ym-sl-uploader-link (NOT :root) — v8's root-level
-  // setProperty cascade-invalidated the whole tree and tanked fps to ~20.
-  // Scoping to the pill means only the pill + its 2 pseudos get invalidated
-  // per frame. JS setProperty (not CSS @keyframes) because AJ's Chrome
-  // reliably repaints the conic on JS writes but NOT on @keyframes animation
-  // of the registered @property (v6/v9 freeze). `currentSpinDeg` is exposed
-  // so buildPersonRow can stamp new pills with the live angle (no first-
-  // frame flicker on track change). prefers-reduced-motion → never start the
-  // rAF; startPfpGlowEngine() stamps 0deg on every pill.
-  let pfpGlowRAF = 0;
-  let currentSpinDeg = 0;
-  // QOL #1 follow-on (2026-09-28): the profile-glow rAF must NOT repaint the
-  // blurred conic while the credits block is scrolled off-screen (mid-song, panel
-  // hidden, or fullscreen-reparented). pfpGlowCreditsInView is driven by an
-  // IntersectionObserver on .ym-sl-credits; the frame only advances + stamps while
-  // it is true, so off-screen pills cost nothing — yet the seam resumes exactly
-  // where it left off when they scroll back into view.
-  let pfpGlowCreditsInView = true;
-  let pfpGlowObserver = null;
-  function setSpinOnAllPills(deg) {
-    const v = (+deg).toFixed(2) + "deg";
-    const pills = document.querySelectorAll(".ym-sl-uploader-link");
-    for (let i = 0; i < pills.length; i++) {
-      pills[i].style.setProperty("--ym-sl-pfp-spin", v);
-    }
-  }
-  function ensurePfpGlowObserver() {
-    if (pfpGlowObserver || typeof IntersectionObserver === "undefined") return;
-    pfpGlowObserver = new IntersectionObserver((entries) => {
-      // One observed target at a time (the live credits block); use its latest state.
-      for (const e of entries) {
-        if (e.target === creditsFooterEl) pfpGlowCreditsInView = e.isIntersecting;
-      }
-    }, { root: null, threshold: 0 });
-  }
-  function startPfpGlowEngine() {
-    if (pfpGlowRAF) return;
-    const reduce = !!(window.matchMedia &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-    if (reduce) {
-      setSpinOnAllPills(0);
-      return;
-    }
-    ensurePfpGlowObserver();
-    const PERIOD_MS = 4200;
-    const GLOW_MIN_MS = 1000 / 40; // ~40fps updates: identical-looking for a slow
-                                   // 4.2s glide, but halves conic+blur repaint cost
-    let glowClock = 0;             // advances ONLY while the credits are visible,
-                                   // so the seam resumes exactly where it left off
-    let lastGlowFrame = 0;
-    let lastGlowPaint = -1e9;
-    (function frame(now) {
-      const dt = lastGlowFrame ? now - lastGlowFrame : 0;
-      lastGlowFrame = now;
-      if (pfpGlowCreditsInView) {
-        glowClock += dt;
-        if (glowClock - lastGlowPaint >= GLOW_MIN_MS) {
-          lastGlowPaint = glowClock;
-          currentSpinDeg = (glowClock / PERIOD_MS * 360) % 360;
-          setSpinOnAllPills(currentSpinDeg);
-        }
-      }
-      pfpGlowRAF = requestAnimationFrame(frame);
-    })(performance.now());
-  }
-
   // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
   // profile. Used for both the uploader and the maker; only community syncs
   // (source === "spicy_lyrics") have either.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
-
-    // Default two-tone glow colours (AJ, 2026-09-28): a stable per-person hue pair
-    // set immediately, so the pill always has a visible gliding seam even before/
-    // without a sampled avatar. sampleAvatarColor() upgrades these below when the
-    // canvas is readable.
-    const glow = defaultPairFor(uploader.username || label || "spicy");
-    row.style.setProperty("--ym-sl-pfp-accent-a", glow.a);
-    row.style.setProperty("--ym-sl-pfp-accent-b", glow.b);
 
     const link = h("a", {
       class: "ym-sl-uploader-link",
@@ -15612,14 +16174,6 @@
       img.referrerPolicy = "no-referrer";
       // A dead/blocked avatar must not leave a broken-image glyph in the panel.
       img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
-      // Upgrade the pill's two glow colours to the pfp's own colours (AJ,
-      // 2026-09-28) when the canvas is readable; otherwise the username-hash
-      // default already set above stands. Async + cached.
-      sampleAvatarColor(uploader.avatar).then((pair) => {
-        if (!pair || !img.isConnected) return;
-        row.style.setProperty("--ym-sl-pfp-accent-a", pair.a);
-        row.style.setProperty("--ym-sl-pfp-accent-b", pair.b);
-      });
       link.appendChild(img);
     }
     link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
@@ -15631,11 +16185,6 @@
       link.classList.add("no-link");
     }
     row.appendChild(link);
-    // Stamp the current glide angle on the new pill so it doesn't flicker at
-    // 0deg for one frame before the rAF catches it (especially on track
-    // change, when pills are recreated).
-    link.style.setProperty("--ym-sl-pfp-spin", currentSpinDeg.toFixed(2) + "deg");
-    startPfpGlowEngine();
     return row;
   }
 
@@ -15702,6 +16251,34 @@
     } catch (e) {}
   }
 
+  // A line's PLAIN TEXT, with spaces between words.
+  // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
+  // NEXT syllable" (parseTTML infers it from the absence of whitespace between
+  // spans — see the word-scan above), so a space belongs before every syllable
+  // whose PREDECESSOR is not part of a word. The empty join produced
+  // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+  // then rendered as one giant word on the share card. The panel itself never
+  // showed this because it renders from `words`, not from `text` — but `text`
+  // is a published bus field, so every consumer was getting the broken form.
+  // Module scope (not inside publishLyricLines) so the on-device translator
+  // reads the SAME text the bus publishes.
+  function syllablesToText(syllables) {
+    const list = syllables || [];
+    let out = "";
+    for (let i = 0; i < list.length; i++) {
+      const prev = list[i - 1];
+      const prevText = prev ? (prev.Text || "") : "";
+      const curText = list[i].Text || "";
+      // Guard against double spaces if a source ever ships the whitespace
+      // inside the syllable text itself.
+      if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
+        out += " ";
+      }
+      out += curText;
+    }
+    return out;
+  }
+
   function publishLyricLines(content) {
     if (!window.YTMod || !window.YTMod.bus) return;
     publishRendererKit(); // before the lines, so a consumer has the springs ready
@@ -15737,39 +16314,6 @@
     };
 
     const lines = [];
-    const mapRomaji = (syllables) => {
-      if (!currentSettings.romanizationEnabled || !syllables || !syllables.length) return "";
-      const plain = syllables.map((word) => word.Text || "").join("");
-      const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
-      if (!kanaOnly.trim()) return "";
-      const rom = romanize(kanaOnly);
-      return rom && rom !== kanaOnly && /[A-Za-z]/.test(rom) ? rom : "";
-    };
-    // A line's PLAIN TEXT, with spaces between words.
-    // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
-    // NEXT syllable" (parseTTML infers it from the absence of whitespace between
-    // spans — see the word-scan above), so a space belongs before every syllable
-    // whose PREDECESSOR is not part of a word. The empty join produced
-    // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
-    // then rendered as one giant word on the share card. The panel itself never
-    // showed this because it renders from `words`, not from `text` — but `text`
-    // is a published bus field, so every consumer was getting the broken form.
-    const syllablesToText = (syllables) => {
-      const list = syllables || [];
-      let out = "";
-      for (let i = 0; i < list.length; i++) {
-        const prev = list[i - 1];
-        const prevText = prev ? (prev.Text || "") : "";
-        const curText = list[i].Text || "";
-        // Guard against double spaces if a source ever ships the whitespace
-        // inside the syllable text itself.
-        if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
-          out += " ";
-        }
-        out += curText;
-      }
-      return out;
-    };
     (content || []).forEach((line) => {
       const lead = line && line.Lead;
       if (!lead || !lead.Syllables || !lead.Syllables.length) return;
@@ -15779,7 +16323,6 @@
         endMs: lead.EndTime * 1000,
         lineTimed: !!line.LineTimed,
         opposite: !!line.OppositeAligned,
-        romaji: mapRomaji(lead.Syllables),
         words: mapWords(lead.Syllables, !!line.LineTimed),
         // Background vocals render as their own .line.bg-line elements right
         // after the main line, with .bg-word children.
@@ -15787,7 +16330,6 @@
           startMs: bg.StartTime * 1000,
           endMs: bg.EndTime * 1000,
           lineTimed: !!bg.LineTimed,
-          romaji: mapRomaji(bg.Syllables),
           words: mapWords(bg.Syllables, !!bg.LineTimed),
         })),
       });
@@ -15799,7 +16341,9 @@
       artist: track ? track.artist : null,
       lines,
       staticLyrics: !!staticLyricsActive,
-      romanizationEnabled: currentSettings.romanizationEnabled === true,
+      // Which renderer draws this track. The PiP runs the SAME one for its
+      // line-by-line surface, so it must not infer it from the timings.
+      renderer: amllTrackUsesEngine(content) ? "amll" : "spicy",
       songwriters: currentSongwriters.slice(),
       smoothScrolling: currentSettings.smoothScrolling !== false,
       simpleLyrics: currentSettings.simpleLyrics === true,
@@ -15858,6 +16402,11 @@
 
   function buildRendererLines(content) {
     lastRendererContent = content;
+    // Build the translation plan before the first line exists, so every line
+    // finds its slot. Translations arrive later and fill those slots in place.
+    // The async work is deliberately detached: a translation failure must never
+    // surface as an unhandled rejection or delay the lyrics themselves.
+    autoTranslateBegin(content).catch(() => {});
     publishLyricLines(content);
     stopScrollGlide();
     // New song -> the old song's end-of-track credits reveal must not own the
@@ -15938,7 +16487,7 @@
       // render it as a static block (no syllable/letter karaoke).
       const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
       appendWords(lineElement, lineModel, lead.Syllables, false, noKaraoke);
-      appendRomaji(lineElement, lead.Syllables);
+      appendTranslation(lineElement, index, -1);
       lineElement.addEventListener("click", () => {
         // While picking a pause sync point a click selects, it does not seek.
         if (pausePickMode) {
@@ -15950,9 +16499,13 @@
         }
       });
       addLine(lineModel);
+      // The lead's own slot, captured now: the bg vocals below are pushed after
+      // it, so the depth-of-field pass needs a pointer back to the line they
+      // belong to instead of ranking them by their own index.
+      const leadIndex = modelLines.length - 1;
 
-      for (const background of contentLine.Background || []) {
-        if (!background.Syllables || !background.Syllables.length) continue;
+      (contentLine.Background || []).forEach((background, backgroundIndex) => {
+        if (!background.Syllables || !background.Syllables.length) return;
         const backgroundElement = h("div", { class: "line bg-line" });
         const backgroundModel = {
           HTMLElement: backgroundElement,
@@ -15962,6 +16515,7 @@
           Syllables: { Lead: [] },
           isPrimary: false,
           BGLine: true,
+          LeadIndex: leadIndex,
           AnimatorStore: null,
         };
         if (isRtl(background.Syllables.map((word) => word.Text).join(" "))) {
@@ -15971,17 +16525,19 @@
           backgroundElement.classList.add("OppositeAligned");
         }
         appendWords(backgroundElement, backgroundModel, background.Syllables, true, noKaraoke);
-        appendRomaji(backgroundElement, background.Syllables);
+        appendTranslation(backgroundElement, index, backgroundIndex);
         backgroundElement.addEventListener("click", () => {
           // Background vocals are never valid sync points, so ignore clicks in
           // pick mode rather than silently picking the wrong line.
           if (pausePickMode) return;
           if (window.YTMod && window.YTMod.player) {
-            window.YTMod.player.seek(backgroundModel.StartTime);
+            // Same rule as the lead line above: the media has to run `offset` ms
+            // past the lyric's own timestamp before that line is the one playing.
+            window.YTMod.player.seek(Math.max(0, backgroundModel.StartTime + getOffsetForLine(backgroundModel.StartTime)));
           }
         });
         addLine(backgroundModel);
-      }
+      });
 
       const next = content[index + 1] && content[index + 1].Lead;
       if (next) {
@@ -15999,13 +16555,9 @@
 
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
-    // Unobserve the previous track's credits block before it is replaced, then
-    // observe the new one so the profile-glow rAF only paints while it's on-screen.
-    if (pfpGlowObserver && creditsFooterEl) pfpGlowObserver.unobserve(creditsFooterEl);
     if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
       creditsFooterEl = buildCreditsFooter(currentSongwriters);
       linesRoot.appendChild(creditsFooterEl);
-      if (pfpGlowObserver) pfpGlowObserver.observe(creditsFooterEl);
     } else {
       creditsFooterEl = null;
     }
@@ -16133,13 +16685,13 @@
         } catch (error) {
           manualLyricsIsPermanent = false;
           manualLyricsTrackKey = trackKey;
-          console.warn("[SpicyLyrics] Could not save permanent TTML:", error);
+          console.warn("[AuroraLyrics] Could not save permanent TTML:", error);
         }
       } else {
         manualLyricsIsPermanent = false;
         manualLyricsTrackKey = trackKey;
       }
-      refreshPermanentDeleteState();
+      refreshFileTabState();
     };
     reader.readAsText(file);
   }
@@ -16461,7 +17013,7 @@
     const selfAwake =
       stateChanged ||
       storeNeedsAnimation(word.AnimatorStore) ||
-      (currentSettings.simpleLyrics && state === "Active");
+      (amllSimpleLookActive() && state === "Active");
     let lettersAwake = false;
     if (word.LetterGroup && (state === "Active" || selfAwake)) {
       lettersAwake = animateLetters(word, state, lineState, positionMs, deltaTime);
@@ -16579,7 +17131,7 @@
     // reset is cheap per frame -- setStyleIfChanged's cache makes it a no-op
     // once everything is back at 1 -- and it guarantees nothing stays
     // half-squeezed from before the toggle was flipped.
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       resetAdaptiveSpacing();
       return;
     }
@@ -16797,7 +17349,7 @@
     // Simple lyrics (Apple Music / AMLL style): drop the look-ahead so the active
     // line centres exactly as it starts playing, like AMLL, instead of gliding in
     // early. Normal mode keeps its lead.
-    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !currentSettings.simpleLyrics)
+    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !amllSimpleLookActive())
       ? currentSettings.scrollLeadMs
       : 0;
     const scrollIndex = scrollLeadMs > 0
@@ -16873,28 +17425,33 @@
         }
       }
 
-      // Keep an entering line's previous blur radius while its unsung halo fades
-      // into the active word glow. Zeroing it on this frame caused a visible
-      // dim-then-bright dip on both lead and background vocals. Other lines still
-      // update when the active line changes; gaps preserve their last value.
+      // Depth blur, the same model the Apple-Music engine uses for its stack
+      // (resolveBlurLevel): a real gaussian blur, one pixel per line away from
+      // the playing line, capped at 5px, and none on the line being sung or on
+      // an interlude's dots. The built-in renderer used to grow its unsung
+      // TEXT-SHADOW halo with distance instead, which read as a dirty haze
+      // around the words rather than as focus, so the halo is retired with the
+      // same write (AJ, 2026-10-23).
+      //
+      // Background vocals are ranked by the LEAD line they belong to, not by
+      // their own slot. They are separate .line.bg-line entries pushed right
+      // after that lead, so their own index put them at distance 1 from a line
+      // being sung — blurred underneath the words the user was reading — and a
+      // bg that outlived its lead turned into a smudge. Ranking by the parent
+      // instead keeps the whole block in focus while its lead plays and blurs
+      // it with the line once the song moves on (AJ, 2026-10-23).
       if (activeLineChanged && activeIndex >= 0) {
-        const distance = Math.abs(index - activeIndex);
-        if (currentSettings.simpleLyrics && !line.HTMLElement.classList.contains("bg-line")) {
-          // AMLL depth: the active line is full and scaled up, neighbours fade and
-          // recede with distance so the panel reads as a stack of lines flowing
-          // past, not flat text scrolling. Injected inline so it overrides the
-          // state-class alpha only while Simple Lyrics is on; cleared on toggle-off
-          // (see clearSimpleLyricsDepth in 04-state-settings.jsfrag). Background
-          // vocals keep their own dimming.
-          const depthAlpha = distance === 0 ? 1 : Math.max(0.3, 1 - distance * 0.22);
-          const depthScale = distance === 0 ? 1.04 : Math.max(0.94, 1 - distance * 0.015);
-          setStyleIfChanged(line.HTMLElement, "--ym-sl-line-alpha", String(depthAlpha), 0.02);
-          setStyleIfChanged(line.HTMLElement, "--amll-depth-scale", String(depthScale), 0.01);
-        } else if (lineState !== "Active") {
-          const blur = distance === 0
-            ? 0
-            : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
-          setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
+        const distance = Math.abs(anchorIndex - activeIndex);
+        // A bg vocal never inherits focus from its own timing: only its lead
+        // line being the one being sung keeps it crisp.
+        const inFocus = line.DotLine || distance === 0 || (lineState === "Active" && !line.BGLine);
+        const depthBlur = inFocus
+          ? 0
+          : Math.min(5, 1 + distance);
+        setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
+        if (lineState !== "Active") {
+          setStyleIfChanged(line.HTMLElement, "--BlurAmount", "0px", 0.25);
         }
       }
 
@@ -16960,8 +17517,102 @@
     applyAdaptiveSpacing(activeIndex, activeLineChanged);
   }
 
+  // TEMP PERF PROBE (2026-10-22) - diagnosis only, remove once the lag is
+  // pinned. Publishes one-second totals as attributes on <html> so the numbers
+  // can be read through the browser bridge without opening DevTools:
+  //   data-aurora-fps          rAF callbacks per second (two loops would double it)
+  //   data-aurora-frame-ms     mean gap between rAF callbacks
+  //   data-aurora-worst-ms     worst gap in the window
+  //   data-aurora-animate-ms   mean time inside animate() (the built-in renderer)
+  //   data-aurora-amll-ms      mean time inside amllDrive() (the AMLL renderer)
+  //   data-aurora-tick-ms      mean time inside the WHOLE tick() body
+  //   data-aurora-long-ms      total long-task (>50ms) time in the window
+  //   data-aurora-long-n       number of long tasks in the window
+  //   data-aurora-anims        live CSS/Web animations on the document
+  //   data-aurora-rejections   unhandled promise rejections in the window
+  const perfProbe = {
+    frames: 0,
+    frameSum: 0,
+    frameWorst: 0,
+    animateSum: 0,
+    animateFrames: 0,
+    amllSum: 0,
+    amllFrames: 0,
+    tickSum: 0,
+    longMs: 0,
+    longN: 0,
+    rejections: 0,
+    lastTs: 0,
+    lastPublish: 0,
+    addAmll(ms) { this.amllSum += ms; this.amllFrames++; },
+    report() {
+      const now = performance.now();
+      if (!this.lastPublish) this.lastPublish = now;
+      if (now - this.lastPublish < 1000) return;
+      const span = now - this.lastPublish;
+      const el = document.documentElement;
+      try {
+        el.setAttribute("data-aurora-fps", ((this.frames * 1000) / span).toFixed(1));
+        el.setAttribute("data-aurora-frame-ms", (this.frames ? this.frameSum / this.frames : 0).toFixed(2));
+        el.setAttribute("data-aurora-worst-ms", this.frameWorst.toFixed(1));
+        el.setAttribute("data-aurora-animate-ms", (this.animateFrames ? this.animateSum / this.animateFrames : 0).toFixed(2));
+        el.setAttribute("data-aurora-amll-ms", (this.amllFrames ? this.amllSum / this.amllFrames : 0).toFixed(2));
+        el.setAttribute("data-aurora-tick-ms", (this.frames ? this.tickSum / this.frames : 0).toFixed(2));
+        el.setAttribute("data-aurora-long-ms", this.longMs.toFixed(0));
+        el.setAttribute("data-aurora-long-n", String(this.longN));
+        el.setAttribute("data-aurora-anims", String(document.getAnimations().length));
+        el.setAttribute("data-aurora-rejections", String(this.rejections));
+        el.setAttribute("data-aurora-simple", amllSimpleLookActive() ? "1" : "0");
+      } catch (e) {}
+      this.frames = 0;
+      this.frameSum = 0;
+      this.frameWorst = 0;
+      this.animateSum = 0;
+      this.animateFrames = 0;
+      this.amllSum = 0;
+      this.amllFrames = 0;
+      this.tickSum = 0;
+      this.longMs = 0;
+      this.longN = 0;
+      this.rejections = 0;
+      this.lastPublish = now;
+    },
+  };
+  window.__auroraPerf = perfProbe;
+  window.addEventListener("unhandledrejection", () => { perfProbe.rejections++; });
+  // Anything the browser spends >50ms on in one chunk is a long task, whether it
+  // came from our callback or from style/layout/paint it triggered. If our JS is
+  // 0.3ms/frame and long tasks are still stacking up, the cost is the browser
+  // reacting to what we wrote, not the writing itself.
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        perfProbe.longMs += entry.duration;
+        perfProbe.longN++;
+      }
+    }).observe({ type: "longtask", buffered: false });
+  } catch (e) {}
+
   function tick() {
     raf = requestAnimationFrame(tick);
+    const tickStartedAt = performance.now();
+    try {
+      tickBody();
+    } finally {
+      perfProbe.tickSum += performance.now() - tickStartedAt;
+    }
+  }
+
+  function tickBody() {
+    const probeNow = performance.now();
+    if (perfProbe.lastTs) {
+      const gap = probeNow - perfProbe.lastTs;
+      perfProbe.frames++;
+      perfProbe.frameSum += gap;
+      if (gap > perfProbe.frameWorst) perfProbe.frameWorst = gap;
+    }
+    perfProbe.lastTs = probeNow;
+    perfProbe.report();
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
@@ -16984,7 +17635,12 @@
     // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
     // springs simply advance on the next good frame. (AJ: "some lines just
     // flicker black for a very very short time".)
-    if (Number.isFinite(position)) animate(position);
+    if (Number.isFinite(position)) {
+      const animStartedAt = performance.now();
+      animate(position);
+      perfProbe.animateSum += performance.now() - animStartedAt;
+      perfProbe.animateFrames++;
+    }
   }
 
   // Track + offset housekeeping used to run inside tick(), so two document-wide
@@ -17134,7 +17790,7 @@
     if (!key) return;
     currentTrackKey = "";
     try { syncTrackLyrics(true); } catch (e) {
-      console.warn("[Aurora Lyrics] re-resolve after source-order change failed:", e);
+      console.warn("[AuroraLyrics] re-resolve after source-order change failed:", e);
     }
   }
 
@@ -17148,6 +17804,10 @@
     // to the page-wide Kawarp, not to us. applySettings() re-clamps for free.
     if (data.type === "ytmod-settings" && data.id === "ytmod-dynamic") {
       const s = data.settings || {};
+      // The fullscreen lyrics view runs its OWN Kawarp (it suspends the page
+      // one), so a slider moved while fullscreen is up has to reach that
+      // instance too — otherwise the backdrop keeps the values it started with.
+      if (fsKawarpActive) applyFullscreenKawarpLook();
       const patch = {};
       if (s.backdropBrightness != null) patch.backdropBrightness = s.backdropBrightness;
       if (s.preferKawarpAlways != null) patch.preferKawarpAlways = s.preferKawarpAlways;
@@ -17190,7 +17850,9 @@
   attachMessageListener();
 
   function teardown() {
-    exitFullscreenMode();
+    // Immediate: teardown is removing this script's UI, so a 220ms fade could
+    // leave the overlay behind if the context goes away first.
+    exitFullscreenMode(true);
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     stopHousekeeping();
@@ -17238,6 +17900,7 @@
     currentTrackKey = "";
     manualLyricsTrackKey = "";
     manualLyricsIsPermanent = false;
+    currentLyricsFromSavedTTML = false;
     currentLyricsIsTTML = false;
     lastObservedTrackKey = "";
     lastObservedPositionMs = null;
@@ -17288,8 +17951,124 @@
   let amllPrevTime = 0;
   let amllWasPlaying = false;
   let amllCssInjected = false;
+  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS (AJ, 2026-10-23):
+   *  - by default, word-synced lyrics render through Aurora's own Spicy
+   *    renderer exactly as they always have (same DOM, springs, glow, scroll),
+   *    and line-synced ones through the AMLL engine.
+   *
+   * WHICH renderer takes which kind of track is now the user's choice, not a
+   * hard rule any more: the two Renderer rows in the panel (`amllWordTracks` /
+   * `spicyLineTracks`, content.js) point either kind of track at either
+   * renderer. See amllContentGoesToSpicy.
+   *
+   * Two earlier attempts are gone and should not come back: (1) taking over the
+   * engine's line contents to get Spicy words inside AMLL's scroll, which could
+   * never be byte-identical to the Spicy renderer, and (2) grafting the Apple
+   * stack (per-line focus blur, scale, staggered rows) onto the Spicy side. Each
+   * renderer is left to do its own thing.
+   *
+   * `amllSpicyTrack` = "the built-in renderer owns the content currently loaded",
+   * whatever the reason. It decides the LOOK too: the AMLL body class, the
+   * gentle spline set and every `amllSimpleLookActive()` call follow it. */
+  let amllSpicyTrack = false;
+  function amllSimpleLookActive() {
+    return !amllSpicyTrack;
+  }
+  function amllContentHasWordTiming(content) {
+    if (!Array.isArray(content)) return false;
+    for (const line of content) {
+      const lead = line && line.Lead;
+      const syls = lead && Array.isArray(lead.Syllables) ? lead.Syllables : null;
+      if (!syls) continue;
+      const windows = new Set();
+      for (const syl of syls) {
+        const start = Number(syl && syl.StartTime) || 0;
+        const end = Number(syl && syl.EndTime) || 0;
+        if (end > start + 0.001) windows.add(Math.round(start * 1000) + ":" + Math.round(end * 1000));
+      }
+      // Two or more syllables with DIFFERENT windows = word karaoke. A line
+      // whose word spans all carry the line's own window is line-timed.
+      if (windows.size >= 2) return true;
+    }
+    return false;
+  }
+  // Does THIS content belong to the built-in Spicy renderer? Each kind of track
+  // has its own Renderer row, and each row names the renderer it SELECTS, so the
+  // two are independent rather than inverses of one another.
+  function amllContentGoesToSpicy(content) {
+    if (amllContentHasWordTiming(content)) return currentSettings.amllWordTracks !== true;
+    return currentSettings.spicyLineTracks === true;
+  }
+
+  function amllSetSpicyTrack(spicy) {
+    const next = !!spicy;
+    if (next === amllSpicyTrack) return;
+    amllSpicyTrack = next;
+    try {
+      document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
+    } catch (e) {}
+    // The spline set follows the renderer, not the setting: the Spicy renderer
+    // must get the real (bouncing) curves back, and the AMLL look gets the
+    // gentle ones.
+    try { applySimpleLyricsSplines(); } catch (e) {}
+    // Consumers (the PiP) hold the spline OBJECTS, and applySimpleLyricsSplines()
+    // REPLACES them. Re-publish when the owner changes, or the next Spicy track
+    // is built from the AMLL curves - which read as words floating up instead of
+    // bouncing.
+    try { publishRendererKit(true); } catch (e) {}
+    // Anything the look may have written inline belongs to the other renderer's
+    // frame; drop it so a rebuilt line never starts from a stale value.
+    try {
+      if (typeof modelLines !== "undefined" && modelLines) {
+        for (const ln of modelLines) {
+          const el = ln && ln.HTMLElement;
+          if (!el) continue;
+          el.style.removeProperty("filter");
+          el.style.removeProperty("--ym-sl-line-alpha");
+          el.style.removeProperty("--amll-depth-scale");
+          el.__ymSpicyStyleCache = {};
+        }
+      }
+    } catch (e) {}
+  }
+  /* Decide the renderer for the loaded content and make the engine agree.
+     Returns true when the OWNER changed, so the caller can rebuild the Spicy
+     lines and re-sync. Safe to call any time: it no-ops when nothing moved.
+
+     The engine may never have been started for the previous track (a word track
+     that went to Spicy does not load it), so handing the next track to the
+     engine has to START it here — waiting for a settings change was the "stays
+     on Spicy until I toggle the mode" bug. */
+  // Which renderer actually OWNS this content right now — published to consumers
+  // (the PiP) so they run the same one instead of guessing from the timings.
+  // "amll" means the engine is drawing timed, line-by-line content; everything
+  // else (word tracks pointed at Spicy, static lyrics, no content) is the
+  // built-in renderer, even while the engine object exists.
+  function amllTrackUsesEngine(content) {
+    if (!content || amllSpicyTrack) return false;
+    if (amllContentGoesToSpicy(content)) return false;
+    return amllContentIsTimed(content);
+  }
+
+  function amllApplyTrackRenderer(content) {
+    const spicy = !content || amllContentGoesToSpicy(content);
+    const changed = spicy !== amllSpicyTrack;
+    amllSetSpicyTrack(spicy);
+    if (spicy) {
+      amllHideSkeleton();
+      if (amllActive) amllHide();
+      return changed;
+    }
+    if (!amllActive) amllActivate();          // async; it syncs amllLastContent
+    else if (changed && content) amllSyncLyrics(content);
+    return changed;
+  }
+
   let amllLastFrameTime = 0;
   let amllGen = 0;                     // invalidates in-flight activations on toggle
+  // Focal line as a fraction of the player height. The loading skeleton reads
+  // the same number through --amll-align-y, so nudging this moves both.
+  const AMLL_ALIGN_POSITION = 0.42;
 
   // YouTube Music loads its own Web Animations polyfill
   // (web-animations-next-lite.min.js), and its Animation.effect objects do NOT
@@ -17353,16 +18132,27 @@
   color: var(--amll-lp-color, white);
   contain: strict;
   mix-blend-mode: plus-lighter;
-  font-size: var(--amll-lp-font-size, max(max(5vh, 2.5vw), 12px));
+  /* Sized off the lyric HOST's width, not the viewport. The same card renders
+     in a 1920 fullscreen pane, a tab that shrinks when the NPV rail opens, and
+     a ~380px NPV lyric box; 5vh stayed at full-screen size in the small ones,
+     so the rail's words blew past its card edges (AJ, 2026-10-21). 7.5cqw is
+     tuned to land on the SAME size as the standard renderer, whose
+     --DefaultLyricsSize is 7cqw of .ym-sl-panel (measured: 522px panel -> 36.5px,
+     this host 487px -> 36.5px), so the two renderers agree in the tab; the 5vh
+     term still caps it in fullscreen, where the old look is unchanged. The bare
+     5vh line is the fallback for a browser without container query units. */
+  font-size: var(--amll-lp-font-size, 5vh);
+  font-size: var(--amll-lp-font-size, clamp(12px, min(5vh, 7.5cqw), 64px));
   overflow: hidden;
 
-  @media screen and (width <= 768px) {
-    font-size: var(--amll-lp-font-size, max(8vw, 12px));
-  }
-
   &.dom {
-    --amll-lp-line-width-aspect: .8;
-    --amll-lp-line-padding-x: 1em;
+    /* Inset of the line box inside the player, and the ONLY lever that decides
+       where a row wraps. The engine wraps at the wrapper's CONTENT width while
+       the highlight box paints the wrapper's full width, so the upstream 1em
+       per side broke rows at 696px inside an 804px player and left a dead
+       strip on the right of every wrapped line (measured live, AJ 2026-10-21).
+       .2em keeps the box off the glyphs and hands ~86px back to the text. */
+    --lyric-line-padding-x: .2em;
     --amll-lp-bg-line-scale: .7;
     user-select: none;
     box-sizing: content-box;
@@ -17371,12 +18161,6 @@
   }
 }
 
-@media screen and (width <= 768px) {
-  .amll-lyric-player {
-    --amll-lp-line-width-aspect: 1;
-    --amll-lp-line-padding-x: 0;
-  }
-}
 @property --bright-mask-alpha {
   syntax: "<number>";
   inherits: true;
@@ -17711,9 +18495,16 @@
   position: absolute;
   inset: 0;
   z-index: 4;
+  /* Query container for the engine's font size (6.7cqw in the player rule):
+     this host is the lyric surface, so its width IS the column the text has to
+     fit. inset:0 already fixes its size, so the containment costs nothing. */
+  container-type: inline-size;
   overflow: hidden;
   pointer-events: auto;
-  font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
+  /* The SAME face the built-in renderer uses, including a user-supplied custom
+     font (--ym-sl-lyric-font). Hardcoding "SpicyLyrics" here meant a custom font
+     applied everywhere except Apple-style lyrics (AJ, 2026-10-23). */
+  font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
   /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
      lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
   font-weight: 700;
@@ -17738,28 +18529,62 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
-/* Credits footer (Written By / provided by / Uploaded by / Made by) goes into the
-   engine's own bottom-line slot, so it scrolls with the lyrics as the last block
-   - the same behaviour as the built-in renderer. The engine watches that element
-   with a MutationObserver and re-lays-out when its content changes.
-   The engine treats that slot as a distant lyric line, so it would otherwise
-   inherit the deepest blur, the dimmest mask alphas and the lyric line's own
-   negative margins - override all of it so the credits read as plain text. */
+/* Credits footer (Written By / Lyrics provided by / Uploaded by / Made by) goes
+   into the engine's own bottom-line slot, so it scrolls with the lyrics as the
+   last block - the same behaviour as the built-in renderer. The engine watches
+   that element with a MutationObserver and re-lays-out when its content
+   changes. The slot is laid out as a distant lyric line, so it would otherwise
+   inherit the deepest blur, the dimmest mask alphas and the line's own negative
+   margins. */
 #ym-sl-amll-host .FmKaba_bottomLine,
-#ym-sl-amll-host .FmKaba_bottomLineWrapper,
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
+#ym-sl-amll-host .FmKaba_bottomLineWrapper {
   filter: none !important;
   opacity: 1 !important;
 }
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits {
+/* The host stamps its karaoke face onto EVERYTHING inside it: 700 weight plus a
+   0.6px text stroke, in a 1.2 line box. That is right for the lyrics and wrong
+   for the footer - the built-in renderer draws this same shared markup as a
+   plain footnote at 400/600, so here it read bold and airy (AJ, 2026-10-23).
+   Opt the credits out and give them that footnote's pitch. :is() covers both
+   mountings: the engine's bottom-line slot when it has one, the host when it
+   does not. */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) {
   --bright-mask-alpha: 1;
   --dark-mask-alpha: 1;
-  margin: 0 !important;
-  padding: 0 !important;
+  filter: none !important;
+  -webkit-text-stroke: 0 !important;
+  text-shadow: none !important;
+  font-weight: 400 !important;
+  line-height: 1.35 !important;
+  letter-spacing: 0 !important;
+  opacity: .85 !important;
+  margin: 24px 0 10px !important;
+  padding: 10px 0 0 !important;
 }
-#ym-sl-amll-host .FmKaba_bottomLine .ym-sl-credits > * {
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) > * {
+  -webkit-text-stroke: 0 !important;
   margin-top: 0 !important;
   margin-bottom: 0 !important;
+}
+/* The label/name/provider weights are the footer's own; only the gaps differ
+   here, so the three lines read as one block instead of drifting apart in the
+   engine's taller line box. */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-label {
+  margin-bottom: 4px !important;
+  line-height: 1.2 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-names {
+  line-height: 1.4 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider, .ym-sl-provider-block, .ym-sl-uploader) {
+  margin-top: 10px !important;
+}
+/* Inside the pill+note block the block owns the gap (flex gap 7px). */
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-provider-block .ym-sl-provider {
+  margin-top: 0 !important;
+}
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider + .ym-sl-uploader, .ym-sl-uploader + .ym-sl-uploader) {
+  margin-top: 4px !important;
 }
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
@@ -17768,35 +18593,116 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 }
 /* Loading skeleton. The engine keeps the previous track's lines on screen until
    the new ones arrive, so a track change would otherwise show the wrong song.
-   Shimmering bars stand in while the lyrics resolve. */
+   Hiding the player outright is the only thing that actually removes them - a
+   translucent scrim still lets the old words read through. The bars sit on the
+   engine's focal line at the same pitch as the built-in skeleton, so the panel
+   does not jump when the real lines land. */
+#ym-sl-amll-host.ym-sl-amll-loading .amll-lyric-player { visibility: hidden; }
 #ym-sl-amll-host .ym-sl-amll-skeleton {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: var(--amll-align-y, 42%);
+  transform: translateY(-50%);
   z-index: 8;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 0.55em;
+  gap: calc(var(--DefaultLyricsSize, 32px) * .95);
   padding: 0 6%;
   pointer-events: none;
 }
 #ym-sl-amll-host .ym-sl-amll-skeleton-bar {
-  height: 0.85em;
-  border-radius: 0.45em;
-  background: linear-gradient(90deg, rgba(255,255,255,.08), rgba(255,255,255,.22), rgba(255,255,255,.08));
-  background-size: 200% 100%;
-  animation: ym-sl-amll-shimmer 1.15s linear infinite;
+  position: relative;
+  flex: 0 0 auto;
+  height: calc(var(--DefaultLyricsSize, 32px) * .6);
+  border-radius: 6px;
+  background: rgba(255,255,255,.075);
+  overflow: hidden;
 }
-@keyframes ym-sl-amll-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+#ym-sl-amll-host .ym-sl-amll-skeleton-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
+  animation: ym-sl-amll-skeleton-sweep 1.15s ease-in-out infinite;
 }
-/* Fullscreen: the lyrics hard-cut at the panel edges. Fade the top and bottom
-   the way the built-in renderer's scroll mask does, so lines glide out instead
-   of clipping. */
-.ym-sl-fs-lyrics #ym-sl-amll-host .amll-lyric-player {
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, transparent 4%, #0f0f0f 16%, #0f0f0f 84%, transparent 96%, transparent 100%);
+@keyframes ym-sl-amll-skeleton-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ym-sl-amll-host .ym-sl-amll-skeleton-bar::after { display: none; }
+}
+/* Middle-click autoscroll marker. It sits in the middle of the lyrics panel
+   rather than under the cursor, so the pointer is free to pull in any direction
+   without the marker trailing it. Centred with the translate property (not
+   transform) so
+   the scale-in animation can own transform. A chevron brightens for the
+   direction the pointer is pulling. */
+#ym-sl-amll-host .ym-sl-amll-autoscroll {
+  position: absolute;
+  z-index: 9;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(18, 18, 20, .7);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.32), 0 2px 10px rgba(0,0,0,.4);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: ym-sl-amll-auto-in .13s ease-out;
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::before,
+#ym-sl-amll-host .ym-sl-amll-autoscroll::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid currentColor;
+  border-left: 1.5px solid currentColor;
+  color: rgba(255,255,255,.42);
+  transition: color .12s ease;
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::before {
+  top: 8px;
+  transform: translateX(-50%) rotate(45deg);
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll::after {
+  bottom: 8px;
+  transform: translateX(-50%) rotate(225deg);
+}
+#ym-sl-amll-host .ym-sl-amll-autoscroll[data-dir="up"]::before,
+#ym-sl-amll-host .ym-sl-amll-autoscroll[data-dir="down"]::after {
+  color: #fff;
+}
+@keyframes ym-sl-amll-auto-in {
+  from { opacity: 0; transform: scale(.8); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ym-sl-amll-host .ym-sl-amll-autoscroll { animation: none; }
+}
+/* Fullscreen: the lyrics pane keeps clamp() vertical padding for the built-in
+   renderer's header and safe bands. AMLL has no header there, so drop it and let
+   the engine's viewport reach the monitor's top and bottom edges. Deliberately
+   no mask: the lines stay visible all the way to the edge instead of fading. */
+body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+/* Loading skeleton in the docked NPV rail: its bars and pitch are em-of-32px
+   tuned for the tab and read as slabs in the small card. */
+#ym-npv .ym-npv-lyrics .ym-sl-amll-skeleton {
+  gap: 14px;
+  padding: 0 4%;
+}
+#ym-npv .ym-npv-lyrics .ym-sl-amll-skeleton-bar {
+  height: 12px;
+  border-radius: 4px;
 }
 `;
 
@@ -17823,6 +18729,150 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   function amllHide() {
     document.body.classList.remove("amll-active");
+    amllStopAutoScroll();
+  }
+
+  /* ---- middle-click autoscroll --------------------------------------------
+     Chrome's autoscroll drives a NATIVE scroll container. The built-in
+     renderer's pane is one (a real overflow box), which is why a middle click
+     there and a mouse move scroll the lyrics; this engine has no scroll box at
+     all — it moves its lines with transforms and listens for wheel. So the
+     gesture had nothing to drive here. Reproduce it: hold the middle button
+     down and move the pointer, and every frame feeds the engine the wheel
+     events a real wheel would, at a speed set by how far the pointer sits from
+     the press point. Releasing the middle button ends it at once (press-and-
+     hold, not Chrome's toggle — AJ asked for the release to stop it), as does
+     any other press, a real wheel, Escape or losing the window. Links keep
+     their own middle-click (open in a new tab). */
+  let amllAuto = null;
+
+  function amllStopAutoScroll() {
+    if (!amllAuto) return;
+    const auto = amllAuto;
+    amllAuto = null;
+    if (auto.raf) cancelAnimationFrame(auto.raf);
+    window.removeEventListener("mousemove", auto.move, true);
+    window.removeEventListener("mousedown", auto.press, true);
+    window.removeEventListener("mouseup", auto.up, true);
+    window.removeEventListener("wheel", auto.wheel, true);
+    window.removeEventListener("keydown", auto.key, true);
+    window.removeEventListener("blur", auto.blur);
+    if (auto.indicator && auto.indicator.parentNode) {
+      auto.indicator.parentNode.removeChild(auto.indicator);
+    }
+  }
+
+  function amllStartAutoScroll(event) {
+    if (event.button !== 1 || !amllPlayer || !amllHost) return;
+    if (!document.body.classList.contains("amll-active")) return;
+    if (event.target && event.target.closest && event.target.closest("a")) {
+      amllStopAutoScroll();
+      return;
+    }
+    // Already running (a middle press whose release was never delivered): stop
+    // rather than stack a second loop. The press is suppressed so Chrome does
+    // not start its own page autoscroll on the way out.
+    if (amllAuto) {
+      event.preventDefault();
+      amllStopAutoScroll();
+      return;
+    }
+    const playerEl = amllPlayer.getElement();
+    if (!playerEl) return;
+    // Chrome would start its own autoscroll on the page here. The lyrics are not
+    // a native scroller, so the gesture is ours.
+    event.preventDefault();
+
+    const anchorY = event.clientY;
+    const indicator = document.createElement("div");
+    indicator.className = "ym-sl-amll-autoscroll";
+    indicator.setAttribute("aria-hidden", "true");
+    amllHost.appendChild(indicator);
+
+    let mouseY = anchorY;
+    // Sub-pixel remainder: a wheel event can only carry whole pixels, so the
+    // fraction is kept for the next frame instead of being thrown away.
+    let carry = 0;
+    let lastFrame = performance.now();
+    let shownDir = "";
+
+    const move = (e) => {
+      // The button state is the authority: if the release happened outside the
+      // window (where no mouseup reaches us), the next move with the middle
+      // button no longer held ends the gesture instead of scrolling forever.
+      if (typeof e.buttons === "number" && (e.buttons & 4) === 0) {
+        amllStopAutoScroll();
+        return;
+      }
+      mouseY = e.clientY;
+    };
+    // The arming press is already propagating when these land on window, so it
+    // has to be excluded by identity or the mode would end on itself. A middle
+    // press inside the lyrics is handled above (stop/arm); every other press,
+    // including middle presses elsewhere, ends the mode.
+    const press = (e) => {
+      if (e === event) return;
+      if (e.button === 1 && amllHost.contains(e.target)) return;
+      amllStopAutoScroll();
+    };
+    // Press-and-hold: the middle button coming up is the end of the gesture.
+    const up = (e) => { if (e.button === 1) amllStopAutoScroll(); };
+    // Our own wheel events bubble to window too; they must not count as the
+    // user scrolling.
+    const wheel = (e) => { if (!e.__auroraAutoScroll) amllStopAutoScroll(); };
+    const key = (e) => { if (e.key === "Escape") amllStopAutoScroll(); };
+    const blur = () => amllStopAutoScroll();
+
+    const tick = (now) => {
+      if (!amllAuto) return;
+      // The panel can be torn down under the gesture (track change, mode
+      // switch); stop rather than scroll a detached element.
+      if (!playerEl.isConnected) { amllStopAutoScroll(); return; }
+      // Per-second speed, not per-frame: a 144Hz screen must not scroll more
+      // than twice as fast as a 60Hz one. The delta is clamped so a stalled tab
+      // cannot resume with one huge jump.
+      const dt = Math.min(50, Math.max(0, (now || lastFrame) - lastFrame));
+      lastFrame = now || lastFrame;
+      const dy = mouseY - anchorY;
+      // A dead zone, like Chrome's: the first few pixels arm nothing, so a
+      // click that did not move does not creep.
+      const power = Math.abs(dy) - 8;
+      if (power > 0) {
+        const sign = dy > 0 ? 1 : -1;
+        // Speed tracks the pull, and keeps tracking it well past the panel:
+        // a 50px pull is a slow creep, 150px is a brisk run, ~270px is the
+        // 4400px/s cap. Linear like Chrome's, so the change is felt at every
+        // distance instead of flattening out early.
+        carry += sign * Math.min(4400, 150 + power * 16) * dt / 1000;
+        const whole = Math.trunc(carry);
+        if (whole) {
+          carry -= whole;
+          const synthetic = new WheelEvent("wheel", {
+            deltaY: whole,
+            deltaMode: 0,
+            bubbles: true,
+            cancelable: true,
+          });
+          synthetic.__auroraAutoScroll = true;
+          playerEl.dispatchEvent(synthetic);
+        }
+        const dir = sign > 0 ? "down" : "up";
+        if (dir !== shownDir) { indicator.dataset.dir = dir; shownDir = dir; }
+      } else if (shownDir) {
+        delete indicator.dataset.dir;
+        shownDir = "";
+      }
+      if (amllAuto) amllAuto.raf = requestAnimationFrame(tick);
+    };
+
+    window.addEventListener("mousemove", move, true);
+    window.addEventListener("mousedown", press, true);
+    window.addEventListener("mouseup", up, true);
+    window.addEventListener("wheel", wheel, true);
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("blur", blur);
+    amllAuto = { raf: 0, indicator, move, press, up, wheel, key, blur };
+    amllAuto.raf = requestAnimationFrame(tick);
   }
 
   function amllEnsureEngine() {
@@ -17872,6 +18922,10 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
       amllHost = document.createElement("div");
       amllHost.id = "ym-sl-amll-host";
+      // Keep the skeleton on the same focal line as the real lines.
+      amllHost.style.setProperty("--amll-align-y", (AMLL_ALIGN_POSITION * 100) + "%");
+      // Middle-click autoscroll: the gesture Chrome gives a native scroller.
+      amllHost.addEventListener("mousedown", amllStartAutoScroll);
       container.appendChild(amllHost);
 
       const player = new mod.LyricPlayer();
@@ -17893,7 +18947,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
       // Focal line sits a little further down than AMLL's own 0.35 default, so
       // the active line reads lower in the panel.
-      player.setAlignPosition(0.42);
+      player.setAlignPosition(AMLL_ALIGN_POSITION);
       // Halve the render buffer. The engine defaults to 300px of overscan, which
       // on a ~950px panel means it builds roughly twice the viewport's worth of
       // lines - and every one of those words re-resolves its CSS mask every
@@ -17944,18 +18998,28 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     }
   }
 
+  // Full teardown of the engine (host, player, drive loop, latches). Nothing in
+  // the settings path calls it any more — the renderer is chosen per track and
+  // a loaded engine is reused across tracks — so it stays as the subsystem's
+  // dispose primitive rather than being lost.
   function amllDeactivate() {
-    // Always clear the failure latch and the cached import promise, so switching
-    // the mode back on retries. This must happen BEFORE the early return below:
+    // Always clear the failure latch and the cached import promise, so a later
+    // activation retries. This must happen BEFORE the early return below:
     // after a failed activation amllActive/amllReady are both false, and the
     // early return would otherwise leave the latch stuck for the whole session.
     amllFailed = false;
     amllEnginePromise = null;
     amllDriveErrors = 0;
+    // With the engine gone the built-in renderer owns whatever is loaded, so the
+    // look has to follow it on the next activation's first sync.
+    amllSpicyTrack = false;
     if (!amllActive && !amllReady) return;
     amllGen++;                               // invalidate any in-flight activation
     amllActive = false;
     amllHide();
+    // The engine owned the pill's state; without it there is nothing to jump
+    // back to, and leaving it up would fake a suspended scroll.
+    setJumpButtonVisible(false);
     try { if (amllPlayer) amllPlayer.dispose(); } catch (e) {}
     amllPlayer = null;
     amllReady = false;
@@ -17964,9 +19028,14 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
     amllStopOwnLoop();
     if (amllTimeHosts && amllTimeHosts.length) {
       for (const el of amllTimeHosts) {
+        amllReleaseTimeHold(el);
         try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
       }
       amllTimeHosts = [];
+    }
+    for (const el of amllTimeHoldTimers.keys()) {
+      amllReleaseTimeHold(el);
+      try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
     }
     if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
     amllSizeSeeded = false;
@@ -18025,32 +19094,39 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   function amllLinesFromContent(content) {
     const out = [];
     if (!Array.isArray(content)) return out;
-    for (const line of content) {
+    for (let index = 0; index < content.length; index++) {
+      const line = content[index];
       const lead = line && line.Lead;
       if (!lead) continue;
       const words = amllWordAtoms(lead.Syllables);
       out.push({
         words,
-        translatedLyric: "",
+        // The translation plan is keyed by the CONTENT index, not by time, so a
+        // lead line and a background line that start together never collide.
+        // Both renderers use the same key, which is what makes their output
+        // identical (see 23-auto-translate).
+        translatedLyric: autoTranslateAmllText(index, -1),
         romanLyric: "",
+        __ymTransKey: autoTranslateKey(index, -1),
         startTime: (lead.StartTime || 0) * 1000,
         endTime: (lead.EndTime || 0) * 1000,
         isBG: false,
         isDuet: !!line.OppositeAligned,
       });
       const bgs = line.Background || [];
-      for (const bg of bgs) {
+      bgs.forEach((bg, bgIndex) => {
         const bgWords = amllWordAtoms(bg.Syllables);
         out.push({
           words: bgWords,
-          translatedLyric: "",
+          translatedLyric: autoTranslateAmllText(index, bgIndex),
           romanLyric: "",
+          __ymTransKey: autoTranslateKey(index, bgIndex),
           startTime: (bg.StartTime || 0) * 1000,
           endTime: (bg.EndTime || 0) * 1000,
           isBG: true,
           isDuet: false,
         });
-      }
+      });
     }
     return out;
   }
@@ -18069,7 +19145,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   // Credits footer. Aurora already builds a full "Written By / Lyrics provided by
   // / Uploaded by / Made by" block for the built-in renderer (buildCreditsFooter
-  // in 16-lyric-dom-romanization), and it reads the same shared state, so the
+  // in 16-lyric-dom), and it reads the same shared state, so the
   // Apple-Music-style panel can simply reuse it rather than duplicating the
   // markup, the provider links, the warning pill or the avatar-glow theming.
   // It is pinned to the bottom of the host, over the engine's own scroll area.
@@ -18102,22 +19178,46 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 
   function amllSyncLyrics(content) {
     amllLastContent = content;
+    // The engine was never started for the previous track (it belonged to
+    // Spicy), so this track has to start it rather than silently staying on
+    // Spicy until the mode is toggled. amllActivate re-syncs from
+    // amllLastContent once it is ready.
+    if (!amllSpicyTrack && !amllActive && !amllFailed) {
+      amllActivate();
+      return;
+    }
     if (!amllActive || !amllReady || !amllPlayer) return;
+    // A track the user pointed at Spicy: hide the engine (the body class is what
+    // makes the built-in container visible again) and leave the line model alone
+    // - it is already built in full Spicy mode.
+    if (amllSpicyTrack) {
+      amllHideSkeleton();
+      amllHide();
+      return;
+    }
     try {
       const lines = amllLinesFromContent(content);
       // Untimed / plain lyrics: the engine can't place them on a timeline, so
       // fall back to Aurora's own (glow-free) Simple render for this content.
       if (!lines.length || !amllContentIsTimed(content)) {
+        // No timeline for the engine: hand the track to Aurora's own renderer,
+        // but take the loading skeleton down first or it would sit on top of
+        // the static lines (and hide the empty state on the next failure).
+        amllHideSkeleton();
         amllHide();
         return;
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
+      // Cached translations were already in the line objects; this fills the
+      // sub-line of any line the engine built before the translation landed.
+      autoTranslateRefreshAmll();
       amllShow();
       amllHideSkeleton();
       amllSyncCredits();
     } catch (e) {
       console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
+      amllHideSkeleton();
       amllHide();
     }
   }
@@ -18153,6 +19253,19 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // reports 0x0 the first time (it observes its still-detached root element), and
   // once the viewport is zero the engine never recovers on its own. With this
   // guard a real viewport, once known, can never be lost again.
+  //
+  // The SAME observer also measures every line, and that report is just as
+  // destructive: switching away from the Lyrics tab (Comments, Related) makes
+  // the panel display:none, so every measured line height is written back as 0.
+  // The layout is then recalculated from zero-height lines, isInRenderRange()
+  // fails for all of them, and commitChanges() removes their elements. Removal
+  // is the part that makes it permanent: a removed line is unobserved (hide()
+  // calls unobserve), so it can never be measured again and never comes back —
+  // the panel returns with a collapsed, half-empty list and no active line.
+  // Verified live against the bundled engine: with only the size guard in
+  // place, 44 of 50 lines are in range before the tab switch and 6 after; with
+  // this second guard, 45 before and 46 after. Lines always carry text, so a
+  // non-positive height is never a real measurement.
   function amllGuardEngineSize() {
     try {
       const guarded = [0, 0];
@@ -18171,6 +19284,18 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         configurable: true,
       });
       amllPlayer.size = guarded;
+      const calc = amllPlayer.layoutCalculator;
+      if (calc && typeof calc.setLineHeight === "function" && !calc.setLineHeight.__amllGuarded) {
+        const setLineHeight = calc.setLineHeight.bind(calc);
+        const guardedSetLineHeight = (index, height) => {
+          if (height > 0) setLineHeight(index, height);
+        };
+        // initHeights() writes the per-song defaults straight into the heights
+        // array and clears the measured flags, so resetting a new track does not
+        // depend on this setter and is unaffected by the guard.
+        guardedSetLineHeight.__amllGuarded = true;
+        calc.setLineHeight = guardedSetLineHeight;
+      }
     } catch (e) {}
   }
   function amllSeedEngineSize() {
@@ -18255,15 +19380,26 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
           const ln = group.mainLine.getLine();
           const at = Number(ln.startTime);
           if (!Number.isFinite(at) || at < 0) return;
+          // `at` is LYRIC time (amllLinesFromContent passes Aurora's raw line
+          // times straight through, and amllDrive feeds the engine pos - offset).
+          // The media has to travel `offset` ms past it to reach that lyric, so
+          // seeking to `at` alone landed the whole offset away from the line and
+          // read as "the line has no sync". Same rule as the panel's own line
+          // click in 17-lyric-events and the PiP's seekToLyricTime.
+          let seekTo = at;
+          try {
+            if (typeof getOffsetForLine === "function") seekTo = at + getOffsetForLine(at);
+          } catch (err) {}
+          seekTo = Math.max(0, seekTo);
           // Try every seek entry point we know of; YTMod.player.seek() is the
           // documented one but builds differ in what they expose.
           const p = window.YTMod && window.YTMod.player;
           const attempts = [
-            () => { if (p && typeof p.seek === "function") p.seek(at); },
-            () => { if (p && typeof p.seekTo === "function") p.seekTo(at); },
+            () => { if (p && typeof p.seek === "function") p.seek(seekTo); },
+            () => { if (p && typeof p.seekTo === "function") p.seekTo(seekTo); },
             () => {
               const el = document.querySelector("video");
-              if (el) el.currentTime = at / 1000;
+              if (el) el.currentTime = seekTo / 1000;
             },
           ];
           for (const attempt of attempts) {
@@ -18276,26 +19412,37 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   }
 
   // Loading skeleton for track changes. The engine holds the previous track's
-  // lines until the new ones arrive, which reads as "the wrong song". Show
-  // shimmering bars from the moment the track changes, and drop them the instant
-  // real lyrics are handed over.
+  // lines until the new ones arrive, which reads as "the wrong song". While the
+  // skeleton is up the player is hidden (.ym-sl-amll-loading), so the old words
+  // cannot show through; it comes down the instant real lyrics are handed over,
+  // whether they came from a provider or from a local TTML file.
+  // Fixed ragged widths, like the built-in skeleton: random ones reshuffle on
+  // every load and read as a glitch.
+  const AMLL_SKELETON_WIDTHS = [86, 62, 94, 71, 88, 55, 92, 66];
   let amllSkeletonEl = null;
   function amllShowSkeleton() {
-    if (!amllActive || !amllReady || !amllHost || amllSkeletonEl) return;
+    if (!amllActive || !amllReady || !amllHost) return;
+    // Reveal the host too. A previous no-lyrics result calls amllHide(), which
+    // takes body.amll-active off, and the host is visibility:hidden until it is
+    // back - so without this the skeleton would be built but never painted.
+    amllShow();
+    if (amllSkeletonEl) return;
     try {
       const wrap = document.createElement("div");
       wrap.className = "ym-sl-amll-skeleton";
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < AMLL_SKELETON_WIDTHS.length; i++) {
         const bar = document.createElement("div");
         bar.className = "ym-sl-amll-skeleton-bar";
-        bar.style.width = (55 + Math.random() * 40) + "%";
+        bar.style.width = AMLL_SKELETON_WIDTHS[i] + "%";
         wrap.appendChild(bar);
       }
       amllHost.appendChild(wrap);
+      amllHost.classList.add("ym-sl-amll-loading");
       amllSkeletonEl = wrap;
     } catch (e) {}
   }
   function amllHideSkeleton() {
+    if (amllHost) amllHost.classList.remove("ym-sl-amll-loading");
     if (!amllSkeletonEl) return;
     try { amllSkeletonEl.remove(); } catch (e) {}
     amllSkeletonEl = null;
@@ -18493,6 +19640,32 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
   // The next line that has not started yet is included too, so it is already at
   // 0% and continues rather than snapping when it takes over.
   let amllTimeHosts = [];
+  // A line that retires must NOT lose its mask clock the same frame it goes
+  // inactive. Each word's mask is a gradient POSITIONED by --amll-player-time;
+  // without the property the clamp falls back to time 0, which is the "not sung"
+  // end, so every word snaps from the lit end of its sweep to the dim one. The
+  // theme's --bright-mask-alpha easing (.45s) was already fading the line down -
+  // the mask jump overrode it, which is what read as "the white fill just
+  // disappears". Hold the last clock value for longer than that easing so the
+  // words stay lit where they finished and only the alpha fades out.
+  const amllTimeHoldTimers = new Map();
+  const AMLL_TIME_HOLD_MS = 600;
+  function amllHoldTime(el, t) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (pending) clearTimeout(pending);
+    try { el.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
+    const timer = setTimeout(() => {
+      amllTimeHoldTimers.delete(el);
+      try { el.style.removeProperty("--amll-player-time"); } catch (err) {}
+    }, AMLL_TIME_HOLD_MS);
+    amllTimeHoldTimers.set(el, timer);
+  }
+  function amllReleaseTimeHold(el) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (!pending) return;
+    clearTimeout(pending);
+    amllTimeHoldTimers.delete(el);
+  }
   function amllScopePlayerTime(t) {
     try {
       const groups = amllPlayer.currentLyricGroups || [];
@@ -18515,19 +19688,36 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       }
       const prev = amllTimeHosts;
       for (const el of prev) {
-        if (hosts.indexOf(el) === -1) {
-          try { el.style.removeProperty("--amll-player-time"); } catch (err) {}
-        }
+        if (hosts.indexOf(el) === -1) amllHoldTime(el, t);
       }
       for (const el of hosts) {
+        amllReleaseTimeHold(el);
         try { el.style.setProperty("--amll-player-time", String(t)); } catch (err) {}
       }
       amllTimeHosts = hosts;
     } catch (e) {}
   }
 
+  /* The "Jump to current" pill only knew about the built-in scroll box: its
+     handler is wired to that element, so Apple-style lyrics could be scrolled
+     away with no way back until a line change happened to land inside the
+     engine's render buffer. The engine keeps the same state on
+     scrollState.isAutoAlignSuspended, and resetScroll() is its way home, so
+     mirror that onto the SAME button instead of adding a second one.
+     Reading the class back (rather than caching a flag) means anything else
+     that hides the pill on a track change is respected on the next frame. */
+  function amllSyncJumpButton() {
+    if (!amllPlayer || !jumpButton) return;
+    let suspended = false;
+    try { suspended = !!amllPlayer.scrollState.isAutoAlignSuspended; } catch (e) {}
+    const shown = !jumpButton.classList.contains("hidden");
+    if (suspended === shown) return;
+    setJumpButtonVisible(suspended);
+  }
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer) return;
+    const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
     amllLastFrameTime = now;
@@ -18567,7 +19757,9 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
       // Release lines that have scrolled well out of range, so their per-word
       // animations do not pile up for the whole song.
       amllReapDistantLines(now);
+      amllSyncJumpButton();
       amllDriveErrors = 0;
+      if (window.__auroraPerf) window.__auroraPerf.addAmll(performance.now() - amllPerfStartedAt);
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
       // first one: a single hiccup (a half-built line, a mid-track line swap)
@@ -18581,9 +19773,754 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
         console.warn("[AuroraLyrics] AMLL drive failed repeatedly; falling back.", e);
         amllFailed = true;
         amllHide();
+        setJumpButtonVisible(false);
       }
     }
   }
+  /* ===================== on-device lyric translation =====================
+     Chrome 138+ ships the Translator and LanguageDetector built-in AI APIs.
+     Both run locally (a language pack may download once), so the lyrics are
+     never sent anywhere. Non-English lines get a small English line
+     underneath, like a subtitle for the one line you are reading.
+
+     Why a PLAN instead of translating each line as it is built:
+       - telling Japanese from Chinese needs the whole song, not one short line;
+       - the Spicy DOM and the AMLL engine draw the same content, and they must
+         show the SAME translation for a line;
+       - a rebuild (settings change) must not start the queue over.
+     autoTranslateBegin() builds the plan once per line build, both renderers
+     read from it by key, and atFill() patches whichever ones exist.
+
+     Nothing here is required for lyrics to work. Every failure path (no API,
+     no language pack, no user gesture, a failed translate) ends with fewer
+     translations, never with a broken panel. */
+
+  const AT_TARGET = "en";
+  // Below this many characters a line is an interjection ("Oh oh oh") where
+  // detection is unreliable and the translation adds nothing.
+  const AT_MIN_LATIN_CHARS = 4;
+  const AT_MIN_CJK_CHARS = 2;
+  const AT_MAX_TRANSLATIONS = 800;
+  // How long to wait before giving a failed line, or a failed translator, a
+  // second chance. Long enough for a language pack that is still settling,
+  // short enough that the glosses still arrive while the line is on screen.
+  const AT_RETRY_DELAY_MS = 600;
+
+  let atPlan = new Map();              // key -> { key, text, source, translation, nodes }
+  let atOrder = [];                    // plan keys in song order
+  let atGeneration = 0;                // invalidates in-flight work on track/build change
+  let atTranslatorBySource = new Map(); // source -> Promise<translator|null>
+  let atDetector = null;
+  let atDetectorPromise = null;
+  let atTextCache = new Map();         // source + NUL + text -> english
+  let atNeedsGesture = new Set();      // pairs Chrome refused until the user clicks
+  let atNeedsDetect = false;           // Latin song whose detector needs a click
+  let atLatinEntries = null;
+  let atWorkingSource = "";
+  let atProgressSources = new Set();
+  let atChip = null;
+  let atChipTimer = 0;
+  let atUnsupportedNoted = false;
+  let atDebugLast = "";
+  let atErrorNote = "";
+
+  function autoTranslateKey(index, bgIndex) {
+    return index + ":" + (bgIndex == null ? -1 : bgIndex);
+  }
+
+  function autoTranslateEnabled() {
+    return currentSettings.autoTranslate === true;
+  }
+
+  /* ---- script detection ---------------------------------------------------
+     A script is a much stronger signal than a detector on a four-word line:
+     anything with kana is Japanese, anything with Hangul is Korean, anything
+     Han-only is Chinese unless the song has kana somewhere. Latin-script
+     languages are the one case a script cannot answer, so those go to
+     LanguageDetector (see atResolveLatin). */
+  const AT_SCRIPT_LANG = {
+    cyrillic: "ru",
+    greek: "el",
+    thai: "th",
+    hebrew: "he",
+    arabic: "ar",
+    devanagari: "hi",
+    bengali: "bn",
+    tamil: "ta",
+    telugu: "te",
+    kannada: "kn",
+  };
+
+  function atScriptCounts(text) {
+    const counts = {
+      kana: 0, hangul: 0, han: 0, cyrillic: 0, greek: 0, thai: 0, hebrew: 0,
+      arabic: 0, devanagari: 0, bengali: 0, tamil: 0, telugu: 0, kannada: 0,
+      latin: 0, other: 0,
+    };
+    const value = String(text || "");
+    for (const ch of value) {
+      const cp = ch.codePointAt(0);
+      if (cp >= 0x3040 && cp <= 0x30ff) counts.kana++;
+      else if (cp >= 0x31f0 && cp <= 0x31ff) counts.kana++;
+      else if ((cp >= 0x1100 && cp <= 0x11ff) || (cp >= 0x3130 && cp <= 0x318f) ||
+               (cp >= 0xa960 && cp <= 0xa97f) || (cp >= 0xac00 && cp <= 0xd7ff)) counts.hangul++;
+      else if ((cp >= 0x3400 && cp <= 0x4dbf) || (cp >= 0x4e00 && cp <= 0x9fff) ||
+               (cp >= 0xf900 && cp <= 0xfaff)) counts.han++;
+      else if ((cp >= 0x0400 && cp <= 0x052f)) counts.cyrillic++;
+      else if ((cp >= 0x0370 && cp <= 0x03ff) || (cp >= 0x1f00 && cp <= 0x1fff)) counts.greek++;
+      else if (cp >= 0x0e00 && cp <= 0x0e7f) counts.thai++;
+      else if (cp >= 0x0590 && cp <= 0x05ff) counts.hebrew++;
+      else if ((cp >= 0x0600 && cp <= 0x06ff) || (cp >= 0x0750 && cp <= 0x077f) ||
+               (cp >= 0x08a0 && cp <= 0x08ff) || (cp >= 0xfb50 && cp <= 0xfdff) ||
+               (cp >= 0xfe70 && cp <= 0xfeff)) counts.arabic++;
+      else if (cp >= 0x0900 && cp <= 0x097f) counts.devanagari++;
+      else if (cp >= 0x0980 && cp <= 0x09ff) counts.bengali++;
+      else if (cp >= 0x0b80 && cp <= 0x0bff) counts.tamil++;
+      else if (cp >= 0x0c00 && cp <= 0x0c7f) counts.telugu++;
+      else if (cp >= 0x0c80 && cp <= 0x0cff) counts.kannada++;
+      else if ((cp >= 0x0041 && cp <= 0x005a) || (cp >= 0x0061 && cp <= 0x007a) ||
+               (cp >= 0x00c0 && cp <= 0x024f) || (cp >= 0x1e00 && cp <= 0x1eff) ||
+               (cp >= 0xff21 && cp <= 0xff3a) || (cp >= 0xff41 && cp <= 0xff5a)) counts.latin++;
+      else if (!/\s/.test(ch)) counts.other++;
+    }
+    return counts;
+  }
+
+  function atCountsTotal(counts) {
+    let total = 0;
+    for (const key in counts) total += counts[key];
+    return total;
+  }
+
+  // The song's dominant non-Latin script, or a Latin marker when there is no
+  // meaningful non-Latin text. null means "too little to tell" (an instrumental
+  // or one-word song), where doing nothing is better than guessing.
+  function atSongScript(lines) {
+    const totals = {
+      kana: 0, hangul: 0, han: 0, cyrillic: 0, greek: 0, thai: 0, hebrew: 0,
+      arabic: 0, devanagari: 0, bengali: 0, tamil: 0, telugu: 0, kannada: 0, latin: 0,
+    };
+    for (const line of lines) {
+      const counts = atScriptCounts(line.text);
+      for (const key in totals) totals[key] += counts[key];
+    }
+    // Kana outranks Han: a Japanese song has kanji-only lines, and Han alone
+    // cannot tell Japanese from Chinese.
+    if (totals.kana >= 2) return { source: "ja", scripts: ["kana", "han"] };
+    if (totals.hangul >= 2) return { source: "ko", scripts: ["hangul"] };
+    if (totals.han >= 2) return { source: "zh", scripts: ["han"] };
+    let best = "";
+    for (const key in AT_SCRIPT_LANG) {
+      if (!best || totals[key] > totals[best]) best = key;
+    }
+    if (best && totals[best] >= 3) return { source: AT_SCRIPT_LANG[best], scripts: [best] };
+    if (totals.latin >= 24) return { source: "", scripts: ["latin"] };
+    return null;
+  }
+
+  function atLineHasScript(text, scripts) {
+    const counts = atScriptCounts(text);
+    for (const script of scripts) {
+      if (script === "latin") {
+        if (counts.latin > 0) return true;
+      } else if (counts[script] > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function atLatinWords(text) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+    return words.length;
+  }
+
+  function atLatinCandidate(text) {
+    const counts = atScriptCounts(text);
+    if (counts.latin < 8 || atLatinWords(text) < 2) return false;
+    // A line that carries another script is handled by the script path; do not
+    // hand mixed CJK/English lines to the Latin detector.
+    for (const key in AT_SCRIPT_LANG) if (counts[key] > 0) return false;
+    if (counts.kana || counts.hangul || counts.han) return false;
+    return true;
+  }
+
+  /* ---- plan --------------------------------------------------------------- */
+  function atBuildPlan(content) {
+    const lines = [];
+    content.forEach((line, index) => {
+      if (!line || !line.Lead || !Array.isArray(line.Lead.Syllables)) return;
+      const text = syllablesToText(line.Lead.Syllables);
+      if (text.trim()) lines.push({ index, bgIndex: -1, text });
+      (line.Background || []).forEach((background, bgIndex) => {
+        if (!background || !Array.isArray(background.Syllables)) return;
+        const bgText = syllablesToText(background.Syllables);
+        if (bgText.trim()) lines.push({ index, bgIndex, text: bgText });
+      });
+    });
+    if (!lines.length) return null;
+
+    const song = atSongScript(lines);
+    if (!song) return null;
+
+    if (song.scripts[0] === "latin") {
+      const latin = [];
+      for (const line of lines) {
+        if (!atLatinCandidate(line.text)) continue;
+        const entry = {
+          key: autoTranslateKey(line.index, line.bgIndex),
+          text: line.text,
+          source: "",
+          translation: "",
+          nodes: [],
+        };
+        atPlan.set(entry.key, entry);
+        atOrder.push(entry.key);
+        latin.push(entry);
+      }
+      return latin.length ? { source: "", latin } : null;
+    }
+
+    for (const line of lines) {
+      if (!atLineHasScript(line.text, song.scripts)) continue;
+      const counts = atScriptCounts(line.text);
+      if (atCountsTotal(counts) < AT_MIN_CJK_CHARS) continue;
+      const entry = {
+        key: autoTranslateKey(line.index, line.bgIndex),
+        text: line.text,
+        source: song.source,
+        translation: "",
+        nodes: [],
+      };
+      atPlan.set(entry.key, entry);
+      atOrder.push(entry.key);
+    }
+    return atPlan.size ? { source: song.source, latin: null } : null;
+  }
+
+  async function autoTranslateBegin(content) {
+    atGeneration++;
+    const generation = atGeneration;
+    atPlan = new Map();
+    atOrder = [];
+    atWorkingSource = "";
+    atLatinEntries = null;
+    atNeedsDetect = false;
+    atProgressSources = new Set();
+    atHideChip();
+    atSetDebug("");
+    if (!Array.isArray(content) || !autoTranslateEnabled()) return;
+    if (typeof Translator === "undefined" || typeof Translator.availability !== "function") {
+      atNoteUnsupported();
+      return;
+    }
+    const plan = atBuildPlan(content);
+    if (!plan) return;
+    atWorkingSource = plan.source;
+    if (plan.latin) {
+      const source = await atResolveLatin(plan.latin, false);
+      if (generation !== atGeneration) return;
+      if (!source) return;
+      atWorkingSource = source;
+    }
+    await atRunPlan();
+  }
+
+  /* ---- language detector --------------------------------------------------
+     Only Latin-script songs need this. A detector model may also download, so
+     a refusal without user activation is handled the same way as a translator:
+     one click to set it up, then the same plan is resolved. */
+  async function atEnsureDetector(force) {
+    if (typeof LanguageDetector === "undefined") return null;
+    if (atDetector) return atDetector;
+    if (force) {
+      atDetectorPromise = null;
+      atDetector = null;
+    }
+    if (!atDetectorPromise) {
+      atDetectorPromise = (async () => {
+        try {
+          if (typeof LanguageDetector.availability === "function") {
+            const status = await LanguageDetector.availability();
+            if (status === "unavailable") return null;
+          }
+          return await LanguageDetector.create();
+        } catch (error) {
+          return null;
+        }
+      })();
+    }
+    atDetector = await atDetectorPromise;
+    if (!atDetector) atDetectorPromise = null;
+    return atDetector;
+  }
+
+  function atNormalizeLang(tag) {
+    const raw = String(tag || "").toLowerCase();
+    if (!raw || raw === "und") return "";
+    if (raw.indexOf("zh") === 0) {
+      return (raw.indexOf("hant") >= 0 || raw === "zh-tw" || raw === "zh-hk") ? "zh-Hant" : "zh";
+    }
+    return raw.split("-")[0];
+  }
+
+  async function atResolveLatin(entries, force) {
+    atLatinEntries = entries;
+    // Without a detector the browser cannot tell Spanish from English, and
+    // guessing would translate English lyrics into English. Leave Latin-script
+    // songs alone rather than showing a setup button that can never succeed.
+    if (typeof LanguageDetector === "undefined") return "";
+    if (atNeedsDetect && !force) {
+      atShowSetup("");
+      return "";
+    }
+    const generation = atGeneration;
+    const detector = await atEnsureDetector(force);
+    if (generation !== atGeneration) return "";
+    if (!detector) {
+      atNeedsDetect = true;
+      atShowSetup("");
+      return "";
+    }
+    const sample = entries.map((entry) => entry.text).join("\n").slice(0, 900);
+    let results = [];
+    try {
+      results = await detector.detect(sample);
+    } catch (error) {
+      return "";
+    }
+    const best = (results || []).find((item) => item && item.detectedLanguage && item.detectedLanguage !== "und");
+    if (!best || Number(best.confidence) < 0.55) return "";
+    const source = atNormalizeLang(best.detectedLanguage);
+    if (!source || source === AT_TARGET) return "";
+
+    // The song is not English, but the hook often is. Ask per line and only
+    // translate the lines that really are in the song's language; short lines
+    // are left on the song-level answer because detection is unreliable there.
+    for (const entry of entries) {
+      if (generation !== atGeneration) return "";
+      if (atLatinWords(entry.text) < 3) {
+        entry.source = source;
+        continue;
+      }
+      let ok = true;
+      try {
+        const lineResults = await detector.detect(entry.text);
+        const top = lineResults && lineResults[0];
+        if (top && top.detectedLanguage && top.detectedLanguage !== "und" &&
+            Number(top.confidence) >= 0.5) {
+          ok = atNormalizeLang(top.detectedLanguage) === source ||
+            atNormalizeLang(top.detectedLanguage) === "";
+        }
+      } catch (error) {}
+      if (ok) entry.source = source;
+    }
+    atNeedsDetect = false;
+    return source;
+  }
+
+  async function autoTranslateRetryDetect() {
+    if (!atLatinEntries || !atLatinEntries.length) return;
+    atNeedsDetect = false;
+    atDetectorPromise = null;
+    atDetector = null;
+    atShowChip("Preparing translation…");
+    const source = await atResolveLatin(atLatinEntries, true);
+    if (!source) return;
+    atWorkingSource = source;
+    await atRunPlan();
+  }
+
+  /* ---- translator --------------------------------------------------------- */
+  function atLanguageName(tag) {
+    if (!tag) return "this language";
+    try {
+      const names = new Intl.DisplayNames(["en"], { type: "language" });
+      return names.of(tag) || tag;
+    } catch (error) {
+      return tag;
+    }
+  }
+
+  async function atEnsureTranslator(source, generation) {
+    if (atTranslatorBySource.has(source)) return atTranslatorBySource.get(source);
+    if (atNeedsGesture.has(source)) {
+      atShowSetup(source);
+      return null;
+    }
+    const promise = (async () => {
+      try {
+        if (typeof Translator.availability === "function") {
+          const status = await Translator.availability({
+            sourceLanguage: source,
+            targetLanguage: AT_TARGET,
+          });
+          if (generation !== atGeneration) return null;
+          if (status === "unavailable") {
+            atShowTransient("Chrome can't translate " + atLanguageName(source) + " yet.");
+            return null;
+          }
+        }
+        const translator = await Translator.create({
+          sourceLanguage: source,
+          targetLanguage: AT_TARGET,
+          monitor(monitor) {
+            try {
+              monitor.addEventListener("downloadprogress", (event) => {
+                atProgress(source, event && event.loaded);
+              });
+            } catch (error) {}
+          },
+        });
+        atProgressSources.delete(source);
+        // A download that started on the previous track must not hide the new
+        // track's setup chip when it finishes.
+        if (generation === atGeneration) atHideChip();
+        return translator;
+      } catch (error) {
+        // Chrome asks for a user gesture before a language pack may download.
+        // Hold the pair until the chip's button is clicked instead of retrying
+        // on every line.
+        atNeedsGesture.add(source);
+        atProgressSources.delete(source);
+        if (generation === atGeneration) atShowSetup(source);
+        return null;
+      }
+    })();
+    atTranslatorBySource.set(source, promise);
+    const translator = await promise;
+    if (!translator) atTranslatorBySource.delete(source);
+    return translator;
+  }
+
+  function autoTranslateRetry() {
+    if (atNeedsDetect) return autoTranslateRetryDetect();
+    const source = atWorkingSource;
+    if (!source) return undefined;
+    atNeedsGesture.delete(source);
+    atTranslatorBySource.delete(source);
+    atProgressSources.add(source);
+    atShowProgress(source, 0);
+    return atRunPlan();
+  }
+
+  function atDelay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // The first failure of a given kind is worth a console line: when a language
+  // that "never translates" shows up again, the error name is the answer.
+  function atNoteTranslateError(source, error) {
+    const tag = source + " " + ((error && error.name) || "Error");
+    if (atErrorNote === tag) return;
+    atErrorNote = tag;
+    console.warn("[AuroraLyrics] on-device translation failed (" + tag + "):", (error && error.message) || error);
+  }
+
+  // One pass over the entries. Returns how many filled and which ones threw,
+  // because a line that failed is usually worth one more try and a rebuild of
+  // the whole song is not.
+  async function atTranslateEntries(translator, entries, source, generation) {
+    let done = 0;
+    const failed = [];
+    for (const entry of entries) {
+      if (generation !== atGeneration) return { done, failed };
+      if (atPlan.get(entry.key) !== entry) continue;
+      if (entry.translation) { done++; continue; }
+      const cacheKey = source + "\u0000" + entry.text;
+      const cached = atTextCache.get(cacheKey);
+      if (cached) {
+        atFill(entry, cached);
+        done++;
+        continue;
+      }
+      try {
+        const raw = await translator.translate(entry.text);
+        if (generation !== atGeneration) return { done, failed };
+        const text = atCleanTranslation(raw);
+        if (!text || text === entry.text) continue;
+        atRemember(cacheKey, text);
+        atFill(entry, text);
+        done++;
+      } catch (error) {
+        // One line the model choked on must not strand the rest of the song.
+        // QuotaExceeded means this string is too large; retrying cannot help.
+        atNoteTranslateError(source, error);
+        if (!error || error.name !== "QuotaExceededError") failed.push(entry);
+      }
+    }
+    return { done, failed };
+  }
+
+  // Throw the cached translator away and build a new one. Only called after a
+  // run that filled nothing, so a working translator is never disturbed.
+  async function atRestartTranslator(source, generation) {
+    const existing = atTranslatorBySource.get(source);
+    atTranslatorBySource.delete(source);
+    if (existing) {
+      try {
+        const translator = await existing;
+        if (translator && typeof translator.destroy === "function") translator.destroy();
+      } catch (error) {}
+    }
+    await atDelay(AT_RETRY_DELAY_MS);
+    if (generation !== atGeneration) return null;
+    return atEnsureTranslator(source, generation);
+  }
+
+  async function atRunPlan() {
+    const generation = atGeneration;
+    const source = atWorkingSource;
+    if (!source) return;
+    const entries = [];
+    for (const key of atOrder) {
+      const entry = atPlan.get(key);
+      if (entry && entry.source === source && !entry.translation) entries.push(entry);
+    }
+    if (!entries.length) return;
+    const translator = await atEnsureTranslator(source, generation);
+    if (generation !== atGeneration || !translator) return;
+    atProgressSources.delete(source);
+    atHideChip();
+
+    let { done, failed } = await atTranslateEntries(translator, entries, source, generation);
+
+    // Chrome can hand back a translator whose model is not ready yet (a language
+    // pack that finished downloading just after create()). Every call then fails
+    // within a millisecond and the song stays bare until the page is reloaded —
+    // which is exactly what "this language never translates" looks like. The same
+    // happens when the model answers with the input unchanged. A delayed retry,
+    // then a fresh instance, covers both and a translator the browser dropped.
+    // Lines that failed are retried on their own; a run that filled nothing at
+    // all retries the whole plan, because "unchanged" is not recorded as failure.
+    const atPending = () => (failed.length ? failed : done === 0 ? entries : []);
+    if (generation === atGeneration) {
+      const first = atPending();
+      if (first.length) {
+        await atDelay(AT_RETRY_DELAY_MS);
+        if (generation !== atGeneration) return;
+        const again = await atTranslateEntries(translator, first, source, generation);
+        done += again.done;
+        failed = again.failed;
+      }
+      if (done === 0) {
+        const fresh = await atRestartTranslator(source, generation);
+        if (fresh && generation === atGeneration) {
+          const again = await atTranslateEntries(fresh, atPending(), source, generation);
+          done += again.done;
+        }
+      }
+    }
+    atSetDebug(source + ":" + done + "/" + entries.length);
+  }
+
+  function atCleanTranslation(raw) {
+    return String(raw || "").replace(/\s+/g, " ").trim();
+  }
+
+  function atRemember(key, text) {
+    if (atTextCache.size >= AT_MAX_TRANSLATIONS) {
+      const oldest = atTextCache.keys().next();
+      if (!oldest.done) atTextCache.delete(oldest.value);
+    }
+    atTextCache.set(key, text);
+  }
+
+  /* ---- rendering ---------------------------------------------------------- */
+  // A translation element for one line. Created empty and hidden by :empty, so
+  // a line only grows once its text arrives. Both renderers call this, which is
+  // what keeps their output identical.
+  function appendTranslation(lineElement, index, bgIndex) {
+    if (!lineElement || !autoTranslateEnabled()) return;
+    const entry = atPlan.get(autoTranslateKey(index, bgIndex));
+    if (!entry) return;
+    const node = h("div", { class: "translation", lang: AT_TARGET });
+    lineElement.appendChild(node);
+    entry.nodes.push(node);
+    if (entry.translation) {
+      node.textContent = entry.translation;
+      node.classList.add("ready");
+    }
+  }
+
+  // The AMLL engine renders translatedLyric into its own sub-line. Feed it at
+  // build time so a re-render keeps the text, and hand it the plan key so a
+  // translation that lands later can be patched into the live node.
+  function autoTranslateAmllText(index, bgIndex) {
+    const entry = atPlan.get(autoTranslateKey(index, bgIndex));
+    return entry && entry.translation ? entry.translation : "";
+  }
+
+  function autoTranslateRefreshAmll() {
+    if (!amllReady || !amllPlayer) return;
+    let groups = null;
+    try {
+      groups = amllPlayer.currentLyricGroups;
+    } catch (error) {
+      return;
+    }
+    if (!Array.isArray(groups)) return;
+    for (const group of groups) {
+      if (!group) continue;
+      atPatchAmllLine(group.mainLine);
+      atPatchAmllLine(group.bgLine);
+    }
+  }
+
+  function atPatchAmllLine(lineEl) {
+    if (!lineEl || typeof lineEl.getLine !== "function") return;
+    let line = null;
+    try {
+      line = lineEl.getLine();
+    } catch (error) {
+      return;
+    }
+    if (!line || !line.__ymTransKey) return;
+    const entry = atPlan.get(line.__ymTransKey);
+    if (!entry || !entry.translation) return;
+    line.translatedLyric = entry.translation;
+    let sub = null;
+    try {
+      sub = lineEl.element && lineEl.element.children && lineEl.element.children[1];
+    } catch (error) {}
+    if (sub && sub.textContent !== entry.translation) sub.textContent = entry.translation;
+  }
+
+  function atFill(entry, text) {
+    entry.translation = text;
+    for (const node of entry.nodes) {
+      if (!node) continue;
+      node.textContent = text;
+      node.classList.add("ready");
+    }
+    autoTranslateRefreshAmll();
+    atSetDebug(atWorkingSource + ":live");
+  }
+
+  /* ---- setup / status chip --------------------------------------------------
+     Only shown when the browser wants a click (language pack download) or when
+     there is genuinely nothing to try. It sits where the old source chip does,
+     above the lyrics, and never blocks a line. */
+  function atChipEl() {
+    if (!panelEl) return null;
+    if (atChip && atChip.isConnected) return atChip;
+    atChip = h("div", { class: "ym-sl-translate-chip", role: "status", "aria-live": "polite" });
+    panelEl.appendChild(atChip);
+    return atChip;
+  }
+
+  function atHideChip() {
+    if (atChipTimer) {
+      clearTimeout(atChipTimer);
+      atChipTimer = 0;
+    }
+    if (atChip) {
+      atChip.remove();
+      atChip = null;
+    }
+  }
+
+  function atShowChip(text, actionLabel, action) {
+    const chip = atChipEl();
+    if (!chip) return;
+    if (atChipTimer) {
+      clearTimeout(atChipTimer);
+      atChipTimer = 0;
+    }
+    chip.classList.remove("ym-sl-fading");
+    chip.replaceChildren();
+    chip.appendChild(h("span", { class: "ym-sl-translate-chip-label", text }));
+    if (actionLabel && typeof action === "function") {
+      const button = h("button", {
+        class: "ym-sl-translate-chip-action",
+        type: "button",
+        text: actionLabel,
+      });
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const result = action();
+          if (result && typeof result.catch === "function") result.catch(() => {});
+        } catch (error) {}
+      });
+      chip.appendChild(button);
+    }
+  }
+
+  function atShowSetup(source) {
+    const label = source
+      ? "Translate " + atLanguageName(source) + " lyrics?"
+      : "Add English translation";
+    atShowChip(label, "Set up", autoTranslateRetry);
+  }
+
+  function atShowTransient(text) {
+    atShowChip(text);
+    atChipTimer = setTimeout(() => {
+      atChipTimer = 0;
+      if (!atChip) return;
+      atChip.classList.add("ym-sl-fading");
+      atChipTimer = setTimeout(atHideChip, 450);
+    }, 6000);
+  }
+
+  function atShowProgress(source, loaded) {
+    if (!atProgressSources.has(source)) return;
+    const percent = Math.max(0, Math.min(100, Math.round(Number(loaded) || 0)));
+    const name = source ? atLanguageName(source) : "";
+    atShowChip("Preparing " + (name ? name + " " : "") + "translation… " + percent + "%");
+  }
+
+  function atProgress(source, loaded) {
+    atShowProgress(source, loaded);
+  }
+
+  function atNoteUnsupported() {
+    if (atUnsupportedNoted) return;
+    atUnsupportedNoted = true;
+    atShowTransient("Translation needs Chrome 138 or newer on desktop.");
+  }
+
+  function atSetDebug(value) {
+    if (value === atDebugLast) return;
+    atDebugLast = value;
+    try {
+      if (value) document.documentElement.dataset.ymTranslate = value;
+      else delete document.documentElement.dataset.ymTranslate;
+    } catch (error) {}
+  }
+
+  function autoTranslateShutdown() {
+    atGeneration++;
+    atPlan = new Map();
+    atOrder = [];
+    atLatinEntries = null;
+    atNeedsDetect = false;
+    atWorkingSource = "";
+    atProgressSources = new Set();
+    atErrorNote = "";
+    atHideChip();
+    atSetDebug("");
+    for (const promise of atTranslatorBySource.values()) {
+      Promise.resolve(promise).then((translator) => {
+        try {
+          if (translator && typeof translator.destroy === "function") translator.destroy();
+        } catch (error) {}
+      });
+    }
+    atTranslatorBySource = new Map();
+    atNeedsGesture.clear();
+    if (atDetector && typeof atDetector.destroy === "function") {
+      try { atDetector.destroy(); } catch (error) {}
+    }
+    atDetector = null;
+    atDetectorPromise = null;
+    // atTextCache survives on purpose: switching the setting off and on again
+    // should not re-translate a song the user already paid the download for.
+  }
+
+  /* ===================== /on-device lyric translation ==================== */
   /* ===================== boot =====================
      The first-run onboarding tour used to live above this line: a modal card, a
      pulsing highlight on the waffle icon, a localStorage completion flag and a

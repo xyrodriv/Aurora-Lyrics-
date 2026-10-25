@@ -39,6 +39,61 @@
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
+  /* ---- Bloom's settings, borrowed for the fullscreen backdrop -------------
+     This is the SAME Kawarp the Aurora Bloom theme runs page-wide, so it has to
+     run with the same numbers. It used to be constructed with the hard-coded
+     FS_KAWARP_OPTIONS (saturation 1.5, no brightness/contrast at all), which
+     made fullscreen read flat and dull next to the page the user had tuned
+     (AJ, 2026-10-23). Bloom publishes its live settings on
+     window.__ymAuroraDynamic.getSettings() for exactly this kind of reuse; the
+     hard-coded block stays only as the value before that lands. */
+  function bloomSettings() {
+    const dyn = window.__ymAuroraDynamic;
+    if (!dyn || typeof dyn.getSettings !== "function") return null;
+    try { return dyn.getSettings() || null; } catch (_) { return null; }
+  }
+  function clampOption(value, lo, hi, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(hi, Math.max(lo, n));
+  }
+  function fullscreenKawarpOptions() {
+    const opts = Object.assign({}, FS_KAWARP_OPTIONS);
+    const s = bloomSettings();
+    if (!s) return opts;
+    opts.saturation = clampOption(s.saturation, 0.5, 2.5, opts.saturation);
+    opts.warpIntensity = clampOption(s.warpIntensity, 0.2, 1, opts.warpIntensity);
+    opts.blurPasses = Math.round(clampOption(s.blurPasses, 2, 8, opts.blurPasses));
+    return opts;
+  }
+  // dynamic.js splits the look in two: the shader gets saturation, warp and
+  // blur passes, and the canvas carries saturate/brightness/contrast as a CSS
+  // filter on top. Without the filter half, fullscreen came out dimmer and
+  // less saturated than the page even at the same slider values.
+  function fullscreenKawarpFilter() {
+    const s = bloomSettings();
+    if (!s) return "";
+    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.5) +
+      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.78) +
+      ") contrast(" + clampOption(s.contrast, 0.6, 1.6, 1) + ")";
+  }
+  function applyFullscreenKawarpLook() {
+    if (fsKawarpCanvas) {
+      const filter = fullscreenKawarpFilter();
+      if (filter) fsKawarpCanvas.style.filter = filter;
+      else fsKawarpCanvas.style.removeProperty("filter");
+    }
+    if (!fsKawarp) return;
+    const opts = fullscreenKawarpOptions();
+    try {
+      fsKawarp.setOptions({
+        saturation: opts.saturation,
+        warpIntensity: opts.warpIntensity,
+        blurPasses: opts.blurPasses,
+      });
+    } catch (_) {}
+  }
+
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
     // Gate on the Dynamic add-on: its handshake object is our signal that the
@@ -62,7 +117,8 @@
       const Kawarp = await getKawarpConstructor();
       if (seq !== fsKawarpSeq || !fsKawarpCanvas || !fsOverlay) return false;
       sizeFullscreenKawarp();
-      fsKawarp = new Kawarp(fsKawarpCanvas, FS_KAWARP_OPTIONS);
+      fsKawarp = new Kawarp(fsKawarpCanvas, fullscreenKawarpOptions());
+      applyFullscreenKawarpLook();
       if (videoEl) {
         // Music videos: feed the LIVE <video> so the backdrop reacts to the
         // picture instead of a heavily blurred + dimmed copy of it (AJ,
@@ -89,7 +145,7 @@
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
-      console.warn("[Aurora Lyrics] Kawarp backdrop failed:", error);
+      console.warn("[AuroraLyrics] Kawarp backdrop failed:", error);
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
       if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
       fsKawarp = null;
@@ -404,12 +460,19 @@
         return;
       } else if (!want && ha) {
         if (byTypeNow === null) {
-          // No type signal on this build, so `want` is only !!lv. Debounce: a
-          // zero videoWidth that has lasted less than FS_VIDEO_ZERO_DEBOUNCE_MS
-          // is a RELOAD, not an audio track. Without this, MV -> MV detached the
-          // video mid-skip, which dropped has-video and restacked the controls.
+          // No type signal on this build, so `want` is only !!lv — a READINESS
+          // answer. A skip reloads the reused <video>, so videoWidth reads 0
+          // while the NEW source is still loading; a plain time debounce could
+          // not tell that from an audio track and detached mid-reload, which
+          // restacked the chrome into the cover-art layout and faded it out a
+          // second time. Hold the video while its new source has no metadata
+          // (readyState HAVE_NOTHING) and only read a LOADED source with no
+          // picture as "audio".
+          const attached = fsSavedVideo && fsSavedVideo.node;
+          const loadingSource = !!attached && attached.readyState < 1;
           if (!fsVideoZeroSince) fsVideoZeroSince = performance.now();
-          if (performance.now() - fsVideoZeroSince < FS_VIDEO_ZERO_DEBOUNCE_MS) {
+          const limit = loadingSource ? FS_VIDEO_SOURCE_LOAD_MAX_MS : FS_VIDEO_ZERO_DEBOUNCE_MS;
+          if (performance.now() - fsVideoZeroSince < limit) {
             retryVideoModeUntilReady();
             return;
           }
@@ -525,6 +588,9 @@
     // emptied / loadstart: a source was torn down and a new one is loading. This
     // is ONE of the two track-change signals (see fsMaybeFadeForTrackChange); it
     // is the fast one for cover -> *, and the LATE one for MV -> cover.
+    // Restart the zero-width clock with the reload, so the readiness gate in
+    // syncFsVideoMode measures THIS load instead of an older zero reading.
+    fsVideoZeroSince = performance.now();
     // Pass the CURRENT id, not "": an id match is a stronger dedupe than the time
     // window, so a late loadstart from our own re-attach can never fade twice.
     fsMaybeFadeForTrackChange("");
@@ -545,8 +611,10 @@
     document.addEventListener("emptied", handleFsMediaEvent, true);
     document.addEventListener("loadstart", handleFsMediaEvent, true);
     document.addEventListener("loadedmetadata", handleFsMediaEvent, true);
-    // Seed so entering fullscreen mid-song never fades the media out.
+    // Seed so entering fullscreen mid-song never fades the media out, and so
+    // the repeat-one check below has an identity to compare against.
     fsFadeAt = 0;
+    fsFadeTrackId = getCurrentFsVideoId() || "";
     // ⚠️ The videoId poll that used to live here is GONE. The probe proved
     // `getPlayerResponse()` returns null on this build (vdKeys=NONE), so the id
     // was always "" and the poll could never detect a change — it was 8Hz of
@@ -607,6 +675,11 @@
   // How long a zero videoWidth must persist before it is read as "audio track".
   // A source change zeroes it for a beat; an audio track keeps it at 0.
   const FS_VIDEO_ZERO_DEBOUNCE_MS = 450;
+  // The reused <video> reports videoWidth 0 for the WHOLE reload, not for a beat:
+  // its new source has no metadata until YTM finishes loading it. While
+  // readyState is 0 the zero means "still loading", so the detach waits this
+  // long for metadata before it gives up and treats the track as cover art.
+  const FS_VIDEO_SOURCE_LOAD_MAX_MS = 6000;
   // Minimum time the chrome must stay dissolved on a mode change before it is
   // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
   // ready (which on a cover -> MV skip is the same tick the fade-out started), and
@@ -729,7 +802,16 @@
   }
 
   function fsFadeInMedia() {
-    if (!fsOverlay || !fsMediaFadingOut) return;
+    // The chrome fade lives on this path because a mode swap reveals the media
+    // and the control column together. A swap that lands AFTER the media has
+    // settled calls this with nothing to fade in, and returning early skipped
+    // the chrome half of the deal: the controls stayed dissolved until
+    // fsChromeFadeOut's 9s heal timer restored them (AJ, 2026-10-23).
+    if (!fsOverlay) return;
+    if (!fsMediaFadingOut) {
+      fsChromeFadeIn();
+      return;
+    }
     fsMediaFadingOut = false;
     if (fsMediaFadeSafetyTimer) { clearTimeout(fsMediaFadeSafetyTimer); fsMediaFadeSafetyTimer = 0; }
     // Never cut the fade-out short: if the incoming media is ready before the
@@ -739,6 +821,10 @@
     if (fsMediaFadeTimer) { clearTimeout(fsMediaFadeTimer); fsMediaFadeTimer = 0; }
     const run = () => {
       if (!fsOverlay || fsMediaFadingOut) return;
+      // The incoming media has settled: this is now the track the repeat-one
+      // check compares against.
+      const settledId = getCurrentFsVideoId();
+      if (settledId) fsFadeTrackId = settledId;
       // Removing the class lets each layer return to its own natural opacity via
       // its own transition (media .25s, Kawarp .6s) — no inline values to clean up.
       fsOverlay.classList.remove("ym-sl-fs-dissolving");
@@ -762,6 +848,22 @@
   const FS_MEDIA_FADE_DEDUPE_MS = 1200;
 
   function fsMaybeFadeForTrackChange(id) {
+    // Repeat-one restarts the SAME stream, and YTM reloads it, so we get the
+    // same emptied/loadstart a real skip produces. Nothing on screen is being
+    // replaced, so dissolving the cover and the chrome is pure noise — the
+    // user sees a pointless dip once per loop (AJ, 2026-10-22).
+    //
+    // Identity is the URL's ?v=. It does not change when the loop restarts, and
+    // it DOES change on a real skip. fsFadeTrackId holds the id of the last
+    // track whose media settled, refreshed in fsFadeInMedia().
+    const urlId = getCurrentFsVideoId() || "";
+    if (
+      urlId &&
+      urlId === fsFadeTrackId &&
+      readPlayerToggle("repeat") === "one"
+    ) {
+      return;
+    }
     if (id && id === fsFadeTrackId) return; // same track — nothing to do
     const now = performance.now();
     if (now - fsFadeAt < FS_MEDIA_FADE_DEDUPE_MS) {
@@ -781,14 +883,19 @@
     } else if (fsOverlay && fsSavedVideo) {
       // LEAVING a music video: an MV -> MV reload and an MV -> cover look
       // identical at the skip instant (both still have a live player video). The
-      // restructure is gated by the debounce below so a reload is never mistaken
-      // for a cover, but the control fade should NOT wait that long. Probe a beat
-      // later: if the player video is GONE by then it is a cover -> dissolve the
-      // controls now, synced with the video leaving; if it survived it is MV -> MV
-      // and the controls must stay perfectly still.
+      // restructure is gated by the source-load wait below so a reload is never
+      // mistaken for a cover, but the control fade should NOT wait that long.
+      // Probe a beat later: if the player video is GONE by then it is a cover ->
+      // dissolve the controls now, synced with the video leaving; if it survived
+      // it is MV -> MV and the controls must stay perfectly still.
       window.setTimeout(() => {
         if (!fsActive || !fsSavedVideo) return;
-        if (!findPlayerVideo()) fsChromeFadeOut();
+        // Readiness, not intent: on an MV -> MV skip the reused element reports
+        // videoWidth 0 for the whole reload, so findPlayerVideo() alone read as
+        // "the video is gone" and dissolved the controls that must stay still.
+        const node = fsSavedVideo.node;
+        const reloading = !!node && node.readyState < 1;
+        if (!reloading && !findPlayerVideo()) fsChromeFadeOut();
       }, 170);
     }
     fsFadeOutMedia();
@@ -1337,7 +1444,7 @@
       const swept = sweepArtCache(Date.now());
       // Page-world log so it is visible in the console alongside the lyrics cache
       // lines (the isolated-world copy of this log is not surfaced).
-      console.log(`[SpicyLyrics] art cache init: ${Object.keys(artCache).length} entries${swept ? " (expired swept)" : ""}.`);
+      console.log(`[AuroraLyrics] art cache init: ${Object.keys(artCache).length} entries${swept ? " (expired swept)" : ""}.`);
       return artCache;
     }).catch(() => { artCache = {}; return artCache; });
     return artCacheLoad;
@@ -1469,12 +1576,12 @@
       if (fsArtNoAlbumKey !== rough) { fsArtNoAlbumKey = rough; fsArtNoAlbumTries = 0; }
       if (fsArtNoAlbumTries < 3) {
         fsArtNoAlbumTries++;
-        console.log(`[SpicyLyrics] animated art: album not settled for "${rough}" (try ${fsArtNoAlbumTries}) — holding the backdrop.`);
+        console.log(`[AuroraLyrics] animated art: album not settled for "${rough}" (try ${fsArtNoAlbumTries}) — holding the backdrop.`);
         suppressStaticCardForAnimated();
         window.setTimeout(() => { try { refreshAnimatedArt(getCurrentTrack()); } catch (_) {} }, 300);
         return;
       }
-      console.log(`[SpicyLyrics] animated art: no album for "${rough}" — showing the static cover.`);
+      console.log(`[AuroraLyrics] animated art: no album for "${rough}" — showing the static cover.`);
       hideAnimatedArt();
       return;
     }
@@ -1505,7 +1612,7 @@
     await loadArtCache();
     const storedUrl = artCacheGet(key);
     if (storedUrl) {
-      console.log(`[SpicyLyrics] animated art from CACHE (no API call): ${key}`);
+      console.log(`[AuroraLyrics] animated art from CACHE (no API call): ${key}`);
       fsArtVideoCache.set(key, storedUrl);
       fsArtVideoKey = key;
       suppressStaticCardForAnimated();
@@ -1555,7 +1662,7 @@
     } catch (err) {
       // Logged so the console distinguishes "this track has no animated art" from
       // "the lookup never ran" — the two look identical from the pane.
-      console.log(`[SpicyLyrics] no animated art for ${key} (${(err && err.message) || err}); static cover kept.`);
+      console.log(`[AuroraLyrics] no animated art for ${key} (${(err && err.message) || err}); static cover kept.`);
       fsArtVideoCache.set(key, false);
       fsArtVideoFail.add(key);
       fsArtVideoLoadingKey = "";

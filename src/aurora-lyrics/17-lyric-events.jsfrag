@@ -61,6 +61,34 @@
     } catch (e) {}
   }
 
+  // A line's PLAIN TEXT, with spaces between words.
+  // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
+  // NEXT syllable" (parseTTML infers it from the absence of whitespace between
+  // spans — see the word-scan above), so a space belongs before every syllable
+  // whose PREDECESSOR is not part of a word. The empty join produced
+  // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+  // then rendered as one giant word on the share card. The panel itself never
+  // showed this because it renders from `words`, not from `text` — but `text`
+  // is a published bus field, so every consumer was getting the broken form.
+  // Module scope (not inside publishLyricLines) so the on-device translator
+  // reads the SAME text the bus publishes.
+  function syllablesToText(syllables) {
+    const list = syllables || [];
+    let out = "";
+    for (let i = 0; i < list.length; i++) {
+      const prev = list[i - 1];
+      const prevText = prev ? (prev.Text || "") : "";
+      const curText = list[i].Text || "";
+      // Guard against double spaces if a source ever ships the whitespace
+      // inside the syllable text itself.
+      if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
+        out += " ";
+      }
+      out += curText;
+    }
+    return out;
+  }
+
   function publishLyricLines(content) {
     if (!window.YTMod || !window.YTMod.bus) return;
     publishRendererKit(); // before the lines, so a consumer has the springs ready
@@ -96,39 +124,6 @@
     };
 
     const lines = [];
-    const mapRomaji = (syllables) => {
-      if (!currentSettings.romanizationEnabled || !syllables || !syllables.length) return "";
-      const plain = syllables.map((word) => word.Text || "").join("");
-      const kanaOnly = plain.replace(/[\u3400-\u9FFF]/g, "");
-      if (!kanaOnly.trim()) return "";
-      const rom = romanize(kanaOnly);
-      return rom && rom !== kanaOnly && /[A-Za-z]/.test(rom) ? rom : "";
-    };
-    // A line's PLAIN TEXT, with spaces between words.
-    // Joining the syllables with "" is wrong: `IsPartOfWord` means "glues to the
-    // NEXT syllable" (parseTTML infers it from the absence of whitespace between
-    // spans — see the word-scan above), so a space belongs before every syllable
-    // whose PREDECESSOR is not part of a word. The empty join produced
-    // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
-    // then rendered as one giant word on the share card. The panel itself never
-    // showed this because it renders from `words`, not from `text` — but `text`
-    // is a published bus field, so every consumer was getting the broken form.
-    const syllablesToText = (syllables) => {
-      const list = syllables || [];
-      let out = "";
-      for (let i = 0; i < list.length; i++) {
-        const prev = list[i - 1];
-        const prevText = prev ? (prev.Text || "") : "";
-        const curText = list[i].Text || "";
-        // Guard against double spaces if a source ever ships the whitespace
-        // inside the syllable text itself.
-        if (i > 0 && prev && !prev.IsPartOfWord && !/\s$/.test(prevText) && !/^\s/.test(curText)) {
-          out += " ";
-        }
-        out += curText;
-      }
-      return out;
-    };
     (content || []).forEach((line) => {
       const lead = line && line.Lead;
       if (!lead || !lead.Syllables || !lead.Syllables.length) return;
@@ -138,7 +133,6 @@
         endMs: lead.EndTime * 1000,
         lineTimed: !!line.LineTimed,
         opposite: !!line.OppositeAligned,
-        romaji: mapRomaji(lead.Syllables),
         words: mapWords(lead.Syllables, !!line.LineTimed),
         // Background vocals render as their own .line.bg-line elements right
         // after the main line, with .bg-word children.
@@ -146,7 +140,6 @@
           startMs: bg.StartTime * 1000,
           endMs: bg.EndTime * 1000,
           lineTimed: !!bg.LineTimed,
-          romaji: mapRomaji(bg.Syllables),
           words: mapWords(bg.Syllables, !!bg.LineTimed),
         })),
       });
@@ -158,7 +151,9 @@
       artist: track ? track.artist : null,
       lines,
       staticLyrics: !!staticLyricsActive,
-      romanizationEnabled: currentSettings.romanizationEnabled === true,
+      // Which renderer draws this track. The PiP runs the SAME one for its
+      // line-by-line surface, so it must not infer it from the timings.
+      renderer: amllTrackUsesEngine(content) ? "amll" : "spicy",
       songwriters: currentSongwriters.slice(),
       smoothScrolling: currentSettings.smoothScrolling !== false,
       simpleLyrics: currentSettings.simpleLyrics === true,
@@ -217,6 +212,11 @@
 
   function buildRendererLines(content) {
     lastRendererContent = content;
+    // Build the translation plan before the first line exists, so every line
+    // finds its slot. Translations arrive later and fill those slots in place.
+    // The async work is deliberately detached: a translation failure must never
+    // surface as an unhandled rejection or delay the lyrics themselves.
+    autoTranslateBegin(content).catch(() => {});
     publishLyricLines(content);
     stopScrollGlide();
     // New song -> the old song's end-of-track credits reveal must not own the
@@ -297,7 +297,7 @@
       // render it as a static block (no syllable/letter karaoke).
       const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
       appendWords(lineElement, lineModel, lead.Syllables, false, noKaraoke);
-      appendRomaji(lineElement, lead.Syllables);
+      appendTranslation(lineElement, index, -1);
       lineElement.addEventListener("click", () => {
         // While picking a pause sync point a click selects, it does not seek.
         if (pausePickMode) {
@@ -309,9 +309,13 @@
         }
       });
       addLine(lineModel);
+      // The lead's own slot, captured now: the bg vocals below are pushed after
+      // it, so the depth-of-field pass needs a pointer back to the line they
+      // belong to instead of ranking them by their own index.
+      const leadIndex = modelLines.length - 1;
 
-      for (const background of contentLine.Background || []) {
-        if (!background.Syllables || !background.Syllables.length) continue;
+      (contentLine.Background || []).forEach((background, backgroundIndex) => {
+        if (!background.Syllables || !background.Syllables.length) return;
         const backgroundElement = h("div", { class: "line bg-line" });
         const backgroundModel = {
           HTMLElement: backgroundElement,
@@ -321,6 +325,7 @@
           Syllables: { Lead: [] },
           isPrimary: false,
           BGLine: true,
+          LeadIndex: leadIndex,
           AnimatorStore: null,
         };
         if (isRtl(background.Syllables.map((word) => word.Text).join(" "))) {
@@ -330,17 +335,19 @@
           backgroundElement.classList.add("OppositeAligned");
         }
         appendWords(backgroundElement, backgroundModel, background.Syllables, true, noKaraoke);
-        appendRomaji(backgroundElement, background.Syllables);
+        appendTranslation(backgroundElement, index, backgroundIndex);
         backgroundElement.addEventListener("click", () => {
           // Background vocals are never valid sync points, so ignore clicks in
           // pick mode rather than silently picking the wrong line.
           if (pausePickMode) return;
           if (window.YTMod && window.YTMod.player) {
-            window.YTMod.player.seek(backgroundModel.StartTime);
+            // Same rule as the lead line above: the media has to run `offset` ms
+            // past the lyric's own timestamp before that line is the one playing.
+            window.YTMod.player.seek(Math.max(0, backgroundModel.StartTime + getOffsetForLine(backgroundModel.StartTime)));
           }
         });
         addLine(backgroundModel);
-      }
+      });
 
       const next = content[index + 1] && content[index + 1].Lead;
       if (next) {
@@ -358,13 +365,9 @@
 
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
-    // Unobserve the previous track's credits block before it is replaced, then
-    // observe the new one so the profile-glow rAF only paints while it's on-screen.
-    if (pfpGlowObserver && creditsFooterEl) pfpGlowObserver.unobserve(creditsFooterEl);
     if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
       creditsFooterEl = buildCreditsFooter(currentSongwriters);
       linesRoot.appendChild(creditsFooterEl);
-      if (pfpGlowObserver) pfpGlowObserver.observe(creditsFooterEl);
     } else {
       creditsFooterEl = null;
     }
@@ -492,13 +495,13 @@
         } catch (error) {
           manualLyricsIsPermanent = false;
           manualLyricsTrackKey = trackKey;
-          console.warn("[SpicyLyrics] Could not save permanent TTML:", error);
+          console.warn("[AuroraLyrics] Could not save permanent TTML:", error);
         }
       } else {
         manualLyricsIsPermanent = false;
         manualLyricsTrackKey = trackKey;
       }
-      refreshPermanentDeleteState();
+      refreshFileTabState();
     };
     reader.readAsText(file);
   }

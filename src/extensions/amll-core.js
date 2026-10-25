@@ -6375,61 +6375,39 @@ var LyricLineBase = class extends EventTarget {
   dispose() {
   }
 };
-var OVERFLOW_PENALTY_MULTIPLIER = 1e3;
-var CJK_BREAK_PENALTY_RATIO = 0.15;
-var NORMAL_BREAK_PENALTY_RATIO = 0.5;
-var SPACE_BREAK_REWARD_RATIO = 0.4;
-var PUNCTUATION_BREAK_REWARD_RATIO = 0.6;
-var PUNCTUATION_REGEX = /[,.;:!?，。；：！？、）】》」』’”)[\]}>~…]$/;
-function calcBalancedBreaks(children, containerWidth, fullText, segmenter) {
+/* Aurora patch (AJ, 2026-10-21): GREEDY wrapping instead of the upstream
+   balanced DP. The DP spread the slack across EVERY row, so a lyric that needs
+   two rows split into two half-empty ones and both stopped well short of the
+   column edge - the "words stack instead of stretching right" look. Filling
+   each row to the edge before wrapping is what the standard renderer does;
+   only the last row is left short. */
+function calcGreedyBreaks(children, containerWidth) {
   const n = children.length;
   if (n === 0 || containerWidth <= 0) return [];
-  const cjkBoundaries = /* @__PURE__ */ new Set();
-  let offset = 0;
-  for (const { segment, isWordLike } of segmenter.segment(fullText)) {
-    if (offset > 0 && isWordLike) {
-      if ([...segment].some((ch) => isCJK(ch))) cjkBoundaries.add(offset);
-    }
-    offset += segment.length;
-  }
-  const charOffsets = new Int32Array(n + 1);
   const prefixWidth = new Float64Array(n + 1);
-  for (let i = 0; i < n; i++) {
-    charOffsets[i + 1] = charOffsets[i] + children[i].text.length;
-    prefixWidth[i + 1] = prefixWidth[i] + children[i].width;
-  }
+  for (let i = 0; i < n; i++) prefixWidth[i + 1] = prefixWidth[i] + children[i].width;
   if (prefixWidth[n] <= containerWidth) return [];
-  const dp = new Float64Array(n + 1).fill(Number.POSITIVE_INFINITY);
-  const nextBreak = new Int32Array(n + 1).fill(-1);
-  dp[n] = 0;
-  const PENALTY_CJK = (containerWidth * CJK_BREAK_PENALTY_RATIO) ** 2;
-  const PENALTY_NORMAL = (containerWidth * NORMAL_BREAK_PENALTY_RATIO) ** 2;
-  for (let i = n - 1; i >= 0; i--) for (let j = i + 1; j <= n; j++) {
-    const w = prefixWidth[j] - prefixWidth[i];
-    let lineCost = 0;
-    if (w > containerWidth) {
-      if (j === i + 1) lineCost = (w - containerWidth) ** 2 * OVERFLOW_PENALTY_MULTIPLIER;
-      else continue;
-    } else lineCost = (containerWidth - w) ** 2;
-    let breakPenalty = 0;
-    if (j < n) {
-      const prevChild = children[j - 1];
-      if (PUNCTUATION_REGEX.test(prevChild.text)) breakPenalty = -((containerWidth * PUNCTUATION_BREAK_REWARD_RATIO) ** 2);
-      else if (prevChild.isSpace) breakPenalty = -((containerWidth * SPACE_BREAK_REWARD_RATIO) ** 2);
-      else if (cjkBoundaries.has(charOffsets[j])) breakPenalty = PENALTY_CJK;
-      else breakPenalty = PENALTY_NORMAL;
-    }
-    const totalCost = lineCost + breakPenalty + dp[j];
-    if (totalCost < dp[i]) {
-      dp[i] = totalCost;
-      nextBreak[i] = j;
-    }
-  }
   const breaks = [];
-  let curr = 0;
-  while (curr < n) {
-    curr = nextBreak[curr];
-    if (curr > 0 && curr < n) breaks.push(curr);
+  let start = 0;
+  while (start < n) {
+    let end = start;
+    while (end < n && prefixWidth[end + 1] - prefixWidth[start] <= containerWidth) end++;
+    if (end >= n) break;
+    if (end === start) {
+      start++;
+      continue;
+    }
+    // Break AFTER the last space that fits so a row never starts with one;
+    // scripts without spaces (CJK) fall back to the furthest atom that fits.
+    let at = end;
+    for (let k = end; k > start + 1; k--) {
+      if (children[k - 1].isSpace) {
+        at = k;
+        break;
+      }
+    }
+    breaks.push(at);
+    start = at;
   }
   return breaks;
 }
@@ -6480,7 +6458,7 @@ var LineBalancer = class {
     }
     let lockAcquired = false;
     try {
-      const { childInfos, fullText } = adapter.buildChildInfos();
+      const { childInfos } = adapter.buildChildInfos();
       let layoutWidth = childInfos.reduce((sum, c) => sum + c.width, 0);
       if (adapter.needsCalibration) {
         const range = document.createRange();
@@ -6497,7 +6475,7 @@ var LineBalancer = class {
         this.lastBalancedContainerWidth = containerWidth;
         return;
       }
-      const breaks = calcBalancedBreaks(childInfos, safeContainerWidth, fullText, wordSegmenter);
+      const breaks = calcGreedyBreaks(childInfos, safeContainerWidth);
       if (breaks.length === 0) {
         this.lastBalancedContainerWidth = containerWidth;
         return;
@@ -6957,6 +6935,29 @@ var CalcMaskAnimator = class {
     }
   }
 };
+// Aurora: YouTube Music ships its own Web Animations polyfill
+// (web-animations-next-lite.min.js), and the effect objects it hands back have
+// no getComputedTiming(). Every unguarded read threw, and because enable() and
+// resume() are async the throw became an unhandled rejection - one per word,
+// many times a second, each with a full stack in the console. Read the timing
+// defensively and treat "cannot read it" as "end time unknown" so the words
+// still play instead of being skipped.
+function amllAnimationEndTime(animation) {
+  const effect = animation && animation.effect;
+  if (!effect) return Number.POSITIVE_INFINITY;
+  const read = (fn) => {
+    try {
+      const timing = fn();
+      const end = Number(timing?.delay ?? 0) + Number(timing?.duration ?? 0);
+      return Number.isFinite(end) ? end : Number.POSITIVE_INFINITY;
+    } catch (_) {
+      return Number.POSITIVE_INFINITY;
+    }
+  };
+  if (typeof effect.getComputedTiming === "function") return read(() => effect.getComputedTiming());
+  if (typeof effect.getTiming === "function") return read(() => effect.getTiming());
+  return Number.POSITIVE_INFINITY;
+}
 var WebMaskAnimator = class {
   words;
   context;
@@ -7136,8 +7137,7 @@ var WebMaskAnimator = class {
     cursor.lastTime = time;
   }
   getAnimationEndTime(animation) {
-    const timing = animation.effect?.getComputedTiming();
-    return Number(timing?.delay ?? 0) + Number(timing?.duration ?? 0);
+    return amllAnimationEndTime(animation);
   }
   dispose() {
     for (const a of this.animations) a.cancel();
@@ -7205,8 +7205,7 @@ var LyricLineEl = class extends LyricLineBase {
     for (const word of this.splittedWords) for (const a of word.elementAnimations) {
       a.currentTime = relativeTime;
       a.playbackRate = 1;
-      const timing = a.effect?.getComputedTiming();
-      const endTime = Number(timing?.delay ?? 0) + Number(timing?.duration ?? 0);
+      const endTime = amllAnimationEndTime(a);
       if (shouldPlay && relativeTime < endTime) a.play();
       else a.pause();
     }
@@ -7229,8 +7228,7 @@ var LyricLineEl = class extends LyricLineBase {
   async resume() {
     if (!this.isEnabled) return;
     for (const word of this.splittedWords) for (const a of word.elementAnimations) if (!this.lastWord || this.splittedWords.indexOf(this.lastWord) < this.splittedWords.indexOf(word)) {
-      const timing = a.effect?.getComputedTiming();
-      const endTime = Number(timing?.delay ?? 0) + Number(timing?.duration ?? 0);
+      const endTime = amllAnimationEndTime(a);
       if (a.playState !== "finished" && (a.currentTime || 0) < endTime) a.play();
     }
     this.maskAnimator?.resume();

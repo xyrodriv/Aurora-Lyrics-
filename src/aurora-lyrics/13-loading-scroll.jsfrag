@@ -113,6 +113,15 @@
   }
 
   function onJumpButtonClick() {
+    // Apple-style lyrics: the engine owns the scroll offset of its own DOM, so
+    // the built-in camera has nothing to move here. resetScroll() is the engine's
+    // supported "back to the playing line" (it clears the manual offset and
+    // un-suspends auto-align), which is exactly what this button promises.
+    if (amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
+      try { amllPlayer.resetScroll(); } catch (e) {}
+      setJumpButtonVisible(false);
+      return;
+    }
     if (staticLyricsActive) {
       // Resume the smooth auto-scroll that the manual scroll interrupted.
       autoScrollUserPaused = false;
@@ -405,7 +414,10 @@
       writeScrollTop(clamped, true);
       return;
     }
-    if ((currentSettings.smoothScrolling || currentSettings.simpleLyrics) && !scrollGlideReducedMotion()) {
+    // amllSimpleLookActive(), not the raw setting: a word-synced track under
+    // Apple-style lyrics renders through this renderer and must respect the
+    // user's Smooth Scrolling choice like any other Spicy track.
+    if ((currentSettings.smoothScrolling || amllSimpleLookActive()) && !scrollGlideReducedMotion()) {
       // The SPRING GLIDE (upstream 6.3.153's model). The spring is REUSED, so a
       // line change arriving mid-flight bends the curve and keeps its velocity
       // instead of restarting — that is what makes fast songs read as one glide.
@@ -654,6 +666,13 @@
       return false;
     }
     const content = toSyllableContent(parsed);
+    // Pick the renderer BEFORE the lines are built: the spline set and the word
+    // markup are chosen at build time, so the owner has to be settled first.
+    // amllApplyTrackRenderer also starts the engine when THIS track is the first
+    // one it should draw (the previous track may have gone to Spicy, which never
+    // starts it) - without that the new track stayed on Spicy until the mode was
+    // toggled. See amllContentGoesToSpicy.
+    amllApplyTrackRenderer(content);
     buildRendererLines(content);
     // Feed the parsed content to the AMLL engine when Simple lyrics (Apple-Music
     // style) mode is active. amllSyncLyrics is a no-op unless the engine is ready,
@@ -677,20 +696,11 @@
     exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
   }
 
-  function loadTTML(xml, source, provider) {
+  function loadTTML(xml, source) {
     const rawXml = String(xml || "");
+    // Set again by the caller when this load IS the permanent save (15-prefetch).
+    currentLyricsFromSavedTTML = false;
     let parsed = parseTTML(rawXml);
-    // lrc.red ships syllable-level spans; join them into words unless the user
-    // turned the toggle off. Word-level files have no syllables to join, so
-    // skip them entirely (AJ, 2026-10-20).
-    const lrcRedWordTiming = /lrc:timing\s*=\s*["']Word["']/i.test(rawXml);
-    if (
-      provider === "lrc.red" &&
-      !lrcRedWordTiming &&
-      currentSettings.joinLrcRedSyllables !== false
-    ) {
-      parsed = joinTTMLSyllables(parsed);
-    }
     if (!parsed.length) {
       staticLyricsActive = false;
       currentLyricsIsTTML = false;
@@ -704,8 +714,8 @@
     staticLyricsActive = false;
     currentSongwriters = extractSongwriters(rawXml);
     // Consume any credits the caller staged for this load (Spicy Lyrics API
-    // results only). Clearing here means imports, cached TTML and Unison never
-    // inherit a stale uploader from a previous track.
+    // results only). Clearing here means imports and cached TTML never inherit
+    // a stale uploader from a previous track.
     if (pendingSpicyCredits) {
       const attr = pendingSpicyCredits.attribution || null;
       currentProvider = (attr && attr.provider) || "";
@@ -725,10 +735,9 @@
       currentMaker = null;
       currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
     } else {
-      // Unison can return TTML too, but it has no Spicy UploadAttribution
-      // object. The caller supplies its provider explicitly so the footer still
-      // says where these lyrics came from.
-      currentProvider = typeof provider === "string" ? provider : "";
+      // A TTML load with no staged credits and no local file: show no provider
+      // rather than inheriting one from the previous track.
+      currentProvider = "";
       currentMaker = null;
       currentUploader = null;
     }
@@ -769,45 +778,6 @@
     showLyricsMessage(NO_LYRICS_MESSAGE);
     setTTMLExportVisibility();
     return false;
-  }
-
-  function unwrapUnisonResult(data) {
-    if (!data) return null;
-    if (data.success && data.data) return data.data;
-    return data.lyrics ? data : null;
-  }
-
-  function normalizeUnisonLyrics(data) {
-    const result = unwrapUnisonResult(data);
-    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
-    const format = String(result.format || "").toLowerCase();
-    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics };
-    if (format === "ttml") return { format: "ttml", lyrics: result.lyrics };
-    // Plain lyrics are deliberately not considered a synced hit. The next
-    // provider (LRCLIB) gets the chance to return timed lyrics instead.
-    if (format === "plain") return null;
-    // Be conservative with servers omitting format: accept only timestamped LRC.
-    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
-      ? { format: "lrc", lyrics: result.lyrics }
-      : null;
-  }
-
-  async function fetchUnisonLyrics(track, key, controller) {
-    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
-    const params = new URLSearchParams();
-    if (track.videoId) params.set("v", track.videoId);
-    else {
-      params.set("song", track.title);
-      if (track.artist) params.set("artist", track.artist);
-      if (track.album) params.set("album", track.album);
-      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
-        params.set("duration", String(Math.round(track.durationMs / 1000)));
-      }
-    }
-    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
-    if (!response.ok || !response.data) return null;
-    return normalizeUnisonLyrics(response.data);
   }
 
   function normalizeLookupText(value) {

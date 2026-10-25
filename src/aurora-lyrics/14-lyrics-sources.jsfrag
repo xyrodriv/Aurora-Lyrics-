@@ -57,7 +57,7 @@
 
   async function loadSpicyCache() {
     if (spicyCache) {
-      console.log(`[SpicyLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
+      console.log(`[AuroraLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
       return Promise.resolve(spicyCache);
     }
     if (spicyCacheLoad) return spicyCacheLoad;
@@ -65,17 +65,17 @@
       // Without the bridge every lookup is a guaranteed miss and every result
       // is thrown away — a failure mode that looks exactly like a working
       // resolver feeding a broken API call.
-      console.warn("[SpicyLyrics] cache bridge unavailable; nothing will be cached this session.");
+      console.warn("[AuroraLyrics] cache bridge unavailable; nothing will be cached this session.");
       spicyCache = {};
       return Promise.resolve(spicyCache);
     }
     spicyCacheLoad = window.YTMod.getSpicyCache().then((stored) => {
       spicyCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
-      console.log(`[SpicyLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
+      console.log(`[AuroraLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
       invalidateStaleSpicyEntries();
       return spicyCache;
     }).catch((error) => {
-      console.warn("[SpicyLyrics] cache read failed; starting empty:", error && error.message);
+      console.warn("[AuroraLyrics] cache read failed; starting empty:", error && error.message);
       spicyCache = {};
       return spicyCache;
     });
@@ -90,7 +90,7 @@
     if (!window.YTMod || typeof window.YTMod.setSpicyCache !== "function") return;
     const snapshot = spicyCache;
     Promise.resolve(window.YTMod.setSpicyCache(snapshot)).catch((error) => {
-      console.warn("[SpicyLyrics] could not persist lyrics cache:", error);
+      console.warn("[AuroraLyrics] could not persist lyrics cache:", error);
     });
   }
 
@@ -151,7 +151,7 @@
     if (!drops.length) return 0;
     drops.forEach((k) => { delete spicyCache[k]; });
     markSpicyCacheDirty();
-    console.log(`[SpicyLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
+    console.log(`[AuroraLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
     return drops.length;
   }
 
@@ -218,8 +218,76 @@
     try {
       await window.YTMod.clearSpicyCache();
     } catch (error) {
-      console.warn("[SpicyLyrics] could not clear lyrics cache:", error);
+      console.warn("[AuroraLyrics] could not clear lyrics cache:", error);
     }
+  }
+
+  // ---- one song's cache entries ----------------------------------------------
+  // A song owns up to three entries: the canonical `sp:<spotifyId>` payload (once
+  // an id is resolved), the `t:<title>|<artist>` entry used before that, and the
+  // `r:t:<title>|<artist>` resolver mapping that points the second at the first.
+  // Dropping only one leaves the song half-cached, and the next play then either
+  // re-hits the API through the id entry or serves the stale TTML from it.
+  async function spicyCacheKeysForTrack(track) {
+    const titleKey = spicyCacheKeyFor(track, "");
+    if (!titleKey) return [];
+    const cache = await loadSpicyCache();
+    const keys = [titleKey, `r:${titleKey}`];
+    const resolver = cache[`r:${titleKey}`];
+    if (resolver && resolver.spotifyId) keys.push(`sp:${resolver.spotifyId}`);
+    return keys;
+  }
+
+  // What the options panel shows for the song on screen. Only live entries count,
+  // so a swept or expired one reads as "not cached" here exactly as it would to
+  // the resolver.
+  async function spicyCacheStatusForTrack(track) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    const now = Date.now();
+    let exp = 0;
+    for (const key of keys) {
+      const entry = cache[key];
+      if (!entry || entry.v !== SPICY_CACHE_VERSION) continue;
+      if (!Number.isFinite(entry.exp) || entry.exp <= now) continue;
+      if (entry.exp > exp) exp = entry.exp;
+    }
+    return {
+      cached: exp > 0,
+      daysLeft: exp > 0 ? Math.max(1, Math.ceil((exp - now) / 86400000)) : 0,
+    };
+  }
+
+  async function clearSpicyCacheForTrack(track) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    let removed = 0;
+    for (const key of keys) {
+      if (!cache[key]) continue;
+      delete cache[key];
+      removed++;
+    }
+    if (removed) markSpicyCacheDirty();
+    return removed;
+  }
+
+  // Brings one song's expiry forward to `afterMs` from now. The panel's "cleared
+  // after this song ends" has to survive a reload to be honest: the in-memory
+  // delete runs at the next track change, but a reload before that would
+  // otherwise restore the entry's full 30-day window from storage.
+  async function deferSpicyCacheForTrack(track, afterMs) {
+    const cache = await loadSpicyCache();
+    const keys = await spicyCacheKeysForTrack(track);
+    const exp = Date.now() + Math.max(0, Number(afterMs) || 0);
+    let touched = 0;
+    for (const key of keys) {
+      const entry = cache[key];
+      if (!entry) continue;
+      entry.exp = Math.min(Number.isFinite(entry.exp) ? entry.exp : exp, exp);
+      touched++;
+    }
+    if (touched) markSpicyCacheDirty();
+    return touched;
   }
 
   // Resolves a Spotify track id from the track's title + artist via
@@ -399,7 +467,7 @@
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) console.warn("[SpicyLyrics] ListenBrainz lookup failed:", error && error.message);
+      if (!userAborted) console.warn("[AuroraLyrics] ListenBrainz lookup failed:", error && error.message);
       return { ids: [], transient: !userAborted };
     } finally {
       clearTimeout(timer);
@@ -409,12 +477,12 @@
     // 400 = our parameters were rejected. That is our bug, not a flake, so it is
     // a definitive no rather than something worth retrying.
     if (response.status === 400) {
-      console.warn("[SpicyLyrics] ListenBrainz rejected the query (HTTP 400).");
+      console.warn("[AuroraLyrics] ListenBrainz rejected the query (HTTP 400).");
       return { ids: [], transient: false };
     }
     if (response.status === 429) {
       lbThrottledUntil = Date.now() + 30_000;
-      console.warn("[SpicyLyrics] ListenBrainz rate-limited us; backing off for 30s.");
+      console.warn("[AuroraLyrics] ListenBrainz rate-limited us; backing off for 30s.");
       return { ids: [], transient: true };
     }
     if (response.status >= 500) return { ids: [], transient: true };
@@ -441,6 +509,11 @@
     return web ? web[1] : "";
   }
 
+  /* Relations are attached by the host's lookup (content.js), not by the
+     search response — MusicBrainz's search endpoint never returns them. TYPE is
+     deliberately ignored: ordinary Spotify mappings are filed as
+     `free streaming`, and filtering for `streaming` would drop every one of
+     them (AJ, 2026-10-22). */
   function musicBrainzSpotifyId(recording) {
     const relations = recording && Array.isArray(recording.relations) ? recording.relations : [];
     for (const relation of relations) {
@@ -463,6 +536,16 @@
     const artistNames = Array.isArray(recording["artist-credit"])
       ? recording["artist-credit"].map((credit) => normLoose(credit && (credit.name || credit.artist && credit.artist.name)))
       : [];
+    // A different artist is a different song, however exactly the title matches.
+    // Once relations became readable this mattered: "Ready or Not" also exists
+    // by other artists, and a wrong-but-linked recording would otherwise beat
+    // the right one whenever its duration happened to be closer (AJ, 2026-10-22).
+    // Rejecting here also means we never fetch a Spotify id for a cover/remix by
+    // someone else and serve its lyrics under this track.
+    if (wantedArtist && artistNames.length &&
+        !artistNames.some((name) => name && (name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name)))) {
+      return -1;
+    }
     if (wantedArtist && artistNames.some((name) => name === wantedArtist)) score += 6;
     else if (wantedArtist && artistNames.some((name) => name && (name.includes(wantedArtist) || wantedArtist.includes(name)))) score += 3;
     const wantedDuration = Number(track.durationMs);
@@ -488,7 +571,10 @@
         track.durationMs
       );
       if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
-      if (!response || response.status === 429 || response.status >= 500) {
+      // status 0 = the host could not reach MusicBrainz at all (the relation
+      // lookup reports it that way), so it is a transport failure like 429/5xx,
+      // never evidence that the song has no mapping.
+      if (!response || response.status === 0 || response.status === 429 || response.status >= 500) {
         return { id: null, transient: true };
       }
       if (!response.ok || !response.data || !Array.isArray(response.data.recordings)) {
@@ -500,15 +586,15 @@
         .sort((a, b) => b.score - a.score);
       const best = candidates[0];
       if (!best) {
-        console.warn(`[SpicyLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
+        console.warn(`[AuroraLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
         return { id: null, transient: false };
       }
       const id = musicBrainzSpotifyId(best.recording);
-      console.log(`[SpicyLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
+      console.log(`[AuroraLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
       return { id, transient: false };
     } catch (error) {
       if (!controller.signal.aborted) {
-        console.warn("[SpicyLyrics] MusicBrainz fallback failed:", error && error.message);
+        console.warn("[AuroraLyrics] MusicBrainz fallback failed:", error && error.message);
       }
       return { id: null, transient: !controller.signal.aborted };
     }
@@ -517,7 +603,7 @@
   async function resolveSpotifyIdUncached(track, controller, key) {
     const title = track && track.title;
     if (!title) {
-      console.warn("[SpicyLyrics] no track title; cannot resolve Spotify id.");
+      console.warn("[AuroraLyrics] no track title; cannot resolve Spotify id.");
       return { id: null, transient: false };
     }
 
@@ -547,13 +633,13 @@
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
           if (lbThrottledUntil > Date.now()) {
-            console.warn("[SpicyLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
+            console.warn("[AuroraLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
             break lbLadder;
           }
           if (attempts >= LB_MAX_ATTEMPTS) {
             // Budget exhausted without a definitive answer, so the caller must
             // not record this as a permanent miss.
-            console.warn(`[SpicyLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
+            console.warn(`[AuroraLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
             break lbLadder;
           }
           attempts++;
@@ -564,14 +650,14 @@
 
           if (out.ids.length) {
             const id = out.ids[0];
-            console.log(`[SpicyLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
+            console.log(`[AuroraLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
             return { id, transient: false };
           }
         }
       }
     }
 
-    console.warn(`[SpicyLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
+    console.warn(`[AuroraLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
@@ -580,7 +666,7 @@
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
     if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      console.warn(`[SpicyLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; not caching a miss.`);
+      console.warn(`[AuroraLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
       return { id: null, transient: true };
     }
     return { id: null, transient: false };
@@ -592,22 +678,19 @@
    */
   async function resolveSpotifyId(track, controller, key) {
     const cacheKey = spicyCacheKeyFor(track, "");
-    let cachedMiss = false;
+    // Only HITS are cached. A miss used to be recorded for 12 hours and then
+    // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
+    // user added afterwards stayed invisible for half a day — the mapping is
+    // exactly what these lookups exist to find, and it can change at any time
+    // without our knowing (AJ, 2026-10-23). A lookup that fails now simply fails
+    // again next time; both layers are budgeted, so re-asking costs a handful of
+    // requests per play, not a loop.
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
-      if (cached) {
-        if (cached.spotifyId) {
-          console.log(`[SpicyLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
-          return cached.spotifyId;
-        }
-        // A recorded miss — don't re-run the whole search on every play of a
-        // song we already know is unresolvable.
-        cachedMiss = true;
+      if (cached && cached.spotifyId) {
+        console.log(`[AuroraLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
+        return cached.spotifyId;
       }
-    }
-    if (cachedMiss) {
-      console.log("[SpicyLyrics] resolver miss from cache; skipping ListenBrainz lookup.");
-      return null;
     }
     const outcome = await resolveSpotifyIdUncached(track, controller, key);
     const resolved = outcome && outcome.id ? outcome.id : null;
@@ -620,19 +703,10 @@
       controller.signal.aborted ||
       key !== currentTrackKey ||
       !spicyCache;
-    if (cacheKey && !stale) {
-      if (resolved) {
-        // A resolved id is durable — give it the full TTL and mark the entry
-        // positive (`hit`) so it isn't treated as a negative result.
-        setSpicyCacheEntry(`r:${cacheKey}`, { spotifyId: resolved, hit: true });
-      } else if (outcome && outcome.transient) {
-        // ListenBrainz was unreachable / rate-limited. That is NOT evidence the
-        // song is unresolvable, so don't poison the cache with a miss — the
-        // next play gets a clean attempt.
-        console.warn("[SpicyLyrics] resolver failed transiently; not caching this as a miss.");
-      } else {
-        setSpicyCacheEntry(`r:${cacheKey}`, { hit: false });
-      }
+    if (cacheKey && !stale && resolved) {
+      // A resolved id is durable — give it the full TTL and mark the entry
+      // positive (`hit`) so it isn't treated as a negative result.
+      setSpicyCacheEntry(`r:${cacheKey}`, { spotifyId: resolved, hit: true });
     }
     return resolved;
   }
@@ -829,12 +903,12 @@
 
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
-    if (!track || !track.title) { console.warn("[SpicyLyrics] no track title; skipping."); return null; }
-    console.log(`[SpicyLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
+    if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
+    console.log(`[AuroraLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
     const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
-      console.warn("[SpicyLyrics] no Spotify track id resolved; falling back.");
+      console.warn("[AuroraLyrics] no Spotify track id resolved; falling back.");
       return null;
     }
 
@@ -845,20 +919,20 @@
     const cached = await getSpicyCacheEntry(cacheKey);
     if (cached) {
       if (cached.ttml) {
-        console.log(`[SpicyLyrics] served TTML from cache (${spotifyId}).`);
+        console.log(`[AuroraLyrics] served TTML from cache (${spotifyId}).`);
         return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
       }
       if (cached.hit === false) {
-        console.log(`[SpicyLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
+        console.log(`[AuroraLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
         return null;
       }
       // An entry that is neither TTML nor a recorded miss is a half-written
       // record — exactly what a cache written while the page was being torn
       // down looks like. Log it, because otherwise this path is a silent
       // fall-through to the API and reads as "the cache did nothing".
-      console.warn(`[SpicyLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
+      console.warn(`[AuroraLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
     }
-    console.log(`[SpicyLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
+    console.log(`[AuroraLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
 
     // Every exit from here on logs. This function used to have several silent
     // `return null` paths, and because those are indistinguishable in the console
@@ -866,7 +940,7 @@
     // sent us chasing the resolver twice. A drop-in replacement for the guard
     // below, used everywhere so no branch can go quiet again.
     const bail = (why) => {
-      console.warn(`[SpicyLyrics] giving up on ${spotifyId} — ${why}`);
+      console.warn(`[AuroraLyrics] giving up on ${spotifyId} — ${why}`);
       return null;
     };
 
@@ -877,7 +951,7 @@
         credentials: "omit",
       });
     } catch (e) {
-      console.warn("[SpicyLyrics] request failed:", e);
+      console.warn("[AuroraLyrics] request failed:", e);
       return null;
     }
     // Report WHICH condition dropped the answer — aborted vs a changed track are
@@ -888,7 +962,7 @@
     if (key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
-    console.log(`[SpicyLyrics] answered HTTP ${response.status} for ${spotifyId}`);
+    console.log(`[AuroraLyrics] answered HTTP ${response.status} for ${spotifyId}`);
     if (response.status === 404) {
       // The API itself says it has no TTML for this id. That is a real answer
       // and safe to remember.
@@ -942,231 +1016,8 @@
       songwriters: parsed.songwriters || [],
       spotifyId,
     });
-    console.log(`[SpicyLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    console.log(`[AuroraLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
     return parsed;
-  }
-
-  /* ---- lrc.red (AJ, 2026-10-19) -----------------------------------------
-     Static file host keyed by ISRC — no search endpoint, no auth, no key:
-       https://lrc.red/s/{ISRC}.ttml   word-level Apple-style TTML
-       https://lrc.red/s/{ISRC}.lrc    line-level fallback
-       https://lrc.red/s/{ISRC}.json   metadata
-     CORS is `access-control-allow-origin: *`, so the page can fetch it
-     directly. The hard part is the ISRC: YTM exposes it only sometimes, so a
-     MusicBrainz recording lookup is the fallback (MB search results already
-     carry `isrcs`, no extra `inc` needed).
-     Their docs ask for credit when the API is proxied — passing "lrc.red" as
-     the provider label satisfies that through the normal credits footer. */
-  const LRC_RED_BASE = "https://lrc.red/s/";
-  const LRC_RED_ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{2}\d{5}$/;
-  const lrcRedCache = new Map(); // isrc -> { ttml?, lrc? }
-  const lrcRedIsrcCache = new Map(); // track key -> isrc
-  // A dead lrc.red origin (Cloudflare 522) hangs until the network gives up,
-  // which made track changes feel frozen. Bound it, and after a failure skip
-  // the source entirely for a while instead of paying the timeout per track.
-  const LRC_RED_TIMEOUT_MS = 4000;
-  const LRC_RED_COOLDOWN_MS = 5 * 60 * 1000;
-  let lrcRedCooldownUntil = 0;
-
-  function lrcRedSignal(trackSignal) {
-    try {
-      if (
-        typeof AbortSignal !== "undefined" &&
-        typeof AbortSignal.any === "function" &&
-        typeof AbortSignal.timeout === "function"
-      ) {
-        return AbortSignal.any([trackSignal, AbortSignal.timeout(LRC_RED_TIMEOUT_MS)]);
-      }
-    } catch (_) {}
-    return trackSignal;
-  }
-
-  function normalizeIsrc(value) {
-    const compact = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-    return LRC_RED_ISRC_RE.test(compact) ? compact : "";
-  }
-
-  // Score a Deezer search hit against the track. Title dominates; artist and
-  // duration break ties (Deezer lists remixes/live versions separately, and
-  // picking the wrong one would fetch the wrong ISRC).
-  function deezerIsrcScore(candidate, track) {
-    const norm = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const candidateTitle = norm(candidate && candidate.title);
-    const trackTitle = norm(track && track.title);
-    if (!candidateTitle || !trackTitle) return 0;
-    let score = 0;
-    if (candidateTitle === trackTitle) score += 60;
-    else if (candidateTitle.indexOf(trackTitle) !== -1 || trackTitle.indexOf(candidateTitle) !== -1) score += 30;
-    else return 0;
-    const candidateArtist = norm(candidate.artist && candidate.artist.name);
-    const trackArtist = norm(track && track.artist);
-    if (candidateArtist && trackArtist) {
-      if (candidateArtist === trackArtist) score += 30;
-      else if (candidateArtist.indexOf(trackArtist) !== -1 || trackArtist.indexOf(candidateArtist) !== -1) score += 15;
-    }
-    const candidateDuration = Number(candidate.duration);
-    const trackDuration = Number(track && track.durationMs) / 1000;
-    if (candidateDuration > 0 && trackDuration > 0) {
-      const delta = Math.abs(candidateDuration - trackDuration);
-      if (delta <= 2) score += 25;
-      else if (delta <= 5) score += 12;
-      else if (delta > 15) score -= 20;
-    }
-    return score;
-  }
-
-  // ISRC for this track. YTM exposes none (verified against /player and /next),
-  // so: Deezer first — it carries new releases on release day and returns
-  // `isrc` on every hit — then MusicBrainz for older catalogue where Deezer
-  // misses (AJ, 2026-10-19).
-  async function resolveLrcRedIsrc(track, controller, key) {
-    const direct = normalizeIsrc(track && track.isrc);
-    if (direct) return direct;
-    const memo = lrcRedIsrcCache.get(key);
-    if (memo) return memo;
-    if (controller.signal.aborted || key !== currentTrackKey) return "";
-
-    if (window.YTMod && typeof window.YTMod.fetchDeezerTracks === "function") {
-      try {
-        // Cleaned title: Deezer's catalogue uses canonical names, not the
-        // uploader's "X (Official Video) [Lyrics]" styling.
-        const response = await window.YTMod.fetchDeezerTracks(
-          cleanSearchTitle(track.title, track.artist),
-          track.artist,
-          track.album
-        );
-        if (controller.signal.aborted || key !== currentTrackKey) return "";
-        if (response && response.ok && response.data && Array.isArray(response.data.data)) {
-          const best = response.data.data
-            .map((candidate) => ({ candidate, score: deezerIsrcScore(candidate, track) }))
-            .filter((entry) => entry.score >= 60 && normalizeIsrc(entry.candidate.isrc))
-            .sort((a, b) => b.score - a.score)[0];
-          if (best) {
-            const isrc = normalizeIsrc(best.candidate.isrc);
-            lrcRedIsrcCache.set(key, isrc);
-            console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via Deezer (score ${best.score}).`);
-            return isrc;
-          }
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return "";
-        console.warn("[SpicyLyrics] lrc.red: Deezer ISRC lookup failed:", error && error.message);
-      }
-    }
-
-    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") return "";
-    if (controller.signal.aborted || key !== currentTrackKey) return "";
-    try {
-      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        cleanSearchTitle(track.title, track.artist),
-        track.artist,
-        track.album,
-        track.durationMs
-      );
-      if (controller.signal.aborted || key !== currentTrackKey) return "";
-      if (!response || !response.ok || !response.data || !Array.isArray(response.data.recordings)) return "";
-      const best = response.data.recordings
-        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
-        .filter((candidate) =>
-          candidate.score > 0 &&
-          Array.isArray(candidate.recording.isrcs) &&
-          candidate.recording.isrcs.length
-        )
-        .sort((a, b) => b.score - a.score)[0];
-      const isrc = best ? normalizeIsrc(best.recording.isrcs[0]) : "";
-      if (!isrc) {
-        console.warn(`[SpicyLyrics] lrc.red: no ISRC for "${track.title}" from Deezer or MusicBrainz.`);
-        return "";
-      }
-      lrcRedIsrcCache.set(key, isrc);
-      console.log(`[SpicyLyrics] lrc.red: ISRC ${isrc} via MusicBrainz (score ${best.score}).`);
-      return isrc;
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        console.warn("[SpicyLyrics] lrc.red: MusicBrainz ISRC lookup failed:", error && error.message);
-      }
-      return "";
-    }
-  }
-
-  async function fetchLrcRedLyrics(track, controller, key) {
-    const isrc = await resolveLrcRedIsrc(track, controller, key);
-    if (!isrc) return null;
-    const cached = lrcRedCache.get(isrc);
-    if (cached) return cached;
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
-    // Origin known to be unreachable right now — skip without paying the
-    // timeout again on this track (AJ, 2026-10-19).
-    if (Date.now() < lrcRedCooldownUntil) return null;
-    const result = {};
-    let unreachable = false;
-    // TTML first (word-level); LRC only if the TTML entry does not exist.
-    for (const ext of ["ttml", "lrc"]) {
-      try {
-        const response = await fetch(`${LRC_RED_BASE}${isrc}.${ext}`, {
-          headers: { Accept: ext === "ttml" ? "application/ttml+xml" : "text/plain" },
-          credentials: "omit",
-          signal: lrcRedSignal(controller.signal),
-        });
-        if (!response.ok) continue; // 404 -> try the next format
-        const text = await response.text();
-        if (!text || text.length < 40) continue;
-        // A 200 with an HTML body is Cloudflare's interstitial, not lyrics.
-        if (ext === "ttml" && text.indexOf("<tt") === -1) continue;
-        result[ext] = text;
-        break;
-      } catch (error) {
-        if (controller.signal.aborted) return null;
-        // A THROW here is not an HTTP status: it is CORS / DNS / a Cloudflare
-        // 522 page (which carries no Access-Control-Allow-Origin, so the
-        // browser reports it as a CORS failure), or our own timeout. The second
-        // extension would fail the same way, so stop instead of waiting twice.
-        unreachable = true;
-        break;
-      }
-    }
-    if (unreachable) {
-      lrcRedCooldownUntil = Date.now() + LRC_RED_COOLDOWN_MS;
-      console.warn(
-        `[SpicyLyrics] lrc.red is unreachable (CORS/522/timeout) — skipping it for ` +
-        `${Math.round(LRC_RED_COOLDOWN_MS / 60000)} min so playback is not delayed.`
-      );
-      return null;
-    }
-    if (!result.ttml && !result.lrc) {
-      console.log(`[SpicyLyrics] lrc.red: no lyrics for ISRC ${isrc}.`);
-      return null;
-    }
-    lrcRedCache.set(isrc, result);
-    console.log(`[SpicyLyrics] lrc.red: fetched ${result.ttml ? "TTML" : "LRC"} for ${isrc}.`);
-    return result;
-  }
-
-  // Does this TTML carry real per-WORD timing (Apple/Spicy <span ttm:role="x-word">
-  // structure, or lrc.red's Word mode)? Line-only TTML (lrc:timing="Line", plain <p>
-  // text) has NO word timing — rendering it through the karaoke path makes every
-  // line light at once, so it is shown as static auto-scroll instead (AJ, 2026-10-19).
-  function ttmlHasWordTiming(xml) {
-    const s = String(xml || "");
-    if (/lrc:timing\s*=\s*["']Word["']/i.test(s)) return true;
-    if (/<span\b[^>]*\bttm:role\s*=\s*["']x-word["']/i.test(s)) return true;
-    return /<span\b/i.test(s) && /\bbegin\s*=/.test(s);
-  }
-  // Flattens a line-level TTML to plain text (one <p> -> one line) for the static path.
-  function ttmlPlainText(xml) {
-    const s = String(xml || "");
-    const lines = [];
-    const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
-    let m;
-    while ((m = re.exec(s))) {
-      const text = decodeEntities(m[1].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
-      if (text) lines.push(text);
-    }
-    return lines.join("\n");
-  }
-  // A synced LRC line is prefixed with a [mm:ss(.xx)] timestamp; plain lyrics are not.
-  function isSyncedLRC(text) {
-    return /\[\s*\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\s*\]/.test(String(text || ""));
   }
 
   async function fetchLRCLyrics(track, key) {
@@ -1176,16 +1027,34 @@
     activeTrackAbort = controller;
 
     // Skeleton rather than a text message: this covers the network wait AND the
-    // synchronous DOM build that follows it (see showLyricsSkeleton).
+    // synchronous DOM build that follows it (see showLyricsSkeleton). The AMLL
+    // engine is a separate renderer, so its skeleton goes up alongside.
     showLyricsSkeleton();
+    amllShowSkeleton();
 
     const stale = () =>
       controller.signal.aborted || requestId !== trackRequestSeq || key !== currentTrackKey;
 
-    /* One LRCLIB fetch, shared by the lrclib runner and by the lrc.red STATIC
-       fallback. The fallback needs the raw result (not a load) so it can decide
-       whether LRCLIB actually has a SYNCED set; if it only has plain lyrics we
-       keep lrc.red's static set instead of swapping one static for another. */
+    /* A result the user picked in Search lyrics is not a suggestion — it is the
+       answer. It outranks every source, including Spicy, because the pick only
+       exists when the automatic resolver already failed for this track. Served
+       from the persistent cache before any runner runs, so a replay or a page
+       reload loads it instantly instead of searching and landing on "no
+       lyrics" again (AJ, 2026-10-22). */
+    const manualPick = getManualLyricsPersistent(key);
+    if (manualPick) {
+      if (stale()) return;
+      if (loadLRCLyrics(manualPick, track.durationMs)) {
+        console.log("[AuroraLyrics] manual search pick served from cache.");
+        return;
+      }
+      // The entry no longer parses (corrupt or older shape): drop it and let
+      // the normal order try rather than failing the track silently.
+      removeLyricsPersistent(key);
+    }
+
+    /* One LRCLIB fetch, shared by the lrclib runner. It stays RAW (not a load)
+       so the caller can tell a synced result from a plain-only one. */
     const fetchLrclibData = async () => {
       const cached = lrclibCache.get(key);
       if (cached) {
@@ -1249,7 +1118,7 @@
             // Silence here was a real dead end: the TTML was fetched and parsed,
             // then dropped on the floor with no output, which reads as "the fetch
             // failed".
-            console.warn(`[SpicyLyrics] discarding the Spicy result — ${
+            console.warn(`[AuroraLyrics] discarding the Spicy result — ${
               controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
             return true;
           }
@@ -1261,103 +1130,17 @@
               songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
             };
             if (loadTTML(spicyResult.ttml, "external")) {
-              console.log("[SpicyLyrics] TTML rendered from the Spicy Lyrics API.");
+              console.log("[AuroraLyrics] TTML rendered from the Spicy Lyrics API.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[SpicyLyrics] API returned TTML we could not parse; trying the next source.");
+            console.warn("[AuroraLyrics] API returned TTML we could not parse; trying the next source.");
           } else {
-            console.warn("[SpicyLyrics] no Spicy TTML for this track; trying the next source.");
+            console.warn("[AuroraLyrics] no Spicy TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] lookup failed; trying the next source:", error);
-        }
-        return false;
-      },
-
-      "lrc.red": async () => {
-        try {
-          const lrcRed = await fetchLrcRedLyrics(track, controller, key);
-          if (stale()) return true;
-          if (!lrcRed || (!lrcRed.ttml && !lrcRed.lrc)) return false;
-
-          const hasWordTiming = !!(lrcRed.ttml && ttmlHasWordTiming(lrcRed.ttml));
-          const hasSyncedLRC = !!(lrcRed.lrc && isSyncedLRC(lrcRed.lrc));
-          const isStatic = !hasWordTiming && !hasSyncedLRC;
-
-          // lrc.red only had a STATIC set. Prefer a SYNCED LRCLIB result over
-          // static lyrics; only settle for lrc.red's static set when LRCLIB has
-          // nothing synced (AJ, 2026-10-20).
-          if (isStatic) {
-            let lrclibData = null;
-            try {
-              lrclibData = await fetchLrclibData();
-            } catch (error) {
-              if (error && error.name === "AbortError") return true;
-              console.warn("[SpicyLyrics] LRCLIB fallback for static lrc.red failed:", error);
-            }
-            if (stale()) return true;
-            if (lrclibData && lrclibData.syncedLyrics) {
-              loadLRCLyrics(lrclibData, track.durationMs);
-              return true;
-            }
-          }
-
-          let ok = false;
-          let loadedSynced = false;
-          if (hasWordTiming) {
-            // Word-level TTML -> normal word-by-word karaoke.
-            ok = loadTTML(lrcRed.ttml, "external", "lrc.red");
-            if (ok) {
-              loadedSynced = true;
-              console.log("[SpicyLyrics] TTML rendered from lrc.red.");
-            }
-          }
-          if (!ok && hasSyncedLRC) {
-            ok = loadLRCLyrics({ syncedLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
-            if (ok) loadedSynced = true;
-          }
-          if (!ok && lrcRed.ttml) {
-            // Line-level-only TTML: no per-word timing. Present it as STATIC
-            // auto-scroll instead (AJ, 2026-10-19).
-            ok = loadLRCLyrics({ plainLyrics: ttmlPlainText(lrcRed.ttml) }, track.durationMs, "lrc.red");
-          }
-          if (!ok && lrcRed.lrc) {
-            // A plain (untimestamped) .lrc piling on one line is the "all fire at
-            // once" bug — feed it through the STATIC path, not syncedLyrics.
-            ok = loadLRCLyrics({ plainLyrics: lrcRed.lrc }, track.durationMs, "lrc.red");
-          }
-          if (ok) {
-            // Only warn about accuracy when the set that ACTUALLY loaded is
-            // synced; a static set has no timing to be out of sync
-            // (AJ, 2026-10-20).
-            if (loadedSynced) showSourceNotice("lrc.red lyrics may be slightly out of sync");
-            return true;
-          }
-          console.warn("[SpicyLyrics] lrc.red TTML could not be parsed; trying the next source.");
-        } catch (error) {
-          if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] lrc.red lookup failed; trying the next source:", error);
-        }
-        return false;
-      },
-
-      unison: async () => {
-        try {
-          const unisonData = await fetchUnisonLyrics(track, key, controller);
-          if (stale()) return true;
-          if (unisonData && unisonData.format === "ttml") {
-            if (loadTTML(unisonData.lyrics, "external", "Unison")) return true;
-            console.warn("[SpicyLyrics] Unison returned TTML that could not be parsed; trying the next source.");
-          }
-          if (unisonData && unisonData.format === "lrc") {
-            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison")) return true;
-            console.warn("[SpicyLyrics] Unison returned LRC that could not be parsed; trying the next source.");
-          }
-        } catch (error) {
-          if (error && error.name === "AbortError") return true;
-          console.warn("[SpicyLyrics] Unison lookup failed; trying the next source:", error);
+          console.warn("[AuroraLyrics] lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -1372,16 +1155,17 @@
         } catch (error) {
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
-          console.warn("[SpicyLyrics] LRCLIB lookup failed:", error);
+          console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
           return false;
         }
       },
     };
 
     // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
-    // was removed. Spicy Lyrics wins when both it and lrc.red carry the track;
-    // lrc.red is next for new releases; Unison + LRCLIB are last-resort fallbacks.
-    const order = ["spicy", "lrc.red", "unison", "lrclib"];
+    // was removed. Spicy Lyrics wins when it has the track; LRCLIB is the
+    // fallback. lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25:
+    // both are unmoderated, so a wrong sync was more common than a useful one.
+    const order = ["spicy", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;

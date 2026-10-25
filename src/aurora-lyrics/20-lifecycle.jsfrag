@@ -18,7 +18,7 @@
     if (!key) return;
     currentTrackKey = "";
     try { syncTrackLyrics(true); } catch (e) {
-      console.warn("[Aurora Lyrics] re-resolve after source-order change failed:", e);
+      console.warn("[AuroraLyrics] re-resolve after source-order change failed:", e);
     }
   }
 
@@ -32,6 +32,10 @@
     // to the page-wide Kawarp, not to us. applySettings() re-clamps for free.
     if (data.type === "ytmod-settings" && data.id === "ytmod-dynamic") {
       const s = data.settings || {};
+      // The fullscreen lyrics view runs its OWN Kawarp (it suspends the page
+      // one), so a slider moved while fullscreen is up has to reach that
+      // instance too — otherwise the backdrop keeps the values it started with.
+      if (fsKawarpActive) applyFullscreenKawarpLook();
       const patch = {};
       if (s.backdropBrightness != null) patch.backdropBrightness = s.backdropBrightness;
       if (s.preferKawarpAlways != null) patch.preferKawarpAlways = s.preferKawarpAlways;
@@ -74,7 +78,9 @@
   attachMessageListener();
 
   function teardown() {
-    exitFullscreenMode();
+    // Immediate: teardown is removing this script's UI, so a 220ms fade could
+    // leave the overlay behind if the context goes away first.
+    exitFullscreenMode(true);
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     stopHousekeeping();
@@ -122,6 +128,7 @@
     currentTrackKey = "";
     manualLyricsTrackKey = "";
     manualLyricsIsPermanent = false;
+    currentLyricsFromSavedTTML = false;
     currentLyricsIsTTML = false;
     lastObservedTrackKey = "";
     lastObservedPositionMs = null;

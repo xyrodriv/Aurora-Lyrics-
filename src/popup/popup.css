@@ -1,51 +1,277 @@
+/* Aurora Lyrics — toolbar popup.
+   A small, quiet surface: one status line, the current song, three facts and two
+   actions. Type is SpicyLyrics (the same face the lyrics use, bundled in the
+   extension) so the popup reads as part of the product rather than a tool window. */
+
 * { box-sizing: border-box; }
 html, body { margin: 0; }
+html { color-scheme: dark; }
+
 body {
-  width: 290px;
-  background: #0f1116;
-  color: #f4f1ee;
+  width: 300px;
+  background:
+    radial-gradient(120% 80% at 50% -20%, rgba(255, 74, 88, .12), transparent 70%),
+    #0a090a;
+  color: var(--ink);
   font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, sans-serif;
-  padding: 14px;
+  font-size: 13px;
+  letter-spacing: .002em;
+  padding: 14px 14px 15px;
+  -webkit-font-smoothing: antialiased;
 }
-header {
+
+:root {
+  --ink: #f4f1ee;
+  --dim: rgba(244, 241, 238, .58);
+  --faint: rgba(244, 241, 238, .38);
+  --line: rgba(255, 255, 255, .085);
+  --surface: rgba(255, 255, 255, .045);
+  --accent: #ff4a58;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+.shell { display: flex; flex-direction: column; gap: 11px; }
+
+/* Each band rises in on open, in reading order. --i drives the stagger. */
+.shell > * {
+  animation: rise .42s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 55ms + 30ms);
+}
+.shell > *:nth-child(1) { --i: 0; }
+.shell > *:nth-child(2) { --i: 1; }
+.shell > *:nth-child(3) { --i: 2; }
+.shell > *:nth-child(4) { --i: 3; }
+.shell > *:nth-child(5) { --i: 4; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── header ──────────────────────────────────────────────────────────────── */
+.head { display: flex; align-items: center; gap: 8px; }
+.logo { display: block; width: 22px; height: 22px; border-radius: 6px; flex: none; }
+.name {
+  font-size: 15.5px;
+  font-weight: 700;
+  letter-spacing: -.012em;
+  white-space: nowrap;
+}
+.ver {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--faint);
+  letter-spacing: .045em;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.ver:empty { display: none; }
+
+/* ── status ──────────────────────────────────────────────────────────────── */
+.status {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--dim);
+  transition: border-color .3s ease, background .3s ease;
 }
-.logo { display: block; width: 22px; height: 22px; border-radius: 6px; }
-.name {
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -.01em;
-}
-.lede {
-  margin: 0 0 10px;
-  font-size: 13px;
-  line-height: 1.45;
-  color: rgba(244, 241, 238, .62);
-}
-.tip {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 11px 12px;
-  border: 1px solid rgba(255, 255, 255, .09);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, .05);
-}
-.waffle {
+.dot {
   flex: none;
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
-  fill: #f4f1ee;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background .3s ease, box-shadow .3s ease;
 }
-.tip p { margin: 0; font-size: 13px; line-height: 1.45; }
-.tip strong { font-weight: 700; }
-.hint {
-  margin: 10px 0 0;
+.status[data-state="on"] { border-color: rgba(255, 74, 88, .30); background: rgba(255, 74, 88, .075); }
+.status[data-state="on"] .dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(255, 74, 88, .16); }
+.status[data-state="on"] .status-text { color: rgba(255, 226, 228, .92); }
+.status[data-state="warn"] { border-color: rgba(255, 198, 92, .26); background: rgba(255, 198, 92, .07); }
+.status[data-state="warn"] .dot { background: #ffc65c; box-shadow: 0 0 0 3px rgba(255, 198, 92, .14); }
+.status[data-state="warn"] .status-text { color: rgba(255, 226, 176, .92); }
+
+/* Only breathe once we KNOW the page answered - a pulse on "checking" would
+   read as activity that is not happening. */
+.status[data-state="on"] .dot { animation: breathe 2.8s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(255, 74, 88, .16); }
+  50%      { box-shadow: 0 0 0 6px rgba(255, 74, 88, .06); }
+}
+
+/* ── now playing ─────────────────────────────────────────────────────────── */
+.now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .028));
+  min-width: 0;
+  animation: rise .42s var(--ease) both;
+  animation-delay: 140ms;
+}
+.now[hidden] { display: none; }
+.art {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, .06);
+  box-shadow: 0 4px 12px -6px rgba(0, 0, 0, .8);
+}
+.art[hidden] { display: none; }
+/* No cover (or a dead URL): a monogram tile instead of a broken-image glyph.
+   Deliberately NOT classed `art` - `.now.no-art .art` hides the <img>, and an
+   equal-specificity rule on the shared class would have hidden this too. */
+.art-fallback {
+  display: none;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: rgba(244, 241, 238, .58);
+  background: linear-gradient(145deg, rgba(255, 255, 255, .11), rgba(255, 255, 255, .04));
+  box-shadow: 0 4px 12px -6px rgba(0, 0, 0, .8);
+}
+.now.no-art .art-fallback { display: flex; }
+
+.meta { min-width: 0; }
+.track, .artist {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track { font-size: 13.5px; font-weight: 600; letter-spacing: -.008em; }
+.artist { margin-top: 1px; font-size: 12px; font-weight: 400; color: var(--dim); }
+
+/* ── facts ───────────────────────────────────────────────────────────────── */
+.facts { display: grid; gap: 5px; margin: 0; }
+.facts[hidden] { display: none; }
+.fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 12px;
-  color: rgba(244, 241, 238, .5);
+  min-width: 0;
 }
-.hint[hidden] { display: none; }
+.fact dt { color: var(--dim); font-weight: 500; flex: none; }
+.fact dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* An error is a MESSAGE, not a value: it gets its own block and two lines of
+   wrapping instead of being squeezed into a right-aligned label pair. */
+.error-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  margin-top: 3px;
+  padding: 7px 9px 8px;
+  border: 1px solid rgba(255, 122, 122, .18);
+  border-radius: 9px;
+  background: rgba(255, 122, 122, .065);
+}
+.error-row dt {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: rgba(255, 176, 176, .72);
+}
+.error-row dd {
+  text-align: left;
+  white-space: normal;
+  overflow: hidden;
+  color: rgba(255, 206, 206, .95);
+  line-height: 1.4;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.error-row[hidden] { display: none; }
+
+/* ── actions ─────────────────────────────────────────────────────────────── */
+.actions { display: flex; flex-direction: column; gap: 7px; margin-top: 1px; }
+.btn {
+  position: relative;
+  width: 100%;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: .004em;
+  cursor: pointer;
+  transition:
+    transform .2s var(--ease),
+    background .2s ease,
+    border-color .2s ease,
+    box-shadow .25s ease,
+    color .2s ease;
+}
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255, 74, 88, .55); }
+.btn:active { transform: scale(.985); }
+.btn:disabled { opacity: .45; cursor: default; transform: none; box-shadow: none; }
+
+.primary {
+  border-color: rgba(255, 74, 88, .34);
+  background: rgba(255, 74, 88, .13);
+  color: #ffe3e5;
+}
+.primary:hover:not(:disabled) {
+  background: rgba(255, 74, 88, .20);
+  border-color: rgba(255, 74, 88, .52);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px -12px rgba(255, 74, 88, .8);
+}
+.ghost { color: rgba(244, 241, 238, .86); }
+.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, .075);
+  border-color: rgba(255, 255, 255, .16);
+  transform: translateY(-1px);
+}
+
+/* Copy → Copied is a crossfade inside one button, not a text swap: a label that
+   changes width mid-click jerks the whole popup. */
+.swap { position: relative; display: inline-grid; place-items: center; }
+.swap-face {
+  grid-area: 1 / 1;
+  transition: opacity .18s ease, transform .26s var(--ease);
+}
+.swap-done { opacity: 0; transform: translateY(6px); color: var(--accent); }
+.copy.copied { border-color: rgba(255, 74, 88, .36); background: rgba(255, 74, 88, .09); }
+.copy.copied .swap-idle { opacity: 0; transform: translateY(-6px); }
+.copy.copied .swap-done { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .shell > *, .now, .status[data-state="on"] .dot { animation: none; }
+  .btn, .swap-face, .btn:hover:not(:disabled) { transition: none; transform: none; }
+}

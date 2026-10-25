@@ -268,7 +268,7 @@
   // these every frame to set their goals, so re-pointing is enough — there is no
   // spring to rebuild.
   function applySimpleLyricsSplines() {
-    const simple = !!currentSettings.simpleLyrics;
+    const simple = amllSimpleLookActive();
     LetterScaleSpline = getSpline(simple ? SIMPLE_LETTER_SCALE_RANGE : LETTER_SCALE_RANGE);
     YOffsetSpline = getSpline(simple ? SIMPLE_Y_OFFSET_RANGE : Y_OFFSET_RANGE);
     LetterYOffsetSpline = getSpline(simple ? SIMPLE_LETTER_Y_OFFSET_RANGE : LETTER_Y_OFFSET_RANGE);
@@ -320,7 +320,7 @@
   });
 
   function createWordSprings(word) {
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         // A LINE-TIMED word must rest at scale 1, not the 0.95 word resting
         // value: its scale goal is a constant 1 (animateWord pins it), and with
@@ -353,7 +353,7 @@
     // is the per-syllable highlight this mode exists to remove. The springs stay
     // real otherwise, so the progress-driven goals keep the letters awake and
     // writing (see the selfAwake note in animateWord).
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         Scale: new Spring(LetterScaleSpline.at(0), 0.88, 0.64),
         YOffset: new Spring(LetterYOffsetSpline.at(0), 1.45, 0.4),
@@ -368,7 +368,7 @@
   }
 
   function createDotSprings() {
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       return {
         // Scale stays REAL in Simple mode: the dots' entrance zoom (0.75 -> 1) is
         // how they arrive, and stubbing it made them hard-pop in with no
@@ -479,6 +479,13 @@
   // In-memory lrclibCache (above) is lost on every page reload, so the same
   // songs get re-fetched. This layer persists the last N songs in localStorage
   // (origin: music.youtube.com) so playback/reload reuses them. LRU eviction.
+  //
+  // A search result the user PICKED is stored wrapped (`{ manual, data }`).
+  // That flag is the difference between "this is one automatic answer among
+  // several sources" and "the user told us this is the right file" — the
+  // resolver serves a manual entry before it asks any API again (AJ, 2026-10-22).
+  // Automatic entries keep the bare data shape older installs already hold, so
+  // nothing stored earlier needs a migration.
   const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";
   const LYRICS_CACHE_LIMIT = 15;
 
@@ -505,23 +512,70 @@
 
   const persistentLyricsCache = loadPersistentLyricsCache();
 
-  function cacheLyricsPersistent(key, data) {
-    if (!key || !data) return;
-    persistentLyricsCache.delete(key);
-    persistentLyricsCache.set(key, data);
+  function isManualPickEntry(value) {
+    return !!(value && typeof value === "object" && value.manual === true && value.data);
+  }
+
+  function unwrapPersistedLyrics(value) {
+    return isManualPickEntry(value) ? value.data : value;
+  }
+
+  // Automatic entries are evicted before manual picks. A pick is the only copy
+  // of lyrics the API could not supply for that track, so losing it to a burst
+  // of skipped songs would put the track straight back to "No lyrics found".
+  // LRU order still picks the victim within each class.
+  function trimPersistentLyricsCache() {
     while (persistentLyricsCache.size > LYRICS_CACHE_LIMIT) {
-      persistentLyricsCache.delete(persistentLyricsCache.keys().next().value);
+      let victim = null;
+      for (const [key, value] of persistentLyricsCache) {
+        if (!isManualPickEntry(value)) { victim = key; break; }
+      }
+      if (victim == null) victim = persistentLyricsCache.keys().next().value;
+      persistentLyricsCache.delete(victim);
     }
+  }
+
+  function cacheLyricsPersistent(key, data, options) {
+    if (!key || !data) return;
+    const manual = !!(options && options.manual);
+    persistentLyricsCache.delete(key);
+    persistentLyricsCache.set(key, manual ? { manual: true, data } : data);
+    trimPersistentLyricsCache();
     persistLyricsCache();
+  }
+
+  // Non-mutating presence check for the options panel: getLyricsPersistent()
+  // rewrites localStorage to refresh the LRU order, which is wasted work on a
+  // status read.
+  function hasLyricsPersistent(key) {
+    return !!key && persistentLyricsCache.has(key);
+  }
+
+  function isManualLyricsPersistent(key) {
+    return !!key && isManualPickEntry(persistentLyricsCache.get(key));
+  }
+
+  function getManualLyricsPersistent(key) {
+    if (!key) return null;
+    const stored = persistentLyricsCache.get(key);
+    return isManualPickEntry(stored) ? stored.data : null;
+  }
+
+  function removeLyricsPersistent(key) {
+    if (!key || !persistentLyricsCache.has(key)) return false;
+    const removed = persistentLyricsCache.delete(key);
+    if (removed) persistLyricsCache();
+    return removed;
   }
 
   function getLyricsPersistent(key) {
     if (!key) return null;
     if (!persistentLyricsCache.has(key)) return null;
-    const data = persistentLyricsCache.get(key);
+    const stored = persistentLyricsCache.get(key);
+    const data = unwrapPersistedLyrics(stored);
     // Refresh LRU position (most-recently-used) and persist the new order.
     persistentLyricsCache.delete(key);
-    persistentLyricsCache.set(key, data);
+    persistentLyricsCache.set(key, stored);
     persistLyricsCache();
     return data;
   }

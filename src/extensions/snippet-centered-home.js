@@ -39,6 +39,9 @@
   let logoHome = null;     // where it came from (#left-content)
   let logoNext = null;     // its original next sibling, for an exact restore
 
+  const LOGO_GAP = 12;     // px between the logo and the search box
+  const LOGO_W_FALLBACK = 71;
+
   const CSS = `
 /* ---- 0. gutter off the left guide ------------------------------------ */
 /* YTM butts the first card straight against the Home / Explore rail. A small
@@ -155,16 +158,55 @@ ytmusic-chip-cloud-renderer > #chips {
 }
 
 /* ---- 3. nav: logo beside the search, both centred --------------------- */
-/* YTM pins the logo to the far-left guide column and left-aligns the search
-   inside .center-content, so with the rail open the search reads off-centre.
-   Centering the row puts the logo + search pair on the content's centre. */
+/* YTM pins the logo to the far-left guide column and centres .center-content on
+   the window with the search inside it, so the pair needs centring by hand.
+
+   ⭐ The logo CANNOT be an in-flow flex child here. The moment the field is
+   focused — and on every search-results page — YTM switches the search box to
+   position:absolute + z-index:2, still centred on the same axis. The search
+   then leaves the flow, so it is no longer part of the centred row: the logo
+   becomes the row's ONLY in-flow item, justify-content:center parks it dead
+   centre, and the absolutely-positioned box paints straight over it. That is
+   both reported symptoms — the logo vanishing on focus, and showing up centred
+   behind the bar on a search page (AJ, 2026-10-22; measured live with the
+   browser bridge, the logo's box sat INSIDE the search box's box in both
+   states).
+
+   So the logo is pinned OUT of the flow, immediately left of the search box by
+   a measured gap — the same place in all three states, and the search alone
+   stays centred (rather than 42px right of centre while a logo rides along in
+   the flex row). --ym-ch-logo-left is written by syncLogoNavOffset(); the
+   fallback is the desktop measurement — half of YTM's 480px box + 12px gap +
+   the 71px logo, i.e. 323px left of centre — for the frame before it runs. */
 ytmusic-nav-bar .center-content {
   justify-content: center !important;
-  gap: 12px;
 }
 ytmusic-nav-bar .center-content ytmusic-logo {
+  position: absolute !important;
+  left: var(--ym-ch-logo-left, calc(50% - 323px)) !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
   margin: 0 !important;
   flex: 0 0 auto;
+}
+
+/* ---- 3b. expanded search: no square frame, no drop shadow -------------- */
+/* Both are YOUTUBE's, and both switch on only while the field is FOCUSED
+   (measured on the live page with the browser bridge, 2026-10-22 — a clean
+   profile has neither): the host element draws a 1px border at
+   border-radius: 2px around the .search-box that is rounded to 8px, so the
+   frame reads as a square line drawn around a rounded pill; and
+   .search-container picks up Material's three-layer elevation shadow.
+
+   The border becomes TRANSPARENT rather than being removed: it still takes its
+   1px in the layout, so the pill neither shifts nor shrinks the moment the box
+   opens, and the dropdown stays aligned with it. The pill keeps its own 1px
+   edge and rounded top corners, so it still reads as a field. */
+ytmusic-nav-bar ytmusic-search-box {
+  border-color: transparent !important;
+}
+ytmusic-nav-bar ytmusic-search-box .search-container {
+  box-shadow: none !important;
 }
 
 /* ---- 4. player-page tabs --------------------------------------------- */
@@ -174,6 +216,29 @@ ytmusic-nav-bar .center-content ytmusic-logo {
    this rule felt delayed. Keeping both would double-play: the cascade picks the
    more specific selector, then the other one re-fires when the class is removed. */
 `;
+
+  // The logo's `left` is measured, not assumed: YTM's search box is not always
+  // exactly 480px wide (it is 482 on a results page, and narrows with the
+  // window), and the gap has to hold whatever it is. Both rects are read in the
+  // SAME state — the search box moves, the logo's containing block does not —
+  // so the offset stays correct whether the box is in flow or absolutely centred.
+  function syncLogoNavOffset() {
+    const nav = document.querySelector("ytmusic-nav-bar");
+    if (!nav) return;
+    const center = nav.querySelector(".center-content");
+    const search = nav.querySelector("ytmusic-search-box");
+    if (!center || !search) return;
+    const sr = search.getBoundingClientRect();
+    const cr = center.getBoundingClientRect();
+    if (!sr.width || !cr.width) return;
+    const lw = (logoEl && logoEl.getBoundingClientRect().width) || LOGO_W_FALLBACK;
+    // Relative to .center-content, which is the logo's containing block. Written
+    // to the element, so nothing compounds on re-measure.
+    center.style.setProperty(
+      "--ym-ch-logo-left",
+      Math.round(sr.left - LOGO_GAP - lw - cr.left) + "px"
+    );
+  }
 
   // YTM renders the logo into #left-content on every nav re-render, so this is
   // re-asserted on a slow poll rather than moved once.
@@ -187,12 +252,19 @@ ytmusic-nav-bar .center-content ytmusic-logo {
       logoHome = logo.parentElement;
       logoNext = logo.nextElementSibling;
     }
-    if (center.contains(logo)) return;
-    center.insertBefore(logo, center.firstElementChild);
-    logoEl = logo;
+    if (!center.contains(logo)) {
+      center.insertBefore(logo, center.firstElementChild);
+      logoEl = logo;
+    }
+    // Runs even when the logo is already in place: the search box changes state
+    // (focus, results page) without the logo moving, and the offset follows it.
+    syncLogoNavOffset();
   }
 
   function restoreLogo() {
+    const nav = document.querySelector("ytmusic-nav-bar");
+    const center = nav && nav.querySelector(".center-content");
+    if (center) center.style.removeProperty("--ym-ch-logo-left");
     if (!logoEl || !logoHome || !logoHome.isConnected) return;
     try {
       const ref = logoNext && logoNext.parentElement === logoHome ? logoNext : null;
@@ -215,6 +287,9 @@ ytmusic-nav-bar .center-content ytmusic-logo {
     injectStyle();
     placeLogo();
     logoPoll = window.setInterval(placeLogo, 1000);
+    // The search box is re-centred on resize, and the nav is laid out after the
+    // first paint of a SPA navigation, so re-measure on both.
+    window.addEventListener("resize", syncLogoNavOffset);
     console.log(TAG, "armed");
   }
 
@@ -222,6 +297,7 @@ ytmusic-nav-bar .center-content ytmusic-logo {
     if (!armed) return;
     armed = false;
     if (logoPoll) { window.clearInterval(logoPoll); logoPoll = 0; }
+    window.removeEventListener("resize", syncLogoNavOffset);
     restoreLogo();
     const s = document.getElementById(STYLE_ID);
     if (s) s.remove();

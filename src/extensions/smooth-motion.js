@@ -18,6 +18,9 @@
  *                Related) fades + rises in instead of hard-cutting.
  *   6. like    — press-shrink + spring-back on the like / dislike buttons, plus
  *                a small emoji flourish (up for like, down for dislike).
+ *   7. song    — opening the song view (the watch page) settles into place
+ *                instead of sliding up a full viewport, and the bars that were
+ *                already on screen are held still instead of re-entering.
  *
  * Runs in the page world (injected as <script src>), so it can read YTM's DOM
  * and receive settings over window.postMessage like the other add-ons.
@@ -73,6 +76,10 @@
          keep --ym-sm-ease (their durations are short enough that the curve
          matters less, and their curves were chosen deliberately). */
       --ym-sm-guide-ease: cubic-bezier(.22,1,.36,1);
+      /* The song view's settle: a long, front-loaded deceleration. A page-sized
+         movement needs a curve that has essentially finished by 60% of its
+         duration, or it reads as a drift. */
+      --ym-sm-song-ease: cubic-bezier(.22,1,.36,1);
     }
 
     /* 1. Guide open/close. Ease the browse-content offset so it glides. Gated on
@@ -462,6 +469,111 @@
       to   { opacity: 0; transform: translate(-50%, -50%) translate(var(--dx), var(--dy)) scale(1); }
     }
 
+    /* 8. Song view (the watch page) open.
+       Measured on the live page: opening a song ran FOUR motions at once — the
+       fixed player page slid up from a full viewport below
+       (transform translate3d(0, 901px, 0) -> none, .3s
+       cubic-bezier(.2,0,.6,1)), the player bar AND its background re-entered
+       from below with player-bar-slide-up, the nav bar and guide backgrounds
+       faded in from opacity 0, and the video player grew from
+       translate(20%,20%) scale(.8) over a full .6s. Three durations and three
+       curves for one navigation: the page landed at 300ms while the player was
+       still growing 300ms after that.
+
+       The bar and the nav bar are ALREADY on screen on the page being left, so
+       their re-entry is not motion — it is a flash. This module holds those
+       still and replaces the travel with a single settle: the page arrives
+       where it lives, the artwork sharpens first, the tab column follows a beat
+       later. Armed from player-page-open (see watchSongOpen), so every way into
+       the view gets it, and so a reload or a direct link never animates a page
+       that did not move. */
+    /* The page neither travels NOR fades. A page-sized translate is the slide,
+       and a page-sized fade is the same compromise in another costume: it dims
+       the whole viewport to say "something is happening" without showing what.
+       The room is simply there, and the content below does the arriving. */
+    html.ym-sm-song-open ytmusic-player-page#player-page {
+      transition: none !important;
+    }
+    /* Not motion: these were already on screen in exactly these boxes.
+       NOTE the zero DURATION rather than animation: none. Cancelling the
+       animation makes the browser re-run it the instant this class is removed —
+       measured, it fired player-bar-slide-up 14ms after the window expired, so
+       the bar still slid up, just later. A zero duration lets it complete
+       invisibly at mount, and removing the override cannot restart what has
+       already finished. */
+    html.ym-sm-song-open ytmusic-player-bar,
+    html.ym-sm-song-open #player-bar-background,
+    html.ym-sm-song-open ytmusic-player#player {
+      animation-duration: 0s !important;
+    }
+    html.ym-sm-song-open #nav-bar-background,
+    html.ym-sm-song-open #mini-guide-background {
+      transition: none !important;
+      opacity: 1 !important;
+    }
+    /* The cover is the entrance. It develops out of its own frame — a real
+       settle (.86 scale over a long travel) rather than a slide, with the blur
+       resolving last so the eye reads "focus", not "movement". Blur is on this
+       one box only: the page-sized version of the same idea would rasterise the
+       whole viewport on every frame. */
+    html.ym-sm-song-open #song-image,
+    html.ym-sm-song-open #song-video {
+      animation: ym-sm-song-art-in .48s var(--ym-sm-song-ease) both;
+    }
+    /* The 70% stop is a three-pixel overshoot. A settle that only ever grows
+       forward reads as a zoom; letting it pass its size and come back reads as
+       a lens finding focus, which is the feeling the blur is there for. */
+    @keyframes ym-sm-song-art-in {
+      from { opacity: 0; transform: scale(.86); filter: blur(8px); }
+      70%  { opacity: 1; transform: scale(1.008); filter: blur(.4px); }
+      to   { opacity: 1; transform: none; filter: blur(0); }
+    }
+    /* ...and the tab column follows a beat later, never with it. */
+    html.ym-sm-song-open ytmusic-player-page .content > #side-panel {
+      animation: ym-sm-song-raise-in .4s var(--ym-sm-song-ease) .09s both;
+    }
+    @keyframes ym-sm-song-raise-in {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* Closing the song view. Measured live: YTM transitions the same fixed page
+       from y=48 back down to y=1049 (the 901px transform again, ~430ms) and only
+       sets visibility: hidden at 468ms — so the page is on screen for the whole
+       slide down, which is the same ugliness in reverse.
+       The replacement is a crossfade: the page holds its position, dissolves
+       over 200ms, and the artwork recedes a touch on the way out. The page's own
+       background is transparent (Aurora Bloom sets it), so the page you came
+       from is revealed THROUGH it — the two views blend rather than one chasing
+       the other off-screen.
+       Two things this block must get right, both measured:
+         - transform is forced to none, because YTM writes the off-screen
+           transform at click time and a killed transition would snap it there
+           before anything could fade;
+         - pointer-events: none from the first frame, so a half-faded full-page
+           layer can never swallow a click.
+       The class is held for 700ms: YTM hides the page at ~340ms on its own, so
+       by the time the class lifts there is nothing left to see even though the
+       transform comes back. */
+    html.ym-sm-song-closing ytmusic-player-page#player-page {
+      transition: none !important;
+      transform: none !important;
+      pointer-events: none !important;
+      animation: ym-sm-song-page-out .2s cubic-bezier(.4,0,1,1) both;
+    }
+    @keyframes ym-sm-song-page-out {
+      from { opacity: 1; }
+      to   { opacity: 0; }
+    }
+    html.ym-sm-song-closing #song-image,
+    html.ym-sm-song-closing #song-video {
+      animation: ym-sm-song-art-out .26s cubic-bezier(.4,0,1,1) both;
+    }
+    @keyframes ym-sm-song-art-out {
+      from { transform: none; }
+      to   { transform: scale(.94); }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       /* These selectors MUST carry the same .ym-sm-guiding class as the rules
          they override. Both sides are !important, so specificity decides — and
@@ -494,6 +606,18 @@
       html.ym-sm-tabs #tab-renderer.ym-sm-tabswap > * { animation: none !important; }
       html.ym-sm-tabs ytd-comment-replies-renderer ytd-comment-view-model { animation: none !important; }
       .ym-sm-flourish { animation: none !important; }
+      /* The song view's transitions are switched off by armSongOpen refusing to
+         arm at all under reduced motion; these cover the animations that hang
+         off the class in case it is already on screen when the preference
+         changes. The transition suppression itself is deliberate: it is what
+         stops the full-height slide. */
+      html.ym-sm-song-open ytmusic-player-page#player-page,
+      html.ym-sm-song-open #song-image,
+      html.ym-sm-song-open #song-video,
+      html.ym-sm-song-open ytmusic-player-page .content > #side-panel,
+      html.ym-sm-song-closing ytmusic-player-page#player-page,
+      html.ym-sm-song-closing #song-image,
+      html.ym-sm-song-closing #song-video { animation: none !important; }
     }
   `;
 
@@ -515,7 +639,7 @@
 
   function applySettings(next) {
     // AJ 2026-09-28: Aurora Flow has no settings UI — every module is always
-    // on. Ignore the incoming `next` and force all gates true so the gates
+    // on. Ignore the incoming "next" and force all gates true so the gates
     // below (guideOn / pagesOn / etc.) and the root class toggles land in the
     // enabled state regardless of what content.js sends.
     settings = Object.assign({}, settings, next || {});
@@ -829,7 +953,7 @@
     const collapsed = guide
       ? guide.offsetWidth < 120
       : root.classList.contains("ym-sm-guide-collapsed");
-    // DIRECTION FIX. `!collapsed` is the NEW collapsed state (used by the class
+    // DIRECTION FIX. "!collapsed" is the NEW collapsed state (used by the class
     // toggle below); the "opening" direction is its INVERSE — this toggle OPENS
     // the guide exactly when it is currently collapsed. Passing !collapsed here
     // marked every collapse as an opening and every opening as a collapse, so
@@ -1114,9 +1238,13 @@
   ].join(",");
 
   function onDocClick(event) {
-    if (!pagesOn()) return;
     const target = event.target;
     if (!target || typeof target.closest !== "function") return;
+    // Both ways into the song view: the player bar's chevron, and any
+    // navigation click (a card, a list row, a guide entry). This runs before
+    // the button bail-out below, because the chevron IS a button.
+    if (target.closest(NAV_TARGET_SEL) || target.closest(".toggle-player-page-button")) armSongOpen();
+    if (!pagesOn()) return;
     // Skip plain buttons (play, like, overflow menus) — they don't navigate.
     if (target.closest("button, tp-yt-paper-icon-button, yt-icon-button, ytmusic-play-button-renderer")) return;
     const hit = target.closest(NAV_TARGET_SEL);
@@ -1165,6 +1293,10 @@
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         syncGuideState();
+        // Re-bind rather than assume: if YTM ever replaces the app layout node,
+        // the observer would be watching a detached element and quietly stop
+        // arming. This is a no-op while the target is unchanged.
+        watchSongOpen();
         markNavigating();
       }
     }, URL_POLL_MS);
@@ -1509,6 +1641,83 @@
     else if (/^dislike$/i.test(label)) spawnLikeFlourish(btn, true);
   }
 
+  // ---- 8. song view open ---------------------------------------------------
+  // YTM's own opening choreography is the measured one in the CSS block above:
+  // a full-viewport slide, the player bar re-entering from below, the nav bar
+  // flashing, and the video growing for twice as long as the page took to
+  // arrive. The whole replacement lives in CSS; this only arms the window it
+  // hangs off.
+  //
+  // Armed from the ATTRIBUTE first and the click second.
+  //
+  // The click alone was not enough, and the live page showed why: the song view
+  // opens from at least three places — the chevron, a card or row link, and a
+  // click on empty space in the player bar (which navigates without matching any
+  // of those selectors). Clicks that missed the selectors played YTM's slide
+  // untouched, so the module appeared to do nothing.
+  //
+  // player-page-open is the state YTM itself commits when the song view opens,
+  // whatever opened it. A MutationObserver callback runs in the microtask after
+  // that write, before the frame paints, so the class can never land later than
+  // the first frame — which matters because the suppression is what stops the
+  // slide. The click path stays as insurance, for the one case the attribute
+  // cannot cover: the chevron can open the page while the attribute write is
+  // batched behind other work.
+  const SONG_WINDOW_MS = 760; // the .48s entrance, plus YTM's own 300ms teardown
+  const SONG_CLOSE_MS = 700;  // YTM hides the page at ~340ms; the rest is slack
+  let songTimer = 0;
+  let songCloseTimer = 0;
+  let songObserver = null;
+
+  // No songViewActive() guard here: the observer runs BECAUSE the view just
+  // opened, so by the time it fires that helper reports true by definition.
+  function armSongWindow() {
+    if (REDUCED_MOTION) return;
+    const root = document.documentElement;
+    root.classList.add("ym-sm-song-open");
+    if (songTimer) clearTimeout(songTimer);
+    songTimer = window.setTimeout(() => {
+      songTimer = 0;
+      root.classList.remove("ym-sm-song-open");
+    }, SONG_WINDOW_MS);
+  }
+
+  // The click path DOES need the guard: on a song view that is already open,
+  // re-arming would replay the entrance over content that is not arriving.
+  function armSongOpen() {
+    if (songViewActive()) return;
+    armSongWindow();
+  }
+
+  // The attribute going away is the close, and it is the only signal that
+  // covers every exit (the chevron, Escape, a browser back, a navigation out).
+  function armSongClose() {
+    if (REDUCED_MOTION) return;
+    const root = document.documentElement;
+    root.classList.add("ym-sm-song-closing");
+    if (songCloseTimer) clearTimeout(songCloseTimer);
+    songCloseTimer = window.setTimeout(() => {
+      songCloseTimer = 0;
+      root.classList.remove("ym-sm-song-closing");
+    }, SONG_CLOSE_MS);
+  }
+
+  function watchSongOpen() {
+    const app = document.querySelector("ytmusic-app-layout");
+    if (!app) return;
+    if (songObserver && songObserver.__target === app) return;
+    if (songObserver) songObserver.disconnect();
+    // One observer, both directions: the attribute is set on open and removed on
+    // close, so the presence test is the direction.
+    songObserver = new MutationObserver(() => {
+      if (app.hasAttribute("player-page-open")) armSongWindow();
+      else armSongClose();
+    });
+    songObserver.observe(app, { attributes: true, attributeFilter: ["player-page-open"] });
+    songObserver.__target = app;
+    dbg("song observer on", app.tagName);
+  }
+
   // ---- lifecycle -----------------------------------------------------------
   function start() {
     ensureStyle();
@@ -1520,6 +1729,7 @@
     document.addEventListener("keydown", onTabKey, true);
     document.addEventListener("click", onLikeClick, true);
     startPageWatch();
+    watchSongOpen();
     syncGuideState();
     document.addEventListener("click", onActionMenuClickCapture, true);
     // Registered AFTER the action-menu handler: when the close click lands on
@@ -1553,6 +1763,9 @@
     if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = 0; }
     if (guidingTimer) { clearTimeout(guidingTimer); guidingTimer = 0; }
     if (tabSwapTimer) { clearTimeout(tabSwapTimer); tabSwapTimer = 0; }
+    if (songTimer) { clearTimeout(songTimer); songTimer = 0; }
+    if (songCloseTimer) { clearTimeout(songCloseTimer); songCloseTimer = 0; }
+    if (songObserver) { songObserver.disconnect(); songObserver = null; }
     stopTabContentWatch();
     // Never leave a half-finished glide on the video: the inline transform is
     // ours, and leaving it behind would offset the player permanently.
@@ -1589,7 +1802,8 @@
     const root = document.documentElement;
     root.classList.remove(
       "ym-sm-on", "ym-sm-guide", "ym-sm-search", "ym-sm-pages", "ym-sm-micro", "ym-sm-tabs",
-      "ym-sm-like", "ym-sm-guide-collapsed", "ym-sm-guiding", "ym-sm-guide-opening"
+      "ym-sm-like", "ym-sm-guide-collapsed", "ym-sm-guiding", "ym-sm-guide-opening",
+      "ym-sm-song-open", "ym-sm-song-closing"
     );
     document.querySelectorAll(".ym-sm-page-in, .ym-sm-page-out")
       .forEach((el) => el.classList.remove("ym-sm-page-in", "ym-sm-page-out"));

@@ -18,6 +18,12 @@
 
 #ym-market.hidden { display: none; }
 #ym-market {
+  /* Pinned to YouTube's own root size, which content.js captures before it
+     applies the YouTube page's Interface text size (AJ, 2026-10-22). Without
+     this an inherited `font: inherit` node would ride along with the site's
+     scale, and Aurora's panel would inflate with YouTube instead of keeping
+     its own type. */
+  font-size: var(--ym-yt-root-fs, 10px);
   /* Monitor-relative scaling knob (AJ, 2026-09-28). Every layout metric in the
      panel is a multiple of this, so the WHOLE surface scales with the display
      instead of only its outer box. Before this, the shell shrank to fit a small
@@ -1657,7 +1663,6 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-lnk:hover::after, #ym-market .ym-mk-lnk:focus-visible::after { transform: scaleX(1); }
 #ym-market .ym-mk-lnk-spicy { --mk-la:#FF5C9E; --mk-lb:#59A9FF; --mk-lg:rgba(255,92,158,.62); }
-#ym-market .ym-mk-lnk-unison { --mk-la:#F20C32; --mk-lb:#FFA0A8; --mk-lg:rgba(242,12,50,.62); }
 #ym-market .ym-mk-lnk-lrclib { --mk-la:#6F6CFF; --mk-lb:#B0AEFF; --mk-lg:rgba(111,108,255,.72); }
 #ym-market .ym-mk-lnk-mb { --mk-la:#B84088; --mk-lb:#E87038; --mk-lg:rgba(184,64,136,.68); }
 #ym-market .ym-mk-lnk-lb { --mk-la:#EB743B; --mk-lb:#8F86E8; --mk-lg:rgba(235,116,59,.66); }
@@ -1840,40 +1845,120 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-ghlink svg { width: 15px; height: 15px; fill: currentColor; opacity: .75; }
 #ym-market .ym-mk-ghlink:hover { color: #fff; }
 
-/* home */
-#ym-market .ym-mk-home { min-height: 100%; display: flex; flex-direction: column; }
-#ym-market .ym-mk-hero {
-  flex: 1 1 auto; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; text-align: center;
-  padding: 40px 34px 10px;
+/* home: a catalog spread, not a landing page ------------------------------
+   The rail already lists every add-on, so the pane does not repeat it as one
+   tall column. A masthead, a narrow setup margin, and the catalog beside it:
+   space and alignment carry the structure, so no rules, cards, icons or
+   artwork. The add-on artwork is out of date, and a stale screenshot is worse
+   than none. */
+#ym-market .ym-mk-home { max-width: 780px; }
+#ym-market .ym-mk-mast {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px 20px; flex-wrap: wrap;
+  padding-bottom: 22px;
 }
-#ym-market .ym-mk-mark {
-  width: 68px; height: 68px; border-radius: 19px; margin-bottom: 22px;
-  background: var(--mk-surf2) center/cover no-repeat;
-  border: 1px solid var(--mk-line2);
-  box-shadow: 0 14px 44px rgba(0,0,0,.5);
+#ym-market .ym-mk-mast-title {
+  margin: 0; font-size: 46px; font-weight: 700;
+  letter-spacing: -.035em; line-height: .94;
 }
-#ym-market .ym-mk-htitle { margin: 0; font-size: 40px; font-weight: 700; letter-spacing: -.02em; line-height: 1.05; max-width: 540px; }
-#ym-market .ym-mk-hsub { margin: 16px 0 30px; max-width: 440px; font-size: 15px; line-height: 1.6; color: var(--mk-dim); }
-#ym-market .ym-mk-stats { display: flex; gap: 12px; margin-bottom: 30px; }
-#ym-market .ym-mk-stat {
-  min-width: 106px; padding: 14px 20px; border-radius: 12px;
-  background: rgba(255,255,255,.04); border: 1px solid var(--mk-line);
+#ym-market .ym-mk-mast-meta {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 3px; padding-bottom: 4px; white-space: nowrap;
+  font-size: 11.5px; color: var(--mk-dim);
 }
-#ym-market .ym-mk-stat b { display: block; font-size: 24px; font-weight: 700; line-height: 1.1; }
-#ym-market .ym-mk-stat span { font-size: 11.5px; color: var(--mk-dim); }
-#ym-market .ym-mk-cta {
-  border: 0; cursor: pointer; font-family: inherit; font-weight: 700; font-size: 14px;
-  color: #111; background: #fff; padding: 12px 24px; border-radius: 11px;
-  transition: transform .25s cubic-bezier(.34,1.4,.5,1), box-shadow .25s;
+#ym-market .ym-mk-mast-on { color: rgba(255,255,255,.78); }
+#ym-market .ym-mk-home-grid {
+  display: grid; grid-template-columns: 184px minmax(0,1fr);
+  gap: 36px; padding-top: 26px; align-items: start;
 }
-#ym-market .ym-mk-cta:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0,0,0,.5); }
-#ym-market .ym-mk-previews { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; padding: 10px 34px 32px; }
-#ym-market .ym-mk-prev .ym-mk-promobox { aspect-ratio: 3/4; border-radius: 13px; cursor: pointer; }
-#ym-market .ym-mk-prevcap { margin-top: 9px; font-size: 12px; color: var(--mk-dim); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The margin note, not a second sidebar: the gap separates it from the
+   catalog, and the note follows the catalog as it scrolls. */
+#ym-market .ym-mk-side {
+  min-width: 0; position: sticky; top: 30px;
+}
+/* First run: no setup to keep at hand, so the note and the catalog go full
+   width. The catalog is what this screen is for. */
+#ym-market .ym-mk-home.is-empty .ym-mk-home-grid {
+  grid-template-columns: minmax(0,1fr); gap: 26px;
+}
+#ym-market .ym-mk-home.is-empty .ym-mk-side {
+  position: static; padding: 0 0 20px;
+}
+#ym-market .ym-mk-sechead {
+  display: flex; align-items: baseline; gap: 7px;
+  margin: 0; padding-bottom: 8px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--mk-dim);
+}
+#ym-market .ym-mk-sechead-label { flex: 0 1 auto; min-width: 0; }
+#ym-market .ym-mk-sechead-n {
+  flex: 0 0 auto; font-weight: 600; letter-spacing: 0;
+  color: var(--mk-dim); font-variant-numeric: tabular-nums;
+}
+#ym-market .ym-mk-side-item {
+  display: flex; align-items: center;
+  width: 100%; min-height: 44px; padding: 8px 0;
+  border: 0;
+  background: transparent; color: inherit; font-family: inherit;
+  font-size: 14.5px; font-weight: 600; letter-spacing: -.01em;
+  text-align: left; cursor: pointer;
+  transition: color .2s;
+}
+#ym-market .ym-mk-side-item:hover { color: #fff; }
+#ym-market .ym-mk-side-item:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
+#ym-market .ym-mk-side-name {
+  display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#ym-market .ym-mk-side-empty {
+  margin: 0; padding: 12px 0 2px;
+  font-size: 12.5px; line-height: 1.55; color: var(--mk-dim);
+}
+#ym-market .ym-mk-catalog { min-width: 0; }
+#ym-market .ym-mk-group + .ym-mk-group { margin-top: 38px; }
+/* The row's padding hangs outside the text column, so the hover pill has air
+   on both sides without moving the name off the section head's left edge. */
+#ym-market .ym-mk-entry {
+  display: flex; align-items: center; gap: 14px;
+  width: calc(100% + 24px); margin: 0 -12px; padding: 11px 12px 12px;
+  border: 0; border-radius: 10px; background: transparent;
+  color: inherit; font-family: inherit; text-align: left; cursor: pointer;
+  transition: background .2s;
+}
+#ym-market .ym-mk-entry:hover { background: rgba(255,255,255,.05); }
+#ym-market .ym-mk-entry:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
+#ym-market .ym-mk-entry-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+#ym-market .ym-mk-entry-name {
+  font-size: 17px; font-weight: 600; letter-spacing: -.015em;
+  color: rgba(255,255,255,.86);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#ym-market .ym-mk-entry.is-on .ym-mk-entry-name { color: #fff; }
+#ym-market .ym-mk-entry-desc {
+  font-size: 12.5px; line-height: 1.5; color: var(--mk-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  max-width: 56ch;
+}
+#ym-market .ym-mk-entry-check { width: 15px; height: 15px; flex: 0 0 auto; fill: var(--mk-accent-soft); }
+#ym-market .ym-mk-entry-go {
+  width: 17px; height: 17px; flex: 0 0 auto; fill: var(--mk-dim2);
+  /* .6 keeps the open affordance above 3:1 on the panel while still quieter
+     than the red installed check. */
+  opacity: .6; transition: opacity .2s, transform .24s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-entry:hover .ym-mk-entry-go,
+#ym-market .ym-mk-entry:focus-visible .ym-mk-entry-go { opacity: 1; transform: translateX(2px); }
 #ym-market .ym-mk-empty { padding: 40px 8px; font-size: 13px; line-height: 1.6; color: var(--mk-dim); }
 
 /* ---- compact / narrow / short ---- */
+/* The pane is narrower than the window in floating mode, so the spread folds
+   before the usual 1100px detail breakpoint: below this the 184px margin
+   would leave the catalog too narrow for its descriptions. */
+@media (max-width: 1280px) {
+  #ym-market .ym-mk-home-grid { grid-template-columns: minmax(0,1fr); gap: 26px; padding-top: 22px; }
+  #ym-market .ym-mk-side {
+    position: static; padding: 0 0 20px;
+  }
+}
 @media (max-width: 1100px), (max-height: 720px) {
   #ym-market.ym-mk2 { grid-template-columns: 282px minmax(0,1fr); }
   #ym-market .ym-mk-detail { padding: 28px 30px 34px; }
@@ -1888,13 +1973,10 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] { width: 150px; }
   #ym-market .ym-mk-btn-un, #ym-market .ym-mk-btn-in { padding: 10px 16px; font-size: 13px; }
   #ym-market .ym-mk-acts { margin-top: 24px; gap: 11px; }
-  #ym-market .ym-mk-htitle { font-size: 32px; }
-  #ym-market .ym-mk-hsub { font-size: 14px; margin: 14px 0 24px; }
-  #ym-market .ym-mk-mark { width: 56px; height: 56px; margin-bottom: 18px; }
-  #ym-market .ym-mk-hero { padding: 30px 28px 8px; }
-  #ym-market .ym-mk-stat { padding: 11px 16px; min-width: 92px; }
-  #ym-market .ym-mk-stat b { font-size: 21px; }
-  #ym-market .ym-mk-previews { padding: 8px 28px 26px; gap: 12px; }
+  #ym-market .ym-mk-mast-title { font-size: 38px; }
+  #ym-market .ym-mk-mast { padding-bottom: 18px; }
+  #ym-market .ym-mk-home-grid { padding-top: 20px; }
+  #ym-market .ym-mk-entry-name { font-size: 16.5px; }
   #ym-market .ym-mk-mono { width: 34px; height: 34px; font-size: 14px; border-radius: 9px; }
   #ym-market .ym-mk-card { padding: 8px 9px; gap: 10px; }
   #ym-market .ym-mk-name { font-size: 13.5px; }
@@ -1905,20 +1987,20 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr); }
   #ym-market .ym-mk-promo { position: static; max-width: 210px; margin-top: 24px; }
   #ym-market .ym-mk-promocap { display: none; }
-  #ym-market .ym-mk-htitle { font-size: 28px; }
-  #ym-market .ym-mk-hsub { font-size: 13.5px; max-width: 360px; }
-  #ym-market .ym-mk-stats { gap: 8px; }
-  #ym-market .ym-mk-stat { padding: 10px 13px; min-width: 80px; }
-  #ym-market .ym-mk-previews { gap: 10px; padding: 8px 22px 22px; }
+  #ym-market .ym-mk-mast-title { font-size: 34px; }
+  #ym-market .ym-mk-mast-meta { font-size: 11px; }
+  #ym-market .ym-mk-entry { gap: 10px; }
+  #ym-market .ym-mk-entry-name { font-size: 16px; }
+  #ym-market .ym-mk-side-item { font-size: 14px; }
 }
 @media (max-height: 560px) {
   #ym-market .ym-mk-detail { padding: 20px 24px 24px; }
   #ym-market .ym-mk-sweep { margin: 14px 0 16px; }
   #ym-market .ym-mk-lead { margin-bottom: 16px; }
-  #ym-market .ym-mk-hero { padding: 20px 24px 6px; }
-  #ym-market .ym-mk-mark { width: 48px; height: 48px; margin-bottom: 14px; }
-  #ym-market .ym-mk-hsub { margin: 10px 0 18px; }
-  #ym-market .ym-mk-previews { display: none; }
+  #ym-market .ym-mk-mast { padding-bottom: 14px; }
+  #ym-market .ym-mk-home-grid { padding-top: 16px; }
+  #ym-market .ym-mk-entry { padding: 8px 12px 9px; }
+  #ym-market .ym-mk-group + .ym-mk-group { margin-top: 22px; }
   #ym-market .ym-mk-acts { margin-top: 20px; }
 }
 
@@ -2300,7 +2382,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   padding-block: .12em;
   font-family: var(--ym-cfont-family, var(--ym-sl-lyric-font, "SpicyLyrics")),
     "SpicyLyrics", "Noto Sans Georgian", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
-  font-size: calc(1.32rem * var(--ym-cfont-scale, 1));
+  font-size: calc(13.2px * var(--ym-cfont-scale, 1));
   font-weight: 700;
   line-height: 1.4;
   letter-spacing: 0;
@@ -2473,8 +2555,16 @@ ytmusic-player-bar .ym-pb-btn:active,
   padding: 0 10px;
   margin: 0 -10px;
   border-radius: 10px;
-  transition: background-color .2s ease;
+  transition: background-color .2s ease, opacity .22s ease;
 }
+/* A dependent row: still readable, dimmed and out of the tab order (the input's
+   own `disabled` flag does the tab order) while the switch it depends on makes
+   it meaningless. Used by Explore's width lever when the tiles are hidden. */
+#ym-market .ym-detail-setting-row.is-locked {
+  opacity: .38;
+  pointer-events: none;
+}
+#ym-market .ym-detail-setting-row.is-locked:hover { background: transparent; }
 #ym-market .ym-detail-setting-row:hover { background: rgba(255,255,255,.035); }
 #ym-market .ym-detail-setting-label { transition: color .2s ease; }
 #ym-market .ym-detail-setting-row:hover .ym-detail-setting-label { color: #fff; }
@@ -2687,6 +2777,70 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market.ym-mk-collapsed .ym-mk-card-discord .ym-mk-out { display: none; }
 
+/* YouTube Modifications: the Discord row's "not an add-on" treatment, in
+   YouTube red (#FF0033) instead of blurple. Same tinted surface, same 1px inset
+   border, same solid tile — only the hue and the hover lift differ, so the two
+   entries above the add-on list read as a pair. It deliberately does NOT get
+   .ym-mk-out: the Discord row's arrow means "leaves the app", and this one is a
+   page inside the panel. Its own rules are needed because the base .sel /
+   :hover rules are more specific than a plain .ym-mk-card-yt one (AJ,
+   2026-10-22). */
+#ym-market .ym-mk-card-yt {
+  --yt-red: #ff0033;
+  color: #f3f3f5;
+  text-decoration: none;
+  background: rgba(255,0,51,.08);
+  box-shadow: inset 0 0 0 1px rgba(255,0,51,.55);
+  transition: background-color .22s ease, box-shadow .22s ease,
+              transform .18s cubic-bezier(.34,1.4,.5,1);
+}
+/* Selected (its page is open) keeps the red identity rather than falling back to
+   the neutral white tint every other row uses. */
+#ym-market .ym-mk-card-yt.sel {
+  background: rgba(255,0,51,.14);
+  box-shadow: inset 0 0 0 1px rgba(255,0,51,.78);
+}
+#ym-market .ym-mk-card-yt:hover {
+  background: rgba(255,0,51,.18);
+  box-shadow: inset 0 0 0 1px rgba(255,0,51,.92);
+}
+#ym-market .ym-mk-card-yt .ym-mk-mono {
+  color: #fff;
+  background: var(--yt-red);
+  border-color: rgba(255,255,255,.22);
+}
+/* The tile keeps the Discord tile's crisp .22 white edge even while selected —
+   the generic `.sel` rule would otherwise swap it for the dimmer neutral line. */
+#ym-market .ym-mk-card-yt:hover .ym-mk-mono,
+#ym-market .ym-mk-card-yt.sel .ym-mk-mono {
+  background: #ff2b4d;
+  border-color: rgba(255,255,255,.22);
+}
+#ym-market .ym-mk-card-yt .ym-mk-name { color: var(--mk-dim); }
+#ym-market .ym-mk-card-yt.sel .ym-mk-name,
+#ym-market .ym-mk-card-yt:hover .ym-mk-name { color: #fff; }
+
+/* Apple Music Style is a built-in theme, not an add-on: the same "nothing to
+   install" reading as the YouTube row, in the theme's own pink. The monogram
+   keeps the inline glyph tint mkCard sets, so only the row and name change. */
+#ym-market .ym-mk-card-apple {
+  background: rgba(250,45,72,.07);
+  box-shadow: inset 0 0 0 1px rgba(250,45,72,.45);
+  transition: background-color .22s ease, box-shadow .22s ease,
+              transform .18s cubic-bezier(.34,1.4,.5,1);
+}
+#ym-market .ym-mk-card-apple.sel {
+  background: rgba(250,45,72,.13);
+  box-shadow: inset 0 0 0 1px rgba(250,45,72,.75);
+}
+#ym-market .ym-mk-card-apple:hover {
+  background: rgba(250,45,72,.16);
+  box-shadow: inset 0 0 0 1px rgba(250,45,72,.9);
+}
+#ym-market .ym-mk-card-apple .ym-mk-name { color: var(--mk-dim); }
+#ym-market .ym-mk-card-apple.sel .ym-mk-name,
+#ym-market .ym-mk-card-apple:hover .ym-mk-name { color: #fff; }
+
 /* ===== custom image picker (AJ, 2026-10-21) ==============================
    Fully custom chrome: the row stacks its label above a card holding a raw
    thumbnail, the filename + dimensions, and two buttons. The only native part is
@@ -2765,3 +2919,1115 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-file-btn-quiet { background: rgba(255,255,255,.08); color: #f3f3f5; }
 #ym-market .ym-file-btn-quiet:hover { background: rgba(255,255,255,.14); }
 #ym-market .ym-file-btn-quiet.is-off { opacity: .32; pointer-events: none; }
+
+/* ===== YouTube page: page-wide font swap (AJ, 2026-10-22) ==================
+   The panel's own YouTube page (not an add-on) toggles `ym-yt-font` on <html>.
+   The swap has to reach YTM's components because every one of them declares its
+   own family, so it needs a universal selector and !important — there is no
+   inheritable hook.
+
+   #ym-sl-panel is excluded with :not(#ym-sl-panel, #ym-sl-panel *): the lyrics
+   carry a user-chosen face and the panel its own stack, and an !important on
+   every descendant would flatten both. (The add-ons panel, #ym-market, is a
+   child of <body> rather than of ytmusic-app, so it is out of reach anyway.)
+   Icon faces are excluded too: some YTM glyphs are ligature icons and would
+   render as words in a text face. */
+html.ym-yt-font ytmusic-app,
+html.ym-yt-font ytmusic-app *:not(#ym-sl-panel, #ym-sl-panel *, iron-icon, yt-icon, tp-yt-iron-icon, .material-icons, .material-icons-extended) {
+  font-family: "SpicyLyrics", "Roboto", "YouTube Sans", "Segoe UI", system-ui, sans-serif !important;
+}
+
+/* The YouTube page is a short single column, not a catalogue: without a cap the
+   rows stretch label-to-control across the whole pane (AJ, 2026-10-22). */
+#ym-market .ym-mk-yt .ym-mk-lead,
+#ym-market .ym-mk-yt .ym-detail-settings { max-width: 620px; }
+/* Two settings blocks on one page (Apple Music Style) would otherwise sit flush:
+   the first block already ends on a row rule, so the next title needs air
+   rather than landing straight on it. */
+#ym-market .ym-mk-yt .ym-mk-settings + .ym-mk-settings { margin-top: 30px; }
+
+/* ===== YouTube page: player chrome (AJ, 2026-10-22) ========================
+   YouTube Music sizes its top bar and player bar from two custom properties on
+   <html>, so overriding them shrinks the chrome AND everything laid out around
+   it — no component rules and no fixed heights of our own to keep in sync. */
+html.ym-yt-compact {
+  --ytmusic-nav-bar-height: 48px;
+  --ytmusic-player-bar-height: 60px;
+}
+
+/* YTM fades the volume slider in only while the player bar is hovered, which
+   reads as "missing" on a desktop. Lower viewports keep YTM's own media query
+   that hides it outright — there is genuinely no room for it there. */
+html.ym-yt-volume .volume-slider.ytmusic-player-bar {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+/* ---- dark frosted shelf ---------------------------------------------------
+   The bar's background is its OWN fixed layer behind `ytmusic-player-bar`,
+   which is transparent — so this is the node to frost, not the bar. !important
+   because Aurora Bloom paints the same layer with a frost of its own and the
+   two have to resolve to one surface. */
+html.ym-yt-dark-bar ytmusic-app-layout #player-bar-background {
+  background: rgba(10, 10, 12, 0.46) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(1.45);
+  backdrop-filter: blur(30px) saturate(1.45);
+}
+
+/* The shelf's hairline lives in its OWN rule, gated on the dividers lever. Left
+   inside the shelf block it depended on source order to lose against the
+   `border: 0` the divider rules write, and any later rule touching the same
+   element put the line back — which is what kept showing above the compact
+   player bar. */
+html.ym-yt-dark-bar:not(.ym-yt-no-dividers) ytmusic-app-layout #player-bar-background {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+html.ym-yt-dark-bar ytmusic-player-bar yt-icon-button:hover,
+html.ym-yt-dark-bar ytmusic-player-bar tp-yt-paper-icon-button:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-radius: 50%;
+}
+
+/* ---- transport spacing ----------------------------------------------------
+   YTM gives each transport button 12px of air on its own sides (8px left, 4px
+   right) AND pads the box 6px around the glyph, so the three icons sat ~35px
+   apart no matter what the margins said. The margins go to zero and the boxes
+   shrink to glyph + 8px: 32px around a 24 icon, 48 around the 40 play, which
+   leaves one even ~15px lane between the painted shapes (AJ, 2026-10-23).
+   Gated on the icon switch: with YouTube's own glyphs back, so is its spacing. */
+html.ym-yt-custom-icons ytmusic-player-bar .left-controls-buttons > yt-icon-button {
+  margin: 0 !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+
+html.ym-yt-custom-icons ytmusic-player-bar .left-controls-buttons > yt-icon-button#play-pause-button {
+  width: 48px !important;
+  height: 48px !important;
+}
+
+/* The painter adds its parts beside YouTube's own paths instead of deleting
+   them, so the switch can hand the stock glyph back. While the set is on those
+   paths are still in the svg — and still getting YouTube's state updates — but
+   they must not paint under ours. */
+html.ym-yt-custom-icons ytmusic-player-bar svg[data-ym-icon] > :not([data-ym-part]) {
+  display: none;
+}
+
+/* ---- dock arrangement -----------------------------------------------------
+   1fr | auto | 1fr sizes the centre column to the transport itself, so the
+   buttons land on the bar's true midpoint. The 3fr / 4fr / 2fr split YTM uses
+   leaves the transport left of centre, because the time readout shares that
+   middle zone with it. */
+html.ym-yt-dock ytmusic-player-bar {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) !important;
+}
+
+html.ym-yt-dock ytmusic-player-bar .middle-controls {
+  grid-column: 1;
+  grid-row: 1;
+  justify-content: flex-start;
+  margin-left: 16px !important;
+}
+
+html.ym-yt-dock ytmusic-player-bar #left-controls {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin-left: 0 !important;
+}
+
+/* The time readout is taken out of the centring maths. Left in flow it drags
+   the play button off centre by half its own width — the "controls look shifted
+   left" defect. It hangs just past the transport instead. */
+html.ym-yt-dock ytmusic-player-bar #left-controls .time-info {
+  position: absolute;
+  left: calc(50% + 96px);
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0;
+}
+
+html.ym-yt-dock ytmusic-player-bar #right-controls {
+  grid-column: 3;
+  grid-row: 1;
+  justify-content: flex-end;
+}
+
+/* ===== YouTube page: top bar and side rail ================================
+   The chrome around every page. Both surfaces are their own fixed layers, not
+   the components drawn on top of them, so painting these is enough and nothing
+   has to be re-measured when YouTube changes a row's height. */
+html.ym-yt-glass-chrome #nav-bar-background {
+  background: rgba(0, 0, 0, 0.3) !important;
+  -webkit-backdrop-filter: blur(26px) saturate(1.3);
+  backdrop-filter: blur(26px) saturate(1.3);
+}
+
+html.ym-yt-glass-chrome #guide-wrapper,
+html.ym-yt-glass-chrome #mini-guide-background {
+  background: transparent !important;
+}
+
+/* ===== YouTube page: divider lines =======================================
+   YouTube Music draws five hairlines that read as clutter once the page is
+   calmer. Measured on the live page: the top bar's bottom edge 1px
+   rgba(255,255,255,.15), the side rail's right edge .15, the collapsed rail's
+   right edge .1, the tab strip's bottom edge .1, and the player bar's top edge.
+   `#nav-bar-divider` is a sixth: a separate fixed 1px strip pinned at
+   `top: var(--ytmusic-nav-bar-height)`, faded in on scroll. It was missed
+   because it is not the nav bar's border, and it is the line that survives
+   under the compact header. */
+html.ym-yt-no-dividers #nav-bar-background,
+html.ym-yt-no-dividers #nav-bar-divider,
+html.ym-yt-no-dividers #guide-wrapper,
+html.ym-yt-no-dividers #mini-guide-background,
+html.ym-yt-no-dividers ytmusic-player-page tp-yt-paper-tabs {
+  border: 0 !important;
+}
+
+/* The player bar is the shelf's own surface plus the custom element YTM draws
+   in front of it (`[slot="player-bar"]`), so both are cleared rather than the
+   background alone. */
+html.ym-yt-no-dividers ytmusic-app-layout #player-bar-background,
+html.ym-yt-no-dividers ytmusic-app-layout > [slot="player-bar"],
+html.ym-yt-no-dividers ytmusic-player-bar,
+html.ym-yt-no-dividers ytmusic-miniplayer {
+  border: 0 !important;
+}
+
+/* Aurora Lyrics' own page backdrop frames the bar with a 1px top hairline and a
+   soft shadow. The hairline is a divider like the rest; the shadow is the same
+   edge seen blurred, so it goes too. Aurora Bloom freezes the bar behind its own
+   fixed frost layer, so that layer's border is the same line drawn somewhere
+   else. */
+html.ym-yt-no-dividers .ym-sl-page-bg-root #player-bar-background,
+html.ym-yt-no-dividers .ym-dynamic-bar-blur {
+  border-top: 0 !important;
+  box-shadow: none !important;
+}
+
+html.ym-yt-no-dividers .ym-sl-page-bg-root.ym-sl-topbar-scrolled #nav-bar-background {
+  box-shadow: none !important;
+}
+
+/* ===== YouTube page: home layout (AJ, 2026-10-22) =========================
+   Three independent levers over the browse pages, each one class on <html>, so
+   YouTube's constant re-rendering cannot drop them. Measured on the live page:
+   the chip row is 112px tall for a 36px strip — 48px of padding above, 16px
+   below, 6px margins — and every carousel shelf carries a 24px bottom margin. */
+html.ym-yt-nochips ytmusic-chip-cloud-renderer {
+  display: none !important;
+}
+
+/* The 48px above the chips exists because the row can scroll under the nav bar.
+   On the home page it is simply empty space, so this trims it to 8px on both
+   sides and pulls the first shelf up by ~48px without touching the chips. */
+html.ym-yt-tight-home ytmusic-chip-cloud-chip-renderer {
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+}
+/* Trimming only the chips did nothing once the chips were hidden: the band at
+   the top is the first shelf's own header, which carries 32px of padding above
+   the artist line for every shelf (measured: first title at y=110 with the nav
+   ending at 48). That is the "it doesn't tighten" the top of the page — so the
+   header padding is the lever, not just the chip row. */
+html.ym-yt-tight-home ytmusic-carousel-shelf-renderer #header-group {
+  padding-top: 10px !important;
+}
+html.ym-yt-tight-home ytmusic-carousel-shelf-renderer {
+  margin-bottom: 8px !important;
+}
+
+/* Home tiles are artwork plus two lines of metadata. Hiding the caption block
+   leaves an artwork wall; the anchor keeps its aria-label, so the link is still
+   named for screen readers. */
+html.ym-yt-no-captions ytmusic-carousel-shelf-renderer ytmusic-two-row-item-renderer .details {
+  display: none !important;
+}
+
+/* YouTube caps a shelf's card grid at 1478px and centres it with an auto margin,
+   so on a wide window the 2008px shelf keeps 265px of empty gutter on EACH
+   side while the row still scrolls (measured at 2104px viewport: the header and
+   #items both sat at x=361 with 265px margins). Dropping the cap on #items lets
+   the grid fill the pane — the columns re-flow, the cards keep their size.
+
+   ⭐ #header-group must NOT be decapped with it. Its width survives an `auto`
+   override (it still measured 1478px), so killing its auto margins welds it to
+   the LEFT edge of the shelf while the cards now start there too — the centred
+   title lands 265px left of where it was (measured: 835 instead of 1100). The
+   header keeps its own centring; the cards around it grow. */
+html.ym-yt-wide-shelves ytmusic-carousel-shelf-renderer #items {
+  width: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* The stock shelf title is a 54px/65px heading centred over the row, which is
+   what gives the browse pages their magazine look. This is the other, denser
+   layout: an 18px label pinned to the first card's edge, the artist line above
+   it, and the header trimmed from 127px to 68px so a screen shows one more
+   shelf. Everything here overrides centered-home's centring. */
+html.ym-yt-small-titles ytmusic-carousel-shelf-renderer #header-group {
+  padding-top: 14px !important;
+}
+html.ym-yt-small-titles ytmusic-carousel-shelf-basic-header-renderer {
+  justify-content: flex-start !important;
+}
+html.ym-yt-small-titles ytmusic-carousel-shelf-basic-header-renderer > #content-group > #details {
+  justify-content: flex-start !important;
+}
+html.ym-yt-small-titles ytmusic-carousel-shelf-renderer yt-formatted-string.title {
+  font-size: 18px !important;
+  font-weight: 600 !important;
+  line-height: 1.5 !important;
+  letter-spacing: 0 !important;
+  text-align: left !important;
+}
+html.ym-yt-small-titles ytmusic-carousel-shelf-basic-header-renderer > #content-group > .strapline {
+  text-align: left !important;
+}
+
+/* ===== YouTube page: section picker (AJ, 2026-10-22) =====================
+   The tab is two levels now: a tile per part of YouTube Music, then that
+   part's settings. The tiles are the whole map of what the tab can change, so
+   they carry the motion — lift on hover, a real press, and the chevron sliding
+   with the pointer. The view swap itself is WAAPI in content.js (out, then in),
+   because the outgoing view has to animate too. */
+#ym-market .ym-yt-views { max-width: 620px; }
+
+#ym-market .ym-yt-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 2px;
+}
+
+#ym-market .ym-yt-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--mk-line);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, .028);
+  color: #fff;
+  font-family: inherit;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: transform .3s cubic-bezier(.22, 1, .36, 1),
+              background-color .22s ease, border-color .22s ease, box-shadow .3s ease;
+}
+#ym-market .ym-yt-tile:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, .05);
+  border-color: rgba(255, 255, 255, .17);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, .38);
+}
+#ym-market .ym-yt-tile:active {
+  transform: translateY(0) scale(.985);
+  transition-duration: .12s;
+}
+#ym-market .ym-yt-tile:focus-visible {
+  outline: 2px solid var(--mk-accent-soft);
+  outline-offset: 2px;
+}
+
+/* The tile's "picture" is drawn, not an image: a mini shelf for Home, a
+   now-playing stack for Song view. */
+#ym-market .ym-yt-art {
+  position: relative;
+  height: 88px;
+  padding: 13px;
+  box-sizing: border-box;
+  display: grid;
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  background:
+    radial-gradient(130% 120% at 18% 0%, rgba(224, 16, 64, .2), rgba(224, 16, 64, 0) 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, .03), rgba(255, 255, 255, 0));
+  transition: transform .5s cubic-bezier(.22, 1, .36, 1);
+}
+#ym-market .ym-yt-tile:hover .ym-yt-art { transform: scale(1.02); }
+
+#ym-market .ym-yt-art-home {
+  gap: 5px 6px;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: 6px 1fr 1fr;
+}
+#ym-market .ym-yt-art-home i {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .14);
+}
+/* The shelf title above the cards. */
+#ym-market .ym-yt-art-home i:first-child {
+  grid-column: 1 / -1;
+  align-self: center;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .34);
+}
+
+#ym-market .ym-yt-art-song {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+#ym-market .ym-yt-disc {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(150deg, rgba(255, 255, 255, .34), rgba(224, 16, 64, .62));
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .35);
+}
+#ym-market .ym-yt-lines {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+#ym-market .ym-yt-lines i {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .13);
+}
+#ym-market .ym-yt-lines i:nth-child(1) { width: 62%; background: rgba(255, 255, 255, .28); }
+#ym-market .ym-yt-lines i:nth-child(2) { width: 92%; background: rgba(255, 86, 116, .85); }
+#ym-market .ym-yt-lines i:nth-child(3) { width: 74%; }
+#ym-market .ym-yt-lines i:nth-child(4) { width: 55%; }
+
+#ym-market .ym-yt-tile-badge {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: rgba(10, 10, 12, .55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  color: rgba(255, 255, 255, .82);
+}
+
+#ym-market .ym-yt-tile-body {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px 13px;
+}
+#ym-market .ym-yt-tile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#ym-market .ym-yt-tile-name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -.005em;
+}
+#ym-market .ym-yt-tile-row svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: rgba(255, 255, 255, .3);
+  transition: transform .28s cubic-bezier(.22, 1, .36, 1), fill .2s ease;
+}
+#ym-market .ym-yt-tile:hover .ym-yt-tile-row svg {
+  transform: translateX(2px);
+  fill: #fff;
+}
+#ym-market .ym-yt-tile-desc {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--mk-dim);
+}
+
+/* ---- inside a section ---- */
+#ym-market .ym-yt-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 20px;
+  padding: 6px 12px 6px 9px;
+  border: 1px solid var(--mk-line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .03);
+  color: var(--mk-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .2s ease, background-color .2s ease,
+              border-color .2s ease, transform .18s cubic-bezier(.22, 1, .36, 1);
+}
+#ym-market .ym-yt-back svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  transition: transform .26s cubic-bezier(.22, 1, .36, 1);
+}
+#ym-market .ym-yt-back:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, .075);
+  border-color: rgba(255, 255, 255, .18);
+}
+#ym-market .ym-yt-back:hover svg { transform: translateX(-2px); }
+#ym-market .ym-yt-back:active { transform: scale(.97); }
+#ym-market .ym-yt-back:focus-visible {
+  outline: 2px solid var(--mk-accent-soft);
+  outline-offset: 2px;
+}
+
+#ym-market .ym-yt-sec-head { max-width: 620px; }
+#ym-market .ym-yt-sec-title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+#ym-market .ym-yt-sec-blurb {
+  margin: 5px 0 0;
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--mk-dim);
+}
+/* The first block under the section header does not need its own divider — the
+   header already separates it — but any second block keeps the standard one. */
+#ym-market .ym-yt-view[data-section] .ym-detail-settings:first-of-type {
+  margin-top: 22px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* The Global tile's art is the hairline itself: two regions and the divider
+   between them — the only lever left on that page now that the type and the
+   size moved to the Apple Music Style card. */
+#ym-market .ym-yt-art-global {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 20px;
+}
+#ym-market .ym-yt-art-block {
+  height: 17px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .09);
+}
+#ym-market .ym-yt-art-rule { height: 1px; background: rgba(255, 255, 255, .34); }
+
+/* An odd number of tiles leaves the last one alone on its row. It spans the row
+   instead of sitting in a half-empty one, and turns into a wide card — art on
+   the left, copy on the right. A fourth tile (Playlist view) restores the plain
+   2x2 with no rule change. */
+#ym-market .ym-yt-tile:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: stretch;
+}
+#ym-market .ym-yt-tile:last-child:nth-child(odd) .ym-yt-art {
+  flex: 0 0 176px;
+  height: auto;
+  min-height: 96px;
+  border-bottom: 0;
+  border-right: 1px solid rgba(255, 255, 255, .055);
+}
+#ym-market .ym-yt-tile:last-child:nth-child(odd) .ym-yt-tile-body {
+  align-self: center;
+  padding: 14px 18px 14px 0;
+}
+
+/* The Library tile's art: a small cover grid with one round artist tile. */
+#ym-market .ym-yt-art-library {
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+}
+#ym-market .ym-yt-art-library i {
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .16);
+}
+#ym-market .ym-yt-art-library i:nth-child(1) {
+  background: linear-gradient(150deg, rgba(255, 255, 255, .3), rgba(224, 16, 64, .6));
+}
+#ym-market .ym-yt-art-library i:nth-child(3) {
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .3);
+}
+
+/* The Explore tile's art: its own four shortcut cards over a strip of chips. */
+#ym-market .ym-yt-art-explore {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+#ym-market .ym-yt-art-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+#ym-market .ym-yt-art-cards i {
+  height: 20px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .16);
+}
+#ym-market .ym-yt-art-cards i:first-child {
+  background: linear-gradient(150deg, rgba(255, 255, 255, .34), rgba(224, 16, 64, .6));
+}
+#ym-market .ym-yt-art-chips { display: flex; gap: 5px; }
+#ym-market .ym-yt-art-chips i {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .13);
+}
+#ym-market .ym-yt-art-chips i:nth-child(2) { background: rgba(255, 86, 116, .7); }
+
+/* ===== YouTube page: library levers (AJ, 2026-10-22) =====================
+   The Library grid is capped and indented like the home shelves (1478px with
+   265px of gutter each side at 2122px wide) and its artwork is square at the
+   ITEM's width, so "bigger cards" is really "wider columns + a square aspect
+   box". Both rules are scoped to html.library, which YouTube only puts on the
+   Library route — a search or playlist grid keeps its own sizing. */
+
+/* Empty playlists are marked with .ym-yt-empty from content.js (YouTube prints
+   "0 tracks" in the subtitle and offers no class of its own). */
+html.ym-yt-lib-noempty ytmusic-grid-renderer ytmusic-two-row-item-renderer.ym-yt-empty {
+  display: none !important;
+}
+
+html.library.ym-yt-lib-big ytmusic-grid-renderer #items {
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)) !important;
+  grid-auto-rows: auto !important;
+  gap: 34px 22px !important;
+}
+html.library.ym-yt-lib-big ytmusic-grid-renderer ytmusic-two-row-item-renderer {
+  height: auto !important;
+}
+/* The artwork space is this wrapper's `padding-top`, and YouTube writes it in
+   PX (142.882px for a 143px card), so it does not follow a wider column. Swap it
+   for a percentage on the bottom edge: percentages DO resolve against the
+   wrapper's own width, which is what makes the square follow the new card size.
+   The padding-top has to be zeroed at the same time or the box keeps both. */
+html.library.ym-yt-lib-big ytmusic-grid-renderer ytmusic-two-row-item-renderer a.image-wrapper {
+  position: relative !important;
+  height: auto !important;
+  padding-top: 0 !important;
+  padding-bottom: 100% !important;
+}
+html.library.ym-yt-lib-big ytmusic-grid-renderer ytmusic-two-row-item-renderer ytmusic-thumbnail-renderer {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* The cap sits on ytmusic-grid-renderer itself, not on #items: measured at a
+   2104px window it is 1478px wide with 265.1px auto margins on each side, so
+   the grid is centred like the home shelves while the tab row above it spans
+   the page. Dropping both leaves the cards to fill the pane and re-flow
+   (`auto-fill` columns), which is the same trade the home width lever makes.
+   Scoped to html.library: a search, album or playlist grid keeps YouTube's own
+   measure, because those pages have no lever of their own to turn it back. */
+html.library.ym-yt-lib-wide ytmusic-grid-renderer {
+  width: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+/* The tab strip (x=333) and the sort row (x=361) are on the SAME 1478px measure
+   as the grid, and their edges are what the old grid edges lined up with. Widen
+   the cards alone and the Library tab ends up 253px inboard of the first card
+   while the sort pill floats 265px short of the last one — the home-shelf header
+   problem again, just inverted. Both widen with the grid.
+
+   ytmusic-tabs is a FLEX row, and a flex child with width:auto sizes to its
+   LABELS (the strip collapsed to a 171px pill in the harness), so the strip has
+   to grow: 100% + border-box, which also keeps the 8px padding inside the width
+   instead of pushing the strip past the cards. The labels carry a 16px side
+   margin, so 8px of container padding lands the first one on the card edge. */
+html.library.ym-yt-lib-wide ytmusic-tabs #tabs {
+  box-sizing: border-box !important;
+  width: 100% !important;
+  flex: 1 1 auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 8px !important;
+}
+html.library.ym-yt-lib-wide ytmusic-side-aligned-item-renderer {
+  width: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* ===== YouTube page: Explore page (AJ, 2026-10-23) =========================
+   Explore has no route class on <html> (only the Library page gets one), so
+   these are scoped by COMPONENTS only Explore renders rather than by route.
+   They are inert on every other page, which is exactly why no route check is
+   needed: nothing else on the site puts a ytmusic-navigation-button-renderer
+   tab in a grid, or a navigation-button listitem in a carousel.
+
+   Measured at a 2122px window: the shortcut grid is 1478px at x=361 with four
+   351x158 tiles in one row; the Moods & genres carousel is a single ~3300px
+   row of thirteen 226x48 chips, clipped by the shelf and reached with arrows. */
+html.ym-yt-explore-wide ytmusic-grid-renderer:has(> #items > ytmusic-navigation-button-renderer) {
+  width: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* One row of tiles, so hiding the row is the whole lever: the first shelf moves
+   up into the space the tiles occupied. */
+html.ym-yt-explore-noshortcuts ytmusic-grid-renderer:has(> #items > ytmusic-navigation-button-renderer) {
+  display: none !important;
+}
+
+/* ---- Moods & genres as a wrapped wall instead of a carousel -------------
+   Every genre on screen at once: no arrows, no hidden chip. This is FLEX, not
+   grid, and that is deliberate. YouTube's carousel already lays #items out as a
+   grid with a column flow and tracks of its own, so an `auto-fill` template on
+   top of it never wrapped row-major — the chips each got their own column and
+   ran off the right edge of the pane instead of stacking. flex-wrap cannot be
+   sabotaged by a grid template, so the wrap is ours.
+
+   `transform: none` is load-bearing: the carousel scrolls by translating #items
+   sideways, and a translated wall would start off the shelf's edge. */
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) {
+  height: auto !important;
+}
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) .ytmusic-shelf {
+  height: auto !important;
+  overflow: visible !important;
+}
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) ytmusic-carousel {
+  height: auto !important;
+  overflow: visible !important;
+}
+/* The arrows page a row that no longer scrolls; with every genre on screen they
+   are two dead buttons. The pill group is arrows only — the More link is not
+   inside it. */
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) .button-group {
+  display: none !important;
+}
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) #items {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: stretch !important;
+  gap: 12px 14px !important;
+  width: 100% !important;
+  /* Held to the shelf's own 1478px card measure (the row above it, and the
+     centred title, are on it) — not the 2008px fullbleed width, which would
+     start the chips 277px left of every cover. The site-wide width lever still
+     wins: with it on the cards fill the pane and so does this wall. */
+  max-width: 1478px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  height: auto !important;
+  transform: none !important;
+  overflow: visible !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+html.ym-yt-explore-moods.ym-yt-wide-shelves ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) #items {
+  max-width: none !important;
+}
+/* 176px of basis lets seven chips share the 1478px measure; growing them makes
+   each row flush with the cards above instead of leaving a ragged right edge,
+   and the cap keeps the final row from stretching into slabs. */
+html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-button-renderer[role="listitem"]) #items > ytmusic-navigation-button-renderer {
+  flex: 1 1 176px !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: 240px !important;
+  /* The carousel spaces these with margins; with flex gap those would stack
+     into double gutters, so the gap is the only spacing in the wall. */
+  margin: 0 !important;
+}
+/* ===== YouTube page: the song view's tab column (AJ, 2026-10-23) ==========
+   The watch page is the cover or video, then a column whose four tabs swap the
+   panel underneath it (Up next / Lyrics / Comments / Related). Measured at a
+   2122px window: #main-panel ends at x=1250, #side-panel runs from x=1346 to
+   2008 — 662px — and paper-tabs carries `fit-container`, so it splits that
+   width evenly (162/149/188/163) and each short label sits alone in its share.
+
+   Two independent levers, both classes on <html> for the same reason as the
+   rest of this page: YTM rebuilds the player page on every track change, the
+   root does not.
+     .ym-yt-song-wide   the column takes a bigger share of the split, so the
+                        lyrics get a longer measure and the picture gets smaller
+     .ym-yt-song-tabs   the labels stop stretching edge to edge, and the active
+                        one is marked by a glass capsule that glides */
+
+/* ---- wider tab column ---------------------------------------------------
+   Growing the column has to take the width from #main-panel: the two are flex
+   siblings, so a wider #side-panel narrows the box YouTube sizes the video
+   (and centres the cover) from. It does not happen by itself — YTM caches that
+   size — so content.js fires a resize when the lever flips; see applyYtPrefs.
+
+   48% is a share of the player page's own row, not of the viewport, so the
+   ratio holds when the guide, the NPV rail or the window changes the page.
+   `min(…, 920px)` stops a very wide monitor from turning the lyrics into one
+   endless line. dynamic.js anchors its divider line to this column's left
+   edge, so the line moves with it — and the shrunken picture is what keeps the
+   line out of the video instead of behind it. */
+html.ym-yt-song-wide ytmusic-player-page #side-panel {
+  width: min(48%, 920px) !important;
+  flex: 0 0 auto !important;
+}
+/* Without this, the video sets a min-content floor and the narrower box would
+   push the page wider instead of shrinking the picture. */
+html.ym-yt-song-wide ytmusic-player-page #main-panel {
+  min-width: 0 !important;
+}
+
+/* ---- a quieter strip ----------------------------------------------------
+   `fit-container` is what stretches the labels; off, every tab keeps its own
+   width, so the four short labels read as one group instead of being dragged
+   apart across 880px. The group then sits in the MIDDLE of the column rather
+   than hugging its left edge, which keeps the strip on the same axis as the
+   panel under it and the cover beside it. */
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs #tabsContent {
+  justify-content: center !important;
+}
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab {
+  flex: 0 0 auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  /* Above the capsule, which is positioned at z-index 0. */
+  z-index: 1 !important;
+}
+/* YTM's Android-style touch ripple: a circle that fills the tab, brightens and
+   fades. It is paper-ripple's, it sits over the label, and it competes with the
+   capsule for the same click — one of the two has to go, and the capsule is the
+   one that says which tab is active. */
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab tp-yt-paper-ripple {
+  display: none !important;
+}
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab .tab-content {
+  padding: 0 15px !important;
+  opacity: 1 !important;
+  color: rgba(255, 255, 255, .55) !important;
+  transition: color .2s ease;
+}
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab:hover .tab-content {
+  color: rgba(255, 255, 255, .82) !important;
+}
+/* `iron-selected` is paper-tabs' own state; the aria flag is what the disabled
+   / cloned Lyrics tab carries, and both must read as the active label. */
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab.iron-selected .tab-content,
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs tp-yt-paper-tab[aria-selected="true"] .tab-content {
+  color: #fff !important;
+}
+
+/* The capsule is paper-tabs' OWN selection bar, re-shaped. paper-tabs drives
+   it with an inline `transform: translateX(%) scaleX()`, which can draw a line
+   but never a capsule: scaleX squashes the corner radius into an ellipse. So
+   content.js publishes the selected tab's box as --ym-song-tab-x / -w and the
+   transform is switched off here. Missing variables mean a zero-width bar,
+   never a misplaced blob. */
+html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs #selectionBar {
+  transform: none !important;
+  left: var(--ym-song-tab-x, 0px) !important;
+  width: var(--ym-song-tab-w, 0px) !important;
+  top: 8px !important;
+  bottom: auto !important;
+  height: 32px !important;
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, .08) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1) !important;
+  z-index: 0 !important;
+  pointer-events: none !important;
+  transition:
+    left .32s cubic-bezier(.22, 1, .36, 1),
+    width .32s cubic-bezier(.22, 1, .36, 1) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs #selectionBar {
+    transition: none !important;
+  }
+}
+
+/* ===== YouTube page: the song view's layout switcher (AJ, 2026-10-23) =====
+   The player page is ONE flex row — #main-panel (cover or video) and #side-panel
+   (the tab strip and the panel under it) — and the four layouts are that row's
+   geometry and nothing else:
+
+     default   cover left, tab column right        (no class at all)
+     split     tab column left, cover right        .ym-yt-song-layout-split
+     lyrics    tab column across the page          .ym-yt-song-layout-lyrics
+     art       cover across the page               .ym-yt-song-layout-art
+
+   Three classes on <html>, like every other lever on this page: YTM rebuilds
+   the player page on each track change, the root does not, and the default
+   layout costs no rules. Everything is gated on min-width: 936px because that
+   is exactly where YTM itself turns the row into a column (its own
+   `@media (max-width: 935px)` rule); reordering a column would put the lyrics
+   above the cover and hide the wrong half. */
+
+/* ---- lyrics on the left, cover on the right ------------------------------
+   `order` only moves the column; the gap is mirrored by giving the side panel
+   the margin the main panel used to own. The gap is YouTube's own custom
+   property, so the mirror keeps the exact spacing of the default layout
+   instead of a hard-coded 64px that is 56px on a narrower window. */
+@media (min-width: 936px) {
+  html.ym-yt-song-layout-split ytmusic-player-page .content > #side-panel {
+    order: -1;
+    margin: 0 var(--ytmusic-player-page-content-gap, 56px) 0 0 !important;
+  }
+}
+
+/* ---- lyrics only ---------------------------------------------------------
+   The cover panel goes and the column is CENTRED rather than stretched. A
+   full-width column would make every lyric line run the width of the window —
+   at 35px type that is one endless line hugging the left edge, which reads as
+   broken even though it is technically what "take the whole page" means. 880px
+   keeps a lyric measure close to the wider-column lever's 800px, and the auto
+   margins centre it in whatever the page has left. The width/max-width are
+   !important because the wider-column lever sets them on the same element;
+   this rule comes later in the sheet, so it wins. */
+@media (min-width: 936px) {
+  html.ym-yt-song-layout-lyrics ytmusic-player-page .content > #main-panel {
+    display: none !important;
+  }
+  html.ym-yt-song-layout-lyrics ytmusic-player-page .content > #side-panel {
+    flex: 0 1 auto !important;
+    width: min(100%, 880px) !important;
+    max-width: 880px !important;
+    margin: 0 auto var(--ytmusic-player-page-vertical-padding, 48px) !important;
+  }
+}
+
+/* ---- cover art only -----------------------------------------------------
+   Hiding the panel is the whole change: #main-panel is already `flex: 1 1 0`,
+   so it takes the width the column freed. The pill is a child of the player
+   page, not of the panel, so it stays reachable here. */
+html.ym-yt-song-layout-art ytmusic-player-page .content > #side-panel {
+  display: none !important;
+}
+
+/* ---- the pill -----------------------------------------------------------
+   Anchored to ytmusic-player-page, which is already positioned, and parked in
+   the empty band above both panels — the same band the panels' top padding
+   leaves free. The `right` here is the fallback for the one layout with no
+   strip to sit above; content.js otherwise pins it to the tab strip's right
+   edge, which is the page edge in the two-column layouts and the column's own
+   edge once that column is centred. */
+ytmusic-player-page > .ym-song-layout {
+  position: absolute;
+  top: 6px;
+  right: var(--ytmusic-player-page-horizontal-padding, 64px);
+  z-index: 5;
+  /* The anchor follows the tab strip, which moves when the column does — the
+     pill glides with it instead of teleporting. */
+  transition: right .42s cubic-bezier(.22, 1, .36, 1);
+}
+/* Below the desktop split there is no second column to rearrange and the
+   stacked page scrolls, so the control would describe a layout it cannot
+   draw. Hidden in fullscreen too: that is a different surface with its own
+   overlay (and its own controls). */
+@media (max-width: 935px) {
+  ytmusic-player-page > .ym-song-layout { display: none; }
+}
+ytmusic-player-page[player-fullscreened] > .ym-song-layout { display: none; }
+
+.ym-song-layout-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09);
+  color: rgba(255, 255, 255, .72);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+}
+.ym-song-layout-btn:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+}
+.ym-song-layout-btn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, .6);
+  outline-offset: 2px;
+}
+/* Open is a state of the pill, not of the page: the menu is only ever showing
+   because this button is what opened it. */
+.ym-song-layout.open .ym-song-layout-btn {
+  background: rgba(255, 255, 255, .12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16);
+  color: #fff;
+}
+
+.ym-song-layout-glyph {
+  width: 20px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+.ym-song-layout-glyph .ln { fill: currentColor; opacity: .78; }
+.ym-song-layout-glyph .art { fill: currentColor; opacity: .4; }
+
+/* ICON_CHEVRON points RIGHT; rotated it reads as the conventional down /
+   up pair, and the turn is the only motion on the button. */
+.ym-song-layout-chev {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  fill: currentColor;
+  opacity: .5;
+  transform: rotate(90deg);
+  transition: transform .2s cubic-bezier(.22, 1, .36, 1);
+}
+.ym-song-layout.open .ym-song-layout-chev { transform: rotate(-90deg); }
+
+/* ---- the menu -----------------------------------------------------------
+   Same glass as the add-ons panel, so it reads as ours on a page that is not
+   ours. It opens INTO the page (not off the top), and `[hidden]` is spelled
+   out because a display value from any other rule would otherwise beat the
+   attribute's UA default. */
+.ym-song-layout-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 226px;
+  padding: 5px;
+  border-radius: 12px;
+  background: rgba(24, 24, 27, .92);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .09);
+  z-index: 6;
+  animation: ym-song-layout-in .16s cubic-bezier(.22, 1, .36, 1);
+}
+.ym-song-layout-menu[hidden] { display: none; }
+@keyframes ym-song-layout-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ym-song-layout-menu { animation: none; }
+  .ym-song-layout-chev { transition: none; }
+}
+
+.ym-song-layout-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, .8);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ym-song-layout-item:hover { background: rgba(255, 255, 255, .07); color: #fff; }
+.ym-song-layout-item:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, .5);
+  outline-offset: -1px;
+}
+/* The checked row keeps a tint AND the brighter diagram, so the current layout
+   is legible without reading the hint under it. */
+.ym-song-layout-item[aria-checked="true"] {
+  background: rgba(255, 255, 255, .09);
+  color: #fff;
+}
+.ym-song-layout-item[aria-checked="true"] .ym-song-layout-glyph .art { opacity: .62; }
+.ym-song-layout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.ym-song-layout-item-label { font-weight: 500; }
+.ym-song-layout-item-hint {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, .44);
+  white-space: nowrap;
+}
+.ym-song-layout-item[aria-checked="true"] .ym-song-layout-item-hint { color: rgba(255, 255, 255, .62); }
+
+/* ---- the layout change itself -------------------------------------------
+   `display`, `order` and a panel's width cannot be transitioned, so the change
+   is choreographed by content.js (see songLayoutSet): the panel that leaves
+   gets .ym-song-panel-dissolve while the OLD layout is still up, then the new
+   layout is applied and the survivors get .ym-song-panel-settle (was on
+   screen, only moved) while a panel that was hidden plays .ym-song-panel-enter.
+   Settle is removed two frames later, so its transition is what plays.
+
+   Enter is an ANIMATION, not a transition: a panel coming back from
+   `display: none` has no previous rendered style, and browsers skip
+   transitions across that. An animation starts on the first frame the element
+   is rendered, so the arrival always plays.
+
+   Blur is safe here: nothing inside #main-panel is position: fixed, so the
+   filter's temporary containing block cannot displace the player. */
+ytmusic-player-page .content > #main-panel,
+ytmusic-player-page .content > #side-panel {
+  transition: opacity .3s ease, filter .3s ease;
+}
+ytmusic-player-page .content > #main-panel.ym-song-panel-dissolve,
+ytmusic-player-page .content > #side-panel.ym-song-panel-dissolve {
+  opacity: 0;
+  filter: blur(18px);
+  pointer-events: none;
+}
+ytmusic-player-page .content > #main-panel.ym-song-panel-settle,
+ytmusic-player-page .content > #side-panel.ym-song-panel-settle {
+  opacity: .45;
+  filter: blur(10px);
+}
+ytmusic-player-page .content > #main-panel.ym-song-panel-enter,
+ytmusic-player-page .content > #side-panel.ym-song-panel-enter {
+  animation: ym-song-panel-in .38s cubic-bezier(.22, 1, .36, 1) both;
+}
+/* Each panel arrives from its own edge of the page: the cover from the left,
+   the tab column from the right. So "art only -> lyrics left" reads as the
+   lyrics sliding in towards the left, not just materialising there. */
+ytmusic-player-page .content > #main-panel.ym-song-panel-enter { --ym-enter-from: -30px; }
+ytmusic-player-page .content > #side-panel.ym-song-panel-enter { --ym-enter-from: 30px; }
+@keyframes ym-song-panel-in {
+  from { opacity: 0; filter: blur(14px); transform: translateX(var(--ym-enter-from, 0px)); }
+  to { opacity: 1; filter: blur(0); transform: none; }
+}
+/* The mirror swap: both panels stay, they only change places, so the motion is
+   a plain horizontal slide (content.js offsets them with a FLIP transform, this
+   is what carries them home). No fade, no blur — nothing is appearing or
+   disappearing. */
+ytmusic-player-page .content > #main-panel.ym-song-panel-swap,
+ytmusic-player-page .content > #side-panel.ym-song-panel-swap {
+  transition: transform .42s cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  ytmusic-player-page .content > #main-panel,
+  ytmusic-player-page .content > #side-panel,
+  ytmusic-player-page .content > #main-panel.ym-song-panel-swap,
+  ytmusic-player-page .content > #side-panel.ym-song-panel-swap,
+  ytmusic-player-page > .ym-song-layout {
+    transition: none;
+  }
+  ytmusic-player-page .content > #main-panel.ym-song-panel-enter,
+  ytmusic-player-page .content > #side-panel.ym-song-panel-enter {
+    animation: none;
+  }
+}

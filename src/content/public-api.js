@@ -785,7 +785,6 @@
     getArtCache: () => cmd("getArtCache"),
     setArtCache: (cache) => cmd("setArtCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
-    fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
     // Deezer track search — the ISRC source for lrc.red (YTM exposes none).

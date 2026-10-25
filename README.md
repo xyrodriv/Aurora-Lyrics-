@@ -12,7 +12,7 @@ smooth motion).
 - **Synced lyrics** — word-level (syllable), line-level, and plain/static
   rendering driven by live playback position.
 - **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API**,
-  **LRCLIB**, and **Unison**, and supports importing/exporting TTML with
+  **LRCLIB**, and supports importing/exporting TTML with
   permanent, per-track saves.
 - **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
   the Spicy Lyrics API is keyed by one. Aurora resolves it through

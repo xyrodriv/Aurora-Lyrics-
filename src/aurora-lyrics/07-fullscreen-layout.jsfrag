@@ -33,13 +33,22 @@
     return url + "=w1024-h1024";
   }
 
+  // Full strength for the always-on readability layer. The gradient inside it
+  // does the shaping (transparent at the column's left edge, near-solid black at
+  // the screen edge), so this is the layer's own opacity, not a black level.
+  // Keep it at 1: a translucent layer composites the SHARP backdrop over the
+  // blurred one, which is what makes a deep blur read as a tint instead of a
+  // frost. The fade in/out still runs through the opacity transition.
+  const FS_LYRICS_SHADE_ON = 1;
+
   function setFullscreenLyricsShadeTarget(target) {
-    // Do not smooth this in JavaScript. The CSS opacity transition already
-    // provides a short visual fade, while assigning the sampled value directly
-    // prevents the old brightness sample from keeping a stale black gradient
-    // visible after the video has returned to a dark or colorful frame.
-    fsLyricsShadeTarget = Math.max(0, Math.min(0.9, target));
-    fsLyricsShadeLevel = fsLyricsShadeTarget;
+    // Do not smooth this in JavaScript: the CSS opacity transition already
+    // provides the fade, and this layer now carries a backdrop blur whose
+    // strength must fade in lockstep with the black gradient.
+    const next = Math.max(0, Math.min(1, target));
+    if (next === fsLyricsShadeTarget) return;
+    fsLyricsShadeTarget = next;
+    fsLyricsShadeLevel = next;
     if (fsOverlay) {
       const opacity = fsLyricsShadeLevel.toFixed(3);
       fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", opacity);
@@ -68,25 +77,20 @@
     return count ? bright / count : 0;
   }
 
-  function applyFullscreenShadePixels(pixels, shadeAllowed) {
-    const response = getBrightResponse(pixels);
-    // Bright colours are far more common than near-white, so require a slightly
-    // larger share of the panel before the gradient starts, then ramp to full.
-    // Skipped when the lyrics are hidden/dimmed — the sample is then only
-    // feeding the controls scrim below.
-    if (shadeAllowed !== false) {
-      const target = Math.max(0, Math.min(1, (response - 0.2) / 0.45)) * 0.9;
-      setFullscreenLyricsShadeTarget(target);
-    }
-    setFullscreenBrightVideo(response);
+  // The sample's only remaining job is the controls scrim. The lyric shade used
+  // to be driven by this same reading, which is why it vanished on a dark frame
+  // and pumped on gradients; it is now a constant layer (see
+  // syncFullscreenLyricsShade) so it never has to chase the picture.
+  function applyFullscreenBrightPixels(pixels) {
+    setFullscreenBrightVideo(getBrightResponse(pixels));
   }
 
   // Toggle the controls scrim with hysteresis: ON above 0.5 bright-pixel share,
   // OFF below 0.38. The gap keeps a video that sits near the threshold from
   // flickering the scrim on and off every sample.
   function setFullscreenBrightVideo(response) {
-    // The scrim is a Video Background thing only; ignore samples that were
-    // taken purely for the MV side-layout lyric shade.
+    // The scrim is a Video Background thing only; the sampler also runs nowhere
+    // else, but keep this guard so a layout switch cannot leave it behind.
     if (fsLayoutMode !== "background") { clearFullscreenBrightVideo(); return; }
     let on = fsBrightVideo;
     if (!on && response > 0.5) on = true;
@@ -102,20 +106,34 @@
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-bright-video");
   }
 
-  // Opt-in MV lyric shade: a class on the overlay turns the readability shade
-  // on in the SIDE layout too (see the .ym-sl-fs-mv-shade CSS rule). No-op
-  // before the overlay exists; applyFullscreenLayout() re-syncs it on entry.
-  function syncFsMvShadeClass() {
-    if (!fsOverlay) return;
-    fsOverlay.classList.toggle("ym-sl-fs-mv-shade", !!currentSettings.mvLyricsShade);
+  // The lyric shade is unconditional now, in BOTH layouts where lyrics float
+  // over a picture: Video Background (full-bleed video) and Video + Lyrics (the
+  // column sits on the Kawarp / blurred-frame backdrop, which can be just as
+  // bright). Lyrics Only has nothing behind the words but the overlay itself, so
+  // it never shows the layer. Portrait side compositions drop the column and
+  // hide the layer in CSS; leaving the target on costs nothing there.
+  function fsShadeLayoutActive() {
+    return fsLayoutMode === "background" || fsLayoutMode === "side";
   }
 
-  // True when the current layout should run the adaptive lyric shade: always in
-  // Video Background, plus the SIDE layout for music videos when the opt-in
-  // mvLyricsShade setting is on. Shared by the sampler and applyFullscreenLayout.
-  function fsShadeLayoutActive() {
-    if (fsLayoutMode === "background") return true;
-    return !!currentSettings.mvLyricsShade && fsLayoutMode === "side" && hasFsVideo();
+  // Drive the shade from STATE, not from a brightness sample. Always on while
+  // the lyrics are actually visible; fades out for the hide toggle and for the
+  // intro / gap / final dim states, where there is nothing to protect. The CSS
+  // opacity transition (and the blur riding on the same element) does the fade.
+  function syncFullscreenLyricsShade() {
+    // fsLyricsHidden only hides the column in Video Background (the class is
+    // scoped there), so in Video + Lyrics the words are still on screen and the
+    // shade must stay with them.
+    const lyricsHidden = fsLayoutMode === "background" && fsLyricsHidden;
+    const visible =
+      !!fsActive &&
+      !!fsOverlay &&
+      fsShadeLayoutActive() &&
+      !lyricsHidden &&
+      !fsLyricsGapDimmed &&
+      !fsLyricsIntroDimmed &&
+      !fsLyricsFinalDimmed;
+    setFullscreenLyricsShadeTarget(visible ? FS_LYRICS_SHADE_ON : 0);
   }
 
   // Map the on-screen lyric band to sample-canvas coordinates.
@@ -127,15 +145,10 @@
   // screen percentage alone still drifts whenever the video aspect differs
   // from the overlay's, so convert the screen band (53%..100%, full height)
   // into frame pixels first, then scale into the canvas, which always holds
-  // the whole frame.
+  // the whole frame. Only Video Background samples now, and there the video
+  // does fill the overlay.
   function getShadeSampleRect() {
     const fallback = { x: FS_SHADE_SAMPLE_X, y: 0, w: FS_SHADE_SAMPLE_SW, h: FS_SHADE_SAMPLE_H };
-    // MV side layout: the lyrics sit over the AMBIENT CANVAS, which is a
-    // full-stretch copy of the frame (drawBgFrame draws it to fill the canvas),
-    // so screen x% maps straight to frame x%. The cover math below assumes the
-    // video fills the overlay, which is only true in Video Background — use the
-    // raw 53%..100% band here.
-    if (fsLayoutMode !== "background") return fallback;
     const video = fsSavedVideo && fsSavedVideo.node;
     if (!fsOverlay || !video || !video.videoWidth || !video.videoHeight) return fallback;
     const overlayW = fsOverlay.clientWidth;
@@ -186,26 +199,13 @@
 
   async function sampleFullscreenLyricsBrightness() {
     if (fsLyricsShadeSampleInFlight) return;
-    // The shade normally runs only in Video Background (lyrics over the
-    // full-bleed video). The opt-in mvLyricsShade extends it to the SIDE
-    // layout for music videos, where the lyrics sit over the blurred video
-    // backdrop. Anywhere else there is nothing to measure: clear both the
-    // lyric shade and the controls scrim.
-    if (!fsActive || !fsShadeLayoutActive() || !fsSavedVideo) {
-      setFullscreenLyricsShadeTarget(0);
+    // Sampling now feeds the CONTROLS scrim only, and that scrim only exists in
+    // Video Background. The lyric shade is a constant layer driven by state, so
+    // nothing else reads the sample any more.
+    if (!fsActive || fsLayoutMode !== "background" || !fsSavedVideo) {
       clearFullscreenBrightVideo();
       return;
     }
-    // The LYRIC shade is pointless whenever the lyrics are not actually visible:
-    // the manual hide toggle plus the intro / gap / final dim states all set the
-    // lyric column to opacity:0 and show only the "..." dots, so a shade over a
-    // bright video would read as a stray black band behind the dots. But the
-    // CONTROLS scrim still needs a brightness reading in exactly that case (AJ:
-    // bright video, lyrics hidden, controls invisible), so keep sampling and
-    // only suppress the shade.
-    const shadeAllowed =
-      !fsLyricsHidden && !fsLyricsGapDimmed && !fsLyricsIntroDimmed && !fsLyricsFinalDimmed;
-    if (!shadeAllowed) setFullscreenLyricsShadeTarget(0);
     const now = performance.now();
     if (now - fsLyricsShadeLastSampleAt < FS_LYRICS_SHADE_SAMPLE_MS) return;
     fsLyricsShadeLastSampleAt = now;
@@ -223,9 +223,8 @@
         try {
           fsLyricsShadeCtx.drawImage(video, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
           const rect = getShadeSampleRect();
-          applyFullscreenShadePixels(
-            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
-            shadeAllowed
+          applyFullscreenBrightPixels(
+            fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
           );
           return;
         } catch (_) {
@@ -233,7 +232,6 @@
         }
       }
       if (!ensureFullscreenShadeCapture()) {
-        setFullscreenLyricsShadeTarget(0);
         clearFullscreenBrightVideo();
         return;
       }
@@ -245,19 +243,16 @@
         frame = await fsLyricsShadeCapture.grabFrame();
       }
       if (!frame) {
-        setFullscreenLyricsShadeTarget(0);
         clearFullscreenBrightVideo();
         return;
       }
       fsLyricsShadeCtx.drawImage(frame, 0, 0, FS_SHADE_SAMPLE_W, FS_SHADE_SAMPLE_H);
       const rect = getShadeSampleRect();
-      applyFullscreenShadePixels(
-        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data,
-        shadeAllowed
+      applyFullscreenBrightPixels(
+        fsLyricsShadeCtx.getImageData(rect.x, rect.y, rect.w, rect.h).data
       );
       if (typeof frame.close === "function") frame.close();
     } catch (_) {
-      setFullscreenLyricsShadeTarget(0);
       clearFullscreenBrightVideo();
     } finally {
       fsLyricsShadeSampleInFlight = false;
@@ -278,6 +273,16 @@
   // away for performance.
   function drawBgFrame() {
     if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    // Kawarp OWNS the backdrop while it is up, and the stylesheet hides this
+    // canvas behind it (.ym-sl-fs-has-kawarp .ym-sl-fs-bg-canvas: display none).
+    // Drawing into it anyway was the most expensive thing in portrait music
+    // video: assigning ctx.filter takes the 2D canvas off the GPU path, and
+    // drawImage(<video>) copies each decoded frame back out of GPU memory.
+    // Measured in a 1080x1920 window, same overlay, same lyrics, same canvas:
+    // 14.8 fps playing vs 121 fps paused, with 0.3ms of our own JS per frame.
+    // Every music video starts Kawarp from the live video, so this is the
+    // normal branch, not a fallback.
+    if (fsKawarpActive) return;
     const now = performance.now();
     if (now - fsBgLastDrawAt < FS_BG_FRAME_INTERVAL_MS) return;
     fsBgLastDrawAt = now;
@@ -382,6 +387,7 @@
         fsLyricsIntroDimmed = false;
         fsLyricsFinalDimmed = false;
       }
+      syncFullscreenLyricsShade();
       return;
     }
 
@@ -422,13 +428,9 @@
       fsOverlay.classList.toggle("ym-sl-fs-final-dim", finalExpired);
     }
     // No lyrics are on screen in any hidden / intro / gap / final state, so the
-    // readability shade has nothing to protect. Clear it immediately so a bright
-    // video doesn't leave a black band behind the "..." dots until the next
-    // 240ms brightness sample. The sampler also guards on these flags, this just
-    // removes the stale-gradient delay.
-    if (fsLyricsHidden || fsLyricsGapDimmed || fsLyricsIntroDimmed || fsLyricsFinalDimmed) {
-      setFullscreenLyricsShadeTarget(0);
-    }
+    // readability layer has nothing to protect. It is state-driven, so this
+    // clears it on the same frame instead of waiting for a brightness sample.
+    syncFullscreenLyricsShade();
   }
 
   const FS_LAYOUT_NAMES = {
@@ -488,14 +490,12 @@
       fsLyricsFinalDimmed = false;
       fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
     }
-    // Clear the lyric shade only when the NEW layout cannot show it — the MV
-    // side layout can, when mvLyricsShade is on.
-    if (!fsShadeLayoutActive()) setFullscreenLyricsShadeTarget(0);
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
     fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
-    // Keep the opt-in MV-shade class in step with the setting on entry/switches.
-    syncFsMvShadeClass();
+    // Background and Video + Lyrics both keep the readability layer on; Lyrics
+    // Only has no picture behind the words and fades it out.
+    syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
     // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
     // are static — this only moves the volume node between the chip and the

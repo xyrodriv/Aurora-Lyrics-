@@ -11,6 +11,11 @@
       overflow: hidden;
       background: transparent !important;
       color: #fff;
+      /* Pinned to YouTube's own root size, captured by content.js before it
+         applies the YouTube page's Interface text size: the panel keeps the
+         inherited size it has always had and never scales with the site
+         (AJ, 2026-10-22). */
+      font-size: var(--ym-yt-root-fs, 10px);
       /* The panel's own chrome (credits, chips, buttons, the options overlay)
          keeps the bundled face. The custom font is scoped to .LyricsContent
          below, so it only reaches the lyric lines (AJ, 2026-10-20). */
@@ -727,6 +732,33 @@
       justify-content: center;
       text-align: center;
     }
+    /* This stylesheet has NO global .hidden rule, so the class the JS toggles on
+       this button was cosmetic and "Delete saved" stayed on screen even with a
+       track saved. Made it real here, scoped to the button (AJ, 2026-10-22). */
+    .ym-sl-delete-permanent-button.hidden { display: none; }
+    /* With nothing saved to delete, Upload must not sit in half of a two-column
+       row next to an empty cell. */
+    .ym-sl-options-file-actions:has(.ym-sl-delete-permanent-button.hidden) {
+      grid-template-columns: 1fr;
+    }
+    /* File tab: the per-song cache row under the import actions. One caption
+       line whose copy carries the state (cached · N days / queued), plus the
+       full-width action. */
+    .ym-sl-file-note {
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255,255,255,.6);
+      padding: 0 2px;
+    }
+    .ym-sl-file-note.hidden { display: none; }
+    /* Queued state reads as a commitment, not as dim helper copy. */
+    .ym-sl-song-cache-status.pending { color: rgba(255,255,255,.82); }
+    .ym-sl-options-panel .ym-sl-song-cache-clear {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
+    }
+    .ym-sl-song-cache-clear.hidden { display: none; }
     .ym-sl-options-body .ym-sl-track { width: 100%; }
     /* The offset row is a wide horizontal rail; let it wrap and give the slider
        its own line so nothing overflows the 340px panel. */
@@ -837,6 +869,9 @@
       background: #0a0a0c;
       color: #fff;
       overflow: hidden;
+      /* Same pin as .ym-sl-panel: the overlay is appended to <body>, which
+         inherits YouTube's scaled root size (AJ, 2026-10-22). */
+      font-size: var(--ym-yt-root-fs, 10px);
     }
     /* Media and lyrics are ALWAYS absolute and animate their geometry. The
        transition list covers every property that changes between layouts.
@@ -896,10 +931,33 @@
       width: 50%;
     }
     .ym-sl-fs-overlay .ym-sl-fs-lyrics {
-      left: 57.4%;
-      width: 42.6%;
-      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px);
+      /* 52.5% hugs the media column: its box is 2% + 50% wide at EVERY video
+         aspect ratio (aspect-ratio only drives the height, and max-height
+         clamps that instead of the width), so the pane's right edge is a flat
+         52% and 0.5% (~10px at 1920) is the whole safety margin. The lyrics
+         can therefore never sit on top of the video, no matter what the video
+         is shaped like — that is the "push it right if it would overlap"
+         requirement, guaranteed by construction rather than measured.
+         If the media column moves, this number moves with it (51% + 50%).
+         The visible air between the two is the left padding below (AJ asked
+         for the words to sit near the video with a little space, 2026-10-21). */
+      left: 52.5%;
+      /* Runs to the right edge, exactly as the old 57.4% / 42.6% pair did, so
+         the wider pane only buys space for the words instead of leaving a
+         dead strip at the screen edge. */
+      width: 47.5%;
+      /* No vertical inset (AJ, 2026-10-23). The pane used to start 84px inside
+         the screen, so the scrollport ended on a padded edge and a line leaving
+         it read as chopped off rather than as leaving the monitor. With the
+         inset gone the words run edge to edge and the mask does the fading. */
+      padding: 0 clamp(24px, 4vw, 72px);
       box-sizing: border-box;
+    }
+    /* Music videos only: the words start just past the video's own edge instead
+       of the standard 4vw inset, which is what put the old 176px void there.
+       Scoped to has-video so cover art keeps its 4vw text inset. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      padding-left: clamp(18px, 2vw, 36px);
     }
     /* "Background" layout: media fills the overlay (3% padding = card inset
        via the video's inline padding-box sizing); lyrics float on the right
@@ -918,17 +976,18 @@
       left: 61%;
       width: 39%;
       min-width: 320px;
-      /* Asymmetric padding so lyric text starts past the left-edge fade. */
-      padding: clamp(28px, 6vh, 84px) clamp(24px, 4vw, 72px) clamp(28px, 6vh, 84px) clamp(80px, 6vw, 120px);
+      /* Asymmetric padding so lyric text starts past the left-edge fade.
+         No vertical inset, same as the side layout: the column owns the full
+         screen height and dissolves at the monitor's own edges. */
+      padding: 0 clamp(24px, 4vw, 72px) 0 clamp(80px, 6vw, 120px);
       box-sizing: border-box;
-      /* No permanent black surface: the shade layer below activates only when
-         the sampled video behind the lyrics is genuinely near-white. */
+      /* No permanent black surface: the shade layer below is the readability
+         layer (shade + blur), and it is always on while the lyrics are. */
       background: transparent;
       -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
       mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 4%, #000 16%, #000 100%);
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
-      --ym-sl-fs-lyrics-shade-opacity: 0;
       transition:
         opacity 1.1s ease,
         left .45s cubic-bezier(.22, .61, .36, 1),
@@ -942,7 +1001,10 @@
       top: 0;
       right: 0;
       bottom: 0;
-      left: 53%;
+      /* Starts just left of the lyric pane (which begins at 61%), not out in the
+         middle of the video: a deep blur that begins 4% early reads as a haze
+         over the picture rather than a frost behind the words. */
+      left: 57%;
       z-index: 2;
       pointer-events: none;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
@@ -955,27 +1017,42 @@
       );
       -webkit-mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
       mask-image: linear-gradient(90deg, transparent 0, rgba(0,0,0,.5) 8%, #000 24%, #000 100%);
+      /* The blur rides ON this layer, so it fades exactly with the black
+         gradient: the layer's opacity scales the backdrop-filter output and the
+         background together, and the mask clips both to the same left-edge
+         fade. No separate element, no second timing to keep in sync. Radius is
+         deliberately LIGHT: AJ tuned it down three times (30-56px, then 24-46px,
+         then 16-30px all still read as too much frost over the picture), so this
+         is a soft-focus veil rather than a deep blur. Saturation stays lifted so
+         colour survives it - a plain blur greys the video out. */
+      -webkit-backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
+      backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
       transition: opacity .22s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics-shade {
       display: block;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
     }
-    /* Opt-in: the SAME adaptive readability shade, but for a music video in
-       the SIDE layout, where the lyrics column sits over the blurred video
-       backdrop. Driven by the "Shade lyrics over bright music video" setting
-       (-> .ym-sl-fs-mv-shade on the overlay, see syncFsMvShadeClass). No video
-       means no shade, so Lyrics Only and cover-art tracks are untouched. */
-    .ym-sl-fs-overlay.ym-sl-fs-mv-shade.ym-sl-fs-has-video .ym-sl-fs-lyrics-shade {
+    /* Video + Lyrics: the lyric column floats over the ambient backdrop too
+       (Kawarp for songs and still uploads, a blurred frame for live MVs), and
+       that backdrop can be just as bright as a full-bleed video. Same shade and
+       blur, sized to each variant's own column: cover art starts at 44%, MVs at
+       52.5%. Portrait hides it further down, where both compositions drop the
+       column and the words no longer sit beside the picture. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
       display: block;
+      left: 44%;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+      left: 52.5%;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
       position: relative;
       z-index: 3;
     }
-    /* The readability shade is adaptive: it is transparent unless the video
-       under the lyric column contains enough near-white pixels. */
+    /* The readability layer is constant (see syncFullscreenLyricsShade); only
+       its state - lyrics visible or not - moves its opacity. */
     /* During a long intro or instrumental gap, dim rather than remove the
        lyrics so the video remains the visual focus. The hidden-toggle rule
        below still wins when the user explicitly hides lyrics. */
@@ -1245,6 +1322,22 @@
       /* No reserved width on the chip: the custom <div> slider expands via a
          composited transform, which never reflows the chip and leaves no gap. */
       flex: 0 0 auto;
+    }
+    /* Scale glyphs bracketing the volume bar. They are markers, not controls:
+       the slider itself stays the only thing that takes a drag or a key. Only the
+       cover-art column reveals them (see its layout block) - the video and
+       video-background layouts keep the bare bar beside the time row. */
+    .ym-sl-fs-volume-icon {
+      display: none;
+      fill: none;
+      stroke: currentColor;
+      /* 2.6 on the 24-grid draws at ~2.4px once the glyph is 22px, which is the
+         weight of the transport's redrawn shuffle / repeat strokes. At 1.7 the
+         speaker vanished beside the 3px bar (AJ, 2026-10-23). */
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
     }
     /* Bottom scrubber: a full-width thin line pinned to the bottom edge. It is
        hidden by default and only appears while the overlay is hovered/focused,
@@ -1524,6 +1617,14 @@
     }
     .ym-sl-fs-player-controls .ym-sl-fs-player-prev svg,
     .ym-sl-fs-player-controls .ym-sl-fs-player-next svg {
+      width: 26px;
+      height: 26px;
+    }
+    /* Shuffle / repeat are redrawn as thick strokes, so they need a little more
+       room than the old solid 22px glyphs to carry the same weight beside the
+       prev/next triangles and the play button. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat svg {
       width: 26px;
       height: 26px;
     }
@@ -2361,7 +2462,21 @@
       padding-left: 0;
       border-left: 0;
       width: 100%;
+      /* Room for the two scale glyphs: they sit INSIDE the artwork's width, so
+         the bar shortens by their size and gaps rather than spilling past the
+         cover (AJ, 2026-10-23). */
+      gap: 12px;
       pointer-events: auto;
+    }
+    /* The glyphs ride the bar's own line: quiet speaker on the left, loud one on
+       the right, both at the low opacity of unplayed chrome. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-icon {
+      display: block;
+      flex: 0 0 auto;
+      width: 22px;
+      height: 22px;
+      color: rgba(255, 255, 255, .62);
+      pointer-events: none;
     }
     /* No hover grow on the volume bar here (AJ, 2026-10-03). */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
@@ -2786,11 +2901,15 @@
        static card is shown while the animated art loads — deliberately, so the
        pane is never blank — and the card is only REMOVED once the video has been
        attached, which is what left both visible at once. Hide the card the moment
-       a READY art video exists in the pane, so it crossfades instead of
-       double-exposing. :has() keeps this pure CSS: no extra JS timing to desync. */
+       a READY art video exists in the pane. :has() keeps this pure CSS: no extra
+       JS timing to desync.
+
+       display:none, NOT opacity (AJ, 2026-10-21): the pane is a flex row, so an
+       opacity-0 card still reserved its ~583px of space and squeezed the ready
+       video to half width until JS hid the card two seconds later — the two
+       covers sitting side by side. The video's own 0.5s fade is the crossfade. */
     .ym-sl-fs-media:has(> video.ym-sl-fs-art-video.ym-sl-fs-art-video-ready) > img {
-      opacity: 0;
-      transition: opacity .3s ease;
+      display: none;
     }
     .ym-sl-fs-media > img,
     .ym-sl-fs-media > video.ym-sl-fs-art-video {
@@ -3207,6 +3326,17 @@
     }
     .ym-sl-import:hover { background: rgba(255,255,255,.14); }
     .ym-sl-import:active { transform: scale(.97); }
+    /* The lyric search button after three empty answers: greyed and inert, with
+       the reason spelled out in the status line above it. */
+    .ym-sl-import:disabled {
+      opacity: .38;
+      cursor: not-allowed;
+      background: rgba(255,255,255,.05);
+      border-color: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.6);
+    }
+    .ym-sl-import:disabled:hover { background: rgba(255,255,255,.05); }
+    .ym-sl-import:disabled:active { transform: none; }
     /* Inside the OPTIONS panel, match the selects they sit beside: same radius,
        slightly larger type. Scoped, so the panel's own toolbar buttons keep their
        compact sizing (AJ, 2026-10-01). */
@@ -3230,7 +3360,7 @@
       align-items: center;
       justify-content: safe center;
       gap: 0;
-      padding: 2rem 8%;
+      padding: 20px 8%;
       text-align: center;
       animation: ym-sl-notice-in .35s cubic-bezier(.22,1,.36,1) both;
     }
@@ -3405,7 +3535,22 @@
     .ym-sl-search-status {
       min-height: 14px;
       font-size: 11px;
+      line-height: 1.45;
       color: rgba(255,255,255,.55);
+    }
+    /* The empty state's Discord invite: the status line is the only place the
+       panel explains a miss, so the link has to read as one at 11px. */
+    .ym-sl-search-link {
+      color: rgba(63,224,197,.95);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      cursor: pointer;
+    }
+    .ym-sl-search-link:hover { color: #3fe0c5; }
+    /* Shown once the three tries are spent, under the empty-state sentence. */
+    .ym-sl-search-empty-note {
+      margin-top: 4px;
+      color: rgba(255,255,255,.72);
     }
     .ym-sl-search-foot {
       font-size: 10.5px;
@@ -3822,7 +3967,10 @@
          The user's size setting still multiplies via --ym-sl-lyrics-scale.
          NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK -- this CSS lives inside a
          JS template literal, so a stray backtick terminates it early. */
-      --DefaultLyricsSize: calc(clamp(1.7rem, calc(1cqw * 7), 3.5rem) * var(--ym-sl-lyrics-scale));
+      /* px, not rem: the root font-size is now user-scalable from the panel's
+         YouTube page, and the lyrics must not grow with YouTube's own UI —
+         their size has its own setting (AJ, 2026-10-22). */
+      --DefaultLyricsSize: calc(clamp(17px, calc(1cqw * 7), 35px) * var(--ym-sl-lyrics-scale));
       --amll-lyric-player-font-size: var(--DefaultLyricsSize);
       --vertical-gap: 0px;
       width: 100%;
@@ -3856,6 +4004,16 @@
       -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
       transition: opacity .25s ease;
+    }
+    /* Fullscreen: the scrollport is now the whole screen height, so the fade
+       belongs to the monitor edge, not to a padded box inside it. Keep the top
+       ramp short — it only softens a line climbing out of the top edge — and
+       let the bottom keep fading down to the very last pixel, where upcoming
+       lines leave for the controls. The active line rests at the halfway point,
+       clear of both (AJ, 2026-10-23). */
+    .ym-sl-fs-lyrics #ym-sl-panel.SpicyRenderer .LyricsContent {
+      -webkit-mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
+      mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
     }
     /* Honour a reduced-motion request: the native ease above is a scroll
        animation like any other. The spring path is already off for these users
@@ -3910,6 +4068,62 @@
       transform-origin: left center;
       animation: ym-sl-mv-sync-timer 5s linear forwards;
     }
+    /* On-device translation setup. Unlike the notice chips above this one can
+       carry a button (Chrome needs a click before a language pack may
+       download), so it takes pointer events and is its own flex row. */
+    .ym-sl-translate-chip {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 6;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      max-width: calc(100% - 28px);
+      padding: 6px 6px 6px 12px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, .62);
+      color: rgba(255, 255, 255, .84);
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      white-space: nowrap;
+      opacity: 1;
+      transition: opacity .45s ease;
+      -webkit-backdrop-filter: blur(10px);
+      backdrop-filter: blur(10px);
+    }
+    .ym-sl-translate-chip.ym-sl-fading {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ym-sl-translate-chip-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ym-sl-translate-chip-action {
+      flex: none;
+      padding: 4px 9px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .14);
+      color: #fff;
+      font: inherit;
+      letter-spacing: inherit;
+      cursor: pointer;
+      transition: background .18s ease;
+    }
+    .ym-sl-translate-chip-action:hover {
+      background: rgba(255, 255, 255, .24);
+    }
+    .ym-sl-translate-chip-action:active {
+      background: rgba(255, 255, 255, .3);
+    }
+    .ym-sl-translate-chip-action:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .8);
+      outline-offset: 2px;
+    }
     @keyframes ym-sl-mv-sync-timer {
       from { transform: scaleX(1); }
       to   { transform: scaleX(0); }
@@ -3937,6 +4151,7 @@
     #ym-sl-panel.SpicyRenderer .line {
       --font-size: var(--DefaultLyricsSize);
       --BlurAmount: 0px;
+
       --DefaultLyricsScale: .95;
       --DefaultEmphasisLyricsScale: .95;
       --DefaultLineScale: 1;
@@ -3961,8 +4176,13 @@
       /* Fade the gradient paint. Group opacity briefly blanks clipped glyphs
          while their per-word sweep repaints at the line's onset. */
       transition:
+        filter .4s cubic-bezier(.22,.61,.36,1),
         --ym-sl-line-alpha .2s cubic-bezier(.61,1,.88,1),
         --ym-sl-entry-shadow-alpha .2s cubic-bezier(.61,1,.88,1);
+      /* Depth blur. animate() writes the filter per line with the engine's own
+         spacing (1px per line away, capped at 5px) and clears it on the
+         playing line, exactly like the Apple-Music renderer, so the sharp line
+         never pays for a filter layer. */
       font-size: var(--font-size) !important;
       /* SF Pro's descenders need a little more line-box room than the
          original SpicyLyrics font, especially while the glyphs are lifted. */
@@ -4021,23 +4241,45 @@
       position: relative;
       z-index: 1;
     }
-    #ym-sl-panel.SpicyRenderer .line .romaji {
+    /* On-device English translation of a foreign line (23-auto-translate).
+       Deliberately a smaller, quieter line than the lyric it explains: it is
+       meaning, not pronunciation, so it must never compete with the sung
+       words. Empty until the translation arrives, and display:none while empty
+       so a pending line keeps its exact old height. */
+    #ym-sl-panel.SpicyRenderer .line .translation {
       flex-basis: 100%;
       width: 100%;
-      order: 99;
-      font-size: .52em;
-      line-height: 1.25;
+      order: 100;
+      font-size: .5em;
+      line-height: 1.3;
       font-weight: 500;
-      letter-spacing: .04em;
+      letter-spacing: .01em;
       text-transform: none;
-      margin-top: .28em;
-      color: rgba(255,255,255,.62);
+      /* The gloss is English even when the lyric is Hebrew or Arabic. Isolate
+         it so an RTL line cannot reverse the order of its words. */
+      direction: ltr;
+      unicode-bidi: isolate;
+      margin-top: .16em;
+      color: rgba(255,255,255,.58);
       text-shadow: 0 1px 3px rgba(0,0,0,.45);
       opacity: var(--ym-sl-line-alpha);
       pointer-events: none;
     }
-    #ym-sl-panel.SpicyRenderer .line.Active .romaji {
-      opacity: calc(.85 * var(--ym-sl-line-alpha));
+    #ym-sl-panel.SpicyRenderer .line .translation:empty {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .line.Active .translation {
+      opacity: calc(.9 * var(--ym-sl-line-alpha));
+      color: rgba(255,255,255,.7);
+    }
+    /* AMLL draws translations through the engine's own sub-line, which upstream
+       keeps at .3 opacity, which is too faint for the line's meaning, so lift it
+       one step. */
+    #ym-sl-panel #ym-sl-amll-host .FmKaba_lyricSubLine {
+      opacity: .4;
+      /* Same rule as the Spicy translation above: the sub-line is English. */
+      direction: ltr;
+      unicode-bidi: isolate;
     }
     #ym-sl-panel.SpicyRenderer .line:hover {
       z-index: 2;
@@ -4087,12 +4329,35 @@
       text-align: right;
       transform-origin: right center;
     }
+    /* Per-kind weight (AJ, 2026-10-22). The bundled face tops out at 700, so
+       extra weight comes from a hairline text-stroke rather than a synthetic
+       bold. The stroke is TRANSPARENT on purpose: a stroke is still part of the
+       background-clip:text region, so the clipped gradient grows by the stroke
+       width and the letters genuinely get heavier, while the stroke itself
+       paints nothing. A white stroke (at ANY alpha) is painted OVER the clipped
+       gradient, so the glyph edge becomes fill + stroke * (1 - fill): on a dim
+       .25-alpha word that is .44, almost double — a white outline around grey
+       letters, the "bright outer layer" AJ reported twice (2026-10-22).
+       Lowering the alpha only scaled that rim down; it cannot remove it.
+       #ym-sl-amll-host gets away with a white stroke because its fill is opaque.
+       Word-by-word gets the heaviest cut, line-synced matches AMLL's 0.6px,
+       and plain (static) TTML only a touch heavier than before. */
+    #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static) {
+      --ym-sl-lyric-stroke: 0.75px;
+    }
+    #ym-sl-panel.SpicyRenderer .line.line-timed {
+      --ym-sl-lyric-stroke: 0.6px;
+    }
+    #ym-sl-panel.SpicyRenderer .line.static {
+      --ym-sl-lyric-stroke: 0.35px;
+    }
     #ym-sl-panel.SpicyRenderer .line .word,
     #ym-sl-panel.SpicyRenderer .line .letter,
     #ym-sl-panel.SpicyRenderer .line .letterGroup {
       position: relative;
       display: inline-block;
       font-weight: 700 !important;
+      -webkit-text-stroke: var(--ym-sl-lyric-stroke, 0) transparent;
       transform-origin: center center;
       --gradient-position: -20%;
       --gradient-color: 255;
@@ -4137,6 +4402,16 @@
       inherits: true;
       initial-value: 1;
     }
+    /* Registered so the font can actually FADE between the sung and unsung
+       fill strengths. Unregistered custom properties cannot be animated, which
+       is why a line's fill used to vanish in one frame when the line ended.
+       Only the Apple-style word track opts into the transition below, so no
+       other mode changes. */
+    @property --gradient-alpha-end {
+      syntax: "<number>";
+      inherits: true;
+      initial-value: .5;
+    }
     @property --ym-sl-line-alpha {
       syntax: "<number>";
       inherits: true;
@@ -4157,6 +4432,17 @@
       syntax: "<length>";
       inherits: false;
       initial-value: 0px;
+    }
+    /* Ease the fill strength when a line crosses Sung/NotSung. The karaoke
+       sweep is driven per word, but the STATE flip (bright -> dim) replaced the
+       gradient alpha instantly, so the fill snapped off at the line end instead
+       of receding. Both vars are registered, so a transition is legal here, and
+       neither is ever written per frame (only the state classes set them), so
+       this cannot lag the karaoke sweep itself. */
+    #ym-sl-panel.SpicyRenderer .line :is(.word, .letter) {
+      transition:
+        --gradient-alpha .42s cubic-bezier(.61, 1, .88, 1),
+        --gradient-alpha-end .42s cubic-bezier(.61, 1, .88, 1);
     }
     /* Simple lyrics — Apple Music / AMLL style. The spring factories are stubbed
        and the splines swapped in JS (applySimpleLyricsSplines). The look is the
@@ -4378,7 +4664,14 @@
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .word,
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letter,
     #ym-sl-panel.SpicyRenderer .line.bg-line.Sung .letterGroup {
-      transition: text-shadow .3s ease;
+      /* The gradient alphas ride along so a background row's fill recedes at
+         the line end instead of vanishing in one frame. Both are driven only by
+         state classes (never per frame), so transitioning them cannot lag the
+         karaoke sweep. */
+      transition:
+        text-shadow .3s ease,
+        --gradient-alpha .42s cubic-bezier(.61, 1, .88, 1),
+        --gradient-alpha-end .42s cubic-bezier(.61, 1, .88, 1);
     }
     #ym-sl-panel.SpicyRenderer .line.musical-line {
       --ym-sl-line-alpha: 1 !important;
@@ -4395,7 +4688,7 @@
       opacity: 1;
     }
     #ym-sl-panel.SpicyRenderer .line.musical-line .dotGroup {
-      --dot-gap: clamp(.005rem, 1.7cqw, .18rem);
+      --dot-gap: clamp(.05px, 1.7cqw, 1.8px);
       display: flex;
       flex-direction: row;
       gap: var(--dot-gap);
@@ -4449,7 +4742,7 @@
       font-size: 14px;
       line-height: 1.5;
       text-align: center;
-      padding: 2rem 6%;
+      padding: 20px 6%;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
       margin: 48px 4px 22px;
@@ -4493,10 +4786,6 @@
       color: rgba(255,255,255,.5);
       font-weight: 600;
       letter-spacing: .02em;
-      /* Keep the label above the pill's glow halo (the halo is a negative-z
-         pseudo that would otherwise wash over this text). */
-      position: relative;
-      z-index: 1;
     }
     /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
        caused the conic to fill the pill interior; reverting to the direct link). */
@@ -4531,77 +4820,6 @@
       flex: none;
       background: rgba(255,255,255,.12);
     }
-    /* Registered so Chrome definitely re-resolves the conic when the JS rAF loop
-       updates the angle on :root (AJ's Chrome would not reliably repaint a conic
-       driven by an UNregistered custom property — the v6 failure). inherits:true
-       so the :root value cascades to every pill's ::before/::after. No CSS
-       animation targets it, so it simply follows the JS-set value. */
-    @property --ym-sl-pfp-spin {
-      syntax: "<angle>";
-      inherits: true;
-      initial-value: 0deg;
-    }
-    /* Attribution glow v9 (AJ, 2026-09-28): two colours as a THIN BAND HUGGING
-       the pill's EDGE. The pill itself stays pill-shaped and STATIC — only the
-       COLOUR SEAM glides around the perimeter (a light travelling round the
-       border), so it reads as "gliding", never a rigid spin.
-
-       Mechanism: a masked pill-shaped ring (XOR mask; padding = ring
-       thickness) painted with a conic-gradient whose 'from' angle is the
-       registered --ym-sl-pfp-spin (inherits). A single CSS animation on the
-       PANEL drives that angle — pure CSS, no JS rAF, no per-frame style
-       invalidation (v8's rAF loop tanked fps to ~20 by setProperty-ing the root
-       every frame; v9 is compositor-friendly). The soft glow is a SECOND masked
-       ring, wider (10px) and blurred (10px), so the halo follows the seam.
-       No fill inside the pill. --ym-sl-pfp-accent-a/-b set on the ROW by
-       buildPersonRow (complementary default pair; sampleAvatarColor() upgrades
-       when the canvas is readable). */
-    /* Glide driver (v10, AJ, 2026-09-28): a JS rAF (startPfpGlowEngine())
-       sets --ym-sl-pfp-spin on EACH .ym-sl-uploader-link every frame — scoped
-       to the pill (NOT :root), so only the pill + its pseudos get invalidated
-       (v8's root-level setProperty tanked fps to ~20 by cascade-invalidating
-       the whole tree). JS-driven because AJ's Chrome reliably repaints the
-       conic on JS setProperty but NOT on CSS @keyframes animation of the
-       same registered @property (v6/v9 freeze). Crisp ::before ring (z:-1)
-       sits on top; soft glow ::after (z:-2) paints behind it.
-       prefers-reduced-motion is handled in the JS engine. */
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::before {
-      content: "";
-      position: absolute;
-      inset: -2px;
-      border-radius: inherit;
-      padding: 2px;
-      background: conic-gradient(
-        from var(--ym-sl-pfp-spin, 0deg),
-        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
-        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
-      );
-      -webkit-mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      -webkit-mask-composite: xor;
-      mask:
-        linear-gradient(#000 0 0) content-box,
-        linear-gradient(#000 0 0);
-      mask-composite: exclude;
-      pointer-events: none;
-      z-index: -1;
-    }
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link::after {
-      content: "";
-      position: absolute;
-      inset: -8px;
-      border-radius: inherit;
-      background: conic-gradient(
-        from var(--ym-sl-pfp-spin, 0deg),
-        var(--ym-sl-pfp-accent-a, #ff5b8e) 0deg 180deg,
-        var(--ym-sl-pfp-accent-b, #5be0ff) 180deg 360deg
-      );
-      filter: blur(6px);
-      opacity: .35;
-      pointer-events: none;
-      z-index: -2;
-    }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
       font-weight: 600;
       line-height: 1;
@@ -4628,7 +4846,7 @@
       color: rgba(255,255,255,.85);
       font-weight: 600;
     }
-    /* Provider name as a link (lrc.red / Unison / LRCLIB) — keeps the same
+    /* Provider name as a link (LRCLIB) — keeps the same
        weight and colour, underlines only on hover. */
     #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name {
       text-decoration: none;
@@ -4824,6 +5042,220 @@
       pointer-events: auto;
     }
 
+    /* ===== PORTRAIT SIDE LAYOUT (AJ, 2026-10-21) =========================
+       The side composition assumes the artwork is SHORTER than the column it
+       sits in. That holds at 16:9 and stops holding on a tall window: the art
+       is sized min(50%, 54vh), so past roughly 0.78 the art grows wider than
+       the fixed 44% lyric inset and the words paint on top of it (measured on
+       1080x1920: art ends at x=562, lyric text starts at x=518). The chrome
+       stack is pinned to that same 2% / 50% column, so the words crossed that
+       too (controls at x=22-562, lyrics from x=475, full height).
+       Rather than add more offsets to a horizontal idea, square and taller
+       windows get their own composition: the WORDS keep the screen, the art
+       shrinks to a now-playing card in the bottom-left corner, and the
+       transport sits beside it in one bottom band. Scoped to the cover-art
+       side layout - Video Background is an overlay by design and Lyrics Only
+       has no media at all. */
+    @media (max-aspect-ratio: 1 / 1) {
+      /* Both portrait compositions share one edge treatment: the lyric pane
+         has real top/bottom edges here (unlike the thin side columns), and a
+         clipped line at either one reads as broken, so the words dissolve
+         before they reach them. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        --ym-sl-fs-portrait-fade-top: clamp(64px, 10vh, 190px);
+        --ym-sl-fs-portrait-fade-bottom: clamp(88px, 14vh, 270px);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        /* One number drives both the card and the chrome's left inset, so the
+           two can never drift apart. */
+        --ym-sl-fs-portrait-art: clamp(96px, 14vh, 176px);
+      }
+      /* Lyrics first: full width, and the pane STOPS above the bottom band so
+         no line can be painted under the transport (the other half of the
+         overlap). The reserve tracks the chrome, whose title is vh-sized. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 0;
+        width: 100%;
+        bottom: clamp(190px, calc(22vh + 18px), 320px);
+        /* MUST be explicit: the later .ym-sl-fs-lyrics rule sets height:100%,
+           and a non-auto height wins over top+bottom, so the inset was being
+           ignored and the pane stayed full-screen (verified live: bottom did
+           not shorten the box). */
+        height: auto;
+        padding: clamp(44px, 7vh, 96px) clamp(40px, 7vw, 120px);
+        /* Top and bottom dissolve instead of ending on a cut line. The bottom
+           fade is taller because it is what keeps approaching lines from
+           crowding the transport below the pane. */
+        -webkit-mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+        mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+      }
+      /* The artwork, demoted to a small square card. top:auto matters: the base
+         pane is stretched top-to-bottom, and leaving that in place would keep
+         a full-height flex box behind the card. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        top: auto;
+        bottom: 24px;
+        left: 24px;
+        width: var(--ym-sl-fs-portrait-art);
+        height: var(--ym-sl-fs-portrait-art);
+        border-radius: 14px;
+      }
+      /* The card must FILL its new box: the landscape rules still ask for
+         min(100%, 54vh), which would crop it to a short strip. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video.ym-sl-fs-art-video {
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        max-height: 100%;
+        transform: none;
+        border-radius: 14px;
+        object-fit: cover;
+      }
+      /* Chrome: one bottom band, starting to the right of the art. Same 24px
+         bottom as the card, so the two sit on one line. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        top: auto;
+        bottom: 24px;
+        left: calc(48px + var(--ym-sl-fs-portrait-art));
+        right: clamp(24px, 5vw, 72px);
+        width: auto;
+        height: auto;
+      }
+      /* A full-band volume slider reads as a stray line at this width; cap it
+         and keep it with the transport. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+        max-width: 320px;
+        align-self: flex-start;
+      }
+
+      /* ===== music video in portrait ======================================
+         A 16:9 video has nowhere to go in a vertical window: the side split
+         gives it half the width and the words start before it ends. Portrait
+         puts the video across the FULL width at the very top (its own aspect
+         ratio decides the height, capped for tall clips), the words fill the
+         space under it, and the transport becomes a player overlay that fades
+         in when the video is hovered - like every other video player. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+        --ym-sl-fs-portrait-video-h: min(calc(100vw / var(--ym-sl-fs-video-ratio, 1.7777778)), 46vh);
+        /* The seam under the video is a real edge; the bottom fade is shorter
+           here because nothing sits below the pane. */
+        --ym-sl-fs-portrait-fade-top: clamp(40px, 5vh, 90px);
+        --ym-sl-fs-portrait-fade-bottom: clamp(56px, 9vh, 160px);
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--ym-sl-fs-portrait-video-h);
+        bottom: auto;
+        transform: none;
+        max-height: none;
+        border-radius: 0;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video {
+        border-radius: 0;
+      }
+      /* The words own everything below the video. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 0;
+        width: 100%;
+        top: calc(var(--ym-sl-fs-portrait-video-h) + 28px);
+        bottom: 0;
+        height: auto;
+        padding: clamp(24px, 4vh, 56px) clamp(40px, 7vw, 120px) clamp(64px, 10vh, 180px);
+        -webkit-mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+        mask-image: linear-gradient(
+          to bottom,
+          transparent 0,
+          rgba(0, 0, 0, .55) calc(var(--ym-sl-fs-portrait-fade-top) * .5),
+          #000 var(--ym-sl-fs-portrait-fade-top),
+          #000 calc(100% - var(--ym-sl-fs-portrait-fade-bottom)),
+          rgba(0, 0, 0, .55) calc(100% - var(--ym-sl-fs-portrait-fade-bottom) * .5),
+          transparent 100%
+        );
+      }
+      /* The horizontal readability shade is for a COLUMN of words beside a
+         picture. Both portrait compositions abandon the column (video on top
+         with the words full-width under it; cover art as a corner card), so the
+         half-width band has nothing left to protect. Video Background keeps
+         its shade - there the video is still the full-bleed backdrop. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+        display: none;
+      }
+      /* Player-style scrim: only under the controls, only on hover, so the
+         video stays untouched at rest. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 45%;
+        background: linear-gradient(to top, rgba(0, 0, 0, .68), rgba(0, 0, 0, 0));
+        opacity: 0;
+        transition: opacity .2s ease;
+        pointer-events: none;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-media::after {
+        opacity: 1;
+      }
+      /* Transport over the video's bottom edge, hidden until the pointer is on
+         the video (or on the controls themselves, which is what keeps them
+         alive while moving down to the seek bar). Nothing invisible may eat
+         clicks on the video, so the children are inert while hidden too. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        top: auto;
+        bottom: calc(100% - var(--ym-sl-fs-portrait-video-h) + 24px);
+        left: clamp(24px, 4vw, 64px);
+        right: clamp(24px, 4vw, 64px);
+        width: auto;
+        height: auto;
+        opacity: 0;
+        transition: opacity .2s ease;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls * {
+        pointer-events: none;
+      }
+      /* The idle class must WIN over hover: the pointer can rest on the video
+         while the overlay hides the cursor, and chrome that stays up after the
+         cursor has gone is the exact thing the idle state exists to prevent. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within {
+        opacity: 1;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within * {
+        pointer-events: auto;
+      }
+    }
+
     /* ===== media-mode swap: NO CROSSFADE (AJ, 2026-10-20) ==================
        The .ym-sl-fs-swapping class and its two rules (title filter fade +
        player-controls opacity fade) are REMOVED. syncFsVideoMode() no longer
@@ -4831,5 +5263,105 @@
        the outgoing image stays up until the incoming one can paint (the cover
        card is held until the video is ready), then both swap in one frame.
        Nothing to fade, nothing to time. */
+
+    /* NOTE: the page-wide YouTube font swap now lives in content/styles.css
+       (html.ym-yt-font) and is driven by the panel's own YouTube page, so it no
+       longer depends on this add-on running at all (AJ, 2026-10-22). */
+
+    /* ===== PiP control surface ==========================================
+       While the lyrics float in a Document Picture-in-Picture window, the
+       panel's lyric surface would just be a second, hidden copy. Instead the
+       panel becomes the control surface: a status block, with the REAL Options
+       card docked underneath so sync/offset stay editable while the window is
+       open. The card is the same node the Options button shows; pip-lyrics.js
+       moves it in from <body> and puts it back on close.
+       NO BACKTICKS ANYWHERE IN THIS BLOCK -- it lives inside a template literal. */
+    .ym-sl-panel.ym-pip-open .LyricsContainer,
+    .ym-sl-panel.ym-pip-open .ym-sl-tools,
+    .ym-sl-panel.ym-pip-open .ym-sl-jump { display: none !important; }
+    .ym-pip-open-view {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      box-sizing: border-box;
+      padding: clamp(22px, 4.4cqw, 38px) clamp(18px, 4.4cqw, 34px) 26px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .ym-pip-open-view::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    /* Centred like the header. text-align lives on the two text blocks, not on
+       the view, or the docked Options card would inherit it. */
+    .ym-pip-open-title {
+      text-align: center;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      /* Big on purpose: the panel is now a status surface, not a lyric sheet. */
+      font-size: clamp(25px, 5.2cqw, 36px);
+      font-weight: 700;
+      line-height: 1.06;
+      letter-spacing: -.02em;
+      color: #fff;
+      max-width: 22ch;
+      text-wrap: balance;
+    }
+    .ym-pip-open-note {
+      text-align: center;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, .56);
+      max-width: 52ch;
+      margin-bottom: 2px;
+    }
+    /* The floating Options card, docked. Every fixed/anchor/drag style is
+       neutralised (the card is moved out of <body> while docked), but its
+       frosted shell and tabbed body are kept so it reads as the same surface. */
+    .ym-sl-options-overlay.ym-sl-options-docked {
+      position: relative !important;
+      inset: auto !important;
+      left: auto !important;
+      top: auto !important;
+      right: auto !important;
+      bottom: auto !important;
+      z-index: auto !important;
+      flex: 0 0 auto;
+      width: 100%;
+      max-width: 620px;
+      /* The floating card had no border-box need; docked, width:100% would add
+         its 1px borders on top of the content box and overflow the pane by 2px. */
+      box-sizing: border-box;
+      margin: 0 auto 4px;
+      transform: none !important;
+      border-radius: 18px;
+      background: rgba(14, 16, 21, .5);
+      -webkit-backdrop-filter: blur(18px) saturate(1.5);
+      backdrop-filter: blur(18px) saturate(1.5);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1), 0 24px 60px -40px rgba(0, 0, 0, .7);
+    }
+    /* The header is the drag handle + close button; neither makes sense docked. */
+    .ym-sl-options-docked .ym-sl-options-header { display: none; }
+    /* Docked, the card is part of the surface, not a dismissible popover. Other
+       code closes the floating overlay (e.g. entering fullscreen); that must not
+       leave the PiP state with a status block and no controls. */
+    .ym-sl-options-overlay.ym-sl-options-docked.hidden {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-options-docked.hidden .ym-sl-options-panel.active {
+      visibility: visible;
+      pointer-events: auto;
+    }
+
   `;
 

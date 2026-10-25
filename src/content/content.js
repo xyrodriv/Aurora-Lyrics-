@@ -65,6 +65,7 @@
   const ICON_DENSITY = "M3 5h18v2H3zm0 6h18v2H3zm0 6h18v2H3z";
   const ICON_FLOAT = "M4 4h16v16H4V4zm2 2v12h12V6H6zm2 2h8v2H8V8zm0 4h5v2H8v-2z";
   const ICON_DELETE = "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM8 9h8v10H8V9zm7.5-5-1-1h-5l-1 1H5v2h14V4z";
+  const ICON_CHEVRON = "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z";
 
   function makeIconButton(iconPath, onClick, title) {
     const b = h("button", { class: "ym-icon-btn", title: title || "", "aria-label": title || "" });
@@ -245,6 +246,11 @@
       extensionSettingsStore = Object.assign({}, store, { [id]: Object.assign({}, values) });
       await new Promise((res) => chrome.storage.local.set({ [EXT_SETTINGS_KEY]: extensionSettingsStore }, res));
     });
+    // A theme's settings ARE its styling, so they take effect immediately rather
+    // than on the next page load. Saved first, classed second: if the write is
+    // interrupted the classes stay consistent with what the panel is showing.
+    const ext = findAvail(id);
+    if (ext && ext.cssUrl) applyThemeOptions(ext, values);
     return extensionSettingsWrite;
   };
   const removeExtensionSettings = (id) => {
@@ -282,10 +288,11 @@
     });
   });
   // ---- Spicy Lyrics API cache -----------------------------------------------
-  // The /v1/lyrics endpoint is rate-limited and the upstream extension caches
-  // its results for 3 days (SpicyLyrics_LyricsStore_g1 -> Unit "Days",
-  // Duration 3 in fetchLyrics.ts). We honour the same window, expiring every
-  // entry well inside the API's acceptable retention. Stored as one object so
+  // The /v1/lyrics endpoint is rate-limited. Entries carry a 30-day `exp`
+  // (SPICY_CACHE_TTL_MS in the page script — the ToS s7 ceiling; upstream's
+  // 3-day window was dropped on 2026-10-07). This side only stores the object;
+  // expiry is enforced by the page script, which sweeps on every read. Stored
+  // as one object so
   // a single read/write covers the whole cache; entries carry their own
   // `exp` stamp and are dropped lazily on read.
   const SPICY_CACHE_KEY = "ytmod_spicy_lyrics_cache";
@@ -357,8 +364,6 @@
   });
   const LRCLIB_ORIGIN = "https://lrclib.net";
   const LRCLIB_PATHS = new Set(["/api/get", "/api/search"]);
-  const UNISON_ORIGIN = "https://unison.boidu.dev";
-  const UNISON_PATHS = new Set(["/lyrics"]);
   const MUSICBRAINZ_ORIGIN = "https://musicbrainz.org";
   // MusicBrainz asks clients to keep request volume low. The resolver calls
   // this only after ListenBrainz misses, and this gate makes the fallback
@@ -380,21 +385,6 @@
       data: response.ok ? await response.json() : null,
     };
   };
-  const fetchUnison = async (rawUrl) => {
-    const url = new URL(String(rawUrl || ""));
-    if (url.origin !== UNISON_ORIGIN || !UNISON_PATHS.has(url.pathname)) {
-      throw new Error("Unsupported Unison endpoint.");
-    }
-    const response = await fetch(url.href, {
-      headers: { Accept: "application/json" },
-      credentials: "omit",
-    });
-    return {
-      ok: response.ok,
-      status: response.status,
-      data: response.ok ? await response.json() : null,
-    };
-  };
   const waitForMusicBrainz = async () => {
     const now = Date.now();
     const wait = Math.max(0, musicBrainzNextAt - now);
@@ -405,23 +395,35 @@
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
     .trim();
+  /* MusicBrainz's SEARCH endpoint never carries URL relationships: `inc` is a
+     LOOKUP parameter, so `recordings[].relations` is always absent and the
+     Spotify link could never be found there however well the search matched —
+     "Ready or Not" by brakence was the visible case (AJ, 2026-10-22). The
+     search stays a single request; the top candidates are then looked up by
+     MBID, where relations DO come back, and those relations are merged onto the
+     candidate so callers keep scoring exactly what they always did.
+
+     Query shape is deliberately title + artist only. `dur:` and `release:` used
+     to be ANDed in, which silently zeroed recall whenever YouTube's duration
+     (music videos run long) or album spelling differed — and duration is
+     already a scoring hint on the caller's side. */
+  const MB_RELATION_LOOKUPS = 3;
+  const musicBrainzSpotifyRelation = (relation) => {
+    const resource = String(relation && relation.url && relation.url.resource || "");
+    return /^spotify:track:[A-Za-z0-9]{22}$/i.test(resource) ||
+      /open\.spotify\.com\/(?:intl-[^/]+\/)?track\/[A-Za-z0-9]{22}/i.test(resource);
+  };
+
   const fetchMusicBrainzRecordingSearch = async (title, artist, album, durationMs) => {
     const recording = quoteMusicBrainz(title);
     const creditedArtist = quoteMusicBrainz(artist);
     if (!recording) return { ok: false, status: 400, data: null };
     const terms = [`recording:\"${recording}\"`];
     if (creditedArtist) terms.push(`artist:\"${creditedArtist}\"`);
-    if (album) terms.push(`release:\"${quoteMusicBrainz(album)}\"`);
-    if (Number.isFinite(Number(durationMs)) && Number(durationMs) > 0) {
-      // MusicBrainz's `dur` field is milliseconds. Keep this as a scoring hint;
-      // the title/artist query remains useful when the duration is rounded.
-      terms.push(`dur:${Math.max(0, Math.round(Number(durationMs) - 5000))}..${Math.round(Number(durationMs) + 5000)}`);
-    }
     const url = new URL("/ws/2/recording/", MUSICBRAINZ_ORIGIN);
     url.search = new URLSearchParams({
       query: terms.join(" AND "),
       fmt: "json",
-      inc: "url-rels",
       limit: "10",
     }).toString();
     await waitForMusicBrainz();
@@ -429,11 +431,43 @@
       headers: { Accept: "application/json" },
       credentials: "omit",
     });
-    return {
-      ok: response.ok,
-      status: response.status,
-      data: response.ok ? await response.json() : null,
-    };
+    if (!response.ok) return { ok: false, status: response.status, data: null };
+    const data = await response.json().catch(() => null);
+    const recordings = data && Array.isArray(data.recordings) ? data.recordings : [];
+
+    // Each lookup is a rate-limited request, so walk only the head of the
+    // relevance list and stop at the first candidate that already carries a
+    // Spotify track link. A failure here is TRANSIENT (status 0/429/5xx): the
+    // caller must not record a permanent miss for a song we could not inspect.
+    let lookups = 0;
+    for (const candidate of recordings) {
+      if (lookups >= MB_RELATION_LOOKUPS) break;
+      if (!candidate || !candidate.id) continue;
+      lookups++;
+      await waitForMusicBrainz();
+      const relUrl = new URL(`/ws/2/recording/${encodeURIComponent(candidate.id)}`, MUSICBRAINZ_ORIGIN);
+      relUrl.search = new URLSearchParams({ inc: "url-rels", fmt: "json" }).toString();
+      let relResponse = null;
+      try {
+        relResponse = await fetch(relUrl.href, {
+          headers: { Accept: "application/json" },
+          credentials: "omit",
+        });
+      } catch (_) {
+        return { ok: false, status: 0, data: null };
+      }
+      if (relResponse.status === 429 || relResponse.status >= 500) {
+        return { ok: false, status: relResponse.status, data: null };
+      }
+      if (!relResponse.ok) continue; // this candidate is unusable; try the next
+      const full = await relResponse.json().catch(() => null);
+      if (!full || !Array.isArray(full.relations)) continue;
+      candidate.relations = full.relations;
+      if (full.relations.some(musicBrainzSpotifyRelation)) break;
+    }
+    // album / durationMs stay in the signature: the caller passes them for
+    // scoring, and dropping the parameters would silently change that contract.
+    return { ok: true, status: 200, data: Object.assign({}, data, { recordings }) };
   };
   const fetchSpotifyAlbumArtwork = async (artist, album) => {
     const cacheKey = [artist, album].map((value) => String(value || "").toLowerCase().trim()).join("\u0001");
@@ -529,7 +563,7 @@
     return result;
   };
 
-  /* Deezer track search, used to obtain an ISRC for lrc.red.
+  /* Deezer track search, exposed to add-ons for ISRC lookups.
      Why Deezer: YouTube Music does NOT expose ISRC anywhere in its API —
      verified against /youtubei/v1/player (videoDetails has musicVideoType but
      no isrc) and /youtubei/v1/next (no isrc, no externalIds). Deezer returns
@@ -670,6 +704,11 @@
   // Inject CSS via a <style> element (Trusted-Types safe: textContent, not innerHTML).
   function injectCSS(css) {
     const s = document.createElement("style");
+    // Marked so the YouTube page's type scaler never rewrites our own sheets
+    // (see ytSheetIsOurs). Theme CSS carries no type today, but a future one
+    // could, and silently resizing the panel from YTM's rules is not a trade
+    // anyone asked for (AJ, 2026-10-22).
+    s.setAttribute("data-ym-owned", "1");
     s.textContent = css;
     (document.head || document.documentElement).appendChild(s);
     return s;
@@ -677,12 +716,36 @@
 
   /* ---- available catalog (later: fetch from a GitHub-hosted marketplace.json) ----
      Entry shape: { id, name, author, category, stars, tags, description, version,
-                    lastUpdated, css?, jsUrl?, comingSoon?, github? }
+                    lastUpdated, css?, cssUrl?, jsUrl?, comingSoon?, github? }
      github: string URL, OR string[] of URLs, OR {label,url}[] — shown in the detail view.
      categories: Extensions | Themes */
   const CAT_COLOR = { Extensions: "#e01040", Themes: "#8e0b26" };
 
+  // The one theme that is a built-in page rather than a stylesheet (see
+  // mkAppleThemePage). It has no jsUrl and no cssUrl: its switches ARE the
+  // site's prefs, so there is nothing to install and nothing to enable.
+  // Named "Style" on purpose: it is a look inspired by Apple Music, not an
+  // Apple product, and the card says so (AJ, 2026-10-23).
+  const APPLE_THEME_ID = "apple-music";
+  const APPLE_THEME_NAME = "Apple Music Style";
+
   const AVAILABLE = [
+    {
+      id: APPLE_THEME_ID,
+      name: APPLE_THEME_NAME,
+      author: "Aurora Lyrics",
+      category: "Themes",
+      stars: 5,
+      tags: ["theme", "apple", "player bar", "glass", "type", "lyrics column"],
+      description: "An Apple Music–style look, gathered on one card: a dark frosted player bar with the song info on the left and the transport centred, the wider lyrics column with its quiet tab strip, the Spicy Lyrics typeface and glass chrome. Nothing to install — every switch changes YouTube Music the moment you touch it.",
+      version: "1.0.0",
+      lastUpdated: "2026-10-23",
+      settings: [],
+    },
+    // The Aurora CSS theme lived here. Its four player/chrome levers were
+    // YouTube Music tweaks rather than a look, so they moved to the YouTube page
+    // and then, with the type and the lyrics column, to the Apple Music card
+    // above (AJ, 2026-10-23).
     {
       id: "ytmod-dynamic",
       name: "Aurora Bloom",
@@ -753,11 +816,13 @@
       tags: ["lyrics", "synced", "karaoke", "ttml"],
       // Terms of Service s5: naming the upstream as a dependency is allowed
       // ("uses or is built on Spicy Lyrics is fine"), but the listing must NOT
-      // read as Spicy Lyrics' own product. Hence the plain "Unofficial." and a
-      // github link to THIS project rather than to Spikerko's repo, which would
-      // imply origin/endorsement.
+      // read as Spicy Lyrics' own product. That is carried by the DISCLAIMER,
+      // which sits directly under the title, so the description no longer opens
+      // with a second "Unofficial." (AJ, 2026-10-22) — plus a github link to
+      // THIS project rather than to Spikerko's repo, which would imply
+      // origin/endorsement.
       // Rewritten in plain language (AJ, 2026-10-19): no renderer/API jargon.
-      description: "Unofficial. Shows the lyrics of whatever you're playing, in time with the music — the words light up as they're sung. You can make the text bigger, change how it looks, and open a full-screen lyric view.",
+      description: "Shows the lyrics of whatever you're playing, in time with the music — the words light up as they're sung. You can make the text bigger, change how it looks, and open a full-screen lyric view.",
       disclaimer: "Not affiliated with Spicy Lyrics · Unofficial",
       version: "0.2.0",
       lastUpdated: "2026-10-07",
@@ -771,23 +836,30 @@
         // Lyric size ceiling is 600%. Default back to 130% (AJ, 2026-10-07) —
           // 145% (2026-09-28) read too big; 130% is the intended look.
         { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.30, display: "percent" },
-        { key: "romanizationEnabled", label: "Romanization (JP / KR)", type: "toggle", default: true },
-        { key: "legibilityBackdrop", label: "Dark shade behind lyrics", type: "toggle", default: false },
-        // Extends the adaptive lyric readability shade (which Video Background
-        // already uses) to the SIDE layout for music videos, where the lyrics
-        // sit over the blurred video backdrop. AJ, 2026-09-28.
-        { key: "mvLyricsShade", label: "Shade lyrics over bright music video", type: "toggle", default: true },
+        // Renderer (AJ, 2026-10-23): WHICH renderer draws WHICH kind of track,
+        // named on the row itself instead of hanging off a master toggle. Both
+        // defaults are the renderer each kind was built for — Spicy for
+        // word-by-word karaoke, the Apple Music engine for line-by-line — and
+        // flipping both swaps them.
+        // They get their own rail tab (LYRICS_GROUPS, "renderer"), not a header
+        // row — the panel strips header rows now that the rail names sections.
+        { key: "amllWordTracks", label: "Apple Music for word-by-word", type: "toggle", default: false },
+        { key: "spicyLineTracks", label: "Spicy lyrics for line-by-line", type: "toggle", default: false },
         // Animated Apple Music cover art (m8tec HLS): swaps the cover for a looping
         // clip in the player view and in fullscreen. Network-backed, so it gets a
         // switch — and it defaults OFF (AJ, 2026-10-07): it is an opt-in extra,
         // not something to turn on for every install unasked.
         { key: "animatedArt", label: "Animated cover art", type: "toggle", default: false },
-        // Apple-Music-style MOTION only (AJ, 2026-10-01): no bounce, no zoom, no
-        // glow — the line just glides up smoothly. The gradient sweep is UNCHANGED
-        // from normal mode; an earlier attempt redirected it at a registered
-        // custom property and broke the active-line highlight, so the mode is now
-        // strictly the spring/spline swap.
-        { key: "simpleLyrics", label: "Apple Music style lyrics", type: "toggle", default: false },
+        // On-device English translation of non-English lines (Chrome 138+ desktop).
+        // OFF by default: it may download a language pack and adds a second line
+        // under the lyrics, so it is a choice rather than part of the look.
+        { key: "autoTranslate", label: "English translation of foreign lyrics", type: "toggle", default: false },
+        { key: "legibilityBackdrop", label: "Dark shade behind lyrics", type: "toggle", default: false },
+        // In-page fullscreen (AJ, 2026-10-22): the overlay stays inside the tab,
+        // so the tab strip, other tabs and the rest of the desktop keep working
+        // while the fullscreen view is up. Off by default — the native behaviour
+        // is unchanged until it is switched on.
+        { key: "fullscreenInPage", label: "Fullscreen stays inside the tab", type: "toggle", default: false },
         // Joins each word into one whole-word fill — no per-syllable/letter karaoke
         // stepping, so a word lights up as a single unit. The Spicy Lyrics
         // "whole word" toggle (AJ, 2026-10-19).
@@ -797,18 +869,20 @@
         // behaviour as a choice instead of hard-coding it. Rendered as an
         // indented child row that only exists while the parent is ON.
         { key: "joinBgSyllables", label: "Also join background lines", type: "toggle", default: true, childOf: "joinSyllables" },
-        // lrc.red's TTML often ships one span per syllable ("shi"+"ning"). This
-        // merges those runs at parse time so the fill/glow covers the whole word.
-        // Separate from the global whole-word renderer toggle above (AJ, 2026-10-20).
-        { key: "joinLrcRedSyllables", label: "Join lrc.red syllables into words", type: "toggle", default: true },
         { type: "header", label: "Scrolling" },
         // smoothScrolling back ON by default (AJ, 2026-10-07) — he prefers the
-        // eased glide into the active line. `disabledWhen` dims + locks the row
-        // while simpleLyrics is ON, because simple mode forces its own spring
-        // scroll and ignores this setting entirely (AJ, 2026-10-02).
-        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true, disabledWhen: "simpleLyrics" },
+        // eased glide into the active line. NOT locked while Apple Music style
+        // lyrics is on any more: that mode is per-track now, and a word-synced
+        // track renders through the Spicy renderer, which honours this toggle.
+        // (Line-synced tracks are drawn by the engine, which springs its own
+        // scroll regardless.)
+        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true },
         { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
         { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
+        // NOTE: "Use the Spicy Lyrics font across YouTube Music" used to live here.
+        // It changes YouTube rather than the lyrics, so it now sits on the panel's
+        // own YouTube page (see YT_PREFS_KEY below) where it survives uninstalling
+        // this add-on (AJ, 2026-10-22).
         // ---- developer mode only ------------------------------------------
         { type: "header", label: "TTML settings" },
         { key: "bgOpacity", label: "Background vocals", min: 0.15, max: 1.0, step: 0.05, default: 1.0, display: "percent", dev: true },
@@ -825,8 +899,9 @@
         // existed cannot keep shifting the lyrics with no UI left to undo it.
         // NOTE: "Where lyrics come from" (source reordering) was removed (AJ,
         // 2026-10-19). The resolver now uses a fixed priority — Spicy Lyrics wins
-        // when it has the track, lrc.red next for new releases, Unison/LRCLIB as
-        // fallbacks — so there is no user-facing reordering.
+        // when it has the track, LRCLIB as the fallback — so there is no
+        // user-facing reordering. lrc.red was retired entirely on 2026-10-22,
+        // and Unison on 2026-10-25.
       ],
     },
     {
@@ -1062,6 +1137,72 @@
      script loaded from jsUrl / inline js, so it can use window.YTMod). Both are
      tracked separately and torn down on disable. */
   const applied = {};
+  // A theme ships as a FILE (cssUrl) rather than an inline string: a theme is
+  // something you write and keep editing, and inlining it here would mean
+  // rebuilding the content script for every colour change.
+  //
+  // It is FETCHED and injected as a <style>, not <link>ed. A <link> to a
+  // chrome-extension:// URL is a cross-origin stylesheet request made by the
+  // page, and when that is refused the failure is silent: the element sits in
+  // the DOM, the file is served, and not one rule applies (AJ, 2026-10-22: the
+  // link was present and correct while #player-bar-background kept its 0px
+  // border). Fetching from the content script's own origin and writing the text
+  // into a <style> is the same path the base stylesheet already takes, and it is
+  // the one that demonstrably applies.
+  function injectCSSFile(id, url) {
+    const style = document.createElement("style");
+    style.dataset.ymExt = id;
+    (document.head || document.documentElement).appendChild(style);
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.text();
+      })
+      .then((css) => {
+        style.textContent = css;
+        console.debug("[YTMod] theme stylesheet applied:", id, css.length + " chars");
+      })
+      .catch((err) => console.warn("[YTMod] theme stylesheet failed to load:", url, err));
+    return style;
+  }
+  /* Only ONE CSS theme may be live at a time: two stylesheets fighting over the
+     same player chrome is not a look, it is a bug. Enabling a theme switches off
+     any other enabled theme, and the REGISTRY is written before anything is
+     applied — otherwise the boot loop would re-apply both after a reload. */
+  async function makeThemeExclusive(id) {
+    const ext = findAvail(id);
+    if (!ext || !ext.cssUrl) return;
+    const reg = await getReg();
+    let changed = false;
+    for (const otherId of Object.keys(reg)) {
+      if (otherId === id) continue;
+      const other = findAvail(otherId);
+      if (!other || !other.cssUrl || !reg[otherId].enabled) continue;
+      reg[otherId].enabled = false;
+      applyExtension(otherId, false);
+      changed = true;
+    }
+    if (changed) await setReg(reg);
+  }
+  /* Theme options are CSS classes on <html>, one per toggle setting:
+     ym-theme-<key>. Every rule in a theme stylesheet is gated on one, so a part
+     that is switched off costs no rules and no repaint, and a second theme could
+     ship its own options without touching this code. */
+  const THEME_CLASS_PREFIX = "ym-theme-";
+  function applyThemeOptions(ext, values) {
+    if (!ext || !ext.cssUrl) return;
+    const root = document.documentElement;
+    for (const setting of ext.settings || []) {
+      if (setting.type !== "toggle" || !setting.key) continue;
+      root.classList.toggle(THEME_CLASS_PREFIX + setting.key, !!(values && values[setting.key]));
+    }
+  }
+  function clearThemeOptions() {
+    const root = document.documentElement;
+    for (const name of Array.from(root.classList)) {
+      if (name.indexOf(THEME_CLASS_PREFIX) === 0) root.classList.remove(name);
+    }
+  }
   function loadExtensionJS(ext) {
     const s = document.createElement("script");
     if (ext.jsUrl) s.src = ext.jsUrl;
@@ -1077,11 +1218,14 @@
     if (!ext) return;
     if (on) {
       if (ext.css && !applied[id + "_css"]) applied[id + "_css"] = injectCSS(ext.css);
+      if (ext.cssUrl && !applied[id + "_css"]) applied[id + "_css"] = injectCSSFile(id, ext.cssUrl);
+      if (ext.cssUrl) getExtensionSettings(ext).then((values) => applyThemeOptions(ext, values));
       if ((ext.jsUrl || ext.js) && !applied[id + "_js"]) {
         applied[id + "_js"] = loadExtensionJS(ext);
         window.postMessage({ type: "ytmod-ext", id, action: "enable" }, "*");
       }
     } else {
+      if (ext.cssUrl) clearThemeOptions();
       if (applied[id + "_css"]) { try { applied[id + "_css"].remove(); } catch (e) {} delete applied[id + "_css"]; }
       if (applied[id + "_js"]) {
         window.postMessage({ type: "ytmod-ext", id, action: "disable" }, "*");
@@ -1942,7 +2086,7 @@
   const REPORT_DISCORD_URL = "https://discord.gg/wsZxTSnaMa";
   function reportIssuesFor(ext) {
     const byId = {
-      "ytmod-spicy-lyrics": ["Lyrics not showing", "Romanization", "Fullscreen", "Lyric sources", "Other"],
+      "ytmod-spicy-lyrics": ["Lyrics not showing", "Fullscreen", "Lyric sources", "Other"],
       "ytmod-smooth-motion": ["Animations look wrong", "Panel / corner motion", "Performance / lag", "Buttons / controls", "Other"],
       "ytmod-artwork-accent": ["Ambient glow / accent color", "Colors", "Performance", "Other"],
       "ytmod-dynamic": ["Cover art animation", "Video background / backdrop", "Gallery dimming", "Performance", "Other"],
@@ -2605,8 +2749,8 @@
         syncRangeFill();
         postExtensionSettings(ext.id, values);
         saveExtensionSettings(ext.id, values);
-        // A change can flip another row's disabledWhen condition (e.g. toggling
-        // Simple Lyrics locks Smooth Scrolling), so re-sync every row. `childOf`
+        // A change can flip another row's disabledWhen condition (e.g. the
+        // kawarp toggle locks its blur slider), so re-sync every row. `childOf`
         // rows re-sync here too, which is what makes a parent toggle open and
         // close its child row.
         controls.forEach((entry) => {
@@ -2638,13 +2782,13 @@
         syncVisible();
       }
       // `disabledWhen`: dim + lock this row while the named setting is truthy
-      // (used by Smooth Scrolling, which Simple Lyrics overrides). Inline styles
-      // keep it self-contained -- there is no conditional-row CSS to extend.
+      // (used by the kawarp blur, which the kawarp toggle overrides). Inline
+      // styles keep it self-contained -- no conditional-row CSS to extend.
       const syncDisabled = () => {
         const blocked = !!(setting.disabledWhen && values[setting.disabledWhen]);
         row.style.opacity = blocked ? "0.45" : "";
         row.style.pointerEvents = blocked ? "none" : "";
-        row.title = blocked ? "Apple Music style lyrics overrides this setting" : "";
+        row.title = blocked ? "Another setting overrides this one" : "";
       };
       syncDisabled();
       controls.set(setting.key, { input, valueEl, setting, syncRangeFill, syncDisabled, syncVisible });
@@ -2813,8 +2957,12 @@
     }
     overlay.classList.remove("hidden", "ym-leaving", "ym-opening");
     refreshPanelArt();
+    // QUIET refresh: the section was already rendered while the overlay was
+    // hidden, and the open animation below fades the whole panel in. A normal
+    // renderSection() replays mkAnimateIn()'s stagger on top of that, so the
+    // user sees the content, then watches it fade in again (AJ, 2026-10-21).
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      renderSection();
+      renderSection(true);
       return;
     }
     // Force a fresh animation when reopening quickly after a close.
@@ -2824,7 +2972,7 @@
       overlay.classList.remove("ym-opening");
       marketplaceOpenTimer = 0;
     }, 280);
-    renderSection();
+    renderSection(true);
   }
 
   function closeMarketplace() {
@@ -2944,6 +3092,7 @@
     const reg = await getReg();
     reg[id] = { enabled: true, version: ext.version || "?", installedAt: Date.now() };
     await setReg(reg);
+    await makeThemeExclusive(id);
     applyExtension(id, true);
     toast((ext.name || id) + " installed");
     renderSection(true);
@@ -2955,6 +3104,7 @@
     if (!reg[id]) return;
     reg[id].enabled = on;
     await setReg(reg);
+    if (on) await makeThemeExclusive(id);
     applyExtension(id, on);
     const e = findAvail(id);
     toast((e ? e.name : id) + (on ? " enabled" : " disabled"));
@@ -3126,6 +3276,9 @@
     if (!overlay || overlay.classList.contains("hidden")) return;
     if (e.key === "Escape") {
       e.preventDefault();
+      // The YouTube tab's section picker owns ONE level of Escape, so stepping
+      // out of a section does not also close the panel (AJ, 2026-10-22).
+      if (mkSel === "youtube" && ytBackToPicker) { ytBackToPicker(); return; }
       closeMarketplace();
       return;
     }
@@ -3184,7 +3337,6 @@
           case "getArtCache": r = await getArtCache(); break;
           case "setArtCache": await setArtCache(args[0]); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
-          case "fetchUnison": r = await fetchUnison(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
             break;
@@ -3340,6 +3492,12 @@
     // Two outward triangles = seek back / forward. Deep accent so it does not
     // read the same as the two #ff4d6a tiles above (AJ, 2026-10-20).
     "snippet-arrow-seek": { c: "#e01040", d: "M10 7v10l-6-5zM14 7v10l6-5z" },
+    // The YouTube PAGE (not an add-on card). Brand red, the same sanctioned
+    // exception as the Discord row: it has to read as YouTube at a glance.
+    youtube: { c: "#ff4a4a", d: "M21.6 7.2a2.5 2.5 0 0 0-1.76-1.77C18.25 5 12 5 12 5s-6.25 0-7.84.43A2.5 2.5 0 0 0 2.4 7.2 26 26 0 0 0 2 12a26 26 0 0 0 .4 4.8 2.5 2.5 0 0 0 1.76 1.77C5.75 19 12 19 12 19s6.25 0 7.84-.43a2.5 2.5 0 0 0 1.76-1.77A26 26 0 0 0 22 12a26 26 0 0 0-.4-4.8zM10 15V9l5.2 3z" },
+    // A built-in theme rather than an add-on: the note wears Apple Music's pink
+    // in the rail, so the row never reads as a missing installed check.
+    [APPLE_THEME_ID]: { c: "#fa2d48", d: "M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" },
   };
   // "#rrggbb" + alpha byte, for the tinted tile background/border.
   const mkTint = (hex, alpha) => hex + alpha;
@@ -3348,17 +3506,12 @@
   // on screen wherever lyrics appear.
   const MK_SOURCES = {
     "ytmod-spicy-lyrics": [
-      ["Lyrics", [["Spicy Lyrics", "https://spicylyrics.org/"], ["lrc.red", "https://lrc.red/"], ["Unison", "https://unison.boidu.dev/"], ["LRCLIB", "https://lrclib.net/"]]],
+      ["Lyrics", [["Spicy Lyrics", "https://spicylyrics.org/"], ["LRCLIB", "https://lrclib.net/"]]],
       ["Track matching", [["MusicBrainz", "https://musicbrainz.org/"], ["ListenBrainz", "https://listenbrainz.org/"]]],
     ],
   };
   const MK_LNK = {
     "Spicy Lyrics": "ym-mk-lnk-spicy",
-    // lrc.red deliberately shares Unison's colour class (AJ, 2026-10-20): it is a
-    // community/unreviewed source of the same kind, and the two sit next to each
-    // other in the list, so giving it a third gradient just added noise.
-    "lrc.red": "ym-mk-lnk-unison",
-    Unison: "ym-mk-lnk-unison",
     LRCLIB: "ym-mk-lnk-lrclib",
     MusicBrainz: "ym-mk-lnk-mb",
     ListenBrainz: "ym-mk-lnk-lb",
@@ -3475,11 +3628,11 @@
       href: REPORT_DISCORD_URL,
       target: "_blank",
       rel: "noopener noreferrer",
-      title: "Open the Aurora Lyrics Discord",
-      "aria-label": "Join the Aurora Lyrics Discord",
+      title: "Open the Aurora Lyrics Discord server",
+      "aria-label": "Join the Aurora Lyrics Discord server",
     });
     card.appendChild(h("div", { class: "ym-mk-mono" }, svgIcon(MK_DISCORD_PATH)));
-    card.appendChild(h("div", { class: "ym-mk-name", text: "Discord" }));
+    card.appendChild(h("div", { class: "ym-mk-name", text: "Discord Server" }));
     const out = svgIcon(MK_ARROW_PATH);
     out.classList.add("ym-mk-out");
     card.appendChild(out);
@@ -3489,15 +3642,29 @@
   function mkBuildRows(list, reg) {
     if (!mkRows || !mkInd) return;
     mkRows.replaceChildren(mkInd);
-    mkRows.appendChild(mkDiscordCard());
+    // Home leads the rail: it is the landing view, so the external link and the
+    // site's own settings sit under it rather than above it (AJ, 2026-10-22).
     mkRows.appendChild(mkCard("home", "Home", "", false, true));
+    mkRows.appendChild(mkDiscordCard());
+    // Its own page rather than an add-on card: it is YouTube's settings, not
+    // Aurora's, so it must not appear as something to install (AJ, 2026-10-22).
+    // It wears the Discord row's "this is not an add-on" treatment in YouTube
+    // red, so the two rail entries above the add-on list read as one pair
+    // (AJ, 2026-10-22).
+    const ytCard = mkCard("youtube", "YouTube Modifications", "YT", false, false);
+    ytCard.classList.add("ym-mk-card-yt");
+    mkRows.appendChild(ytCard);
     let last = null;
     for (const ext of list) {
       if (ext.category !== last) {
         last = ext.category;
         mkRows.appendChild(h("div", { class: "ym-mk-cat", text: ext.category || "Add-ons" }));
       }
-      mkRows.appendChild(mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false));
+      const card = mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false);
+      // Apple Music Style is built in like the YouTube page, so its row wears
+      // the "not an add-on" tint instead of an installed check.
+      if (ext.id === APPLE_THEME_ID) card.classList.add("ym-mk-card-apple");
+      mkRows.appendChild(card);
     }
     mkPositionInd(true);
   }
@@ -3562,7 +3729,7 @@
         { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "both" }
       );
     });
-    const m = w.querySelector(".ym-mk-dmono") || w.querySelector(".ym-mk-mark");
+    const m = w.querySelector(".ym-mk-dmono");
     if (m && m.animate) {
       m.animate([{ transform: "scale(.84)" }, { transform: "scale(1)" }],
         { duration: 640, easing: "cubic-bezier(.34,1.5,.5,1)", fill: "both" });
@@ -3778,45 +3945,128 @@
   const MK_ARROW_PATH = "M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z";
 
 
-  function mkHome(reg) {
-    const installedCount = Object.keys(reg).length;
-    const themes = AVAILABLE.filter((e) => e.category === "Themes").length;
-    const exts = AVAILABLE.filter((e) => e.category === "Extensions").length;
-    const wrap = h("div", { class: "ym-mk-home" });
-    const hero = h("div", { class: "ym-mk-hero" });
-    const mark = h("div", { class: "ym-mk-mark" });
-    const markUrl = mkLogoUrl();
-    if (markUrl) mark.style.backgroundImage = 'url("' + markUrl + '")';
-    hero.appendChild(mark);
-    hero.appendChild(h("h1", { class: "ym-mk-htitle", text: "Make YouTube Music yours." }));
-    hero.appendChild(h("p", { class: "ym-mk-hsub", text: "Themes, synced lyrics, and little touches — all in one place. Pick an add-on to dive in." }));
-    const stats = h("div", { class: "ym-mk-stats" });
-    for (const pair of [[installedCount, "Installed"], [themes, "Themes"], [exts, "Extensions"]]) {
-      stats.appendChild(h("div", { class: "ym-mk-stat" }, h("b", { text: String(pair[0]) }), h("span", { text: pair[1] })));
-    }
-    hero.appendChild(stats);
-    const cta = h("button", { class: "ym-mk-cta", type: "button", text: "Browse add-ons" });
-    cta.addEventListener("click", () => {
-      const first = AVAILABLE.find((e) => mkFilter === "All" || e.category === mkFilter);
-      if (first) mkSelect(first.id);
-    });
-    hero.appendChild(cta);
-    wrap.appendChild(hero);
+  /* The home screen is a catalog spread now, not a homepage (AJ, 2026-10-25).
+     The first pass removed the hero but still stacked "installed" over a
+     two-column index, which is the shape every add-on store ships. This one
+     uses the pane's width: a masthead, a narrow setup margin, and the catalog
+     beside it. Space and alignment carry the structure, so there are no rules,
+     cards, icons or artwork. The icon left with the hero; the artwork is out of
+     date, and the add-ons themselves are the content. */
+  // One line per add-on for the catalog. `description` is the detail page's
+  // paragraph and reads too long in a list; these keep the entry scannable and
+  // stay factual, because this is the line someone chooses from.
+  const MK_BLURB = {
+    [APPLE_THEME_ID]: "A frosted player bar, a wider lyrics column and glass chrome.",
+    "ytmod-dynamic": "The playing artwork becomes a full-page backdrop.",
+    "ytmod-artwork-accent": "A glow around the artwork, with the controls tinted to match.",
+    "ytmod-smooth-motion": "The page eases between states instead of snapping.",
+    "ytmod-spicy-lyrics": "Word-by-word lyrics in the panel and in fullscreen.",
+    "ytmod-sleep-timer": "Fades the music out and pauses it, on a timer or at the end of the track.",
+    "ytmod-pip-lyrics": "The current lyric line in a small always-on-top window.",
+    "ytmod-share-lyric": "Saves the line you are on as a square image.",
+    "ytmod-next-up": "What plays next, in a pill beside the artwork.",
+    "ytmod-song-notes": "Private notes on a song, saved in the browser.",
+    "snippet-track-toast": "A notification with the artwork whenever the track changes.",
+    "snippet-copy-lyrics": "Copies the whole song to the clipboard in one click.",
+    "snippet-centered-home": "Centers the home page headers and filter chips.",
+    "snippet-npv-panel": "A side panel with the artwork, the song and live lyrics.",
+    "snippet-arrow-seek": "Left and right arrows scrub the song, five seconds a press.",
+  };
 
-    const prev = h("div", { class: "ym-mk-previews" });
-    // PiP Lyrics is deliberately absent: its preview showed copyrighted lyric
-    // text (AJ, 2026-10-19).
-    for (const id of ["ytmod-sleep-timer", "ytmod-next-up", "ytmod-song-notes"]) {
-      const ext = findAvail(id);
-      if (!ext) continue;
-      const card = h("div", { class: "ym-mk-prev" });
-      const box = mkPromoBox(ext, "");
-      box.addEventListener("click", () => mkSelect(id));
-      card.appendChild(box);
-      card.appendChild(h("div", { class: "ym-mk-prevcap", text: ext.name }));
-      prev.appendChild(card);
+  // A label and its count, set together at the left. No rule between or after
+  // them: the space and the shared alignment carry the spread, not a line.
+  function mkHomeHead(label, count) {
+    return h("h2", { class: "ym-mk-sechead" },
+      h("span", { class: "ym-mk-sechead-label", text: label }),
+      h("span", { class: "ym-mk-sechead-n", text: String(count) }));
+  }
+
+  function mkHomeEntry(ext, installed) {
+    const blurb = MK_BLURB[ext.id] || "";
+    const row = h("button", {
+      class: "ym-mk-entry" + (installed ? " is-on" : ""),
+      type: "button",
+      "data-id": ext.id,
+    });
+    // The check is aria-hidden, so the state lives in the row's name instead.
+    row.setAttribute("aria-label", ext.name + (installed ? ", installed. " : ". ") + blurb);
+    const body = h("span", { class: "ym-mk-entry-body" });
+    body.appendChild(h("span", { class: "ym-mk-entry-name", text: ext.name }));
+    body.appendChild(h("span", { class: "ym-mk-entry-desc", text: blurb }));
+    row.appendChild(body);
+    // One mark per row, and it carries state: a check means the add-on is on,
+    // a chevron means the row opens something. Two marks on the right would
+    // turn a quiet list into a toolbar.
+    const mark = svgIcon(installed ? MK_CHECK : ICON_CHEVRON);
+    mark.classList.add(installed ? "ym-mk-entry-check" : "ym-mk-entry-go");
+    mark.setAttribute("aria-hidden", "true");
+    row.appendChild(mark);
+    row.addEventListener("click", () => mkSelect(ext.id));
+    return row;
+  }
+
+  function mkHome(reg) {
+    // Count what the page can actually list: an id left in storage after the
+    // catalog dropped it has no row to open, so counting it would inflate the
+    // figure next to an empty space.
+    const installed = AVAILABLE.filter((e) => !!reg[e.id]).length;
+    // With nothing in the margin, the catalog takes the whole page: an empty
+    // 184px column would frame the absence instead of the add-ons.
+    const wrap = h("div", { class: "ym-mk-home" + (installed ? "" : " is-empty") });
+
+    const mast = h("header", { class: "ym-mk-mast" });
+    mast.appendChild(h("h1", { class: "ym-mk-mast-title", text: "Add-ons" }));
+    const meta = h("div", { class: "ym-mk-mast-meta" });
+    meta.appendChild(h("span", { text: AVAILABLE.length + " add-ons" }));
+    meta.appendChild(h("span", { class: "ym-mk-mast-on", text: installed + " in use" }));
+    mast.appendChild(meta);
+    wrap.appendChild(mast);
+
+    const grid = h("div", { class: "ym-mk-home-grid" });
+
+    // Setup first in the tree so its position matches the tab order: a left
+    // margin beside the catalog when there is room, the first block above it
+    // when there is not.
+    const live = AVAILABLE
+      .filter((e) => !!reg[e.id])
+      .slice()
+      .sort((a, b) => (MK_CAT_ORDER[a.category] ?? 9) - (MK_CAT_ORDER[b.category] ?? 9));
+    const side = h("aside", { class: "ym-mk-side", "aria-labelledby": "ym-mk-setup-h" });
+    const sideHead = mkHomeHead("Your setup", live.length);
+    sideHead.id = "ym-mk-setup-h";
+    side.appendChild(sideHead);
+    if (live.length) {
+      const sideList = h("div", { class: "ym-mk-side-list" });
+      for (const ext of live) {
+        const b = h("button", { class: "ym-mk-side-item", type: "button", "data-id": ext.id });
+        b.appendChild(h("span", { class: "ym-mk-side-name", text: ext.name }));
+        b.addEventListener("click", () => mkSelect(ext.id));
+        sideList.appendChild(b);
+      }
+      side.appendChild(sideList);
+    } else {
+      // First run: name the state and the way out of it, not "No data".
+      side.appendChild(h("p", {
+        class: "ym-mk-side-empty",
+        text: "Nothing added yet. Your page is stock YouTube Music until you add one from the catalog.",
+      }));
     }
-    wrap.appendChild(prev);
+    grid.appendChild(side);
+
+    const catalog = h("section", { class: "ym-mk-catalog", "aria-label": "Add-on catalog" });
+    for (const cat of ["Themes", "Extensions", "Snippets"]) {
+      const items = AVAILABLE.filter((e) => e.category === cat);
+      if (!items.length) continue;
+      const group = h("section", { class: "ym-mk-group" });
+      group.appendChild(mkHomeHead(cat, items.length));
+      const list = h("div", { class: "ym-mk-list" });
+      for (const ext of items) list.appendChild(mkHomeEntry(ext, !!reg[ext.id]));
+      group.appendChild(list);
+      catalog.appendChild(group);
+    }
+    grid.appendChild(catalog);
+
+    wrap.appendChild(grid);
     return wrap;
   }
 
@@ -3855,7 +4105,7 @@
 
   /* ===== Aurora Lyrics: grouped sub-rail (AJ, 2026-10-21) =================
      This add-on has 19 settings and read as one endless column. They are split
-     into five groups and the pane gains a second, smaller rail.
+     into groups and the pane gains a second, smaller rail.
      ⭐ The rows are the SAME NODES the generic builder already made — they are
      MOVED, never rebuilt — so every control keeps its listener, its childOf
      collapse and its disabledWhen wiring. Nothing in the settings engine
@@ -3866,10 +4116,18 @@
   let lrActiveGroup = "";
 
   const LYRICS_GROUPS = [
-    { id: "look", label: "Look", keys: ["size", "romanizationEnabled", "legibilityBackdrop", "mvLyricsShade", "bgOpacity", "adaptiveSpacing"] },
-    { id: "words", label: "Words", keys: ["joinSyllables", "joinBgSyllables", "joinLrcRedSyllables"] },
-    { id: "motion", label: "Motion", keys: ["animatedArt", "simpleLyrics", "animation", "syllableAnimation", "verticalAnimation"] },
-    { id: "timing", label: "Timing", keys: ["smoothScrolling", "scrollLeadEnabled", "scrollLeadMs"] },
+    // Look collects everything you SEE: how big the words are, what they sit
+    // on, and the two presentation modes (Apple-Music motion + animated art).
+    // The Motion tab keeps only the intensities, which are dev-only — so for a
+    // normal install that tab is empty and drops itself (see `live` below).
+    { id: "look", label: "Look", keys: ["size", "animatedArt", "legibilityBackdrop", "fullscreenInPage", "bgOpacity", "adaptiveSpacing"] },
+    // Which renderer draws which kind of track (AJ, 2026-10-23). Its own tab so
+    // the choice reads as a choice instead of hiding under the look settings.
+    { id: "renderer", label: "Renderer", keys: ["amllWordTracks", "spicyLineTracks"] },
+    // Translation is a property of the WORDS, not of the look (AJ, 2026-10-22).
+    { id: "words", label: "Words", keys: ["autoTranslate", "joinSyllables", "joinBgSyllables"] },
+    { id: "motion", label: "Motion", keys: ["animation", "syllableAnimation", "verticalAnimation"] },
+    { id: "scrolling", label: "Scrolling", keys: ["smoothScrolling", "scrollLeadEnabled", "scrollLeadMs"] },
     { id: "font", label: "Font", keys: [] },
   ];
 
@@ -4022,6 +4280,1245 @@
     return section;
   }
 
+  /* ===== player bar icons (AJ, 2026-10-23) =================================
+     YouTube Music draws its player bar from Material glyphs. These are ours, in
+     the same thick rounded language as the fullscreen transport: solid heads and
+     triangles where Apple Music uses them, a 2.2 round-capped stroke for the
+     line work, all on the 24x24 grid YTM's own <svg> already uses. Only the
+     svg's CHILDREN are replaced, so the button, its size, its colour, its
+     hover/press states and its aria-label stay exactly YTM's — the icon is the
+     only thing that changes.
+
+     YTM re-renders an icon whenever its state changes (play <-> pause, repeat
+     off/all/one, a pressed thumb), which drops our parts. One MutationObserver
+     on the bar repaints whatever fell back, and the state key stored on the svg
+     makes a settled pass free: a matching key with our parts still in place
+     writes nothing, so the observer cannot loop.
+
+     State is read from the DOM YTM already owns — aria-pressed on the thumbs,
+     the volume slider's aria-valuenow, the media element's paused flag. The one
+     exception is repeat-one, which YTM publishes only in the button's localized
+     title; in a non-English UI the numeral falls back to the plain loop. */
+  const YT_ICON_STROKE = 2.4;
+  function ytIconStroke(d, extra) {
+    return {
+      tag: "path",
+      attrs: Object.assign({
+        d,
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": String(YT_ICON_STROKE),
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }, extra || {}),
+    };
+  }
+  function ytIconSolid(d, extra) {
+    return {
+      tag: "path",
+      attrs: Object.assign({
+        d,
+        fill: "currentColor",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linejoin": "round",
+      }, extra || {}),
+    };
+  }
+  function ytIconHead(d) {
+    return { tag: "path", attrs: { d, fill: "currentColor", stroke: "none" } };
+  }
+  // Two solid triangles, a hair apart at the tips. This is the Apple Music
+  // skip shape, and the 2-unit stroke rounds the corners without closing the
+  // gap. The triangles grow OUTWARD from the tips (the bases moved, the tips
+  // barely did), so a bigger skip reads heavier without pushing its edge into
+  // the play button's air (AJ, 2026-10-23).
+  // Previous points LEFT and next points RIGHT. They shipped swapped, so each
+  // button's arrows pointed the opposite way to its own name (AJ, 2026-10-23).
+  const YT_ICON_PREV = [
+    ytIconSolid("M12.2 12 22 4.2v15.6L12.2 12Z"),
+    ytIconSolid("M2 12 11.8 4.2v15.6L2 12Z"),
+  ];
+  const YT_ICON_NEXT = [
+    ytIconSolid("M11.8 12 2 4.2v15.6L11.8 12Z"),
+    ytIconSolid("M22 12 12.2 4.2v15.6L22 12Z"),
+  ];
+  // The play button's svg is 40px, not 24: the same 24-grid geometry draws at
+  // 1.67x, so this triangle is sized for that box, not for the 24px row. It is
+  // deliberately a touch smaller than YTM's (5..22) now that the skips carry
+  // the weight (AJ, 2026-10-23).
+  const YT_ICON_PLAY = [ytIconSolid("M4.8 4.8 19.2 12 4.8 19.2Z", { "stroke-width": "2.4" })];
+  // Round caps extend each bar by half its stroke, so the 6..18 line paints
+  // 3.6..20.4 tall: the same 16.8 the play triangle occupies. The bars are 4.8
+  // wide and 2.4 apart, so the pair grew outward without closing the gap
+  // (AJ, 2026-10-23).
+  const YT_ICON_PAUSE = [
+    ytIconStroke("M8.3 6v12", { "stroke-width": "4.8" }),
+    ytIconStroke("M15.7 6v12", { "stroke-width": "4.8" }),
+  ];
+  // The fullscreen transport's shuffle and repeat, at the bar's 24px.
+  const YT_ICON_SHUFFLE = [
+    ytIconStroke("M3 7h3.6l9.4 10h0.8"),
+    ytIconStroke("M3 17h3.6l9.4-10h0.8"),
+    ytIconHead("M16.9 13.8 21.6 17 16.9 20.2Z"),
+    ytIconHead("M16.9 3.8 21.6 7 16.9 10.2Z"),
+  ];
+  const YT_ICON_REPEAT = [
+    ytIconStroke("M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3"),
+    ytIconHead("M15.2 1.9 19.6 5 15.2 8.1Z"),
+    ytIconStroke("M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2"),
+    ytIconHead("M8.8 15.9 4.4 19 8.8 22.1Z"),
+  ];
+  const YT_ICON_REPEAT_ONE = YT_ICON_REPEAT.concat([ytIconStroke("M10.6 10.6 12.5 9.3V15")]);
+  // Speaker with the waves the volume level deserves. The body is solid, like
+  // the system glyph; only the waves are strokes so they stay one weight.
+  const YT_VOLUME_BODY = {
+    tag: "path",
+    attrs: {
+      d: "M4 9.5h3.2L12 5.8v12.4l-4.8-3.7H4Z",
+      fill: "currentColor",
+      stroke: "currentColor",
+      "stroke-width": "1.3",
+      "stroke-linejoin": "round",
+    },
+  };
+  const YT_ICON_VOLUME_HIGH = [
+    YT_VOLUME_BODY,
+    ytIconStroke("M15.2 9.4a4.4 4.4 0 0 1 0 5.2", { "stroke-width": "2" }),
+    ytIconStroke("M18 6.6a8 8 0 0 1 0 10.8", { "stroke-width": "2" }),
+  ];
+  const YT_ICON_VOLUME_LOW = [
+    YT_VOLUME_BODY,
+    ytIconStroke("M15.4 9.3a4.6 4.6 0 0 1 0 5.4", { "stroke-width": "2" }),
+  ];
+  const YT_ICON_VOLUME_MUTE = [
+    YT_VOLUME_BODY,
+    ytIconStroke("M15.4 9.7l5 4.6", { "stroke-width": "2.1" }),
+    ytIconStroke("M20.4 9.7l-5 4.6", { "stroke-width": "2.1" }),
+  ];
+  // One closed thumb: the cuff is part of the outline, so the pressed state can
+  // simply fill the same path instead of needing a second shape. Dislike is the
+  // same path turned over, which keeps the pair exactly symmetrical.
+  const YT_LIKE_PATH = "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
+  const YT_LIKE_FLIP = "translate(0 24) scale(1 -1)";
+  function ytIconThumb(on, flip) {
+    const attrs = {
+      d: YT_LIKE_PATH,
+      fill: on ? "currentColor" : "none",
+      stroke: "currentColor",
+      "stroke-width": on ? "1.2" : "2.1",
+      "stroke-linejoin": "round",
+    };
+    if (flip) attrs.transform = YT_LIKE_FLIP;
+    return { tag: "path", attrs };
+  }
+  const YT_ICON_MORE = [5, 12, 19].map((cx) => ({
+    tag: "circle",
+    attrs: { cx: String(cx), cy: "12", r: "1.7", fill: "currentColor" },
+  }));
+  const YT_ICON_PARTS = {
+    prev: YT_ICON_PREV,
+    next: YT_ICON_NEXT,
+    play: YT_ICON_PLAY,
+    pause: YT_ICON_PAUSE,
+    shuffle: YT_ICON_SHUFFLE,
+    repeat: YT_ICON_REPEAT,
+    repeatOne: YT_ICON_REPEAT_ONE,
+    "volume-high": YT_ICON_VOLUME_HIGH,
+    "volume-low": YT_ICON_VOLUME_LOW,
+    "volume-mute": YT_ICON_VOLUME_MUTE,
+    like: [ytIconThumb(false, false)],
+    likeOn: [ytIconThumb(true, false)],
+    dislike: [ytIconThumb(false, true)],
+    dislikeOn: [ytIconThumb(true, true)],
+    more: YT_ICON_MORE,
+  };
+
+  function ytPlayerBar() {
+    return document.querySelector("ytmusic-player-bar");
+  }
+  // The media element is the truth for play vs pause; the button's label is the
+  // fallback for the rare frame before a track has loaded.
+  function ytPlayerPaused() {
+    const video = document.querySelector("ytmusic-player video, #movie_player video, video");
+    if (video) return video.paused === true;
+    const bar = ytPlayerBar();
+    const btn = bar && bar.querySelector("yt-icon-button.play-pause-button");
+    const inner = btn && btn.querySelector("button");
+    const label = (btn && btn.getAttribute("title")) || (inner && inner.getAttribute("aria-label")) || "";
+    return !/pause/i.test(label);
+  }
+  function ytRepeatIsOne(btn) {
+    const inner = btn.querySelector("button");
+    const label = btn.getAttribute("title") || (inner && inner.getAttribute("aria-label")) || "";
+    return /\bone\b|\b1\b/i.test(label);
+  }
+  function ytVolumeLevel() {
+    // Muting does not always zero the slider: YTM remembers the volume it will
+    // restore, so the media element is the authority on silence.
+    const video = document.querySelector("ytmusic-player video, #movie_player video, video");
+    if (video && video.muted === true) return "mute";
+    const bar = ytPlayerBar();
+    const slider = bar && bar.querySelector("#volume-slider");
+    const raw = slider ? (slider.getAttribute("aria-valuenow") || slider.value) : 100;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return "mute";
+    return value < 45 ? "low" : "high";
+  }
+
+  const YT_ICON_JOBS = [
+    ["yt-icon-button.previous-button", () => "prev"],
+    ["yt-icon-button.next-button", () => "next"],
+    ["yt-icon-button.play-pause-button", () => (ytPlayerPaused() ? "play" : "pause")],
+    ["yt-icon-button.shuffle", () => "shuffle"],
+    ["yt-icon-button.expand-shuffle", () => "shuffle"],
+    ["yt-icon-button.repeat", (btn) => (ytRepeatIsOne(btn) ? "repeatOne" : "repeat")],
+    ["yt-icon-button.volume", () => "volume-" + ytVolumeLevel()],
+    ["yt-icon-button.expand-volume", () => "volume-" + ytVolumeLevel()],
+  ];
+
+  function ytPaintIcon(svg, key) {
+    const parts = YT_ICON_PARTS[key];
+    if (!svg || !parts) return;
+    // Ours, and the right state: nothing to do. This is what stops the
+    // observer from repainting its own work on every pass.
+    if (svg.getAttribute("data-ym-icon") === key && svg.querySelector("[data-ym-part]")) return;
+    // YTM's own paths stay in the svg, hidden by CSS while we own it: they are
+    // what the switch hands back, and hidden they still receive YouTube's
+    // play/pause updates, so turning the custom set off shows the CURRENT
+    // glyph rather than the one from page load (AJ, 2026-10-23).
+    for (const node of Array.from(svg.children)) {
+      if (node.getAttribute("data-ym-part")) svg.removeChild(node);
+    }
+    for (const part of parts) {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", part.tag);
+      const attrs = part.attrs || {};
+      for (const name in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, name)) el.setAttribute(name, attrs[name]);
+      }
+      el.setAttribute("data-ym-part", "1");
+      svg.appendChild(el);
+    }
+    svg.setAttribute("data-ym-icon", key);
+  }
+
+  function ytPaintPlayerIcons() {
+    const bar = ytPlayerBar();
+    if (!bar) return;
+    for (const job of YT_ICON_JOBS) {
+      const buttons = bar.querySelectorAll(job[0]);
+      for (const button of buttons) {
+        ytPaintIcon(button.querySelector("svg"), job[1](button));
+      }
+    }
+    const middle = bar.querySelector(".middle-controls-buttons");
+    if (!middle) return;
+    const thumbs = middle.querySelectorAll("ytmusic-like-button-renderer button[aria-pressed]");
+    if (thumbs[0]) {
+      ytPaintIcon(thumbs[0].querySelector("svg"),
+        thumbs[0].getAttribute("aria-pressed") === "true" ? "likeOn" : "like");
+    }
+    if (thumbs[1]) {
+      ytPaintIcon(thumbs[1].querySelector("svg"),
+        thumbs[1].getAttribute("aria-pressed") === "true" ? "dislikeOn" : "dislike");
+    }
+    const menu = middle.querySelector("ytmusic-menu-renderer button");
+    if (menu) ytPaintIcon(menu.querySelector("svg"), "more");
+  }
+
+  let ytIconObserver = null;
+  let ytIconTimer = 0;
+
+  function ytSchedulePlayerIcons() {
+    if (ytIconTimer) return;
+    ytIconTimer = window.setTimeout(() => {
+      ytIconTimer = 0;
+      ytPaintPlayerIcons();
+    }, 60);
+  }
+
+  function ytAttachIconObserver() {
+    if (ytIconObserver) return true;
+    const bar = ytPlayerBar();
+    if (!bar) return false;
+    ytIconObserver = new MutationObserver(ytSchedulePlayerIcons);
+    // Scoped to the bar, not <body>: the lyrics repaint every frame, and an
+    // observer there would wake this module on every word.
+    ytIconObserver.observe(bar, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-pressed", "aria-valuenow", "title", "d"],
+    });
+    ytPaintPlayerIcons();
+    return true;
+  }
+
+  let ytIconPoll = 0;
+  function ytStartPlayerIcons() {
+    if (ytAttachIconObserver()) return;
+    // A cold load builds the bar after the content script runs. Poll until it
+    // lands, then stop: the bar itself lives for the whole session. One poller
+    // only — applyYtPrefs() calls this on every settings change (AJ, 2026-10-23).
+    if (ytIconPoll) return;
+    let tries = 0;
+    ytIconPoll = window.setInterval(() => {
+      if (ytAttachIconObserver() || ++tries > 40) {
+        window.clearInterval(ytIconPoll);
+        ytIconPoll = 0;
+      }
+    }, 250);
+  }
+
+  // The switch's off path. Our parts out and the key cleared, the stock paths
+  // the painter left in place paint again — and the observer goes with them, so
+  // nothing repaints the set back on (AJ, 2026-10-23).
+  function ytStopPlayerIcons() {
+    if (ytIconObserver) ytIconObserver.disconnect();
+    ytIconObserver = null;
+    if (ytIconTimer) {
+      if (window.clearTimeout) window.clearTimeout(ytIconTimer);
+      ytIconTimer = 0;
+    }
+    if (ytIconPoll) {
+      window.clearInterval(ytIconPoll);
+      ytIconPoll = 0;
+    }
+    const bar = ytPlayerBar();
+    if (!bar) return;
+    for (const svg of bar.querySelectorAll("svg[data-ym-icon]")) {
+      for (const node of Array.from(svg.children)) {
+        if (node.getAttribute("data-ym-part")) svg.removeChild(node);
+      }
+      svg.removeAttribute("data-ym-icon");
+    }
+  }
+
+  /* ===== YouTube page (AJ, 2026-10-22) =====================================
+     Settings for YouTube Music ITSELF — not for the lyrics, and deliberately NOT
+     part of an add-on. They get their own rail page and their own storage key so
+     they keep working with every add-on uninstalled, Aurora Lyrics included.
+
+     Both are applied to <html>: YTM rebuilds the inside of ytmusic-app
+     constantly, but the root survives, so neither can be dropped by a re-render.
+     applyYtPrefs() is idempotent, so boot and every change can just call it. */
+  const YT_PREFS_KEY = "ytmod_youtube_prefs";
+  const YT_FONT_CLASS = "ym-yt-font";
+  const YT_COMPACT_CLASS = "ym-yt-compact";
+  const YT_VOLUME_CLASS = "ym-yt-volume";
+  // Home levers (AJ, 2026-10-22). Classes on <html> for the same reason as the
+  // rest: YouTube rebuilds the browse page constantly, the root never goes away,
+  // and a switch that is off costs no rules at all.
+  const YT_NOCHIPS_CLASS = "ym-yt-nochips";
+  const YT_TIGHT_CLASS = "ym-yt-tight-home";
+  const YT_NOCAPTIONS_CLASS = "ym-yt-no-captions";
+  const YT_WIDE_CLASS = "ym-yt-wide-shelves";
+  const YT_SMALLTITLES_CLASS = "ym-yt-small-titles";
+  const YT_LIBEMPTY_CLASS = "ym-yt-lib-noempty";
+  const YT_LIBBIG_CLASS = "ym-yt-lib-big";
+  const YT_LIBWIDE_CLASS = "ym-yt-lib-wide";
+  // Explore (AJ, 2026-10-23). No route class exists for this page — <html> only
+  // gets one for the Library — so these are scoped in CSS by the components
+  // only Explore renders (:has() on the shortcut grid / the genre carousel),
+  // and the switches are simply inert elsewhere.
+  const YT_EXPLOREWIDE_CLASS = "ym-yt-explore-wide";
+  const YT_EXPLOREMOODS_CLASS = "ym-yt-explore-moods";
+  const YT_EXPLORENOSHORTCUTS_CLASS = "ym-yt-explore-noshortcuts";
+  // Song view (AJ, 2026-10-23): the column beside the cover art. Both are
+  // layout-only, so they are classes like the rest and cost nothing when off.
+  const YT_SONGWIDE_CLASS = "ym-yt-song-wide";
+  const YT_SONGTABS_CLASS = "ym-yt-song-tabs";
+  // Song view layouts (AJ, 2026-10-23). One class per NON-default layout; the
+  // default is the absence of a class, so it contributes no rules at all.
+  const YT_SONGLAYOUT_PREFIX = "ym-yt-song-layout-";
+  const SONG_LAYOUTS = [
+    { id: "default", label: "Default", hint: "Cover left · lyrics right" },
+    { id: "split", label: "Lyrics left", hint: "Lyrics left · cover right" },
+    { id: "lyrics", label: "Lyrics only", hint: "No cover, full-width lyrics" },
+    { id: "art", label: "Cover art only", hint: "The lyrics column is hidden" },
+  ];
+  // Anything stored before this lever existed, or a value from a build that
+  // shipped a different set, lands on the default rather than on no layout.
+  const songLayoutNormalized = (value) =>
+    SONG_LAYOUTS.some((layout) => layout.id === value) ? value : "default";
+  // Player-bar and chrome levers, carried over from the retired Aurora theme
+  // (AJ, 2026-10-23). Same contract as the rest of this page: a class on <html>
+  // and a switch that is off contributes no rules at all.
+  const YT_DARKBAR_CLASS = "ym-yt-dark-bar";
+  // The custom glyph set is a switch now (AJ, 2026-10-23). Off, the painter is
+  // stopped and the player bar keeps YouTube's own icons AND its own spacing.
+  const YT_CUSTOMICONS_CLASS = "ym-yt-custom-icons";
+  const YT_DOCK_CLASS = "ym-yt-dock";
+  const YT_GLASSCHROME_CLASS = "ym-yt-glass-chrome";
+  const YT_NODIVIDERS_CLASS = "ym-yt-no-dividers";
+  const YT_SCALE_MIN = 0.85;
+  const YT_SCALE_MAX = 1.2;
+  const DEFAULT_YT_PREFS = {
+    font: false,
+    scale: 1,
+    compact: false,
+    volume: false,
+    noChips: false,
+    tightHome: false,
+    noCaptions: false,
+    wideShelves: false,
+    smallTitles: false,
+    libHideEmpty: false,
+    libBig: false,
+    libWide: false,
+    exploreWide: false,
+    exploreMoods: false,
+    exploreNoShortcuts: false,
+    // Wider column on by default too: the lyrics get a usable measure without
+    // anyone finding the lever first (AJ, 2026-10-23).
+    songWide: true,
+    songTabs: false,
+    // Which of the four player-page layouts is drawn. A string, not a switch,
+    // so loadYtPrefs() normalises it by hand (see the schema pass there).
+    songLayout: "default",
+    // On by default: this is the look the Aurora theme shipped, and moving it
+    // here should not silently hand people the stock chrome back (AJ,
+    // 2026-10-23). Every one of them is a switch on the YouTube page.
+    darkBar: true,
+    // The custom set ships on: it is the look the Apple Music card is for
+    // (AJ, 2026-10-23).
+    customIcons: true,
+    dock: true,
+    glassChrome: true,
+    noDividers: true,
+  };
+  let ytPrefs = Object.assign({}, DEFAULT_YT_PREFS);
+
+  const clampYtScale = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 1;
+    return Math.round(Math.min(YT_SCALE_MAX, Math.max(YT_SCALE_MIN, n)) * 100) / 100;
+  };
+
+  // YTM's own root size, captured BEFORE the first time we overwrite it. Our
+  // surfaces (the add-ons panel, the lyrics panel) are pinned to it in CSS, so
+  // they keep the size they inherit today and never inflate with this setting.
+  // Captured rather than hard-coded at 10px: if YouTube ever changes its base,
+  // the pin follows instead of drifting (AJ, 2026-10-22).
+  let ytRootBase = 0;
+  // Last compact state actually painted, so the resize nudge below only fires
+  // on a real flip instead of on every boot and every slider tick.
+  let ytCompactApplied = null;
+  // Same idea for the wider lyrics column: flipping it changes the player
+  // page's split, which YouTube only re-fits on a resize.
+  let ytSongWideApplied = null;
+  // Same, for the layout: every layout is a different split, so flipping one
+  // needs the same refit the wider column does.
+  let ytSongLayoutApplied = null;
+
+  function applyYtPrefs() {
+    const root = document.documentElement;
+    if (!ytRootBase) {
+      ytRootBase = parseFloat(getComputedStyle(root).fontSize) || 10;
+      root.style.setProperty("--ym-yt-root-fs", ytRootBase + "px");
+    }
+    root.classList.toggle(YT_FONT_CLASS, ytPrefs.font === true);
+    const compact = ytPrefs.compact === true;
+    root.classList.toggle(YT_COMPACT_CLASS, compact);
+    root.classList.toggle(YT_VOLUME_CLASS, ytPrefs.volume === true);
+    root.classList.toggle(YT_NOCHIPS_CLASS, ytPrefs.noChips === true);
+    root.classList.toggle(YT_TIGHT_CLASS, ytPrefs.tightHome === true);
+    root.classList.toggle(YT_NOCAPTIONS_CLASS, ytPrefs.noCaptions === true);
+    root.classList.toggle(YT_WIDE_CLASS, ytPrefs.wideShelves === true);
+    root.classList.toggle(YT_SMALLTITLES_CLASS, ytPrefs.smallTitles === true);
+    root.classList.toggle(YT_LIBEMPTY_CLASS, ytPrefs.libHideEmpty === true);
+    root.classList.toggle(YT_LIBBIG_CLASS, ytPrefs.libBig === true);
+    root.classList.toggle(YT_LIBWIDE_CLASS, ytPrefs.libWide === true);
+    root.classList.toggle(YT_EXPLOREWIDE_CLASS, ytPrefs.exploreWide === true);
+    root.classList.toggle(YT_EXPLOREMOODS_CLASS, ytPrefs.exploreMoods === true);
+    root.classList.toggle(YT_EXPLORENOSHORTCUTS_CLASS, ytPrefs.exploreNoShortcuts === true);
+    const songWide = ytPrefs.songWide === true;
+    root.classList.toggle(YT_SONGWIDE_CLASS, songWide);
+    root.classList.toggle(YT_SONGTABS_CLASS, ytPrefs.songTabs === true);
+    const songLayout = songLayoutNormalized(ytPrefs.songLayout);
+    for (const layout of SONG_LAYOUTS) {
+      root.classList.toggle(
+        YT_SONGLAYOUT_PREFIX + layout.id,
+        layout.id === songLayout && layout.id !== "default"
+      );
+    }
+    root.classList.toggle(YT_DARKBAR_CLASS, ytPrefs.darkBar === true);
+    const customIcons = ytPrefs.customIcons === true;
+    root.classList.toggle(YT_CUSTOMICONS_CLASS, customIcons);
+    if (customIcons) ytStartPlayerIcons();
+    else ytStopPlayerIcons();
+    root.classList.toggle(YT_DOCK_CLASS, ytPrefs.dock === true);
+    root.classList.toggle(YT_GLASSCHROME_CLASS, ytPrefs.glassChrome === true);
+    root.classList.toggle(YT_NODIVIDERS_CLASS, ytPrefs.noDividers === true);
+    // The capsule needs the selected tab's box the moment the lever turns on,
+    // not at the next tab switch. One frame, because the class has to paint
+    // before anything can be measured.
+    const measureSong = () => songTabGeometry();
+    if (window.requestAnimationFrame) window.requestAnimationFrame(measureSong);
+    else window.setTimeout(measureSong, 0);
+    // A wider column is a different player-page split, and YouTube sizes the
+    // video (and re-centres the cover) from that split only when a resize tells
+    // it to. First paint counts too, not just a flip: the class can be on long
+    // before the player page mounts. Two follow-ups catch the lazy tracker that
+    // lands after the frame.
+    if (ytSongWideApplied !== songWide || ytSongLayoutApplied !== songLayout) {
+      const refit = () => window.dispatchEvent(new Event("resize"));
+      if (window.requestAnimationFrame) window.requestAnimationFrame(refit);
+      else window.setTimeout(refit, 0);
+      window.setTimeout(refit, 180);
+      window.setTimeout(refit, 420);
+    }
+    ytSongWideApplied = songWide;
+    ytSongLayoutApplied = songLayout;
+    // Turning the filter on has to mark the cards that are ALREADY on screen;
+    // the watcher below only sees what renders after it is armed.
+    if (ytPrefs.libHideEmpty) ytTagEmptyPlaylists();
+    // YTM measures its player page once in JS and stores the height inline, so
+    // a CSS-only change to the bars would leave that page sized for the old
+    // chrome. A resize is the event it already listens for (AJ, 2026-10-22).
+    if (ytCompactApplied !== null && ytCompactApplied !== compact) {
+      const nudge = () => window.dispatchEvent(new Event("resize"));
+      if (window.requestAnimationFrame) window.requestAnimationFrame(nudge);
+      else window.setTimeout(nudge, 0);
+    }
+    ytCompactApplied = compact;
+    // The Spicy Lyrics sheet also registers the @font-face, so it has to be in
+    // the document even if the panel was never opened this session.
+    if (ytPrefs.font) ensurePanelFont();
+    // Two levers, because YouTube's type is split: the rem rules follow this
+    // root (inline, or YTM's `html { font-size: 10px }` would win), while the
+    // px majority is rewritten in the CSSOM below. At 100% the property is
+    // removed rather than written back, so the page is exactly as YTM shipped it.
+    if (Math.abs(ytPrefs.scale - 1) > 0.001) {
+      root.style.fontSize = (ytRootBase * ytPrefs.scale).toFixed(2) + "px";
+    } else {
+      root.style.removeProperty("font-size");
+    }
+    // rem rules follow the root above; the px majority follows this one.
+    if (Math.abs(ytPrefs.scale - 1) > 0.001) {
+      ytCollectScaleTargets();
+      ytApplyScale();
+      ytWatchSheets();
+    } else if (ytScaleTargets) {
+      ytApplyScale();
+    }
+  }
+
+  /* ---- the px half of the interface scale --------------------------------
+     YouTube Music authors almost all of its type in fixed px (16px guide
+     entries, 14px row titles, 12px bylines), so scaling the rem root alone
+     left the app looking untouched — that is the "it does nothing" AJ hit on
+     2026-10-22. The px declarations are rewritten in the LIVE CSSOM instead:
+     every font-size, plus every custom property whose name mentions font-size
+     (YTM sizes whole component families from tokens such as
+     --ytmusic-responsive-font-size), gets multiplied. The normal cascade —
+     inheritance included — does the rest, and nothing is hard-coded, so a
+     component YouTube ships next month is covered for free.
+
+     Originals are captured ONCE and always multiplied from that snapshot, so
+     dragging the slider can never compound the scale. At 100% every touched
+     declaration is written back and the page is YouTube's again. */
+  let ytScaleTargets = null;
+  const ytScaleSheets = new WeakSet();
+  let ytScaleObserver = null;
+
+  function ytSheetIsOurs(sheet) {
+    const node = sheet.ownerNode;
+    // Content-script CSS is not listed in document.styleSheets at all, and
+    // adopted stylesheets belong to the page. No owner node = not ours to touch.
+    if (!node) return true;
+    if (node.getAttribute && node.getAttribute("data-ym-owned")) return true;
+    if (/^ym-/.test(String(node.id || ""))) return true;
+    return /^(chrome|moz|safari-web)-extension:/.test(String(node.href || ""));
+  }
+
+  function ytHarvestRules(rules) {
+    for (const rule of rules) {
+      // Grouping rules (@media, @supports) carry no declarations of their own.
+      if (!rule.style) {
+        if (rule.cssRules && rule.cssRules.length) ytHarvestRules(rule.cssRules);
+        continue;
+      }
+      // Aurora's own UI keeps its type whichever sheet it lands in.
+      if (rule.selectorText && rule.selectorText.indexOf("ym-") !== -1) continue;
+      const style = rule.style;
+      const size = String(style.getPropertyValue("font-size") || "").trim();
+      if (/^\d+(\.\d+)?px$/.test(size) && parseFloat(size) > 0) {
+        ytScaleTargets.push({
+          style,
+          prop: "font-size",
+          px: parseFloat(size),
+          priority: style.getPropertyPriority("font-size"),
+        });
+      }
+      for (const prop of style) {
+        if (!prop.startsWith("--") || prop.toLowerCase().indexOf("font-size") === -1) continue;
+        const value = String(style.getPropertyValue(prop) || "").trim();
+        if (!/^\d+(\.\d+)?px$/.test(value)) continue;
+        ytScaleTargets.push({
+          style,
+          prop,
+          px: parseFloat(value),
+          priority: style.getPropertyPriority(prop),
+        });
+      }
+    }
+  }
+
+  function ytCollectScaleTargets() {
+    if (!ytScaleTargets) ytScaleTargets = [];
+    for (const sheet of Array.from(document.styleSheets)) {
+      if (ytScaleSheets.has(sheet)) continue;
+      if (ytSheetIsOurs(sheet)) { ytScaleSheets.add(sheet); continue; }
+      let rules = null;
+      // Throws for cross-origin sheets, and a freshly added <link> is listed
+      // before its CSS is parsed. Neither is marked as done: a later pass can
+      // still find rules in the second case.
+      try { rules = sheet.cssRules; } catch (_) { continue; }
+      if (!rules || !rules.length) continue;
+      ytScaleSheets.add(sheet);
+      try { ytHarvestRules(rules); } catch (_) {}
+    }
+  }
+
+  function ytApplyScale() {
+    if (!ytScaleTargets || !ytScaleTargets.length) return;
+    const scale = ytPrefs.scale;
+    for (const target of ytScaleTargets) {
+      try {
+        // Priority is passed through: setProperty() without it would silently
+        // drop an !important and change which rule wins.
+        target.style.setProperty(target.prop, (target.px * scale).toFixed(2) + "px", target.priority);
+      } catch (_) {}
+    }
+  }
+
+  // YTM lazy-loads stylesheet chunks as you navigate. Without this, a page
+  // reached after boot keeps its stock type while everything else scales.
+  function ytWatchSheets() {
+    if (ytScaleObserver || !document.head || !window.MutationObserver) return;
+    const pass = () => {
+      if (ytPrefs.scale === 1) return;
+      ytCollectScaleTargets();
+      ytApplyScale();
+    };
+    ytScaleObserver = new MutationObserver(() => {
+      pass();
+      // A <link> shows up in the DOM before its rules do, and the load itself
+      // fires no mutation; one delayed look picks the sheet up once it parses.
+      window.setTimeout(pass, 1500);
+    });
+    ytScaleObserver.observe(document.head, { childList: true });
+  }
+
+  async function loadYtPrefs() {
+    const saved = await safeStorageGet(YT_PREFS_KEY, null);
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      // Read through the schema instead of naming the keys. The first three
+      // home switches were added to the page and to applyYtPrefs() but not
+      // here, so they painted the page and then came back Off on the next
+      // load; a schema pass cannot drift again (AJ, 2026-10-22).
+      const next = Object.assign({}, DEFAULT_YT_PREFS);
+      for (const key of Object.keys(DEFAULT_YT_PREFS)) {
+        if (key === "scale") next.scale = clampYtScale(saved.scale);
+        else if (key === "songLayout") next.songLayout = songLayoutNormalized(saved.songLayout);
+        else if (typeof saved[key] === "boolean") next[key] = saved[key];
+      }
+      ytPrefs = next;
+    } else {
+      // One-time migration from the build where this switch lived in Aurora
+      // Lyrics' own settings. Without it, updating would quietly switch the font
+      // back off under anyone who had already turned it on (AJ, 2026-10-22).
+      const store = await getExtensionSettingsStore();
+      const legacy = store["ytmod-spicy-lyrics"];
+      if (legacy && legacy.youtubeFont === true) {
+        ytPrefs = Object.assign({}, DEFAULT_YT_PREFS, { font: true });
+      }
+    }
+    applyYtPrefs();
+    // Armed once at boot; it stays idle unless the Library filter is on.
+    ytWatchEmptyPlaylists();
+  }
+
+  // Dragging the size slider fires an input event per pixel; without this every
+  // one of them was a storage write (AJ, 2026-10-22).
+  let ytSaveTimer = 0;
+  function saveYtPrefs() {
+    clearTimeout(ytSaveTimer);
+    ytSaveTimer = window.setTimeout(() => {
+      // Same schema pass as the loader, for the same reason.
+      const out = {};
+      for (const key of Object.keys(DEFAULT_YT_PREFS)) out[key] = ytPrefs[key];
+      chrome.storage.local.set({ [YT_PREFS_KEY]: out });
+    }, 200);
+  }
+
+  // One row of the YouTube page, built from the same classes as an add-on's
+  // settings rows so both surfaces read as one panel — same switch, same slider,
+  // same hover and focus treatment.
+  function ytRow(key, label, input, valueEl) {
+    return h("div", { class: "ym-detail-setting-row", "data-key": key },
+      h("div", { class: "ym-detail-setting-label", text: label }),
+      h("div", { class: "ym-detail-setting-control" }, input, valueEl)
+    );
+  }
+
+  // A switch row for the YouTube page: one label, one switch, one On/Off readout.
+  function ytToggleRow(key, label, value, onChange) {
+    const input = h("input", {
+      class: "ym-detail-setting-input",
+      type: "checkbox",
+      "aria-label": label,
+    });
+    input.checked = value === true;
+    const out = h("output", {
+      class: "ym-detail-setting-value",
+      text: input.checked ? "On" : "Off",
+    });
+    input.addEventListener("change", () => {
+      out.textContent = input.checked ? "On" : "Off";
+      onChange(input.checked);
+    });
+    return ytRow(key, label, input, out);
+  }
+
+  /* ---- the YouTube page: a picker, then one panel per part of the site ----
+     AJ, 2026-10-22. The page used to be one long column of settings. It is now
+     two levels: a tile per part of YouTube Music, then that part's switches.
+     Five Home levers plus Playlist view was going to be a wall, and a tile per
+     part reads as a map of the site rather than a list of settings.
+
+     Both views live inside .ym-yt-views and are SWAPPED, not re-rendered by the
+     marketplace — and the outgoing view plays its own exit (fade + travel +
+     blur) before it is replaced, so going back is a motion, not a cut. */
+  // Which panel is open; null = the picker. Module-level so a QUIET re-render
+  // (install / uninstall while the panel is open) keeps the user where they are.
+  /* ---- Library cards: which ones are empty -------------------------------
+     YouTube prints "0 tracks" in the subtitle of an empty playlist and nothing
+     in the element itself, so CSS cannot filter them — the class has to be
+     spent from script. Only the subtitle is read, and only while the switch is
+     on, so the cost is one text scan per browse re-render (AJ, 2026-10-22).
+
+     LIMIT: the match is the English string. A localized YouTube would print
+     "0 Titel" and nothing would be hidden — the rest of this panel is English
+     too, so the switch simply does nothing there rather than hiding the wrong
+     cards. */
+  const ytEmptyRe = /(^|[\s\u2022·])0\s+(tracks?|songs?|episodes?)\b/i;
+  let ytEmptyObserver = null;
+  let ytEmptyTimer = 0;
+
+  function ytTagEmptyPlaylists() {
+    if (!ytPrefs.libHideEmpty) return;
+    const cards = document.querySelectorAll("ytmusic-grid-renderer ytmusic-two-row-item-renderer");
+    for (const card of cards) {
+      const sub = card.querySelector(".subtitle");
+      const empty = !!(sub && ytEmptyRe.test(sub.textContent || ""));
+      if (card.classList.contains("ym-yt-empty") !== empty) card.classList.toggle("ym-yt-empty", empty);
+    }
+  }
+
+  function ytWatchEmptyPlaylists() {
+    if (ytEmptyObserver || !window.MutationObserver) return;
+    ytEmptyObserver = new MutationObserver(() => {
+      if (!ytPrefs.libHideEmpty) return;
+      clearTimeout(ytEmptyTimer);
+      ytEmptyTimer = window.setTimeout(ytTagEmptyPlaylists, 150);
+    });
+    ytEmptyObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  let ytSection = null;
+  // Mounted while a panel is open. The global Escape handler uses it to step
+  // back one level instead of closing the whole panel.
+  let ytBackToPicker = null;
+
+  const YT_SECTIONS = [
+    {
+      id: "home",
+      name: "Home screen",
+      desc: "Chips, spacing, shelf titles, card captions.",
+      art: "home",
+      title: "Home screen",
+      blurb: "Chips, spacing, shelf titles and card captions. The browse pages only — your library and the player are untouched.",
+      active: () => ["noChips", "tightHome", "noCaptions", "wideShelves", "smallTitles"]
+        .filter((k) => ytPrefs[k] === true).length,
+      panels: () => [ytHomePanel()],
+    },
+    {
+      id: "library",
+      name: "Library",
+      desc: "Empty playlists, card size.",
+      art: "library",
+      title: "Library",
+      blurb: "Your saved music grid — what it shows, how big the cards are, and how much of the window they use. Only the Library page.",
+      active: () => (ytPrefs.libHideEmpty ? 1 : 0) + (ytPrefs.libBig ? 1 : 0) +
+        (ytPrefs.libWide ? 1 : 0),
+      panels: () => [ytLibraryPanel()],
+    },
+    {
+      id: "explore",
+      name: "Explore",
+      desc: "Shortcut tiles, the genre wall.",
+      art: "explore",
+      title: "Explore",
+      blurb: "The four shortcut tiles at the top of Explore and the Moods & genres row under them. Only that page.",
+      // The width lever only counts while the tiles it widens are on screen.
+      active: () => (ytPrefs.exploreWide && !ytPrefs.exploreNoShortcuts ? 1 : 0) +
+        (ytPrefs.exploreMoods ? 1 : 0) + (ytPrefs.exploreNoShortcuts ? 1 : 0),
+      panels: () => [ytExplorePanel()],
+    },
+    {
+      // Type and text size are the two settings that change EVERY page, so they
+      // get their own tile rather than sitting under one page's name. It is the
+      // tile that collects the next site-wide lever too (AJ, 2026-10-22).
+      id: "global",
+      name: "Global",
+      desc: "The hairlines between regions.",
+      art: "global",
+      title: "Global",
+      blurb: "The divider lines that separate one region from the next, on every page. The player bar, the lyrics column, the type and the chrome now live on the Apple Music theme.",
+      active: () => (ytPrefs.noDividers ? 1 : 0),
+      panels: () => [ytChromePanel()],
+    },
+  ];
+
+  // A settings block. A block's heading is OPTIONAL: the section header above
+  // already names the section, so a single unnamed block is the normal case and
+  // a heading is only what separates two blocks in one section.
+  function ytPanel(title, subtitle, cls) {
+    const sec = h("section", { class: "ym-detail-settings ym-mk-settings" + (cls ? " " + cls : "") });
+    if (title) {
+      const head = h("div", { class: "ym-detail-settings-head" });
+      head.appendChild(h("div", { class: "ym-detail-settings-titlerow" },
+        h("div", { class: "ym-detail-settings-title", text: title })
+      ));
+      if (subtitle) head.appendChild(h("div", { class: "ym-detail-settings-subtitle", text: subtitle }));
+      sec.appendChild(head);
+    }
+    return sec;
+  }
+
+  // The hairlines were the one lever in Global that was not part of the Apple
+  // Music look, so they stayed behind when the rest moved to the theme card
+  // (AJ, 2026-10-23).
+  function ytChromePanel() {
+    const sec = ytPanel("Dividers");
+    sec.appendChild(ytToggleRow("ytNoDividers", "Hide divider lines", ytPrefs.noDividers, (on) => {
+      ytPrefs.noDividers = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    return sec;
+  }
+
+  /* The theme's type block. The font, the interface size and the glass chrome
+     were Global's rows on the YouTube page; they moved here with the rest of the
+     Apple Music look (AJ, 2026-10-23). */
+  function appleTypePanel() {
+    const sec = ytPanel("Type and chrome");
+
+    // ---- interface font
+    sec.appendChild(ytToggleRow("ytFont", "Spicy Lyrics font", ytPrefs.font, (on) => {
+      ytPrefs.font = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+
+    // ---- glass top bar and side nav
+    sec.appendChild(ytToggleRow("ytGlassChrome", "Glass top bar and side nav", ytPrefs.glassChrome, (on) => {
+      ytPrefs.glassChrome = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+
+    // ---- interface text size
+    const scaleInput = h("input", {
+      class: "ym-detail-setting-input",
+      type: "range",
+      min: YT_SCALE_MIN,
+      max: YT_SCALE_MAX,
+      step: 0.05,
+      "aria-label": "Interface text size",
+    });
+    scaleInput.value = ytPrefs.scale;
+    const scaleValue = h("output", {
+      class: "ym-detail-setting-value",
+      text: Math.round(ytPrefs.scale * 100) + "%",
+    });
+    // Drives the filled part of the track (the shared range CSS reads --val).
+    const syncFill = () => {
+      const pct = ((Number(scaleInput.value) - YT_SCALE_MIN) / (YT_SCALE_MAX - YT_SCALE_MIN)) * 100;
+      scaleInput.style.setProperty("--val", Math.max(0, Math.min(100, pct)) + "%");
+    };
+    scaleInput.addEventListener("input", () => {
+      ytPrefs.scale = clampYtScale(scaleInput.value);
+      scaleValue.textContent = Math.round(ytPrefs.scale * 100) + "%";
+      syncFill();
+      applyYtPrefs();
+      saveYtPrefs();
+    });
+    syncFill();
+    sec.appendChild(ytRow("ytScale", "Interface text size", scaleInput, scaleValue));
+    return sec;
+  }
+
+  function ytHomePanel() {
+    // The browse pages, not the player: the chip row is the tallest thing above
+    // the first shelf and the cards carry two lines of metadata each. Every
+    // switch is independent, so this reads as a menu rather than a "mode".
+    const sec = ytPanel(null, null, "ym-mk-yt-home");
+    sec.appendChild(ytToggleRow("ytNoChips", "Hide the filter chips", ytPrefs.noChips, (on) => {
+      ytPrefs.noChips = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytTightHome", "Tighter home spacing", ytPrefs.tightHome, (on) => {
+      ytPrefs.tightHome = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytNoCaptions", "Artwork-only cards", ytPrefs.noCaptions, (on) => {
+      ytPrefs.noCaptions = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytWideShelves", "Let the shelves use the full width", ytPrefs.wideShelves, (on) => {
+      ytPrefs.wideShelves = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytSmallTitles", "Small shelf titles", ytPrefs.smallTitles, (on) => {
+      ytPrefs.smallTitles = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    return sec;
+  }
+
+  function ytLibraryPanel() {
+    const sec = ytPanel(null, null);
+    sec.appendChild(ytToggleRow("ytLibEmpty", "Hide empty playlists", ytPrefs.libHideEmpty, (on) => {
+      ytPrefs.libHideEmpty = on;
+      applyYtPrefs();
+      ytWatchEmptyPlaylists();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytLibBig", "Larger library cards", ytPrefs.libBig, (on) => {
+      ytPrefs.libBig = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytLibWide", "Let the library use the full width", ytPrefs.libWide, (on) => {
+      ytPrefs.libWide = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    return sec;
+  }
+
+  function ytExplorePanel() {
+    const sec = ytPanel(null, null);
+    const wideRow = ytToggleRow("ytExploreWide", "Full-width shortcut tiles", ytPrefs.exploreWide, (on) => {
+      ytPrefs.exploreWide = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    });
+    sec.appendChild(wideRow);
+    sec.appendChild(ytToggleRow("ytExploreMoods", "Moods & genres as a grid", ytPrefs.exploreMoods, (on) => {
+      ytPrefs.exploreMoods = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+
+    /* The width lever has nothing to widen while the tiles are hidden, so the
+       skip switch locks it. Locked, not cleared: the stored value survives, and
+       turning the tiles back on restores the width they were at. Runs on build
+       too, so reopening the section shows the lock that is really in effect. */
+    const syncWideLock = () => {
+      const locked = ytPrefs.exploreNoShortcuts === true;
+      wideRow.classList.toggle("is-locked", locked);
+      wideRow.setAttribute("aria-disabled", locked ? "true" : "false");
+      if (locked) wideRow.title = "The shortcut tiles are hidden";
+      else wideRow.removeAttribute("title");
+      const input = wideRow.querySelector("input");
+      if (input) {
+        input.disabled = locked;
+        input.tabIndex = locked ? -1 : 0;
+      }
+    };
+
+    sec.appendChild(ytToggleRow("ytExploreNoShortcuts", "Skip the shortcut tiles", ytPrefs.exploreNoShortcuts, (on) => {
+      ytPrefs.exploreNoShortcuts = on;
+      applyYtPrefs();
+      saveYtPrefs();
+      syncWideLock();
+    }));
+    syncWideLock();
+    return sec;
+  }
+
+  function applePlayerPanel() {
+    const sec = ytPanel("Player bar and song view");
+    // The bar's own look and arrangement. Independent of the compact lever
+    // below: one changes the bar's HEIGHT, these change its surface and where
+    // its three zones sit.
+    sec.appendChild(ytToggleRow("ytDarkBar", "Dark frosted player bar", ytPrefs.darkBar, (on) => {
+      ytPrefs.darkBar = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    // Off restores YouTube's own glyphs and the stock spacing around them, so
+    // the bar reads exactly as it did before the theme (AJ, 2026-10-23).
+    sec.appendChild(ytToggleRow("ytIcons", "Custom player-bar icons", ytPrefs.customIcons, (on) => {
+      ytPrefs.customIcons = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytDock", "Song info left, controls centred", ytPrefs.dock, (on) => {
+      ytPrefs.dock = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytCompact", "Compact header and player bar", ytPrefs.compact, (on) => {
+      ytPrefs.compact = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytVolume", "Always show the volume slider", ytPrefs.volume, (on) => {
+      ytPrefs.volume = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    // The column beside the cover. Independent levers: the width one is about
+    // how much lyric fits on a line, the tab one about how the four labels
+    // share that width.
+    sec.appendChild(ytToggleRow("ytSongWide", "Wider lyrics column", ytPrefs.songWide, (on) => {
+      ytPrefs.songWide = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    sec.appendChild(ytToggleRow("ytSongTabs", "Quiet tab strip with a sliding capsule", ytPrefs.songTabs, (on) => {
+      ytPrefs.songTabs = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    return sec;
+  }
+
+  // The tile's "picture" is CSS, not artwork: a mini shelf for Home and a
+  // now-playing stack for Song view. Two elements per tile either way, so a
+  // third section only needs its own art class.
+  function ytTileArt(kind) {
+    const art = h("div", { class: "ym-yt-art ym-yt-art-" + kind, "aria-hidden": "true" });
+    if (kind === "home") {
+      // First cell is the shelf title, then eight cards in two rows.
+      for (let i = 0; i < 9; i++) art.appendChild(h("i"));
+    } else if (kind === "global") {
+      // The hairline IS the setting: two regions and the divider the switch
+      // hides between them. It used to be a letterform, back when the type and
+      // the size lived on this page (AJ, 2026-10-23).
+      art.appendChild(h("i", { class: "ym-yt-art-block" }));
+      art.appendChild(h("i", { class: "ym-yt-art-rule" }));
+      art.appendChild(h("i", { class: "ym-yt-art-block" }));
+    } else if (kind === "library") {
+      // A little grid of covers, with one round artist tile among them.
+      for (let i = 0; i < 8; i++) art.appendChild(h("i"));
+    } else if (kind === "explore") {
+      // Four shortcut cards over a strip of genre chips — the page's own map.
+      const cards = h("div", { class: "ym-yt-art-cards" });
+      for (let i = 0; i < 4; i++) cards.appendChild(h("i"));
+      art.appendChild(cards);
+      const chips = h("div", { class: "ym-yt-art-chips" });
+      for (let i = 0; i < 3; i++) chips.appendChild(h("i"));
+      art.appendChild(chips);
+    } else {
+      art.appendChild(h("i", { class: "ym-yt-disc" }));
+      const lines = h("div", { class: "ym-yt-lines" });
+      for (let i = 0; i < 4; i++) lines.appendChild(h("i"));
+      art.appendChild(lines);
+    }
+    return art;
+  }
+
+  function ytTile(sec, onOpen) {
+    // The badge sits inside aria-hidden art, so the tile names itself.
+    const tile = h("button", { class: "ym-yt-tile", type: "button", "aria-label": sec.name + " settings" });
+    const art = ytTileArt(sec.art);
+    const on = sec.active();
+    if (on) art.appendChild(h("span", { class: "ym-yt-tile-badge", text: on + " on" }));
+    tile.appendChild(art);
+
+    const body = h("div", { class: "ym-yt-tile-body" });
+    const row = h("div", { class: "ym-yt-tile-row" });
+    row.appendChild(h("div", { class: "ym-yt-tile-name", text: sec.name }));
+    row.appendChild(svgIcon(ICON_CHEVRON));
+    body.appendChild(row);
+    body.appendChild(h("div", { class: "ym-yt-tile-desc", text: sec.desc }));
+    tile.appendChild(body);
+
+    tile.addEventListener("click", () => onOpen(sec));
+    return tile;
+  }
+
+  function ytPickerView(onOpen) {
+    const view = h("div", { class: "ym-yt-view", "data-view": "picker" });
+    const tiles = h("div", { class: "ym-yt-tiles" });
+    for (const sec of YT_SECTIONS) tiles.appendChild(ytTile(sec, onOpen));
+    view.appendChild(tiles);
+    return view;
+  }
+
+  function ytSectionView(sec, onBack) {
+    const view = h("div", { class: "ym-yt-view", "data-section": sec.id });
+
+    const back = h("button", { class: "ym-yt-back", type: "button", "aria-label": "All sections" });
+    back.appendChild(svgIcon(ICON_BACK));
+    back.appendChild(h("span", { text: "All sections" }));
+    back.addEventListener("click", onBack);
+    view.appendChild(back);
+
+    const head = h("div", { class: "ym-yt-sec-head" });
+    head.appendChild(h("h2", { class: "ym-yt-sec-title", text: sec.title }));
+    head.appendChild(h("p", { class: "ym-yt-sec-blurb", text: sec.blurb }));
+    view.appendChild(head);
+
+    for (const panel of sec.panels()) view.appendChild(panel);
+    return view;
+  }
+
+  function mkYoutubePage() {
+    const wrap = h("div", { class: "ym-mk-dwrap ym-mk-yt" });
+
+    const head = h("div", { class: "ym-mk-dhead" });
+    const glyph = MK_GLYPH.youtube;
+    const mono = h("div", { class: "ym-mk-dmono" }, svgIcon(glyph.d));
+    mono.style.color = glyph.c;
+    mono.style.background = mkTint(glyph.c, "1f");
+    mono.style.borderColor = mkTint(glyph.c, "3d");
+    head.appendChild(mono);
+    const titles = h("div", { class: "ym-mk-dtitles" });
+    titles.appendChild(h("h1", { text: "YouTube Music" }));
+    titles.appendChild(h("div", { class: "ym-mk-disclaimer", text: "Settings for the site itself, not for an add-on" }));
+    head.appendChild(titles);
+    wrap.appendChild(head);
+
+    wrap.appendChild(h("p", {
+      class: "ym-mk-lead",
+      text: "These change YouTube Music rather than the lyrics. They keep working with every add-on uninstalled, and they apply the moment you change them.",
+    }));
+
+    const views = h("div", { class: "ym-yt-views" });
+    wrap.appendChild(views);
+
+    // Locked while a swap is in flight so a fast double click cannot stack two
+    // exits on the same view.
+    let busy = false;
+
+    /* dir +1 travels INTO a section, -1 comes back out. The outgoing view leaves
+       the way the eye is moving (the opposite side) and the incoming one enters
+       from that side, so the two motions read as one slide. */
+    function ymViewSwap(next, dir) {
+      const from = views.firstElementChild;
+      const reduce = window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const place = () => {
+        views.replaceChildren(next);
+        // A section is usually taller than the picker; opening it at whatever
+        // scroll the previous view was left at would start mid-page.
+        if (mkDetail) mkDetail.scrollTop = 0;
+        if (reduce || !next.animate) { busy = false; return; }
+        Array.from(next.children).forEach((el, i) => {
+          if (!el.animate) return;
+          el.animate(
+            [
+              { opacity: 0, transform: "translateX(" + (dir * 16) + "px)" },
+              { opacity: 1, transform: "none" },
+            ],
+            { duration: 380, delay: 16 + i * 46, easing: "cubic-bezier(.34,1.3,.5,1)", fill: "both" }
+          );
+        });
+        busy = false;
+      };
+      if (!from || !from.animate || reduce) { place(); return; }
+      busy = true;
+      const outs = Array.from(from.children).map((el, i) => el.animate(
+        [
+          { opacity: 1, transform: "none", filter: "blur(0px)" },
+          { opacity: 0, transform: "translateX(" + (dir * -14) + "px)", filter: "blur(3px)" },
+        ],
+        { duration: 150, delay: i * 10, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" }
+      ));
+      let settled = false;
+      const go = () => { if (settled) return; settled = true; place(); };
+      const last = outs[outs.length - 1];
+      // onfinish is the good path; the timeout is the belt for a background
+      // tab, where animation events can be skipped entirely.
+      if (last) last.onfinish = go;
+      window.setTimeout(go, 176 + outs.length * 10 + 40);
+    }
+
+    function open(sec) {
+      if (busy || String(ytSection) === sec.id) return;
+      ytSection = sec.id;
+      ytBackToPicker = back;
+      ymViewSwap(ytSectionView(sec, back), 1);
+    }
+
+    function back() {
+      if (busy || !ytSection) return;
+      ytSection = null;
+      ytBackToPicker = null;
+      ymViewSwap(ytPickerView(open), -1);
+    }
+
+    // A quiet re-render keeps the open section; a stale id (a section removed
+    // in a later version) falls back to the picker.
+    const start = YT_SECTIONS.find((s) => s.id === ytSection) || null;
+    ytSection = start ? start.id : null;
+    views.appendChild(start ? ytSectionView(start, back) : ytPickerView(open));
+    if (start) ytBackToPicker = back;
+
+    return wrap;
+  }
+
+  /* ---- Apple Music Style (AJ, 2026-10-23) ----------------------------------
+     A theme with nothing to install and no stylesheet of its own: the preset IS
+     the YouTube page's prefs, so these switches write YT_PREFS_KEY exactly the
+     way the site page's own rows do. That is the point — an installable theme
+     would need a second copy of every value and would still have to ask
+     content.js to paint the classes, whereas this page opens showing what the
+     site is really doing and hands the stock chrome back when every switch is
+     off. It is the only place the playbar, the lyrics column, the type and the
+     chrome are exposed now. */
+  function mkAppleThemePage() {
+    const wrap = h("div", { class: "ym-mk-dwrap ym-mk-yt" });
+
+    const head = h("div", { class: "ym-mk-dhead" });
+    const glyph = MK_GLYPH[APPLE_THEME_ID];
+    const mono = h("div", { class: "ym-mk-dmono" }, svgIcon(glyph.d));
+    mono.style.color = glyph.c;
+    mono.style.background = mkTint(glyph.c, "1f");
+    mono.style.borderColor = mkTint(glyph.c, "3d");
+    head.appendChild(mono);
+    const titles = h("div", { class: "ym-mk-dtitles" });
+    titles.appendChild(h("h1", { text: APPLE_THEME_NAME }));
+    titles.appendChild(h("div", {
+      class: "ym-mk-disclaimer",
+      text: "Built into the extension · not affiliated with Apple",
+    }));
+    head.appendChild(titles);
+    wrap.appendChild(head);
+
+    wrap.appendChild(h("p", {
+      class: "ym-mk-lead",
+      text: "The player bar, the lyrics column, the type and the chrome. Every switch changes YouTube Music itself, so they keep working with every add-on uninstalled — and with all of them off you get the stock site back.",
+    }));
+
+    wrap.appendChild(applePlayerPanel());
+    wrap.appendChild(appleTypePanel());
+    return wrap;
+  }
+
   async function mkRenderDetail(reg, quiet) {
     if (!mkDetail) return;
     const keepScroll = quiet ? mkDetail.scrollTop : 0;
@@ -4045,6 +5542,27 @@
     mkDetail.classList.add("ym-mk-anim-hold");
     mkDetail.replaceChildren();
     mkDetail.scrollTop = 0;
+    // The YouTube page is not an add-on, so it has to be matched BEFORE the
+    // findAvail() fallback below — that check would otherwise bounce it to Home.
+    if (mkSel === "youtube") {
+      // A fresh visit opens on the picker; only a QUIET re-render keeps the
+      // section that is already open.
+      if (!quiet) ytSection = null;
+      mkDetail.appendChild(mkYoutubePage());
+      if (!quiet) mkAnimateIn();
+      mkDetail.classList.remove("ym-mk-anim-hold");
+      mkDetail.scrollTop = keepScroll;
+      return;
+    }
+    // Apple Music Style is a page like the YouTube one, not a catalog entry with
+    // an Install button, so it is matched before the findAvail fallback.
+    if (mkSel === APPLE_THEME_ID) {
+      mkDetail.appendChild(mkAppleThemePage());
+      if (!quiet) mkAnimateIn();
+      mkDetail.classList.remove("ym-mk-anim-hold");
+      mkDetail.scrollTop = keepScroll;
+      return;
+    }
     if (mkSel === "home" || !findAvail(mkSel)) {
       mkSel = "home";
       mkDetail.appendChild(mkHome(reg));
@@ -4205,7 +5723,10 @@
     document.addEventListener("keydown", marketKey);
     window.addEventListener("resize", syncMkCollapse);
     window.addEventListener("resize", () => mkPositionSegPill(true));
-    renderSection();
+    // Quiet: the panel is hidden at build, so an entrance stagger here is never
+    // seen - and a slow storage read would let it replay AFTER openMarketplace()
+    // has already faded the panel in. The open path is the only visible one.
+    renderSection(true);
   }
 
   async function renderSection(quiet) {
@@ -4644,12 +6165,84 @@
     }, NAV_HINT_MS);
   }
 
+  /* ---- diagnostics for the toolbar popup -----------------------------------
+     The popup cannot read the page; a content script is the only bridge. So it
+     asks for ONE snapshot and renders that — nothing here mutates the page or
+     persists anything. Errors are captured because "it broke on this song" is
+     useless without the message, and the last few are the only ones a user can
+     still see by the time they open the popup. */
+  const DIAG_ERROR_MAX = 3;
+  const diagErrors = [];
+  function recordDiagError(kind, message) {
+    const text = String(message == null ? "" : message).replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!text) return; // resource load errors carry no message - not ours to report
+    diagErrors.push({ kind, text, at: Date.now() });
+    if (diagErrors.length > DIAG_ERROR_MAX) diagErrors.shift();
+  }
+  window.addEventListener("error", (e) => recordDiagError("error", e && e.message), true);
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e && e.reason;
+    recordDiagError("promise", reason && reason.message ? reason.message : reason);
+  }, true);
+
+  function readPlayerBarTrack() {
+    const clean = (el) => (el && el.textContent ? el.textContent.replace(/\s+/g, " ").trim() : "");
+    const bar = document.querySelector("ytmusic-player-bar");
+    const byline = bar && bar.querySelector(".byline");
+    let artist = "";
+    if (byline) {
+      const links = Array.from(byline.querySelectorAll("a")).map(clean).filter(Boolean);
+      artist = links.length ? links.join(", ") : clean(byline);
+    }
+    const img = (bar && (bar.querySelector("img.image") || bar.querySelector("img"))) ||
+      document.querySelector("#song-image img");
+    const src = img && img.getAttribute("src");
+    return {
+      title: clean(bar && bar.querySelector(".title")),
+      artist,
+      art: src && /^https?:/.test(src) ? src : "",
+    };
+  }
+
+  async function buildDiagnostics() {
+    const reg = (await getReg()) || {};
+    const installed = Object.keys(reg);
+    const enabled = installed.filter((id) => reg[id] && reg[id].enabled);
+    return {
+      version: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "",
+      url: location.href,
+      track: readPlayerBarTrack(),
+      // Which renderer the page is actually running, and where the panel lives.
+      renderer: document.body && document.body.classList.contains("amll-active") ? "amll" : "standard",
+      panel: !!document.querySelector("#ym-sl-panel"),
+      fullscreen: !!document.querySelector(".ym-sl-fs-overlay"),
+      addons: {
+        installed: installed.length,
+        enabled: enabled.length,
+        names: enabled.map((id) => (findAvail(id) || {}).name || id),
+      },
+      error: diagErrors.length ? diagErrors[diagErrors.length - 1] : null,
+      // Layout bugs are almost always size-dependent, and the popup cannot see
+      // the page's viewport (its own is the popup's).
+      viewport: window.innerWidth + " x " + window.innerHeight,
+      dpr: window.devicePixelRatio || 1,
+    };
+  }
+
   /* ---- messages from the popup ---- */
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg) return;
     if (msg.type === "ytmod-open") openMarketplace();
     else if (msg.type === "ytmod-hint-nav") highlightNavButton();
     else if (msg.type === "ytmod-setEnabled") setEnabled(msg.id, msg.on).then(renderSection);
+    else if (msg.type === "ytmod-diagnostics") {
+      // Async reply: keep the channel open, and never leave the popup hanging
+      // on a rejected promise (it would show "checking" forever).
+      buildDiagnostics()
+        .then((snapshot) => sendResponse(snapshot))
+        .catch(() => sendResponse(null));
+      return true;
+    }
   });
 
   /* ---- update notice ------------------------------------------------------
@@ -5156,11 +6749,38 @@
     rltAppliedFor = currentVideoId();
     safeStorageSet({ [LAST_TAB_KEY]: identity });
   }
+  /* ---- song view: the tab capsule's geometry ------------------------------
+     paper-tabs positions its selection bar with a percentage transform, which
+     can draw a line but never a capsule: scaleX turns the corner radius into an
+     ellipse. The capsule itself is CSS; it only needs the selected tab's real
+     box, published here as two custom properties. Re-measured on every
+     selection, resize and player-page rebuild — a couple of layout reads, and
+     only while the lever is on. */
+  function songTabGeometry() {
+    if (!ytPrefs.songTabs) return;
+    const strip = watchTabBar();
+    if (!strip) return;
+    const selected =
+      strip.querySelector("tp-yt-paper-tab.iron-selected") ||
+      strip.querySelector('tp-yt-paper-tab[aria-selected="true"]');
+    // Zero width means the strip is still hidden (mini player, page building).
+    if (!selected || !selected.offsetWidth) return;
+    strip.style.setProperty("--ym-song-tab-x", selected.offsetLeft + "px");
+    strip.style.setProperty("--ym-song-tab-w", selected.offsetWidth + "px");
+  }
+
   function rltBindBar() {
     const bar = watchTabBar();
     if (bar && !bar.__rltBound) {
       bar.addEventListener("iron-select", rltOnSelect);
+      // Separate listener: the capsule must follow even the programmatic
+      // re-select this module does, which is deliberately not saved.
+      bar.addEventListener("iron-select", () => {
+        songTabGeometry();
+        requestAnimationFrame(songTabGeometry);
+      });
       bar.__rltBound = true;
+      songTabGeometry();
     }
   }
   function initRememberLastWatchTab() {
@@ -5175,15 +6795,18 @@
           obsRaf = 0;
           rltBindBar();
           rltApplyRemembered();
+          songTabGeometry();
         }, 250);
       });
       obs.observe(root, { childList: true, subtree: true });
     }
+    window.addEventListener("resize", songTabGeometry);
     document.addEventListener("yt-navigate-finish", () => {
       rltAppliedFor = null;
       rltSaveEnabled = false;
       rltPending = null;
       rltApplyRemembered();
+      songTabGeometry();
     });
     window.addEventListener("popstate", () => {
       rltAppliedFor = null;
@@ -5194,9 +6817,521 @@
     console.log("[Aurora Lyrics] remember-last-watch-tab active");
   }
 
+  /* ---- song view: the layout switcher -------------------------------------
+     The player page is one flex row — #main-panel (cover or video) and
+     #side-panel (tabs + the panel under them) — and the four layouts are that
+     row's geometry, nothing else. Three of them are classes on <html> (see
+     applyYtPrefs); this module is only the control that picks one.
+
+     It is a pill in the empty band above both panels, NOT a fifth tab. Two
+     reasons: paper-tabs sizes its labels with `fit-container`, so a foreign
+     child inside #tabsContent would be measured into the selection geometry;
+     and in "Cover art only" the tab column that would hold it does not exist,
+     which would leave the switcher invisible in the one layout it cannot be
+     left from. The pill is anchored to ytmusic-player-page (already a
+     positioned element, and the parent of both panels), so it survives all
+     four. */
+  let songLayoutEl = null;
+  let songLayoutBtn = null;
+  let songLayoutMenu = null;
+
+  // Each layout gets a 22×16 diagram: lyrics as text lines, the picture as a
+  // filled block. Drawn rather than described, because the label alone cannot
+  // say which side the cover ends up on.
+  function songLayoutGlyph(id) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 22 16");
+    svg.setAttribute("class", "ym-song-layout-glyph");
+    svg.setAttribute("aria-hidden", "true");
+    const block = (x, y, w, hgt, cls) => {
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", x);
+      r.setAttribute("y", y);
+      r.setAttribute("width", w);
+      r.setAttribute("height", hgt);
+      r.setAttribute("rx", "1.5");
+      r.setAttribute("class", cls);
+      svg.appendChild(r);
+    };
+    if (id === "split") {
+      block(1, 3, 8, 1.8, "ln");
+      block(1, 7.1, 8, 1.8, "ln");
+      block(1, 11.2, 5.5, 1.8, "ln");
+      block(11.5, 2, 9.5, 12, "art");
+    } else if (id === "lyrics") {
+      block(1, 2.6, 20, 1.8, "ln");
+      block(1, 7.1, 20, 1.8, "ln");
+      block(1, 11.6, 13.5, 1.8, "ln");
+    } else if (id === "art") {
+      block(2, 1.5, 18, 13, "art");
+    } else {
+      block(1, 2, 12, 12, "art");
+      block(15.5, 3, 5.5, 1.8, "ln");
+      block(15.5, 7.1, 5.5, 1.8, "ln");
+      block(15.5, 11.2, 3.5, 1.8, "ln");
+    }
+    return svg;
+  }
+
+  function songLayoutOutside(event) {
+    if (songLayoutEl && !songLayoutEl.contains(event.target)) songLayoutOpen(false);
+  }
+
+  function songLayoutOnKey(event) {
+    if (event.key !== "Escape") return;
+    songLayoutOpen(false);
+    if (songLayoutBtn) songLayoutBtn.focus();
+  }
+
+  function songLayoutOpen(on) {
+    if (!songLayoutEl || !songLayoutMenu || !songLayoutBtn) return;
+    on = on === true;
+    songLayoutMenu.hidden = !on;
+    songLayoutBtn.setAttribute("aria-expanded", on ? "true" : "false");
+    songLayoutEl.classList.toggle("open", on);
+    // Document-level listeners exist only while the menu is open, so the page
+    // pays nothing for a control most people open once.
+    document.removeEventListener("pointerdown", songLayoutOutside, true);
+    document.removeEventListener("keydown", songLayoutOnKey, true);
+    if (!on) return;
+    document.addEventListener("pointerdown", songLayoutOutside, true);
+    document.addEventListener("keydown", songLayoutOnKey, true);
+    const current = songLayoutMenu.querySelector('[aria-checked="true"]') ||
+      songLayoutMenu.querySelector("[data-layout]");
+    if (current && current.focus) current.focus();
+  }
+
+  /* ---- motion -------------------------------------------------------------
+     A layout change is a hard cut in CSS: a panel goes `display: none`, the
+     other takes its place, and `order` swaps instantly — none of those can be
+     transitioned. So the transition is split in two beats, and each half is a
+     property that CAN be:
+
+       1. the panel that is leaving DISSOLVES first (opacity + blur) while the
+          layout is still the old one, so the thing being removed never moves;
+       2. the layout is applied, then whatever is visible SHARPENS into place
+          from a little blurred + dimmed, which covers the geometry jump.
+
+     A swap where both panels stay (default <-> lyrics-left) has nothing to
+     dissolve: the same two panels change places, so they SLIDE past each other
+     instead (a FLIP in songLayoutSlideIntoPlace). Nothing fades there — nothing
+     is appearing or disappearing. */
+  const SONG_LAYOUT_DISSOLVE_MS = 300;
+  const SONG_LAYOUT_REBUILD_MS = 220;
+  const SONG_LAYOUT_SLIDE_MS = 420;
+  const SONG_LAYOUT_ENTER_MS = 520;
+  const SONG_LAYOUT_MOTION_CLASSES = [
+    "ym-song-panel-dissolve",
+    "ym-song-panel-settle",
+    "ym-song-panel-enter",
+    "ym-song-panel-swap",
+  ];
+
+  let songLayoutSwapTimer = 0;
+  let songLayoutReleaseFrame = 0;
+  let songLayoutEnterTimer = 0;
+
+  function songLayoutPanels() {
+    const content = $("ytmusic-player-page > .content") || $("#player-page > .content");
+    if (!content) return null;
+    return {
+      main: content.querySelector(":scope > #main-panel"),
+      side: content.querySelector(":scope > #side-panel"),
+    };
+  }
+
+  function songLayoutVisible(panel) {
+    return !!panel && getComputedStyle(panel).display !== "none";
+  }
+
+  // Cancels an in-flight transition and strips its classes, so a second pick
+  // can never inherit half a dissolve or a stale offset.
+  function songLayoutStopMotion() {
+    if (songLayoutSwapTimer) {
+      clearTimeout(songLayoutSwapTimer);
+      songLayoutSwapTimer = 0;
+    }
+    if (songLayoutReleaseFrame && window.cancelAnimationFrame) {
+      window.cancelAnimationFrame(songLayoutReleaseFrame);
+    }
+    songLayoutReleaseFrame = 0;
+    if (songLayoutEnterTimer) {
+      clearTimeout(songLayoutEnterTimer);
+      songLayoutEnterTimer = 0;
+    }
+    const panels = songLayoutPanels();
+    if (!panels) return;
+    for (const panel of [panels.main, panels.side]) {
+      if (!panel) continue;
+      panel.classList.remove(...SONG_LAYOUT_MOTION_CLASSES);
+      panel.style.removeProperty("transform");
+    }
+  }
+
+  /* The mirror swap (default <-> lyrics-left) has nothing to dissolve — the
+     same two panels change places. `order` cannot be transitioned, so this is
+     a FLIP: the layout is applied, each panel is offset back to where it just
+     was with a transform, and the transform is released so the stylesheet's
+     transition carries it home. Both slide at once, in opposite directions. */
+  function songLayoutSlideIntoPlace(moves) {
+    const sliding = [];
+    for (const move of moves) {
+      if (!move.panel) continue;
+      const dx = Math.round(move.from.left - move.panel.getBoundingClientRect().left);
+      if (Math.abs(dx) < 1) continue;
+      move.panel.style.transform = "translateX(" + dx + "px)";
+      sliding.push(move.panel);
+    }
+    if (!sliding.length) return;
+    // One layout read so the offset is the position that paints.
+    void sliding[0].offsetWidth;
+    for (const panel of sliding) panel.classList.add("ym-song-panel-swap");
+    const settle = () => {
+      for (const panel of sliding) panel.style.removeProperty("transform");
+    };
+    const cleanup = () => {
+      for (const panel of sliding) {
+        panel.classList.remove("ym-song-panel-swap");
+        panel.style.removeProperty("transform");
+      }
+    };
+    if (window.requestAnimationFrame) {
+      songLayoutReleaseFrame = window.requestAnimationFrame(() => {
+        songLayoutReleaseFrame = window.requestAnimationFrame(settle);
+      });
+    } else {
+      window.setTimeout(settle, 16);
+    }
+    // The class holds the transition; it outlives the motion (and is the
+    // deadline if the tab never produces frames).
+    window.setTimeout(cleanup, SONG_LAYOUT_SLIDE_MS + 280);
+  }
+
+  // Adds the start state, lets the browser paint it once, then removes it so
+  // the base transition carries both panels to their real look. Without the
+  // two frames the class is added and removed inside one style recalc and the
+  // transition never runs.
+  function songLayoutReleaseMotion(panels, className) {
+    const list = panels.filter((panel) => panel && songLayoutVisible(panel));
+    if (!list.length) return;
+    for (const panel of list) panel.classList.add(className);
+    const release = () => {
+      songLayoutReleaseFrame = 0;
+      for (const panel of list) panel.classList.remove(className);
+    };
+    if (window.requestAnimationFrame) {
+      songLayoutReleaseFrame = window.requestAnimationFrame(() => {
+        songLayoutReleaseFrame = window.requestAnimationFrame(release);
+      });
+    } else {
+      window.setTimeout(release, 16);
+    }
+    // A hidden or throttled tab can go a long time without a frame, and these
+    // classes hold a half-faded panel on screen — so the release also has a
+    // deadline. Removing a class that is already gone is a no-op.
+    window.setTimeout(release, 700);
+  }
+
+  /* A panel that was `display: none` has no previous rendered style, and a
+     transition between "not rendered" and "rendered" is exactly the case
+     browsers skip — which is why a panel arriving from "cover art only" used to
+     snap in with no fade. A keyframe ANIMATION starts on the first frame the
+     element is rendered, so the arrival is a real animation, not a transition. */
+  function songLayoutPlayEnter(panels) {
+    const list = panels.filter((panel) => panel && songLayoutVisible(panel));
+    if (!list.length) return;
+    for (const panel of list) {
+      panel.classList.remove("ym-song-panel-enter");
+      // Reflow so a repeat play of the same class restarts instead of being a no-op.
+      void panel.offsetWidth;
+      panel.classList.add("ym-song-panel-enter");
+    }
+    if (songLayoutEnterTimer) clearTimeout(songLayoutEnterTimer);
+    songLayoutEnterTimer = window.setTimeout(() => {
+      songLayoutEnterTimer = 0;
+      for (const panel of list) panel.classList.remove("ym-song-panel-enter");
+    }, SONG_LAYOUT_ENTER_MS);
+  }
+
+  function songLayoutSet(id) {
+    const next = songLayoutNormalized(id);
+    const reduced = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const panels = songLayoutPanels();
+    if (ytPrefs.songLayout === next && !songLayoutSwapTimer) {
+      syncSongLayoutPicker();
+      return;
+    }
+    songLayoutStopMotion();
+    // The pill answers the click immediately; the page follows, and on the
+    // animated path it follows once the outgoing panel has dissolved.
+    ytPrefs.songLayout = next;
+    syncSongLayoutPicker();
+
+    const commit = () => {
+      songLayoutSwapTimer = 0;
+      applyYtPrefs();
+      saveYtPrefs();
+      syncSongLayoutPicker();
+    };
+
+    if (!panels || !panels.main || !panels.side || reduced) {
+      commit();
+      return;
+    }
+
+    const before = { main: songLayoutVisible(panels.main), side: songLayoutVisible(panels.side) };
+    // What the next layout shows. "lyrics only" keeps the tab column and drops
+    // the cover; "cover art only" is the mirror of that; the other two show both.
+    const after = { main: next !== "lyrics", side: next !== "art" };
+    const leaving = [];
+    const arriving = [];
+    const moved = [];
+    for (const key of ["main", "side"]) {
+      if (before[key] && !after[key]) leaving.push(panels[key]);
+      else if (!before[key] && after[key]) arriving.push(panels[key]);
+      else if (before[key] && after[key]) moved.push(panels[key]);
+    }
+
+    if (leaving.length) {
+      // One beat: the panel that is going dissolves in the layout it still
+      // belongs to, so it never has to move anywhere first.
+      for (const panel of leaving) panel.classList.add("ym-song-panel-dissolve");
+      songLayoutSwapTimer = window.setTimeout(() => {
+        commit();
+        for (const panel of leaving) panel.classList.remove("ym-song-panel-dissolve");
+        // The survivor only changed geometry (a column that widens, a column
+        // that slides over): it sharpens back rather than sliding, because a
+        // width cannot be transitioned. A panel that was hidden ARRIVES.
+        songLayoutReleaseMotion(moved, "ym-song-panel-settle");
+        songLayoutPlayEnter(arriving);
+      }, SONG_LAYOUT_DISSOLVE_MS);
+      return;
+    }
+
+    if (arriving.length) {
+      // Nothing leaves, but the arrangement changes shape (one panel has to
+      // appear and the other grows or shrinks by hundreds of pixels). The
+      // survivors dip for a beat, the layout swaps while they are soft, and
+      // the new panel animates in — the alternative is a hard width jump.
+      for (const panel of moved) panel.classList.add("ym-song-panel-settle");
+      songLayoutSwapTimer = window.setTimeout(() => {
+        commit();
+        for (const panel of moved) panel.classList.remove("ym-song-panel-settle");
+        songLayoutPlayEnter(arriving);
+      }, SONG_LAYOUT_REBUILD_MS);
+      return;
+    }
+
+    // Both panels stay and only change places: nothing fades, they slide.
+    const beforeRects = {
+      main: panels.main.getBoundingClientRect(),
+      side: panels.side.getBoundingClientRect(),
+    };
+    commit();
+    songLayoutSlideIntoPlace(moved.map((panel) => ({
+      panel,
+      from: beforeRects[panel === panels.main ? "main" : "side"],
+    })));
+  }
+
+  /* The pill belongs to the tab strip, so it sits at that strip's right edge
+     rather than the page's. In "lyrics only" the column is narrower than the
+     page and centred — a page-anchored pill would float hundreds of pixels away
+     from the tabs it opens. With no strip on screen ("cover art only") the
+     stylesheet's page-padding default is the fallback, which is where the pill
+     already sits in the two-column layouts. */
+  function syncSongLayoutAnchor() {
+    if (!songLayoutEl) return;
+    const page = songLayoutEl.parentElement;
+    const strip = $("ytmusic-player-page #side-panel > tp-yt-paper-tabs");
+    if (!page || !strip || !strip.offsetWidth) {
+      songLayoutEl.style.removeProperty("right");
+      return;
+    }
+    const pageBox = page.getBoundingClientRect();
+    const stripBox = strip.getBoundingClientRect();
+    songLayoutEl.style.right = Math.max(0, Math.round(pageBox.right - stripBox.right)) + "px";
+  }
+
+  function syncSongLayoutPicker() {
+    if (!songLayoutEl) return;
+    const active = songLayoutNormalized(ytPrefs.songLayout);
+    const entry = SONG_LAYOUTS.find((layout) => layout.id === active) || SONG_LAYOUTS[0];
+    const name = songLayoutBtn.querySelector(".ym-song-layout-name");
+    if (name) name.textContent = entry.label;
+    const slot = songLayoutBtn.querySelector(".ym-song-layout-glyph-slot");
+    if (slot) {
+      slot.textContent = "";
+      slot.appendChild(songLayoutGlyph(active));
+    }
+    for (const item of Array.from(songLayoutMenu.querySelectorAll("[data-layout]"))) {
+      item.setAttribute("aria-checked", item.getAttribute("data-layout") === active ? "true" : "false");
+    }
+    songLayoutBtn.setAttribute("aria-label", "Song view layout: " + entry.label);
+    syncSongLayoutAnchor();
+  }
+
+  function buildSongLayoutPicker() {
+    songLayoutBtn = h("button", {
+      class: "ym-song-layout-btn",
+      type: "button",
+      "aria-haspopup": "true",
+      "aria-expanded": "false",
+      title: "Song view layout",
+    });
+    songLayoutBtn.appendChild(h("span", { class: "ym-song-layout-glyph-slot" }));
+    songLayoutBtn.appendChild(h("span", { class: "ym-song-layout-name" }));
+    const chevron = svgIcon(ICON_CHEVRON);
+    chevron.setAttribute("class", "ym-song-layout-chev");
+    songLayoutBtn.appendChild(chevron);
+
+    songLayoutMenu = h("div", { class: "ym-song-layout-menu", role: "menu", hidden: "" });
+    for (const layout of SONG_LAYOUTS) {
+      const item = h("button", {
+        class: "ym-song-layout-item",
+        type: "button",
+        role: "menuitemradio",
+        "aria-checked": "false",
+        "data-layout": layout.id,
+      });
+      item.appendChild(songLayoutGlyph(layout.id));
+      item.appendChild(h("span", { class: "ym-song-layout-text" },
+        h("span", { class: "ym-song-layout-item-label", text: layout.label }),
+        h("span", { class: "ym-song-layout-item-hint", text: layout.hint })
+      ));
+      item.addEventListener("click", () => {
+        songLayoutSet(layout.id);
+        songLayoutOpen(false);
+        if (songLayoutBtn) songLayoutBtn.focus();
+      });
+      songLayoutMenu.appendChild(item);
+    }
+
+    songLayoutEl = h("div", { class: "ym-song-layout" }, songLayoutBtn, songLayoutMenu);
+    songLayoutBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      songLayoutOpen(songLayoutMenu.hidden);
+    });
+    return songLayoutEl;
+  }
+
+  // Mounted on every player-page rebuild, and cheap when it is already there:
+  // a connected parent element short-circuits before touching the DOM.
+  function ensureSongLayoutPicker() {
+    if (!isWatchPage()) return;
+    const page = $("#player-page") || $("ytmusic-player-page");
+    if (!page) return;
+    if (!songLayoutEl) {
+      buildSongLayoutPicker();
+      syncSongLayoutPicker();
+    }
+    if (songLayoutEl.parentElement !== page) page.appendChild(songLayoutEl);
+    // The strip moves when the layout does (and on resize), so the anchor is
+    // re-measured here as well as on a pick.
+    syncSongLayoutAnchor();
+  }
+
+  function initSongLayoutPicker() {
+    ensureSongLayoutPicker();
+    const root = $("ytmusic-player-page") || document.body;
+    let raf = 0;
+    new MutationObserver(() => {
+      if (raf) return;
+      raf = window.setTimeout(() => {
+        raf = 0;
+        ensureSongLayoutPicker();
+      }, 250);
+    }).observe(root, { childList: true, subtree: true });
+    window.addEventListener("resize", ensureSongLayoutPicker);
+    document.addEventListener("yt-navigate-finish", () => {
+      ensureSongLayoutPicker();
+      syncSongLayoutPicker();
+    });
+    console.log("[Aurora Lyrics] song-view layout switcher active");
+  }
+
   /* ---- boot ---- */
+  /* ---- current artwork as a custom property -------------------------------
+     A theme cannot read an <img> src from CSS, so the cover URL is published as
+     --ym-art on the root element and a theme turns it into a backdrop:
+         background-image: var(--ym-art)
+     Written only when the URL actually changes, so this costs one string
+     comparison per observed mutation and nothing at all while the track holds.
+     Aurora Bloom paints its own canvas backdrop and ignores it, so the property
+     is inert until a theme asks for it. */
+  let publishedArtUrl = "";
+  function publishArtUrl() {
+    const img =
+      document.querySelector("ytmusic-player-bar img.image") ||
+      document.querySelector("ytmusic-player-bar img") ||
+      document.querySelector("ytmusic-player-page #song-image img") ||
+      document.querySelector("#song-image img") ||
+      document.querySelector("ytmusic-player-page img");
+    const src = (img && (img.currentSrc || img.src)) || "";
+    if (!src || src === publishedArtUrl) return;
+    publishedArtUrl = src;
+    document.documentElement.style.setProperty("--ym-art", 'url("' + src + '")');
+  }
+
+  /* ---- start with the guide collapsed -------------------------------------
+     YouTube Music restores its own guide preference on load, and an expanded
+     guide is 240px of Home/Explore eating the page for the whole session. When
+     the EXPANDED guide is what rendered, click YTM's own toggle instead of
+     hiding nodes: the click runs through the component, so its internal model,
+     the page offsets and the button's aria-expanded stay in agreement, and the
+     animation still plays.
+
+     This runs ONCE per page load and stops as soon as the state is right, so
+     expanding the guide by hand later in the session is respected. Polling is
+     needed because the guide renders after the player does; 12 tries is about
+     five seconds, after which the layout is settled either way. */
+  function startGuideCollapsed() {
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries++;
+      const expanded = document.querySelector("#guide-wrapper");
+      const mini = document.querySelector("#mini-guide");
+      const isExpanded =
+        expanded &&
+        expanded.offsetWidth > 100 &&
+        getComputedStyle(expanded).visibility !== "hidden";
+      if (isExpanded) {
+        const button =
+          document.querySelector("ytmusic-nav-bar #guide-button") ||
+          document.querySelector("#guide-button");
+        if (button && typeof button.click === "function") {
+          button.click();
+          clearInterval(timer);
+          console.debug("[YTMod] guide collapsed on load");
+          return;
+        }
+      } else if (mini && mini.offsetWidth > 0) {
+        clearInterval(timer); // already collapsed, nothing to do
+        return;
+      }
+      if (tries >= 12) clearInterval(timer);
+    }, 400);
+  }
   async function boot() {
     injectPublicAPI(); // expose window.YTMod (page world) before any JS extension loads
+    // Keep --ym-art current. The src swap fires on the existing node for most
+    // track changes, but YTM replaces the node itself on some navigations, so
+    // both childList and src attributes are observed.
+    try {
+      const artObserver = new MutationObserver(publishArtUrl);
+      artObserver.observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["src"],
+      });
+    } catch (_) {}
+    publishArtUrl();
+    startGuideCollapsed();
+    // The stored value can still turn them off; this early start is only so the
+    // default (on) paints without waiting for storage (AJ, 2026-10-23).
+    if (ytPrefs.customIcons) ytStartPlayerIcons();
     // Vendored hls.js, loaded into the PAGE world (so window.Hls is directly
     // usable by the spicy-lyrics add-on, which also runs page-world). Chrome /
     // Comet cannot play HLS natively, and the animated Apple Music cover art
@@ -5216,6 +7351,21 @@
         delete reg[removedId];
         registryChanged = true;
       }
+    }
+    // Generic sweep for every OTHER row the catalog no longer knows. Deleting an
+    // add-on from AVAILABLE (as the discord-presence attempt was) leaves its
+    // installed record behind: applyExtension() bails on an unknown id so nothing
+    // loads, the marketplace has no card to uninstall it from, and every count
+    // (home "installed", the popup's add-on line) keeps including a phantom that
+    // shows up as a bare id. Its settings and background go with it, exactly as a
+    // real uninstall would (AJ, 2026-10-21).
+    for (const id of Object.keys(reg)) {
+      if (findAvail(id)) continue;
+      delete reg[id];
+      registryChanged = true;
+      try { await removeExtensionSettings(id); } catch (_) {}
+      try { await bgDel(id); } catch (_) {}
+      console.debug("[YTMod] dropped orphaned add-on record:", id);
     }
     // First-run seeding: the two core add-ons (synced lyrics + dynamic theme)
     // install and enable themselves on a fresh profile, so a new user gets the
@@ -5245,6 +7395,10 @@
     // Deliberately an explicit `=== true`: an absent or junk key means off, and
     // nothing but the 6-tap gesture is allowed to turn this on.
     if (savedUI.dev === true) ui.dev = true;
+    // Applied to <html> before the panel exists, because the YouTube page's two
+    // settings are page-wide and must be right on the FIRST paint (the panel can
+    // stay closed for the whole session).
+    await loadYtPrefs();
     buildMarketplace();
 
     let tries = 0;
@@ -5258,6 +7412,8 @@
 
     // Always-on personalisation: reopen the watch-page tab you last used.
     initRememberLastWatchTab();
+    // Always-on, too: the layout of the player page, from a pill beside the tabs.
+    initSongLayoutPicker();
 
     console.log("[Aurora Lyrics] booted v" + VERSION);
   }

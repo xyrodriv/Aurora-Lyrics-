@@ -23,7 +23,7 @@ const parts = [
   "13-loading-scroll.jsfrag",
   "14-lyrics-sources.jsfrag",
   "15-prefetch-search.jsfrag",
-  "16-lyric-dom-romanization.jsfrag",
+  "16-lyric-dom.jsfrag",
   "17-lyric-events.jsfrag",
   "18-animation.jsfrag",
   "19-animation-modes.jsfrag",
@@ -33,6 +33,9 @@ const parts = [
   // 21-boot.jsfrag, which closes the IIFE with })(); — otherwise every amll*
   // function ends up at module scope and throws ReferenceError on panelEl.
   "22-amll-integration.jsfrag",
+  // On-device translation reads the AMLL player when patching a line that was
+  // already laid out, so it follows 22. It must also precede the boot fragment.
+  "23-auto-translate.jsfrag",
   "21-boot.jsfrag",
 ];
 

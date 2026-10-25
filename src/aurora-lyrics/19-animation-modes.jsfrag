@@ -154,7 +154,7 @@
     const selfAwake =
       stateChanged ||
       storeNeedsAnimation(word.AnimatorStore) ||
-      (currentSettings.simpleLyrics && state === "Active");
+      (amllSimpleLookActive() && state === "Active");
     let lettersAwake = false;
     if (word.LetterGroup && (state === "Active" || selfAwake)) {
       lettersAwake = animateLetters(word, state, lineState, positionMs, deltaTime);
@@ -272,7 +272,7 @@
     // reset is cheap per frame -- setStyleIfChanged's cache makes it a no-op
     // once everything is back at 1 -- and it guarantees nothing stays
     // half-squeezed from before the toggle was flipped.
-    if (currentSettings.simpleLyrics) {
+    if (amllSimpleLookActive()) {
       resetAdaptiveSpacing();
       return;
     }
@@ -490,7 +490,7 @@
     // Simple lyrics (Apple Music / AMLL style): drop the look-ahead so the active
     // line centres exactly as it starts playing, like AMLL, instead of gliding in
     // early. Normal mode keeps its lead.
-    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !currentSettings.simpleLyrics)
+    const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !amllSimpleLookActive())
       ? currentSettings.scrollLeadMs
       : 0;
     const scrollIndex = scrollLeadMs > 0
@@ -566,28 +566,33 @@
         }
       }
 
-      // Keep an entering line's previous blur radius while its unsung halo fades
-      // into the active word glow. Zeroing it on this frame caused a visible
-      // dim-then-bright dip on both lead and background vocals. Other lines still
-      // update when the active line changes; gaps preserve their last value.
+      // Depth blur, the same model the Apple-Music engine uses for its stack
+      // (resolveBlurLevel): a real gaussian blur, one pixel per line away from
+      // the playing line, capped at 5px, and none on the line being sung or on
+      // an interlude's dots. The built-in renderer used to grow its unsung
+      // TEXT-SHADOW halo with distance instead, which read as a dirty haze
+      // around the words rather than as focus, so the halo is retired with the
+      // same write (AJ, 2026-10-23).
+      //
+      // Background vocals are ranked by the LEAD line they belong to, not by
+      // their own slot. They are separate .line.bg-line entries pushed right
+      // after that lead, so their own index put them at distance 1 from a line
+      // being sung — blurred underneath the words the user was reading — and a
+      // bg that outlived its lead turned into a smudge. Ranking by the parent
+      // instead keeps the whole block in focus while its lead plays and blurs
+      // it with the line once the song moves on (AJ, 2026-10-23).
       if (activeLineChanged && activeIndex >= 0) {
-        const distance = Math.abs(index - activeIndex);
-        if (currentSettings.simpleLyrics && !line.HTMLElement.classList.contains("bg-line")) {
-          // AMLL depth: the active line is full and scaled up, neighbours fade and
-          // recede with distance so the panel reads as a stack of lines flowing
-          // past, not flat text scrolling. Injected inline so it overrides the
-          // state-class alpha only while Simple Lyrics is on; cleared on toggle-off
-          // (see clearSimpleLyricsDepth in 04-state-settings.jsfrag). Background
-          // vocals keep their own dimming.
-          const depthAlpha = distance === 0 ? 1 : Math.max(0.3, 1 - distance * 0.22);
-          const depthScale = distance === 0 ? 1.04 : Math.max(0.94, 1 - distance * 0.015);
-          setStyleIfChanged(line.HTMLElement, "--ym-sl-line-alpha", String(depthAlpha), 0.02);
-          setStyleIfChanged(line.HTMLElement, "--amll-depth-scale", String(depthScale), 0.01);
-        } else if (lineState !== "Active") {
-          const blur = distance === 0
-            ? 0
-            : Math.min(distance * 1.25, 1.25 * 5 + 1.25 * 0.465);
-          setStyleIfChanged(line.HTMLElement, "--BlurAmount", `${blur}px`, 0.25);
+        const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
+        const distance = Math.abs(anchorIndex - activeIndex);
+        // A bg vocal never inherits focus from its own timing: only its lead
+        // line being the one being sung keeps it crisp.
+        const inFocus = line.DotLine || distance === 0 || (lineState === "Active" && !line.BGLine);
+        const depthBlur = inFocus
+          ? 0
+          : Math.min(5, 1 + distance);
+        setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
+        if (lineState !== "Active") {
+          setStyleIfChanged(line.HTMLElement, "--BlurAmount", "0px", 0.25);
         }
       }
 
@@ -653,8 +658,102 @@
     applyAdaptiveSpacing(activeIndex, activeLineChanged);
   }
 
+  // TEMP PERF PROBE (2026-10-22) - diagnosis only, remove once the lag is
+  // pinned. Publishes one-second totals as attributes on <html> so the numbers
+  // can be read through the browser bridge without opening DevTools:
+  //   data-aurora-fps          rAF callbacks per second (two loops would double it)
+  //   data-aurora-frame-ms     mean gap between rAF callbacks
+  //   data-aurora-worst-ms     worst gap in the window
+  //   data-aurora-animate-ms   mean time inside animate() (the built-in renderer)
+  //   data-aurora-amll-ms      mean time inside amllDrive() (the AMLL renderer)
+  //   data-aurora-tick-ms      mean time inside the WHOLE tick() body
+  //   data-aurora-long-ms      total long-task (>50ms) time in the window
+  //   data-aurora-long-n       number of long tasks in the window
+  //   data-aurora-anims        live CSS/Web animations on the document
+  //   data-aurora-rejections   unhandled promise rejections in the window
+  const perfProbe = {
+    frames: 0,
+    frameSum: 0,
+    frameWorst: 0,
+    animateSum: 0,
+    animateFrames: 0,
+    amllSum: 0,
+    amllFrames: 0,
+    tickSum: 0,
+    longMs: 0,
+    longN: 0,
+    rejections: 0,
+    lastTs: 0,
+    lastPublish: 0,
+    addAmll(ms) { this.amllSum += ms; this.amllFrames++; },
+    report() {
+      const now = performance.now();
+      if (!this.lastPublish) this.lastPublish = now;
+      if (now - this.lastPublish < 1000) return;
+      const span = now - this.lastPublish;
+      const el = document.documentElement;
+      try {
+        el.setAttribute("data-aurora-fps", ((this.frames * 1000) / span).toFixed(1));
+        el.setAttribute("data-aurora-frame-ms", (this.frames ? this.frameSum / this.frames : 0).toFixed(2));
+        el.setAttribute("data-aurora-worst-ms", this.frameWorst.toFixed(1));
+        el.setAttribute("data-aurora-animate-ms", (this.animateFrames ? this.animateSum / this.animateFrames : 0).toFixed(2));
+        el.setAttribute("data-aurora-amll-ms", (this.amllFrames ? this.amllSum / this.amllFrames : 0).toFixed(2));
+        el.setAttribute("data-aurora-tick-ms", (this.frames ? this.tickSum / this.frames : 0).toFixed(2));
+        el.setAttribute("data-aurora-long-ms", this.longMs.toFixed(0));
+        el.setAttribute("data-aurora-long-n", String(this.longN));
+        el.setAttribute("data-aurora-anims", String(document.getAnimations().length));
+        el.setAttribute("data-aurora-rejections", String(this.rejections));
+        el.setAttribute("data-aurora-simple", amllSimpleLookActive() ? "1" : "0");
+      } catch (e) {}
+      this.frames = 0;
+      this.frameSum = 0;
+      this.frameWorst = 0;
+      this.animateSum = 0;
+      this.animateFrames = 0;
+      this.amllSum = 0;
+      this.amllFrames = 0;
+      this.tickSum = 0;
+      this.longMs = 0;
+      this.longN = 0;
+      this.rejections = 0;
+      this.lastPublish = now;
+    },
+  };
+  window.__auroraPerf = perfProbe;
+  window.addEventListener("unhandledrejection", () => { perfProbe.rejections++; });
+  // Anything the browser spends >50ms on in one chunk is a long task, whether it
+  // came from our callback or from style/layout/paint it triggered. If our JS is
+  // 0.3ms/frame and long tasks are still stacking up, the cost is the browser
+  // reacting to what we wrote, not the writing itself.
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        perfProbe.longMs += entry.duration;
+        perfProbe.longN++;
+      }
+    }).observe({ type: "longtask", buffered: false });
+  } catch (e) {}
+
   function tick() {
     raf = requestAnimationFrame(tick);
+    const tickStartedAt = performance.now();
+    try {
+      tickBody();
+    } finally {
+      perfProbe.tickSum += performance.now() - tickStartedAt;
+    }
+  }
+
+  function tickBody() {
+    const probeNow = performance.now();
+    if (perfProbe.lastTs) {
+      const gap = probeNow - perfProbe.lastTs;
+      perfProbe.frames++;
+      perfProbe.frameSum += gap;
+      if (gap > perfProbe.frameWorst) perfProbe.frameWorst = gap;
+    }
+    perfProbe.lastTs = probeNow;
+    perfProbe.report();
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
@@ -677,7 +776,12 @@
     // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
     // springs simply advance on the next good frame. (AJ: "some lines just
     // flicker black for a very very short time".)
-    if (Number.isFinite(position)) animate(position);
+    if (Number.isFinite(position)) {
+      const animStartedAt = performance.now();
+      animate(position);
+      perfProbe.animateSum += performance.now() - animStartedAt;
+      perfProbe.animateFrames++;
+    }
   }
 
   // Track + offset housekeeping used to run inside tick(), so two document-wide

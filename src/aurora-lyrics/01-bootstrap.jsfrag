@@ -23,11 +23,10 @@
   // the page. If this line does NOT appear in the DevTools console after a full
   // extension + tab reload, the new code is not being loaded (stale cache /
   // wrong reload procedure), and any lyric-rendering change will have no effect.
-  console.log("[Aurora Lyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
+  console.log("[AuroraLyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
 
   // Keep the original internal ID so existing installs and saved lyrics remain active.
   const EXT_ID = "ytmod-spicy-lyrics";
-  const UNISON_API = "https://unison.boidu.dev/lyrics";
   const LRCLIB_API = "https://lrclib.net/api/get";
   const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
   const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
@@ -73,8 +72,11 @@
   // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
   // relative URL is all we need.
   const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
-  // Match the Dynamic add-on's defaults so the fullscreen backdrop looks like
-  // the page-wide one. animationSpeed is overridden per playback state.
+  // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
+  // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
+  // These are what the backdrop uses before that handshake lands, and they
+  // match Bloom's shipped defaults. animationSpeed is overridden per playback
+  // state.
   const FS_KAWARP_OPTIONS = {
     warpIntensity: 1,
     blurPasses: 6,

@@ -47,6 +47,9 @@
   // Same vendored Kawarp module the Dynamic theme and the fullscreen backdrop
   // use, so the PiP gets the identical fluid treatment rather than a lookalike.
   const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
+  // The SAME engine module the panel uses for Apple-Music-style lyrics. Loaded
+  // here so a line-by-line track keeps its renderer when it moves to the PiP.
+  const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
   const KAWARP_OPTIONS = {
     warpIntensity: 1,
     blurPasses: 6,
@@ -185,7 +188,7 @@
       inset: 0;
       display: flex;
       flex-direction: column;
-      padding: 14px 18px 10px;
+      padding: 14px 16px 12px;
       box-sizing: border-box;
       /* Fallback for when Kawarp cannot start (no WebGL, module failure). */
       background: linear-gradient(180deg, #17181c 0%, #0c0d10 100%);
@@ -193,12 +196,25 @@
       font-family: "SpicyLyrics", Roboto, Arial, sans-serif;
       overflow: hidden;
       user-select: none;
+      /* Compositor-only entrance: the window itself is created by Chrome, so
+         this is the only "open" motion the document owns. */
+      animation: ym-pip-in .34s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    @keyframes ym-pip-in {
+      from { opacity: 0; transform: scale(.985) translateY(6px); }
+      to { opacity: 1; transform: none; }
     }
     /* The Kawarp canvas is the backdrop; everything else sits above it. */
     .ym-pip-kawarp {
       position: absolute;
       inset: 0;
       z-index: 0;
+      /* The backing store is sized in DEVICE pixels for sharpness; without these
+         the canvas displays at its attribute size (1.5x the window) and spills
+         past the root. 100% + the 1.06 scale is the only overscan. */
+      display: block;
+      width: 100%;
+      height: 100%;
       opacity: 0;
       transition: opacity .6s ease;
       transform: scale(1.06);
@@ -215,16 +231,116 @@
       background: linear-gradient(180deg,
         rgba(0, 0, 0, .5) 0%, rgba(0, 0, 0, .22) 42%, rgba(0, 0, 0, .62) 100%);
     }
-    .ym-pip > .ym-pip-head,
-    .ym-pip > .ym-pip-lines,
-    .ym-pip > .ym-pip-transport { position: relative; z-index: 2; }
+    .ym-pip-board,
+    .ym-pip > .ym-pip-controls { position: relative; z-index: 2; }
+    /* One board holds the picture and the lyric column, so the layout can move
+       the picture to the side without touching the DOM. Stacked (default):
+       video row, title row, lyrics row. */
+    .ym-pip-board {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-areas: "video" "head" "stage";
+    }
+    /* ---- music-video pane --------------------------------------------------
+       The live player video is MIRRORED here (captureStream), never moved: the
+       tab keeps its picture and playback, and YTM's element stays where it
+       expects it. */
+    .ym-pip-video-wrap {
+      position: relative;
+      z-index: 2;
+      grid-area: video;
+      opacity: 0;
+      margin-bottom: 0;
+      transition:
+        opacity .28s ease,
+        margin-bottom .38s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* "video-on" means "show the picture NOW", which is not the same as "this
+       track has a video". A window too short to feed the picture without
+       starving the lyrics drops the class, and the thumbnail comes back. */
+    .ym-pip.video-on .ym-pip-video-wrap {
+      opacity: 1;
+      margin-bottom: 12px;
+    }
+    /* max-height, not grid-template-rows: a 1fr row inside an auto-height
+       container resolves to 0, so the video painted OVER the header instead of
+       taking space (measured in a headless pass). The inner carries the 16:9
+       ratio, so it has a real height to collapse from. */
+    .ym-pip-video-inner {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      max-height: 0;
+      overflow: hidden;
+      border-radius: 14px;
+      background: #000;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .45);
+      position: relative;
+      transition: max-height .4s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-pip.video-on .ym-pip-video-inner { max-height: 50vh; }
+    /* WIDE layout: picture on the LEFT, title + lyrics in a RIGHT column, the
+       transport still spanning the bottom. Applied only when JS measured a
+       window wide enough for both columns AND a picture that fits (see
+       updatePipLayout), so a narrow PiP keeps the stacked arrangement. */
+    .ym-pip.video-on.ym-pip-wide .ym-pip-board {
+      grid-template-columns: minmax(0, 1.06fr) minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-areas:
+        "video head"
+        "video stage";
+      column-gap: 16px;
+    }
+    .ym-pip.video-on.ym-pip-wide .ym-pip-video-wrap {
+      margin-bottom: 0;
+      align-self: center;
+      min-height: 0;
+    }
+    /* The left column sets the width; this keeps the picture from overflowing a
+       short window. 124px = the shell's 26px padding + the measured transport
+       card (82px) + a little slack; it only bites on extreme wide-and-short. */
+    .ym-pip.video-on.ym-pip-wide .ym-pip-video-inner {
+      max-height: calc(100vh - 124px);
+    }
+    #ym-pip-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      opacity: 0;
+      transition: opacity .45s ease;
+    }
+    #ym-pip-video.live { opacity: 1; }
     .ym-pip-head {
       display: flex;
       align-items: center;
       gap: 10px;
-      flex: 0 0 auto;
+      grid-area: head;
       margin-bottom: 10px;
       min-width: 0;
+      animation: ym-pip-rise .4s .04s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    /* With the video on top the thumbnail is redundant, and the title becomes
+       the caption for the picture. */
+    .ym-pip.video-on .ym-pip-art { display: none; }
+    .ym-pip.video-on .ym-pip-title { font-size: 16px; letter-spacing: .1px; }
+    .ym-pip.video-on .ym-pip-artist { font-size: 12.5px; }
+    @keyframes ym-pip-rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    /* Track change: the text is re-written in place, so flash it rather than
+       letting a new title appear mid-frame with no transition. */
+    .ym-pip-title.swap, .ym-pip-artist.swap {
+      animation: ym-pip-swap .34s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    @keyframes ym-pip-swap {
+      from { opacity: .15; transform: translateY(5px); }
+      to { opacity: 1; transform: none; }
     }
     /* Cover art thumbnail (AJ, 2026-10-07). Hidden until the track supplies
        artwork, so a track with none leaves no gap. */
@@ -270,9 +386,28 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    /* The lyric viewport. Holds the built-in renderer's scroll box, and the
+       AMLL host on top of it when the engine owns the track. */
+    .ym-pip-stage {
+      position: relative;
+      grid-area: stage;
+      min-height: 0;
+    }
+    .ym-pip-stage .ym-pip-lines {
+      position: absolute;
+      inset: 0;
+    }
+    /* Soft TOP edge only. A scroll box has to clip, and a hard line cutting a
+       glyph in half under the header is what reads as broken. No bottom mask:
+       the controls card terminates the area, and fading the last lines there
+       just made the fill look like it was dying early. */
+    .ym-pip-lines,
+    #ym-sl-amll-host {
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
+      mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
+    }
     .ym-pip-lines {
       position: relative;
-      flex: 1 1 auto;
       min-height: 0;
       /* border-box is REQUIRED for the padding below to do anything: as a
          stretched flex item this element defaults to content-box, so padding
@@ -301,23 +436,28 @@
     .ym-pip-lines::-webkit-scrollbar { display: none; width: 0; height: 0; }
     .ym-pip-jump {
       position: absolute;
-      z-index: 5;
-      /* Bottom-LEFT, so it sits to the side of the centred transport controls
-         rather than on top of them. */
-      left: 12px;
-      bottom: 12px;
-      display: none;
+      z-index: 6;
+      /* Bottom-LEFT of the LYRIC area, so it never lands on the controls card. */
+      left: 2px;
+      bottom: 6px;
+      display: block;
       padding: 7px 12px;
-      border: 1px solid rgba(255,255,255,.18);
+      border: 1px solid rgba(255,255,255,.16);
       border-radius: 999px;
-      background: rgba(20,20,24,.82);
+      background: rgba(20,20,24,.72);
       color: rgba(255,255,255,.92);
       font: 600 12px/1.2 "SpicyLyrics", Roboto, Arial, sans-serif;
       cursor: pointer;
       white-space: nowrap;
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      opacity: 0;
+      transform: translateY(6px);
+      pointer-events: none;
+      transition: opacity .2s ease, transform .24s cubic-bezier(.2, .7, .3, 1),
+        background-color .16s ease;
     }
-    .ym-pip-jump.visible { display: block; }
+    .ym-pip-jump.visible { opacity: 1; transform: none; pointer-events: auto; }
     .ym-pip-jump:hover { background: rgba(255,255,255,.16); }
     /* Normal flow is important: the outer .ym-pip-lines element is the actual
        scroll container, and the credits footer must come AFTER the lyric track,
@@ -391,58 +531,123 @@
     /* Own class: the panel relies on its scroll container plus adaptive spacing
        to fade distant lines, which a small window has no room for. */
     #ym-sl-panel.SpicyRenderer .line.ym-pip-far { opacity: .2 !important; }
-    .ym-pip-transport {
+    /* ---- controls ---------------------------------------------------------
+       One glass card instead of loose rows: the seek bar, transport and volume
+       now read as a single object, which is also what gives the window its
+       "floating player" feel. */
+    .ym-pip-controls {
       flex: 0 0 auto;
+      margin-top: 10px;
+      padding: 10px 12px 9px;
+      border-radius: 18px;
+      background: rgba(18, 18, 22, .55);
+      border: 1px solid rgba(255, 255, 255, .1);
+      box-shadow:
+        0 12px 30px rgba(0, 0, 0, .28),
+        inset 0 1px 0 rgba(255, 255, 255, .07);
+      backdrop-filter: blur(24px) saturate(1.35);
+      -webkit-backdrop-filter: blur(24px) saturate(1.35);
+      animation: ym-pip-rise .42s .08s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    .ym-pip-transport {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 14px;
-      padding-top: 8px;
+      gap: 4px;
+      padding-top: 7px;
       /* The volume sits at the far right WITHOUT dragging the centred transport
-         off-centre — an auto margin would eat all the free space. */
+         off-centre — an absolute child does not take part in the centring. */
       position: relative;
     }
     .ym-pip-transport button {
-      width: 34px;
-      height: 34px;
+      width: 36px;
+      height: 36px;
       padding: 0;
       border: 0;
       border-radius: 50%;
-      background: none;
-      color: rgba(255, 255, 255, .82);
+      background: transparent;
+      color: rgba(255, 255, 255, .8);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: background-color .16s ease, color .16s ease, transform .16s ease;
     }
     .ym-pip-transport button:hover { background: rgba(255, 255, 255, .12); color: #fff; }
-    .ym-pip-transport button svg { width: 22px; height: 22px; fill: currentColor; }
-    .ym-pip-transport .ym-pip-main svg { width: 28px; height: 28px; }
-    /* ---- seek row, shuffle/repeat, volume (AJ, 2026-10-07) ---------------- */
-    .ym-pip-seek {
-      flex: 0 0 auto;
+    .ym-pip-transport button:active { transform: scale(.92); }
+    .ym-pip-transport button:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .8);
+      outline-offset: 2px;
+    }
+    .ym-pip-transport button svg { width: 21px; height: 21px; fill: currentColor; }
+    /* Primary transport: a solid disc, so the one action you reach for is
+       unmistakable at a glance in a small window. */
+    .ym-pip-transport .ym-pip-main {
+      width: 42px;
+      height: 42px;
+      margin: 0 2px;
+      background: #fff;
+      color: #111;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+      transition: transform .2s cubic-bezier(.2, .8, .3, 1.2), box-shadow .2s ease,
+        background-color .16s ease;
+    }
+    .ym-pip-transport .ym-pip-main:hover {
+      background: #fff;
+      transform: scale(1.06);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .42);
+    }
+    .ym-pip-transport .ym-pip-main:active { transform: scale(.95); }
+    .ym-pip-transport .ym-pip-main svg { width: 24px; height: 24px; }
+    /* Shuffle / Repeat are dimmed at rest and full white when engaged — the class
+       is set from the LIVE player state in syncLoop, so they cannot lie. */
+    .ym-pip-transport .ym-pip-opt { color: rgba(255, 255, 255, .42); }
+    .ym-pip-transport .ym-pip-opt:hover { color: rgba(255, 255, 255, .9); }
+    .ym-pip-transport .ym-pip-opt.active { color: #fff; }
+    .ym-pip-vol {
+      position: absolute;
+      right: -2px;
+      top: 50%;
+      transform: translateY(-50%);
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding-top: 8px;
+      gap: 6px;
+      color: rgba(255, 255, 255, .6);
+    }
+    .ym-pip-vol svg { width: 17px; height: 17px; fill: currentColor; flex: 0 0 auto; }
+    .ym-pip-volume { width: 58px; }
+    /* ---- seek row -------------------------------------------------------- */
+    .ym-pip-seek {
+      display: flex;
+      align-items: center;
+      gap: 9px;
     }
     .ym-pip-time {
-      font-size: 11px;
+      font-size: 10.5px;
+      font-weight: 600;
       font-variant-numeric: tabular-nums;
-      color: rgba(255, 255, 255, .6);
-      min-width: 30px;
+      color: rgba(255, 255, 255, .5);
+      min-width: 29px;
+      letter-spacing: .2px;
     }
     .ym-pip-time:last-child { text-align: right; }
-    /* Shared range look for the seek + volume sliders. */
+    /* The track behind the knob is a FILL: a hard-stop gradient driven by the
+       --ym-pip-fill percentage the loop writes, so the played part reads at a
+       glance without a second element. */
     .ym-pip-seek-range,
     .ym-pip-volume {
       -webkit-appearance: none;
       appearance: none;
       height: 4px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, .22);
+      background: linear-gradient(90deg,
+        rgba(255, 255, 255, .92) 0 var(--ym-pip-fill, 0%),
+        rgba(255, 255, 255, .2) var(--ym-pip-fill, 0%) 100%);
       cursor: pointer;
+      transition: height .16s ease;
     }
+    .ym-pip-seek-range:hover,
+    .ym-pip-volume:hover { height: 5px; }
     .ym-pip-seek-range { flex: 1 1 auto; min-width: 0; }
     .ym-pip-seek-range::-webkit-slider-thumb,
     .ym-pip-volume::-webkit-slider-thumb {
@@ -452,29 +657,36 @@
       height: 11px;
       border-radius: 50%;
       background: #fff;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+      box-shadow: 0 1px 5px rgba(0, 0, 0, .55);
+      transition: transform .16s ease;
     }
-    /* Shuffle / Repeat are dimmed at rest and full white when engaged — the class
-       is set from the LIVE player state in syncLoop, so they cannot lie. */
-    .ym-pip-transport .ym-pip-opt { color: rgba(255, 255, 255, .55); }
-    .ym-pip-transport .ym-pip-opt.active { color: #fff; }
-    .ym-pip-vol {
-      position: absolute;
-      right: 0;
-      top: calc(50% + 4px);
-      transform: translateY(-50%);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      color: rgba(255, 255, 255, .7);
-    }
-    .ym-pip-vol svg { width: 18px; height: 18px; fill: currentColor; flex: 0 0 auto; }
-    .ym-pip-volume { width: 70px; }
+    .ym-pip-seek-range:hover::-webkit-slider-thumb,
+    .ym-pip-volume:hover::-webkit-slider-thumb { transform: scale(1.25); }
     .ym-pip-hint {
       flex: 0 0 auto;
       text-align: center;
       font-size: 11px;
       color: rgba(255, 255, 255, .34);
+    }
+    /* A narrow window cannot fit the volume beside five buttons; the icon would
+       end up under the next button. Drop the slider, keep the transport. */
+    @media (max-width: 420px) {
+      .ym-pip-vol { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-pip,
+      .ym-pip-head,
+      .ym-pip-controls,
+      .ym-pip-title.swap,
+      .ym-pip-artist.swap,
+      .ym-pip-video-wrap,
+      #ym-pip-video,
+      .ym-pip-jump,
+      .ym-pip-transport button,
+      .ym-pip-transport .ym-pip-main {
+        animation: none !important;
+        transition: none !important;
+      }
     }
   `;
 
@@ -486,11 +698,9 @@
   let lines = [];
   let linesVideoId = null;
   let staticLyrics = false;
-  let romanizationEnabled = true;
   let songwriters = [];
   let attribution = null;
   let smoothScrolling = true;
-  let simpleLyrics = false;
   let scrollLeadEnabled = false;
   let scrollLeadMs = 0;
   let lastRenderedActive = -2;
@@ -508,6 +718,25 @@
   // MV-pause re-sync segment. Mirrors the panel's getOffsetForPosition() so the
   // PiP lyric clock matches the synced tab instead of running on raw playback.
   let syncState = null;
+  // ---- renderer ---------------------------------------------------------
+  // "spicy" = the built-in renderer drawn from the panel's own stylesheet and
+  // kit; "amll" = the real Apple-Music engine, exactly as the panel runs it for
+  // line-by-line tracks. Published per track by the panel (the Renderer tab).
+  let rendererMode = "spicy";
+  let amllPlayer = null;
+  let amllHost = null;
+  let amllCreditsEl = null;
+  let amllModulePromise = null;
+  let amllGen = 0;
+  let amllSizeObserver = null;
+  let amllTimeHosts = [];
+  const amllTimeHoldTimers = new Map();
+  const AMLL_TIME_HOLD_MS = 600;
+  let amllLastFrameAt = 0;
+  // ---- music-video mirror ------------------------------------------------
+  let pipVideoSource = null;
+  let pipVideoStream = null;
+  let pipVideoCheckedAt = 0;
 
   function player() {
     return (window.YTMod && window.YTMod.player) || null;
@@ -565,6 +794,9 @@
     const style = doc.createElement("style");
     style.textContent = fontFaces() + panelStylesheetText() + CSS;
     doc.head.appendChild(style);
+    // The window can be resized while open; the picture appears, moves to its own
+    // column, or is dropped entirely depending on the new size (updatePipLayout).
+    win.addEventListener("resize", updatePipLayout);
 
     const root = makeEl(doc, "div", "ym-pip");
     root.id = "ym-pip-root";
@@ -578,7 +810,32 @@
     const scrim = makeEl(doc, "div", "ym-pip-scrim");
     root.appendChild(scrim);
 
+    // ---- music-video mirror (hidden until a video track is detected) ------
+    // The <video> here is fed a captureStream of the TAB's player video. Moving
+    // the real element across documents would take the picture away from YTM
+    // and risk its player losing the media, so this is a read-only mirror.
+    const videoWrap = makeEl(doc, "div", "ym-pip-video-wrap");
+    videoWrap.id = "ym-pip-video-wrap";
+    const videoInner = makeEl(doc, "div", "ym-pip-video-inner");
+    const mirror = doc.createElement("video");
+    mirror.id = "ym-pip-video";
+    mirror.muted = true;
+    mirror.autoplay = true;
+    mirror.playsInline = true;
+    mirror.setAttribute("playsinline", "");
+    mirror.setAttribute("muted", "");
+    mirror.addEventListener("playing", () => mirror.classList.add("live"));
+    videoInner.appendChild(mirror);
+    videoWrap.appendChild(videoInner);
+    // The board owns the video, title and lyrics, so the wide layout can put the
+    // picture in a left column simply by re-gridding it.
+    const board = makeEl(doc, "div", "ym-pip-board");
+    board.id = "ym-pip-board";
+    board.appendChild(videoWrap);
+    root.appendChild(board);
+
     const head = makeEl(doc, "div", "ym-pip-head");
+    head.id = "ym-pip-head";
     // Cover art (AJ, 2026-10-07): a small square thumbnail beside the title, like
     // the fullscreen header. The src is set in setHeader() from the track's
     // artworkUrl; it stays empty (and collapses) until a track is known.
@@ -594,8 +851,15 @@
     head.appendChild(meta);
     // Source label (AJ, 2026-10-07) — dim, pushed to the far right of the header.
     head.appendChild(makeEl(doc, "div", "ym-pip-source", "Aurora Lyrics"));
-    root.appendChild(head);
+    board.appendChild(head);
 
+    // ---- lyric stage ------------------------------------------------------
+    // Fixed-height box that owns BOTH renderers: the built-in scroll box and,
+    // when the panel publishes renderer "amll", the engine host stacked on top.
+    // Keeping the engine out of the scroll box is what gives it a stable
+    // viewport (it translates its own lines instead of scrolling).
+    const stage = makeEl(doc, "div", "ym-pip-stage");
+    stage.id = "ym-pip-stage";
     const linesBox = makeEl(doc, "div", "ym-pip-lines");
     linesBox.id = "ym-pip-lines";
     const jump = makeEl(doc, "button", "ym-pip-jump", "Jump to current lyric");
@@ -603,10 +867,9 @@
     jump.type = "button";
     jump.setAttribute("aria-label", "Jump to current lyric");
     jump.addEventListener("click", () => jumpToCurrentLyric());
-    // OVERLAY, not content: appended to the fixed .ym-pip root, NOT to the
-    // scroll box. As a child of .ym-pip-lines it scrolled away with the lyrics
-    // (an absolutely-positioned child of a scroll container scrolls with it).
-    root.appendChild(jump);
+    // OVERLAY, not content: a child of the STAGE, NOT of the scroll box. Inside
+    // .ym-pip-lines it would scroll away with the lyrics (an absolutely
+    // positioned child of a scroll container scrolls with it).
     // The PiP uses the same scroll semantics as the main panel. A manual wheel
     // gesture stops the camera spring so it cannot fight the user's scroll.
     linesBox.addEventListener("wheel", () => {
@@ -632,9 +895,29 @@
     // panel's live --ym-sl-lyrics-scale into this same LyricsContent tree.
     panelWrap.appendChild(lyricsContent);
     linesBox.appendChild(panelWrap);
-    root.appendChild(linesBox);
+    stage.appendChild(linesBox);
+    stage.appendChild(jump);
+    board.appendChild(stage);
+    // The video pane opening/closing changes the lyric viewport. Re-seat the
+    // built-in camera afterwards, or the active line drifts off centre.
+    if (typeof win.ResizeObserver === "function") {
+      let stageResizeTimer = 0;
+      const stageObserver = new win.ResizeObserver(() => {
+        if (stageResizeTimer) win.clearTimeout(stageResizeTimer);
+        stageResizeTimer = win.setTimeout(() => {
+          stageResizeTimer = 0;
+          if (!pipWin || pipWin.closed) return;
+          if (rendererMode === "spicy" && lineEls.length) recenterAfterLayout();
+        }, 140);
+      });
+      stageObserver.observe(stage);
+    }
 
     if (settings.showTransport !== false) {
+      // One glass card holds the scrubber and the transport, so the bottom of
+      // the window reads as a single surface instead of three loose rows.
+      const controls = makeEl(doc, "div", "ym-pip-controls");
+      controls.id = "ym-pip-controls";
       // ---- seek row (AJ, 2026-10-07) --------------------------------------
       // Times either side of a range, mirroring the fullscreen scrubber. The range
       // is a 0..1000 RATIO, so it never depends on the duration arriving first.
@@ -654,11 +937,15 @@
       seekRow.appendChild(cur);
       seekRow.appendChild(seek);
       seekRow.appendChild(total);
-      root.appendChild(seekRow);
+      controls.appendChild(seekRow);
       // While the user is dragging, the per-frame sync must not fight the thumb —
       // the same grace window the fullscreen seek uses.
       seek.addEventListener("pointerdown", () => { pipSeekUserAt = performance.now(); });
-      seek.addEventListener("input", () => { pipSeekUserAt = performance.now(); });
+      seek.addEventListener("input", () => {
+        pipSeekUserAt = performance.now();
+        setRangeFill(seek);
+      });
+      setRangeFill(seek);
       const commitSeek = () => {
         pipSeekUserAt = performance.now();
         const p = player();
@@ -737,7 +1024,9 @@
         // raw 0..100 made every value >= 1 clamp to FULL volume, so nudging the
         // slider up jumped straight to max (AJ, 2026-10-07).
         if (p && typeof p.setVolume === "function") p.setVolume(Number(vol.value) / 100);
+        setRangeFill(vol);
       });
+      setRangeFill(vol);
       volWrap.appendChild(vol);
       pipVolumeEl = vol;
 
@@ -747,7 +1036,8 @@
       bar.appendChild(next);
       bar.appendChild(repeat);
       bar.appendChild(volWrap);
-      root.appendChild(bar);
+      controls.appendChild(bar);
+      root.appendChild(controls);
     }
 
     doc.body.appendChild(root);
@@ -757,11 +1047,628 @@
     return pipDoc ? pipDoc.getElementById(id) : null;
   }
 
+  /* ---- AMLL renderer ------------------------------------------------------
+     Line-by-line tracks are drawn by the Apple-Music engine in the panel, and
+     the PiP now runs that SAME engine instead of approximating it with the
+     built-in renderer. The panel publishes which renderer owns the track
+     ("lyrics:settings" / "lyrics:lines" -> renderer), so the two surfaces can
+     never disagree about what the song should look like.
+
+     The engine is imported in the PAGE's realm (the same module URL the panel
+     uses) and its element is appended into the PiP document, which adopts it.
+     Importing in the PiP realm would need an inline module script, and the
+     host page's CSP is not ours to rely on.
+  */
+  const AMLL_CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+  let amllLastPos = 0;
+  let amllUnavailable = false;
+
+  function amllCssText() {
+    const el = document.getElementById("ym-sl-amll-css");
+    return el && el.textContent ? el.textContent : "";
+  }
+
+  function injectAmllCss() {
+    if (!pipDoc || pipDoc.getElementById("ym-pip-amll-css")) return;
+    const style = pipDoc.createElement("style");
+    style.id = "ym-pip-amll-css";
+    style.textContent = amllCssText();
+    (pipDoc.head || pipDoc.documentElement).appendChild(style);
+  }
+
+  // A zero viewport is unrecoverable in this engine (it zeroes the default line
+  // height, and the range test then fails for every line). The panel guards the
+  // size the same way; mirror it so a resize can never write 0 back in.
+  function guardAmllSize() {
+    if (!amllPlayer) return;
+    try {
+      const guarded = [0, 0];
+      let w = 0;
+      let h = 0;
+      Object.defineProperty(guarded, "0", {
+        get() { return w; }, set(v) { if (v > 0) w = v; },
+        enumerable: true, configurable: true,
+      });
+      Object.defineProperty(guarded, "1", {
+        get() { return h; }, set(v) { if (v > 0) h = v; },
+        enumerable: true, configurable: true,
+      });
+      amllPlayer.size = guarded;
+    } catch (e) {}
+  }
+
+  function seedAmllSize() {
+    if (!amllPlayer || !amllHost) return false;
+    const r = amllHost.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    try {
+      amllPlayer.size[0] = r.width;
+      amllPlayer.size[1] = r.height;
+    } catch (e) { return false; }
+    return true;
+  }
+
+  function watchAmllSize() {
+    if (amllSizeObserver || !pipWin || typeof pipWin.ResizeObserver === "undefined") return;
+    amllSizeObserver = new pipWin.ResizeObserver(() => {
+      if (!amllPlayer || !amllHost) return;
+      const r = amllHost.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      if (amllPlayer.size[0] === r.width && amllPlayer.size[1] === r.height) return;
+      amllPlayer.size[0] = r.width;
+      amllPlayer.size[1] = r.height;
+      try { amllPlayer.layoutCalculator.updateUnmeasuredHeights(amllPlayer.defaultLineHeight); } catch (e) {}
+      try { if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("resize"); } catch (e) {}
+    });
+    try { amllSizeObserver.observe(amllHost); } catch (e) {}
+  }
+
+  // Published line model -> the engine's LyricLine[] (times in ms).
+  function amllAtoms(words) {
+    const out = [];
+    const list = words || [];
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      if (!w || !w.text) continue;
+      const start = Number(w.startMs) || 0;
+      const end = Math.max(start + 1, Number(w.endMs) || 0);
+      out.push({ word: String(w.text), startTime: start, endTime: end });
+      const next = list[i + 1];
+      if (!next || !next.text) continue;
+      if (w.isPartOfWord) continue;
+      if (/\s$/.test(String(w.text)) || /^\s/.test(String(next.text))) continue;
+      if (AMLL_CJK_RE.test(String(w.text)) || AMLL_CJK_RE.test(String(next.text))) continue;
+      // The engine treats whitespace as its own atom; without it every word in
+      // the line fuses into one element and the fill sweeps as a single block.
+      out.push({ word: " ", startTime: end, endTime: end });
+    }
+    return out;
+  }
+
+  function amllLinesFromPublished() {
+    const out = [];
+    (lines || []).forEach((line) => {
+      if (!line) return;
+      out.push({
+        words: amllAtoms(line.words && line.words.length
+          ? line.words
+          : [{ text: line.text, startMs: line.startMs, endMs: line.endMs }]),
+        translatedLyric: "",
+        romanLyric: "",
+        startTime: Number(line.startMs) || 0,
+        endTime: Math.max(Number(line.startMs) || 0, Number(line.endMs) || 0),
+        isBG: false,
+        isDuet: !!line.opposite,
+      });
+      (line.background || []).forEach((bg) => {
+        if (!bg || !bg.words || !bg.words.length) return;
+        out.push({
+          words: amllAtoms(bg.words),
+          translatedLyric: "",
+          romanLyric: "",
+          startTime: Number(bg.startMs) || 0,
+          endTime: Math.max(Number(bg.startMs) || 0, Number(bg.endMs) || 0),
+          isBG: true,
+          isDuet: false,
+        });
+      });
+    });
+    return out;
+  }
+
+  // Tap a line to jump the player there, exactly like the built-in renderer.
+  // The engine renders its own DOM, so Aurora's panel-side click handling never
+  // sees these nodes. It does dispatch a `line-click` LyricLineMouseEvent on the
+  // player object though, which is the supported hook. `line.startTime` is a lyric
+  // timestamp; seekToLyricTime() adds the active offset back when seeking, so a
+  // manual or pause-sync offset lands on the same line it draws as active.
+  function bindAmllSeek(engine) {
+    if (!engine || typeof engine.addEventListener !== "function") return;
+    // DomLyricPlayer extends EventTarget and dispatches the event on ITSELF
+    // (this.dispatchEvent(evt) in onMouseEventHandler), not on its DOM element.
+    // Listening on getElement() therefore never fired and a click did nothing.
+    if (engine.__ymPipSeekBound) return;
+    engine.__ymPipSeekBound = true;
+    engine.addEventListener("line-click", (event) => {
+      // event.line is the engine's LyricLineEl, not the raw line data; its
+      // getLine() is the object carrying startTime. Accept both shapes so a
+      // future engine build that hands over the data directly still works.
+      const line = event && event.line;
+      const data = line && typeof line.getLine === "function" ? line.getLine() : line;
+      if (!data) return;
+      const at = Number(data.startTime);
+      if (!Number.isFinite(at) || at < 0) return;
+      event.preventDefault();
+      seekToLyricTime(at);
+    });
+  }
+
+  function syncAmllCredits() {
+    if (!amllPlayer || !amllHost) return;
+    if (amllCreditsEl) { try { amllCreditsEl.remove(); } catch (e) {} amllCreditsEl = null; }
+    const footer = buildCreditsFooter();
+    if (!footer) return;
+    amllCreditsEl = footer;
+    let slot = null;
+    try { slot = amllPlayer.getBottomLineElement(); } catch (e) {}
+    (slot || amllHost).appendChild(footer);
+  }
+
+  function syncAmllLines() {
+    if (!amllPlayer) return;
+    try {
+      amllPlayer.setLyricLines(amllLinesFromPublished(), Math.max(0, amllLastPos));
+      syncAmllCredits();
+    } catch (e) {
+      console.warn("[AuroraLyrics] PiP: could not give the lyrics to AMLL.", e);
+    }
+  }
+
+  /* The engine's mask position is computed from --amll-player-time, which the
+     host must write (the bundled build deliberately does not write it itself).
+     Scope it to the enabled lines plus the next one so a frame does not
+     invalidate every word in the window. An outgoing line keeps its last value
+     for longer than the theme's alpha easing, or its fill would snap back to
+     the unsung end as it fades. */
+  function holdAmllTime(el, t) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (pending) clearTimeout(pending);
+    try { el.style.setProperty("--amll-player-time", String(t)); } catch (e) {}
+    const timer = setTimeout(() => {
+      amllTimeHoldTimers.delete(el);
+      try { el.style.removeProperty("--amll-player-time"); } catch (e) {}
+    }, AMLL_TIME_HOLD_MS);
+    amllTimeHoldTimers.set(el, timer);
+  }
+
+  function releaseAmllTime(el) {
+    const pending = amllTimeHoldTimers.get(el);
+    if (!pending) return;
+    clearTimeout(pending);
+    amllTimeHoldTimers.delete(el);
+  }
+
+  function scopeAmllTime(t) {
+    try {
+      const groups = amllPlayer.currentLyricGroups || [];
+      const hosts = [];
+      let lastEnabled = -1;
+      for (let i = 0; i < groups.length; i++) {
+        const group = groups[i];
+        if (!group || !group.mainLine || !group.element) continue;
+        let enabled = false;
+        try { enabled = !!group.mainLine.isEnabled; } catch (e) {}
+        if (!enabled) continue;
+        hosts.push(group.element);
+        lastEnabled = i;
+      }
+      for (let i = lastEnabled + 1; i < groups.length; i++) {
+        try {
+          if (groups[i].mainLine.getLine().startTime > t) { hosts.push(groups[i].element); break; }
+        } catch (e) {}
+      }
+      for (const el of amllTimeHosts) {
+        if (hosts.indexOf(el) === -1) holdAmllTime(el, t);
+      }
+      for (const el of hosts) {
+        releaseAmllTime(el);
+        try { el.style.setProperty("--amll-player-time", String(t)); } catch (e) {}
+      }
+      amllTimeHosts = hosts;
+    } catch (e) {}
+  }
+
+  /* The engine only retires a finished line when the next one starts in the same
+     tick, so a line whose window has passed can stay fully lit. Retire anything
+     the playhead has left, and re-point the scroll once (not per line, which
+     walks the camera a line per frame). */
+  function retireAmllLines() {
+    try {
+      const groups = amllPlayer.currentLyricGroups || [];
+      const t = amllPlayer.getCurrentTime();
+      let targetIdx = -1;
+      for (let i = 0; i < groups.length; i++) {
+        try {
+          const ln = groups[i].mainLine.getLine();
+          if (t >= ln.startTime && t <= ln.endTime) { targetIdx = i; break; }
+          if (ln.startTime > t) { targetIdx = i; break; }
+        } catch (e) {}
+      }
+      let retired = false;
+      for (const group of groups) {
+        if (!group || !group.mainLine) continue;
+        let s = -1;
+        let e = -1;
+        try {
+          const ln = group.mainLine.getLine();
+          s = ln.startTime;
+          e = ln.endTime;
+        } catch (err) { continue; }
+        if (t >= s && t <= e) continue;
+        let enabled = false;
+        try { enabled = !!group.mainLine.isEnabled; } catch (err) {}
+        if (!enabled) continue;
+        // disable() can be async; swallow a rejection so one retired line cannot
+        // become an unhandled rejection every frame.
+        try {
+          const p = group.mainLine.disable();
+          if (p && typeof p.catch === "function") p.catch(() => {});
+        } catch (err) {}
+        if (group.bgLine) {
+          try {
+            const p = group.bgLine.disable();
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch (err) {}
+        }
+        try {
+          const tc = amllPlayer.timelineController;
+          const idx = groups.indexOf(group);
+          if (tc && idx !== -1 && tc.highlightedGroupsSet &&
+              typeof tc.highlightedGroupsSet.delete === "function") {
+            tc.highlightedGroupsSet.delete(idx);
+          }
+        } catch (err) {}
+        retired = true;
+      }
+      if (retired && targetIdx !== -1) {
+        try {
+          const tc = amllPlayer.timelineController;
+          if (tc && tc.snapshot && tc.snapshot.scrollToIndex !== targetIdx) {
+            tc.snapshot.scrollToIndex = targetIdx;
+            if (typeof amllPlayer.calcLayout === "function") amllPlayer.calcLayout("playback-tick");
+          }
+        } catch (err) {}
+      }
+    } catch (e) {}
+  }
+
+  // The engine reports a manual scroll on scrollState.isAutoAlignSuspended. The
+  // PiP's jump pill only listened to the built-in scroll box, so Apple-style
+  // lyrics could be scrolled away with no way back. Mirror the engine's flag
+  // onto the same pill; reading the class back keeps any other hide respected.
+  function syncAmllJumpButton() {
+    const button = pipEl("ym-pip-jump");
+    if (!button || !amllPlayer) return;
+    let suspended = false;
+    try { suspended = !!amllPlayer.scrollState.isAutoAlignSuspended; } catch (e) {}
+    if (button.classList.contains("visible") === suspended) return;
+    setJumpVisible(suspended);
+  }
+
+  function amllDrive(posMs, paused) {
+    if (!amllPlayer || !Number.isFinite(posMs)) return;
+    const now = performance.now();
+    const dt = amllLastFrameAt ? Math.min(64, Math.max(0, now - amllLastFrameAt)) : 16;
+    amllLastFrameAt = now;
+    try {
+      const wantPlaying = !paused;
+      if (amllPlayer.getIsPlaying() !== wantPlaying) {
+        if (wantPlaying) amllPlayer.resume();
+        else amllPlayer.pause();
+      }
+      if (!(amllPlayer.size[1] > 0)) seedAmllSize();
+      amllLastPos = posMs;
+      amllPlayer.setCurrentTime(posMs, false);
+      amllPlayer.update(dt);
+      scopeAmllTime(posMs);
+      retireAmllLines();
+      syncAmllJumpButton();
+    } catch (e) {}
+  }
+
+  function dropAmll() {
+    amllGen++;
+    if (amllSizeObserver) { try { amllSizeObserver.disconnect(); } catch (e) {} amllSizeObserver = null; }
+    for (const el of amllTimeHosts) releaseAmllTime(el);
+    amllTimeHosts = [];
+    for (const el of amllTimeHoldTimers.keys()) releaseAmllTime(el);
+    if (amllPlayer) { try { amllPlayer.dispose(); } catch (e) {} }
+    amllPlayer = null;
+    amllCreditsEl = null;
+    if (amllHost && amllHost.parentNode) amllHost.parentNode.removeChild(amllHost);
+    amllHost = null;
+    amllLastFrameAt = 0;
+    if (pipDoc && pipDoc.body) pipDoc.body.classList.remove("amll-active");
+  }
+
+  async function ensureAmll() {
+    if (!pipDoc || !pipWin || pipWin.closed) return;
+    if (amllPlayer) return;
+    if (amllUnavailable) return;
+    const gen = ++amllGen;
+    // The stylesheet is injected by the panel when it starts the engine, which
+    // can land a beat after the lyrics payload. Wait for it, bounded.
+    for (let i = 0; i < 30; i++) {
+      if (amllCssText()) break;
+      await new Promise((r) => setTimeout(r, 100));
+      if (gen !== amllGen || !pipWin || pipWin.closed) return;
+    }
+    if (!amllCssText()) {
+      // The panel is not running the engine for this track after all. Keep the
+      // built-in renderer rather than drawing unstyled engine output.
+      amllUnavailable = true;
+      rendererMode = "spicy";
+      const box = pipEl("ym-pip-lines");
+      if (box) box.style.display = "";
+      buildLinesBox();
+      return;
+    }
+    try {
+      if (!amllModulePromise) amllModulePromise = import(AMLL_CORE_URL);
+      const mod = await amllModulePromise;
+      if (gen !== amllGen || !pipWin || pipWin.closed) return;
+      if (!mod || typeof mod.LyricPlayer !== "function") throw new Error("LyricPlayer missing");
+      injectAmllCss();
+      const stage = pipEl("ym-pip-stage");
+      if (!stage) return;
+      const host = pipDoc.createElement("div");
+      host.id = "ym-sl-amll-host";
+      stage.appendChild(host);
+      amllHost = host;
+      const engine = new mod.LyricPlayer();
+      // Same configuration the panel uses for this engine. The calc-mask path
+      // is the one that tracks the media clock on every frame; the WAAPI mask
+      // path can park on a stale play-state.
+      engine.supportMaskImage = false;
+      engine.setEnableSpring(true);
+      engine.setWordFadeWidth(0.5);
+      engine.setAlignPosition(0.42);
+      engine.setOverscanPx(150);
+      engine.getElement().style.height = "100%";
+      host.appendChild(engine.getElement());
+      amllPlayer = engine;
+      bindAmllSeek(engine);
+      guardAmllSize();
+      seedAmllSize();
+      watchAmllSize();
+      pipDoc.body.classList.add("amll-active");
+      const box = pipEl("ym-pip-lines");
+      if (box) box.style.display = "none";
+      syncAmllLines();
+      amllLastFrameAt = 0;
+    } catch (e) {
+      console.warn("[AuroraLyrics] PiP: AMLL engine unavailable; using the built-in renderer.", e);
+      amllUnavailable = true;
+      dropAmll();
+      rendererMode = "spicy";
+      const box = pipEl("ym-pip-lines");
+      if (box) box.style.display = "";
+      buildLinesBox();
+    }
+  }
+
+  // <html data-*> markers: the cheapest way to observe the PiP from the tab's
+  // own page, where the bridge / devtools can see them (the PiP document has no
+  // content script of its own).
+  function markPipState() {
+    try {
+      const root = document.documentElement;
+      root.dataset.ymPipRenderer = rendererMode;
+      root.dataset.ymPipAmll = amllPlayer
+        ? String((amllPlayer.currentLyricGroups || []).length)
+        : "0";
+      const mirror = pipEl("ym-pip-video");
+      root.dataset.ymPipVideo = mirror && mirror.srcObject ? "1" : "0";
+      root.dataset.ymPipKawarp = kawarp ? (kawarpVideoEl ? "video" : "art") : "0";
+    } catch (e) {}
+  }
+
+  // Flip the PiP between the two renderers. Returns true when the owner changed.
+  function setRenderer(mode) {
+    const next = mode === "amll" ? "amll" : "spicy";
+    const changed = next !== rendererMode;
+    rendererMode = next;
+    const box = pipEl("ym-pip-lines");
+    if (next === "amll") {
+      if (box) box.style.display = "none";
+      setJumpVisible(false);
+      ensureAmll();
+      markPipState();
+      return changed;
+    }
+    dropAmll();
+    if (box) box.style.display = "";
+    markPipState();
+    return changed;
+  }
+
+  /* ---- music-video mirror -------------------------------------------------
+     A music video sits on top of the window with the title under it, or in its
+     own left column when the window is wide enough (see updatePipLayout). The
+     TAB's <video> is mirrored with captureStream() rather than moved: moving a
+     media element to another document makes YTM lose the playback it owns, and
+     it would also fight the fullscreen overlay for the same node. A mirror is
+     one extra composite and keeps every existing behaviour intact.
+  */
+  function findLiveVideo() {
+    const video = document.querySelector("ytmusic-player video") ||
+      document.querySelector("#movie_player video");
+    // A song with no video still leaves an empty element behind, so require real
+    // frame dimensions - the same readiness test the panel uses.
+    return video && video.videoWidth > 0 ? video : null;
+  }
+
+  // Side-by-side needs BOTH: a column wide enough for a useful picture, and
+  // enough height for the transport card plus a readable lyric column. The bar
+  // is lower than the stacked layout's because the picture no longer borrows
+  // the lyrics' height.
+  const WIDE_MIN_WIDTH = 640;
+  const WIDE_MIN_HEIGHT = 360;
+  // Below this even a side-by-side picture is pointless.
+  const VIDEO_MIN_HEIGHT = 300;
+  // A STACKED picture steals its height from the lyrics, and how much it steals
+  // depends on the WIDTH (16:9), so no fixed window height can know when it stops
+  // being worth it. Measure instead: under this the stage is too short for a
+  // couple of lines, and the picture is dropped entirely (thumbnail returns).
+  const MIN_STAGE_HEIGHT = 120;
+  // A few px of hysteresis around that floor: the header grows slightly when the
+  // picture is on (larger title), so a decision that re-measured at the exact
+  // boundary could flip itself. Hide below the floor, come back only with room
+  // to spare.
+  const LAYOUT_HYSTERESIS = 10;
+
+  function stopVideoMirror() {
+    const mirror = pipEl("ym-pip-video");
+    if (mirror) {
+      try { mirror.pause(); } catch (e) {}
+      mirror.srcObject = null;
+      mirror.classList.remove("live");
+    }
+    // Capturing keeps the tab's decoder feeding a second consumer; stop the
+    // tracks explicitly or they outlive the window.
+    if (pipVideoStream && typeof pipVideoStream.getTracks === "function") {
+      pipVideoStream.getTracks().forEach((track) => { try { track.stop(); } catch (e) {} });
+    }
+    pipVideoSource = null;
+    pipVideoStream = null;
+    updatePipLayout();
+  }
+
+  // Decide how the window draws itself from its CURRENT size plus whether a
+  // picture exists:
+  //   off     - too short for a stacked picture: no video at all
+  //   stacked - video row on top, title under it, lyrics below (narrow window)
+  //   wide    - video on the LEFT, title + lyrics in a RIGHT column
+  // Only class toggles: every rule lives in CSS, so there is no per-frame cost.
+  function updatePipLayout() {
+    if (!pipWin || pipWin.closed || !pipDoc) return;
+    const root = pipEl("ym-pip-root");
+    const mirror = pipEl("ym-pip-video");
+    if (!root || !mirror) return;
+    const hasVideo = !!mirror.srcObject;
+    const w = pipWin.innerWidth || 0;
+    const h = pipWin.innerHeight || 0;
+    const wideFits = w >= WIDE_MIN_WIDTH && h >= WIDE_MIN_HEIGHT;
+    let showVideo = hasVideo && h >= VIDEO_MIN_HEIGHT;
+    let wide = showVideo && wideFits;
+    // Stacked only: decide from the geometry the picture WOULD take, without
+    // showing it. The old probe added `video-on`, measured the shrunken stage,
+    // then removed it - and since the shrunken stage was measured after the
+    // class went on, the answer depended on the previous frame. Near the
+    // threshold every sync tick re-decided the opposite way and the video faded
+    // in and out forever. These numbers are state-independent: the board and
+    // head heights do not depend on the picture, and its 16:9 height follows the
+    // board's width (capped by the CSS max-height: 50vh).
+    if (showVideo && !wide) {
+      const board = pipEl("ym-pip-board");
+      const head = pipEl("ym-pip-head");
+      const boardBox = board ? board.getBoundingClientRect() : null;
+      const boardH = boardBox ? boardBox.height : 0;
+      const boardW = boardBox ? boardBox.width : 0;
+      // +10 is the header's margin-bottom; +12 is the picture's own.
+      const headH = head ? head.getBoundingClientRect().height + 10 : 0;
+      const videoH = Math.min(boardW * 9 / 16, h * 0.5);
+      // The class reflects the PREVIOUS decision (it is applied after this
+      // block), which is exactly the state the hysteresis band needs.
+      const floor = root.classList.contains("video-on")
+        ? MIN_STAGE_HEIGHT
+        : MIN_STAGE_HEIGHT + LAYOUT_HYSTERESIS;
+      if (boardH > 0 && boardH - headH - 12 - videoH < floor) {
+        showVideo = false;
+        wide = false;
+      }
+    }
+    // Apply the decision in ONE step, after it is made. Applying `video-on` first
+    // and probing what was left was the feedback loop: hide/show flipped every
+    // time the result was measured.
+    root.classList.toggle("video-on", showVideo);
+    root.classList.toggle("ym-pip-wide", wide);
+    // A hidden mirror would keep decoding behind the thumbnail. Pause it; the
+    // live stream resumes by itself when the window is big enough again. This
+    // never touches the tab's real player.
+    if (showVideo) {
+      if (mirror.paused) mirror.play().catch(() => {});
+    } else if (!mirror.paused) {
+      try { mirror.pause(); } catch (e) {}
+    }
+    // Tab-side marker like ymPipRenderer, so the layout the PiP chose can be
+    // observed from the page without reaching into the PiP document.
+    try {
+      document.documentElement.dataset.ymPipLayout = wide ? "wide" : showVideo ? "stacked" : "off";
+    } catch (e) {}
+  }
+
+  function syncVideoPane(force) {
+    if (!pipWin || pipWin.closed || !pipDoc) return;
+    const now = performance.now();
+    if (!force && now - pipVideoCheckedAt < 500) return;
+    pipVideoCheckedAt = now;
+    const mirror = pipEl("ym-pip-video");
+    const root = pipEl("ym-pip-root");
+    if (!mirror || !root) return;
+    const live = findLiveVideo();
+    if (!live) { stopVideoMirror(); syncKawarpSource(); return; }
+    const videoTrack = pipVideoStream && pipVideoStream.getVideoTracks
+      ? pipVideoStream.getVideoTracks()[0]
+      : null;
+    // Re-capture when the element is swapped, and also when its tracks have
+    // ended (a track change can kill the capture while leaving the element in
+    // place, which would otherwise leave a frozen last frame on screen).
+    const stale = !!pipVideoStream && (!videoTrack || videoTrack.readyState === "ended");
+    if (pipVideoSource !== live || stale) {
+      stopVideoMirror();
+      try {
+        if (typeof live.captureStream === "function") {
+          pipVideoStream = live.captureStream();
+          mirror.srcObject = pipVideoStream;
+          pipVideoSource = live;
+          mirror.play().catch(() => {});
+        }
+      } catch (e) {
+        pipVideoSource = null;
+        pipVideoStream = null;
+      }
+    }
+    updatePipLayout();
+    syncKawarpSource();
+    markPipState();
+  }
+
   // ---- kawarp backdrop -----------------------------------------------------
   let kawarp = null;
   let kawarpArtUrl = null;
+  let kawarpVideoEl = null;
+  // A track change can blank videoWidth for a tick or two while the next source
+  // loads. Switching on the first missing tick would flash the cover-art fluid
+  // in the middle of a music video, so the video has to stay gone for a while.
+  let kawarpVideoGoneTicks = 0;
   let kawarpResizeObserver = null;
   let kawarpSeq = 0;
+  // The module import is async, so several sync ticks can land before the first
+  // instance exists. Without this, each one would construct on the SAME canvas;
+  // the extras never start but still take the WebGL context. Holds the seq of
+  // the creation in flight; stopKawarp() invalidates it by bumping kawarpSeq.
+  let kawarpPendingSeq = 0;
+
+  // A music video feeds the fluid with its live frames, exactly like the panel's
+  // fullscreen backdrop: a small colour map sampled at 30fps reacts to the
+  // picture instead of a still cover. Tracks without a video keep the artwork.
+  const KAWARP_VIDEO_OPTIONS = {
+    sampleWidth: 72,
+    sampleHeight: 128,
+    smoothing: 120,
+    frameRate: 30,
+  };
 
   function sizeKawarp() {
     const canvas = pipEl("ym-pip-kawarp");
@@ -777,18 +1684,38 @@
       if (kawarp && typeof kawarp.resize === "function") {
         try { kawarp.resize(); } catch (e) {}
       }
+      // Assigning width/height CLEARS the drawing buffer. Doing the redraw in
+      // the same task means the cleared buffer is never composited; otherwise a
+      // resize tick (or a burst of them) showed the empty canvas as a black
+      // flash until the next animation frame painted.
+      if (kawarp && typeof kawarp.renderFrame === "function") {
+        try { kawarp.renderFrame(); } catch (e) {}
+      }
     }
   }
 
-  function startKawarp(artUrl) {
+  function startKawarp(artUrl, videoEl) {
     const canvas = pipEl("ym-pip-kawarp");
     if (!canvas || !KAWARP_CORE_URL) return;
     const seq = ++kawarpSeq;
+    kawarpPendingSeq = seq;
     sizeKawarp();
     getKawarpConstructor().then(async (Kawarp) => {
       if (seq !== kawarpSeq || !pipWin || pipWin.closed) return;
       kawarp = new Kawarp(canvas, KAWARP_OPTIONS);
-      if (artUrl) {
+      let live = false;
+      if (videoEl) {
+        // loadVideo throws for a source it cannot follow; that must not cost the
+        // backdrop, so fall through to the artwork instead of failing shut.
+        try {
+          kawarp.loadVideo(videoEl, KAWARP_VIDEO_OPTIONS);
+          live = true;
+        } catch (e) {}
+      }
+      if (live) {
+        kawarpVideoEl = videoEl;
+        kawarpArtUrl = null;
+      } else if (artUrl) {
         await kawarp.loadImage(artUrl);
         kawarpArtUrl = artUrl;
       }
@@ -801,6 +1728,7 @@
       }
     }).catch((error) => {
       // Any failure falls back to the gradient background — never a blank window.
+      if (kawarpPendingSeq === seq) kawarpPendingSeq = 0;
       console.warn("[Aurora Lyrics] PiP Kawarp failed:", error);
       if (canvas) canvas.classList.remove("ready");
       if (kawarp) { try { kawarp.dispose(); } catch (e) {} }
@@ -815,27 +1743,84 @@
     if (kawarp) { try { kawarp.dispose(); } catch (e) {} }
     kawarp = null;
     kawarpArtUrl = null;
+    kawarpVideoEl = null;
+    kawarpVideoGoneTicks = 0;
   }
 
-  // Swap the artwork the fluid is built from when the track changes.
-  function syncKawarpArt(artUrl) {
-    const url = artUrl ? hiResArt(artUrl) : "";
-    if (!url) return;
-    if (!kawarp) { startKawarp(url); return; }
-    if (url === kawarpArtUrl) return;
-    kawarpArtUrl = url;
-    try { kawarp.loadImage(url); } catch (e) {}
+  function kawarpArtworkUrl() {
+    const p = player();
+    const track = p && p.getTrack ? p.getTrack() : null;
+    return track && track.artworkUrl ? hiResArt(track.artworkUrl) : "";
+  }
+
+  // Keep ONE Kawarp alive and swap only what feeds it, so a track change or a
+  // video appearing is a load, never a restart (a second canvas would stack and
+  // the older one would paint over the new source). The live video wins while it
+  // exists; without one the artwork is the source.
+  function syncKawarpSource() {
+    const videoEl = findLiveVideo();
+    const artUrl = kawarpArtworkUrl();
+    if (!kawarp) {
+      // 0 is "nothing in flight": kawarpSeq starts at 0 too, so a plain equality
+      // would refuse to ever start the first backdrop.
+      if (kawarpPendingSeq && kawarpPendingSeq === kawarpSeq) return;
+      if (videoEl || artUrl) startKawarp(artUrl, videoEl);
+      return;
+    }
+    if (videoEl) {
+      kawarpVideoGoneTicks = 0;
+      if (videoEl === kawarpVideoEl) return;
+      try {
+        kawarp.loadVideo(videoEl, KAWARP_VIDEO_OPTIONS);
+        kawarpVideoEl = videoEl;
+        kawarpArtUrl = null;
+      } catch (e) {
+        // Not samplable: stay on whatever was already drawing.
+      }
+      return;
+    }
+    if (kawarpVideoEl) {
+      // The video ended, or an audio-only track replaced it. Wait out a couple
+      // of checks first so a track change cannot strobe the backdrop.
+      if (++kawarpVideoGoneTicks < 3) return;
+      kawarpVideoGoneTicks = 0;
+      kawarpVideoEl = null;
+      try { kawarp.unloadVideo(); } catch (e) {}
+      if (artUrl) {
+        kawarpArtUrl = artUrl;
+        try { kawarp.loadImage(artUrl); } catch (e) {}
+      }
+      return;
+    }
+    if (artUrl && artUrl !== kawarpArtUrl) {
+      kawarpArtUrl = artUrl;
+      try { kawarp.loadImage(artUrl); } catch (e) {}
+    }
   }
 
   // ---- rendering -----------------------------------------------------------
+  // Replace a header string and flash it in. Only on an actual change, so the
+  // per-track refresh cannot make the title twitch every time it runs.
+  function swapText(el, text) {
+    if (!el) return;
+    const next = text == null ? "" : String(text);
+    if (el.textContent === next) return;
+    el.textContent = next;
+    try {
+      el.classList.remove("swap");
+      void el.offsetWidth;   // restart the animation from its first frame
+      el.classList.add("swap");
+    } catch (e) {}
+  }
+
   function setHeader() {
     const artist = pipEl("ym-pip-artist");
     if (!artist) return;
     const p = player();
     const track = p && p.getTrack ? p.getTrack() : null;
     const titleEl = pipDoc.querySelector(".ym-pip-title");
-    if (titleEl) titleEl.textContent = (track && track.title) || "Aurora Lyrics";
-    artist.textContent = (track && track.artist) || "";
+    swapText(titleEl, (track && track.title) || "Aurora Lyrics");
+    swapText(artist, (track && track.artist) || "");
     const art = pipEl("ym-pip-art");
     if (art) {
       const url = (track && track.artworkUrl) || "";
@@ -844,7 +1829,7 @@
       if (url && art.getAttribute("src") !== url) art.setAttribute("src", url);
       art.classList.toggle("has-art", !!url);
     }
-    if (track && track.artworkUrl) syncKawarpArt(track.artworkUrl);
+    syncKawarpSource();
   }
 
   // One line, in the panel's exact markup. Plain syllables become .word; ones the
@@ -884,9 +1869,6 @@
     const elements = [div];
     const bgIntervals = [];
     buildWordsInto(div, words, records, false, !!line.lineTimed);
-    if (romanizationEnabled && line.romaji) {
-      div.appendChild(makeEl(pipDoc, "div", "romaji", line.romaji));
-    }
     // Match the main panel's click-to-seek behavior. Use the lyric-clock start,
     // then restore the active/pause-sync offset inside seekToLyricTime().
     div.addEventListener("click", () => seekToLyricTime(line.startMs));
@@ -901,9 +1883,6 @@
       if (bg.lineTimed) bgEl.classList.add("line-timed");
       if (staticLyrics) bgEl.classList.add("static");
       buildWordsInto(bgEl, bg.words, records, true, !!bg.lineTimed);
-      if (romanizationEnabled && bg.romaji) {
-        bgEl.appendChild(makeEl(pipDoc, "div", "romaji", bg.romaji));
-      }
       // Background vocals use their own time window, just like the main panel.
       bgEl.addEventListener("click", () => seekToLyricTime(bg.startMs));
       elements.push(bgEl);
@@ -1070,12 +2049,7 @@
     });
     content.appendChild(track);
     const footer = buildCreditsFooter();
-    if (footer) {
-      content.appendChild(footer);
-      // Stamp the live glide angle on the fresh pills so they do not flicker at
-      // 0deg for one frame before syncLoop's next tick.
-      stampPipPills(pipSpinDeg());
-    }
+    if (footer) content.appendChild(footer);
     // The lines have no measurable height until the browser has laid them out,
     // so a centering pass right now clamps to 0 and then SPRINGS to the real
     // position - which reads as the lyrics "bouncing" when the window opens.
@@ -1180,16 +2154,13 @@
       rec.springs.Glow.SetGoal(
         kit.blendSyllableAnimation(splines.GlowSpline.at(0), splines.GlowSpline.at(target)));
 
-      // Mirror the panel's simple-lyrics clause EXACTLY (19-animation-modes):
-      // Simple lyrics stubs the Scale/Glow springs, so storeNeedsAnimation reports
-      // false the moment they "settle" — but the gradient sweep still needs a
-      // per-frame write while the word is being sung. Without this the fill freezes
-      // at its state-flip value (the panel's "flash of fill, then dim" bug), which
-      // is why the PiP's simple mode animated differently from the panel's.
+      // Non-simple mode: the springs are real, so "settled" genuinely means this
+      // word has nothing left to write. (The old activation clause here existed
+      // for the sharpened Simple look, which the PiP no longer applies to a Spicy
+      // track — see applyScrollSettings.)
       const selfAwake =
         stateChanged ||
-        kit.storeNeedsAnimation(rec.springs) ||
-        (simpleLyrics && state === "Active");
+        kit.storeNeedsAnimation(rec.springs);
       let lettersAwake = false;
       if (rec.letters && (state === "Active" || selfAwake)) {
         lettersAwake = animateLetters(rec, posMs, dt);
@@ -1353,43 +2324,6 @@
     });
   }
 
-  /* ---- credit-pill glow ----------------------------------------------------
-     The panel animates `--ym-sl-pfp-spin` on ITS .ym-sl-uploader-link pills from
-     its own rAF, which only ever queries the MAIN document - so the PiP's copy of
-     the credits pill sat frozen at 0deg. Run the same glide here, on THIS
-     document's pills. Same 4.2s period and ~40fps throttle as aurora-lyrics.js. */
-  const PIP_GLOW_PERIOD_MS = 4200;
-  const PIP_GLOW_MIN_MS = 1000 / 40;
-  let pipGlowClock = 0;
-  let pipGlowLastPaint = -1e9;
-  let pipGlowReduce = false;
-  try {
-    pipGlowReduce = !!(window.matchMedia &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  } catch (e) {}
-
-  function pipSpinDeg() {
-    return (pipGlowClock / PIP_GLOW_PERIOD_MS * 360) % 360;
-  }
-
-  function stampPipPills(deg) {
-    if (!pipDoc) return;
-    const v = (+deg).toFixed(2) + "deg";
-    const pills = pipDoc.querySelectorAll(".ym-sl-uploader-link");
-    for (let i = 0; i < pills.length; i++) {
-      pills[i].style.setProperty("--ym-sl-pfp-spin", v);
-    }
-  }
-
-  function stepPipGlow(dtMs) {
-    if (!pipDoc) return;
-    if (pipGlowReduce) { stampPipPills(0); return; }
-    pipGlowClock += dtMs;
-    if (pipGlowClock - pipGlowLastPaint < PIP_GLOW_MIN_MS) return;
-    pipGlowLastPaint = pipGlowClock;
-    stampPipPills(pipSpinDeg());
-  }
-
   function syncLoop() {
     if (!pipWin || pipWin.closed) { stopSync(); return; }
     rafId = pipWin.requestAnimationFrame(syncLoop);
@@ -1425,33 +2359,41 @@
     // the same or every line/word lands that offset early. Mirror the panel's
     // animate(): lyricPositionMs = positionMs - getOffsetForPosition(positionMs).
     const lyricPos = lyricPositionMs(pos);
-    const idx = activeIndexAt(lyricPos);
-    const targetPos = scrollLeadEnabled ? lyricPos + scrollLeadMs : lyricPos;
-    const targetIdx = activeIndexAt(targetPos);
-    updateLineStates(lyricPos);
-    if (idx !== lastRenderedActive) {
-      lastRenderedActive = idx;
-    }
-    if (targetIdx !== lastRenderedTarget) {
-      lastRenderedTarget = targetIdx;
-      renderActive(targetIdx);
-    }
-    updateManualScrollRecovery(idx);
-    stepCenterSpring(dt);
-    // Glide the credits pill's seam (the panel's own rAF cannot see this doc).
-    stepPipGlow(dt * 1000);
-    // The panel evaluates every model line from its own StartTime/EndTime each
-    // frame. Do the same here: background-vocal intervals are independent of
-    // their lead line, and a late bg must keep filling while the next lead is
-    // already active. This replaces the old "only active primary line" shortcut.
-    for (let s = 0; s < lineSets.length; s++) {
-      if (staticLyrics) continue;
-      if (kit) animateLine(s, lyricPos, dt);
-      else if (s === idx) fillWithoutKit(s, lyricPos);
+    const paused = p.isPaused ? p.isPaused() : false;
+    // The music-video mirror is polled, not built per frame: attaching a stream
+    // is cheap but not free, and the video element YTM recycles only changes on
+    // a track change.
+    syncVideoPane(false);
+    if (rendererMode === "amll" && amllPlayer) {
+      // The engine owns the lyric surface: it translates and masks its own
+      // lines, including the camera and the credits in its bottom slot.
+      amllDrive(lyricPos, paused);
+    } else {
+      const idx = activeIndexAt(lyricPos);
+      const targetPos = scrollLeadEnabled ? lyricPos + scrollLeadMs : lyricPos;
+      const targetIdx = activeIndexAt(targetPos);
+      updateLineStates(lyricPos);
+      if (idx !== lastRenderedActive) {
+        lastRenderedActive = idx;
+      }
+      if (targetIdx !== lastRenderedTarget) {
+        lastRenderedTarget = targetIdx;
+        renderActive(targetIdx);
+      }
+      updateManualScrollRecovery(idx);
+      stepCenterSpring(dt);
+      // The panel evaluates every model line from its own StartTime/EndTime each
+      // frame. Do the same here: background-vocal intervals are independent of
+      // their lead line, and a late bg must keep filling while the next lead is
+      // already active. This replaces the old "only active primary line" shortcut.
+      for (let s = 0; s < lineSets.length; s++) {
+        if (staticLyrics) continue;
+        if (kit) animateLine(s, lyricPos, dt);
+        else if (s === idx) fillWithoutKit(s, lyricPos);
+      }
     }
     const toggle = pipEl("ym-pip-toggle");
     if (toggle) {
-      const paused = p.isPaused ? p.isPaused() : false;
       const want = paused ? ICON_PLAY : ICON_PAUSE;
       if (toggle.dataset.icon !== want) {
         toggle.dataset.icon = want;
@@ -1460,6 +2402,16 @@
       }
     }
     syncPipControls(p, pos);
+  }
+
+  // Paint the played portion of a range with the shared fill gradient.
+  function setRangeFill(el) {
+    if (!el) return;
+    const min = Number(el.min) || 0;
+    const max = Number(el.max) || 100;
+    const value = Number(el.value) || 0;
+    const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+    el.style.setProperty("--ym-pip-fill", Math.max(0, Math.min(100, pct)).toFixed(2) + "%");
   }
 
   function pipFormatClock(ms) {
@@ -1483,6 +2435,7 @@
         const totEl = pipEl("ym-pip-time-total");
         if (curEl) curEl.textContent = pipFormatClock(at);
         if (totEl) totEl.textContent = pipFormatClock(dur);
+        setRangeFill(pipSeekEl);
       }
     }
     if (pipVolumeEl && p && typeof p.getVolume === "function" && pipDoc.activeElement !== pipVolumeEl) {
@@ -1495,6 +2448,7 @@
         : (info && typeof info.slider === "number" ? info.slider / 100 : null);
       if (vol01 !== null && Number.isFinite(vol01)) {
         pipVolumeEl.value = String(Math.round(vol01 * 100));
+        setRangeFill(pipVolumeEl);
       }
     }
     if (!kit || !kit.readPlayerToggle) return;
@@ -1652,6 +2606,15 @@
   }
 
   function jumpToCurrentLyric() {
+    // Apple-style lyrics: the engine owns its own scroll offset, so the built-in
+    // camera math has nothing to move. resetScroll() is the engine's supported
+    // "back to the playing line" - it clears the manual offset and un-suspends
+    // auto-align, exactly like the panel's button now does.
+    if (rendererMode === "amll" && amllPlayer && typeof amllPlayer.resetScroll === "function") {
+      try { amllPlayer.resetScroll(); } catch (e) {}
+      setJumpVisible(false);
+      return;
+    }
     // Target the line the camera is GLIDING toward (the scroll-lead line), which
     // is what the main panel targets too. Centring the line being SUNG instead
     // fights the very next frame's retarget back to the lead line, so the jump
@@ -1717,12 +2680,11 @@
       return;
     }
     centerTargetY = clamped;
-    // Smooth Scrolling OFF (and not Simple Lyrics, which always glides — the
-    // panel's setScrollTarget treats them the same way): hand the move to the
-    // element's own CSS ease, ONCE per target change (stepCenterSpring then does
-    // nothing). Without this the PiP wrote the new scrollTop instantly every frame
-    // and had NO scroll animation.
-    if (!smoothScrolling && !simpleLyrics) { writeCameraScroll(box, clamped, false); return; }
+    // Smooth Scrolling OFF: hand the move to the element's own CSS ease, ONCE
+    // per target change (stepCenterSpring then does nothing). Without this the
+    // PiP wrote the new scrollTop instantly every frame and had NO scroll
+    // animation.
+    if (!smoothScrolling) { writeCameraScroll(box, clamped, false); return; }
     // The glide: the spring is REUSED so its velocity carries into the new goal,
     // which is what makes rapid line changes read as one motion.
     if (!cameraSpring && kit && kit.Spring) {
@@ -1772,7 +2734,7 @@
     if (!box || centerTargetY == null || pipManualScrollPaused) return;
     const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
     centerTargetY = Math.max(0, Math.min(maxScroll, centerTargetY));
-    if ((!smoothScrolling && !simpleLyrics) || !cameraSpring) {
+    if (!smoothScrolling || !cameraSpring) {
       // Either the one-shot CSS ease owns the move, or no glide is running.
       setCameraFraction(0);
       return;
@@ -1820,36 +2782,33 @@
     smoothScrolling = src.smoothScrolling !== false;
     scrollLeadEnabled = src.scrollLeadEnabled === true;
     scrollLeadMs = Number(src.scrollLeadMs) || 0;
-    const simple = src.simpleLyrics === true;
-    if (simple !== simpleLyrics) {
-      simpleLyrics = simple;
-      // Apple Music style lyrics is a RENDER MODE whose motion rules are scoped to
-      // body.ym-sl-simple-lyrics in the panel's stylesheet. The springs already
-      // switch (the kit's createWordSprings reads the panel's own setting), but
-      // without this class on the PiP's BODY the CSS half never applies — which is
-      // why the mode "kinda worked" here (AJ, 2026-10-07).
-      if (pipDoc && pipDoc.body) pipDoc.body.classList.toggle("ym-sl-simple-lyrics", simple);
-      // The word records capture their springs AT BUILD TIME, and createWordSprings
-      // only returns the Scale/Glow STUBS while the panel's setting is on — so a
-      // toggle has to REBUILD the lines, or the words keep the normal-mode zoom and
-      // glow springs and the mode never truly applies (AJ, 2026-10-07). The panel
-      // does the same thing (buildRendererLines on a simpleLyrics change).
-      if (lines.length && pipWin && !pipWin.closed && pipDoc) {
-        buildLinesBox();
-        const p = player();
-        const pos = lyricPositionMs(p ? p.getPositionMs() : null);
-        updateLineStates(pos);
-        lastRenderedActive = -2;
-        lastRenderedTarget = -2;
-        renderActive(activeIndexAt(pos));
-      }
-    }
+    // NOTE: the panel's legacy simpleLyrics flag is PINNED true (it stopped being
+    // a mode when the renderer became per-kind), so it must NOT drive the PiP.
+    // Applying it here put body.ym-sl-simple-lyrics on a Spicy track, which turns
+    // on the AMLL look's stubbed Scale/Glow springs and per-line scaling — the
+    // words floated up instead of bouncing. The PiP's look follows rendererMode,
+    // so a Spicy track is drawn exactly like the panel's Spicy track.
     // Smooth Scrolling switched off: drop the glide NOW, not on the next track.
     if (!smoothScrolling) resetCameraGlide();
   }
 
+  // Which renderer the PiP should be running for the current content: the
+  // panel's own decision, never inferred from the timings here.
+  function wantedRenderer(payload) {
+    if (!payload || payload.renderer !== "amll") return "spicy";
+    if (payload.staticLyrics || !lines.length) return "spicy";
+    return "amll";
+  }
+
   function onSettings(s) {
+    if (!s) return;
     applyScrollSettings(s);
+    if (!s.renderer) return;
+    const mode = wantedRenderer({ renderer: s.renderer, staticLyrics: staticLyrics });
+    if (mode === rendererMode) return;
+    setRenderer(mode);
+    if (mode === "spicy") buildLinesBox();
+    else syncAmllLines();
   }
 
   function onLines(payload) {
@@ -1857,7 +2816,6 @@
     lines = Array.isArray(payload.lines) ? payload.lines : [];
     linesVideoId = payload.videoId || null;
     staticLyrics = !!payload.staticLyrics;
-    romanizationEnabled = payload.romanizationEnabled !== false;
     songwriters = Array.isArray(payload.songwriters) ? payload.songwriters : [];
     attribution = payload.attribution || null;
     applyScrollSettings(payload);
@@ -1870,52 +2828,129 @@
     resetCameraGlide();
     centerInitialized = false;
     if (!pipWin || pipWin.closed || !pipDoc) return;
+    // A PiP opened from another page (Home, a playlist) predates the Lyrics tab,
+    // so the panel may have appeared after the open call. The first track's
+    // lyrics are the moment that panel exists; idempotent, so every track can
+    // re-assert it.
+    setMainPanelPipView(true);
     setHeader();
-    buildLinesBox();
-    const pos = lyricPositionMs(player() ? player().getPositionMs() : null);
-    updateLineStates(pos);
-    renderActive(activeIndexAt(pos));
+    syncVideoPane(true);
+    const mode = wantedRenderer(payload);
+    if (mode === "amll") {
+      // A new track is a fresh chance: a previous fallback (the stylesheet had
+      // not landed yet) must not keep this song on the wrong renderer forever.
+      amllUnavailable = false;
+      // The engine hosts its own line model and credits; rebuild them for this
+      // track rather than leaving the previous song on screen. Hand it the
+      // CURRENT clock, or the view would rebuild at 0 and scroll in.
+      const nowPos = lyricPositionMs(player() ? player().getPositionMs() : null);
+      amllLastPos = Number.isFinite(nowPos) ? Math.max(0, nowPos) : 0;
+      setRenderer("amll");
+      syncAmllLines();
+    } else {
+      setRenderer("spicy");
+      buildLinesBox();
+      const pos = lyricPositionMs(player() ? player().getPositionMs() : null);
+      updateLineStates(pos);
+      renderActive(activeIndexAt(pos));
+    }
   }
 
-  // While the PiP is open the synced-tab panel's lyrics are redundant (and waste
-  // paint). Visually hide the main #ym-sl-panel via a class toggle and a one-time
-  // injected !important rule. The panel still computes in the background — the
-  // PiP needs its lyrics:lines / lyrics:sync bus topics — so this is purely a
-  // visual / QoL suppression, not a pause.
-  let suppressStyleInjected = false;
-  function setMainPanelSuppressed(suppressed) {
-    const panel = document.getElementById("ym-sl-panel");
+  // While the PiP is open the tab's lyric panel is redundant, but hiding the
+  // whole panel also hides the ONLY controls that edit sync and offset. So the
+  // panel becomes the PiP control surface instead: a status block, and the REAL
+  // Options card (the same node the Options button shows) docked underneath.
+  // That card is a <body> child normally; moving it in makes it a normal block
+  // inside the panel, and closing the PiP puts it back where it came from.
+  let pipPanelView = null;
+  let dockedOptionsWasHidden = true;
+
+  function setMainPanelPipView(open) {
+    // The tab panel can be detached while YTM re-renders the watch page (it is
+    // moved around, not rebuilt), and getElementById cannot see a detached tree.
+    // Fall back to the view's own parent so a PiP closed during that re-render
+    // still puts the Options card back instead of leaving it inside a panel that
+    // will reappear later still showing "PiP is open".
+    const panel = document.getElementById("ym-sl-panel") ||
+      (pipPanelView && pipPanelView.parentElement);
     if (!panel) return;
-    if (suppressed && !suppressStyleInjected) {
-      const style = document.createElement("style");
-      style.id = "ym-pip-suppress-style";
-      style.textContent = "#ym-sl-panel.ym-pip-suppressed { display: none !important; }";
-      (document.head || document.documentElement).appendChild(style);
-      suppressStyleInjected = true;
+    // Same detached-tree reason as above: the card travels inside the view, so
+    // look there when it is not reachable from the live document.
+    const overlay = document.querySelector(".ym-sl-options-overlay") ||
+      (pipPanelView && pipPanelView.querySelector(".ym-sl-options-overlay"));
+    if (open) {
+      panel.classList.add("ym-pip-open");
+      if (pipPanelView && pipPanelView.parentElement !== panel) {
+        // YTM rebuilt the tab around a detached panel: carry the view (and the
+        // docked card inside it) across instead of making a second one.
+        panel.appendChild(pipPanelView);
+      } else if (!pipPanelView) {
+        pipPanelView = document.createElement("div");
+        pipPanelView.className = "ym-pip-open-view";
+        pipPanelView.id = "ym-pip-open-view";
+        const title = document.createElement("div");
+        title.className = "ym-pip-open-title";
+        title.textContent = "PiP is open";
+        const note = document.createElement("div");
+        note.className = "ym-pip-open-note";
+        note.textContent = "The lyrics are in the floating window. Adjust sync, offset, or the lyric file below — changes apply immediately.";
+        pipPanelView.append(title, note);
+        panel.appendChild(pipPanelView);
+      }
+      if (overlay && overlay.parentElement !== pipPanelView) {
+        dockedOptionsWasHidden = overlay.classList.contains("hidden");
+        overlay.classList.remove("hidden");
+        overlay.classList.add("ym-sl-options-docked");
+        pipPanelView.appendChild(overlay);
+      }
+    } else {
+      panel.classList.remove("ym-pip-open");
+      if (overlay && pipPanelView && overlay.parentElement === pipPanelView) {
+        overlay.classList.remove("ym-sl-options-docked");
+        // Restore the exact state it had before docking: if the user had the
+        // floating card open, it comes back open; otherwise it comes back closed.
+        if (dockedOptionsWasHidden) overlay.classList.add("hidden");
+        document.body.appendChild(overlay);
+      }
+      // remove() works on a detached panel too (isConnected would be false there
+      // and leave the view behind, so the panel came back still saying PiP is on).
+      if (pipPanelView) pipPanelView.remove();
+      pipPanelView = null;
     }
-    panel.classList.toggle("ym-pip-suppressed", suppressed);
   }
 
   function onPipClosed() {
     stopSync();
     stopKawarp();
+    stopVideoMirror();
+    dropAmll();
+    try {
+      const ds = document.documentElement.dataset;
+      delete ds.ymPipRenderer;
+      delete ds.ymPipAmll;
+      delete ds.ymPipVideo;
+      delete ds.ymPipLayout;
+      delete ds.ymPipKawarp;
+    } catch (e) {}
     pipWin = null;
     pipDoc = null;
     lineEls = [];
-    setMainPanelSuppressed(false);
+    lineSets = [];
+    setMainPanelPipView(false);
     if (btnHandle) btnHandle.setActive(false);
   }
 
   function openPip() {
     if (!supported()) return;
     // requestWindow needs the user gesture, so it is called synchronously here.
-    documentPictureInPicture.requestWindow({ width: 460, height: 300 }).then((win) => {
+    // Tall enough for a music video plus a few lyric lines; the user can resize.
+    documentPictureInPicture.requestWindow({ width: 480, height: 620 }).then((win) => {
       pipWin = win;
       pipDoc = win.document;
       buildPipDoc(win);
       win.addEventListener("pagehide", onPipClosed);
       if (btnHandle) btnHandle.setActive(true);
-      setMainPanelSuppressed(true);
+      setMainPanelPipView(true);
       // Pull the current lyrics: they are published when the lyrics are BUILT,
       // which is usually before this window is opened.
       const cached = (window.YTMod && window.YTMod.bus) ? window.YTMod.bus.last("lyrics:lines") : null;

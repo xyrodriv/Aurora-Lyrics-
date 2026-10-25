@@ -1,0 +1,373 @@
+  /* ===================== lyric DOM construction ===================== */
+
+  function makeLetterGroup(word) {
+    const start = word.StartTime * 1000;
+    const rawEnd = word.EndTime * 1000;
+    const letterEnd = Math.max(start + 1, rawEnd - 250);
+    const letterTotal = Math.max(1, letterEnd - start);
+    const group = h("div", { class: "letterGroup" });
+    const letters = [];
+    const chars = Array.from(word.Text);
+    const duration = letterTotal / Math.max(chars.length, 1);
+
+    chars.forEach((char, index) => {
+      const isSpace = char.trim().length === 0;
+      const letter = h("span", { class: "letter Emphasis", text: char });
+      const letterStart = start + index * duration;
+      const letterEnd = letterStart + duration;
+      letter.style.setProperty("--gradient-position", "-20%");
+      letter.style.setProperty("--text-shadow-opacity", "0%");
+      letter.style.setProperty("--text-shadow-blur-radius", "4px");
+      letter.style.setProperty("--ym-sl-base-scale", "0.95");
+      letter.style.transform = "translateY(calc(var(--DefaultLyricsSize) * 0.02))";
+      if (index === chars.length - 1) letter.classList.add("LastLetterInWord");
+      // Whitespace inside an inline-block collapses to a 0px box, which glues
+      // multi-word syllables (e.g. "Watch this") together. Tag it so the
+      // stylesheet can keep the space rendered. Mirrors upstream Emphasize.ts.
+      if (isSpace) letter.classList.add("SpaceLetter");
+      group.appendChild(letter);
+      letters.push({
+        HTMLElement: letter,
+        StartTime: letterStart,
+        EndTime: letterEnd,
+        AnimatorStore: null,
+      });
+    });
+
+    const model = {
+      HTMLElement: group,
+      Text: word.Text,
+      StartTime: start,
+      EndTime: rawEnd,
+      TotalTime: Math.max(1, rawEnd - start),
+      LetterGroup: true,
+      Letters: letters,
+      AnimatorStore: null,
+    };
+    return model;
+  }
+
+  // Does the whole-word join apply to this line? `joinSyllables` is the master
+  // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
+  // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
+  // Defaults to ON, which is the historical behaviour — bg lines joined too.
+  function joinApplies(background) {
+    if (!currentSettings.joinSyllables) return false;
+    if (background && currentSettings.joinBgSyllables === false) return false;
+    return true;
+  }
+
+  function makeWord(word, isLast, lineTimed, noKaraoke, background) {
+    // An unsynced line (no real per-word timing) must not spawn syllable/letter
+    // karaoke springs — that is what tanks FPS on partially-synced TTML imports
+    // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
+    // static block.
+    const suppressKaraoke = !!(noKaraoke && !lineTimed);
+    const start = word.StartTime * 1000;
+    const end = Math.max(start + 1, word.EndTime * 1000);
+    const duration = end - start;
+    // A LINE-TIMED word is a whole line wearing one word's clothes. It must never
+    // become a letterGroup: makeLetterGroup() would spawn one karaoke spring per
+    // CHARACTER, so a 40-character line turns into 40 animated spans each with a
+    // ~90ms window, while the line-level fill runs over the full multi-second
+    // window. The result is the "wavy and glowy" drift AJ sees — it reads as an
+    // animation bug, not as line-synced lyrics.
+    //
+    // Keeping it a plain `.word` hands the whole thing to the line-level fill:
+    // the gradient sweeps across the line as one unit, which is what line-synced
+    // lyrics are supposed to look like. Word-by-word karaoke is the Syllable
+    // body's job, and those words are short enough to stay plain words too.
+    let letterCapable =
+      !lineTimed &&
+      !suppressKaraoke &&
+      !word.DisableLetterAnimation &&
+      !word.disableLetterAnimation &&
+      isLetterCapable(word.Text, duration);
+    // Join syllables (AJ, 2026-10-19): paint every word as ONE whole-word fill
+    // instead of a per-letter karaoke group, so a word lights up whole with no
+    // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
+    // plain-.word path keeps its own scale/glow/gradient springs, so it still
+    // animates, just as a single unit.
+    // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
+    // per-letter "wavy" karaoke group either — AMLL fills the whole word with one
+    // clean gradient sweep. Force the plain-.word path so long words match AMLL.
+    if (joinApplies(background) || amllSimpleLookActive()) letterCapable = false;
+    const element = letterCapable
+      ? makeLetterGroup(word)
+      : h("span", { class: "word", text: word.Text });
+
+    if (!letterCapable) {
+      if (staticLyricsActive) {
+        // Static (unsynced) lyrics: paint fully filled immediately so there is
+        // no one-frame dim flash before animateWord confirms the Sung state.
+        element.style.setProperty("--gradient-position", "100%");
+        element.style.setProperty("--text-shadow-opacity", "0%");
+        element.style.setProperty("--text-shadow-blur-radius", "4px");
+        element.style.setProperty("--ym-sl-base-scale", "1");
+        element.style.transform = "translateY(0)";
+      } else {
+        element.style.setProperty("--gradient-position", "-20%");
+        element.style.setProperty("--text-shadow-opacity", "0%");
+        element.style.setProperty("--text-shadow-blur-radius", "4px");
+        element.style.setProperty("--ym-sl-base-scale", lineTimed ? "1" : "0.95");
+        element.style.transform = lineTimed
+          ? "translateY(0)"
+          : "translateY(calc(var(--DefaultLyricsSize) * 0.01))";
+      }
+    }
+    const elementNode = letterCapable ? element.HTMLElement : element;
+    if (word.IsPartOfWord) elementNode.classList.add("PartOfWord");
+    if (isLast) {
+      elementNode.classList.add("LastWordInLine");
+    }
+
+    return letterCapable
+      ? element
+      : {
+          HTMLElement: element,
+          Text: word.Text,
+          StartTime: start,
+          EndTime: end,
+          TotalTime: duration,
+          IsPartOfWord: !!word.IsPartOfWord,
+          LineTimed: !!lineTimed,
+          NoKaraoke: suppressKaraoke,
+          LetterGroup: false,
+          AnimatorStore: null,
+        };
+  }
+
+  function appendWords(lineElement, lineModel, words, background, noKaraoke) {
+    // Join syllables (AJ, 2026-10-19): a logical word is a run of syllable tokens
+    // glued by IsPartOfWord. Left alone each token fills in sequence, so a word
+    // reads as separate syllables. When the setting is on, collapse every run into
+    // ONE word spanning the whole run (merged text + merged time window) so it
+    // fills as a single unit. OFF by default, so the per-syllable karaoke and the
+    // .word-group wrapping are unchanged unless the user opts in.
+    let renderWords = words;
+    if (joinApplies(background) && Array.isArray(words) && words.length) {
+      const joined = [];
+      for (const word of words) {
+        const open = joined[joined.length - 1];
+        if (open && open.__joining) {
+          // Extend the open word: append this token's text and let it run to the
+          // token's end. Keep the run open only while this token still glues
+          // forward (a joined word never carries a trailing PartOfWord class).
+          open.Text = (open.Text || "") + (word.Text || "");
+          open.EndTime = word.EndTime;
+          open.__joining = !!word.IsPartOfWord;
+        } else {
+          joined.push({
+            Text: word.Text,
+            StartTime: word.StartTime,
+            EndTime: word.EndTime,
+            IsPartOfWord: false,
+            DisableLetterAnimation: word.DisableLetterAnimation,
+            disableLetterAnimation: word.disableLetterAnimation,
+            __joining: !!word.IsPartOfWord,
+          });
+        }
+      }
+      joined.forEach((w) => { delete w.__joining; });
+      renderWords = joined;
+    }
+    let currentWordGroup = null;
+    renderWords.forEach((word, wordIndex) => {
+      const wordModel = makeWord(word, wordIndex === renderWords.length - 1, lineModel.LineTimed, noKaraoke, background);
+      if (background) {
+        wordModel.BGWord = true;
+        wordModel.HTMLElement.classList.add("bg-word");
+      }
+      const previous = renderWords[wordIndex - 1];
+      const belongsToGroupedWord =
+        word.IsPartOfWord || (previous && previous.IsPartOfWord && currentWordGroup);
+
+      if (belongsToGroupedWord) {
+        if (!currentWordGroup) {
+          currentWordGroup = h("span", { class: "word-group" });
+          lineElement.appendChild(currentWordGroup);
+        }
+        currentWordGroup.appendChild(wordModel.HTMLElement);
+        if (!word.IsPartOfWord && previous && previous.IsPartOfWord) {
+          currentWordGroup = null;
+        }
+      } else {
+        currentWordGroup = null;
+        lineElement.appendChild(wordModel.HTMLElement);
+      }
+      lineModel.Syllables.Lead.push(wordModel);
+    });
+  }
+
+  function makeDotLine(startMs, endMs, oppositeAligned) {
+    const lineElement = h("div", { class: "line musical-line" });
+    if (oppositeAligned) lineElement.classList.add("OppositeAligned");
+    const dotGroup = h("div", { class: "dotGroup" });
+    const total = Math.max(1, endMs - startMs);
+    const base = total / 3;
+    const padding = -((PRE_HIDDEN_DOT_LINE_MS + 50) / 3);
+    const dotEnds = [
+      Math.max(startMs, startMs + base + padding),
+      Math.max(startMs, startMs + base * 2 + padding * 2),
+      Math.max(startMs, startMs + total - (PRE_HIDDEN_DOT_LINE_MS + 50)),
+    ];
+    const words = [];
+    let dotStart = startMs;
+
+    for (let i = 0; i < 3; i++) {
+      const dot = h("span", { class: "word dot", text: "•" });
+      dotGroup.appendChild(dot);
+      words.push({
+        HTMLElement: dot,
+        Text: "•",
+        StartTime: dotStart,
+        EndTime: Math.max(dotStart + 1, dotEnds[i]),
+        TotalTime: Math.max(1, dotEnds[i] - dotStart),
+        Dot: true,
+        AnimatorStore: null,
+      });
+      dotStart = dotEnds[i];
+    }
+    lineElement.appendChild(dotGroup);
+    return {
+      HTMLElement: lineElement,
+      StartTime: startMs,
+      EndTime: endMs,
+      TotalTime: total,
+      DotLine: true,
+      Syllables: { Lead: words },
+      AnimatorStore: null,
+    };
+  }
+
+  function buildCreditsFooter(names) {
+    const footer = h("div", { class: "ym-sl-credits" });
+    if (names && names.length) {
+      footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
+      const namesEl = h("div", { class: "ym-sl-credits-names" });
+      names.forEach((name, index) => {
+        if (index) namesEl.appendChild(document.createTextNode(", "));
+        namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
+      });
+      footer.appendChild(namesEl);
+    }
+    // Order matters: the provider is the credit every source owes, then the
+    // people who made the sync (community syncs only).
+    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
+    if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
+    if (currentMaker) footer.appendChild(buildPersonRow("Made by", currentMaker));
+    return footer;
+  }
+
+  // "Lyrics provided by <provider>" — every API source owes this one, so it is
+  // plain text and never conditional on a person existing. A link is the
+  // strongest form of that credit: it lets the user check the source.
+  const PROVIDER_URLS = {
+    "LRCLIB": "https://lrclib.net/",
+  };
+  // Sources whose timing is machine-aligned rather than hand-synced get the
+  // warning treatment: red pill + triangle. Persistent, unlike the transient
+  // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
+  // (2026-10-22); kept as the hook for any future machine-aligned source.
+  const PROVIDER_WARN = {};
+
+  // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
+  function buildProviderWarnIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-provider-warn-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const tri = document.createElementNS(NS, "path");
+    tri.setAttribute("d", "M12 2.6 22.6 21.2H1.4Z");
+    tri.setAttribute("fill", "#e5484d");
+    const bar = document.createElementNS(NS, "rect");
+    bar.setAttribute("x", "11.05");
+    bar.setAttribute("y", "8.3");
+    bar.setAttribute("width", "1.9");
+    bar.setAttribute("height", "6.5");
+    bar.setAttribute("rx", "0.95");
+    bar.setAttribute("fill", "#ffffff");
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", "12");
+    dot.setAttribute("cy", "17.5");
+    dot.setAttribute("r", "1.15");
+    dot.setAttribute("fill", "#ffffff");
+    svg.append(tri, bar, dot);
+    return svg;
+  }
+
+  function buildProviderRow(provider, isStatic) {
+    // The red pill/triangle means "these timings are machine-aligned". A static
+    // (unsynced) set has no timings at all, so the warning is meaningless and
+    // reads as a defect — show the normal credit instead (AJ, 2026-10-20).
+    const warn = !!PROVIDER_WARN[provider] && !isStatic;
+    const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
+    if (warn) row.appendChild(buildProviderWarnIcon());
+    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
+    const url = PROVIDER_URLS[provider] || "";
+    if (url) {
+      row.appendChild(h("a", {
+        class: "ym-sl-provider-name",
+        href: url,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: provider,
+      }));
+    } else {
+      row.appendChild(h("span", { class: "ym-sl-provider-name", text: provider }));
+    }
+    if (!warn) return row;
+    // Explain WHY it is flagged, so the red pill is not just alarm without
+    // context. Static — it lives as long as the lyrics do (AJ, 2026-10-19).
+    return h("div", { class: "ym-sl-provider-block" },
+      row,
+      h("div", {
+        class: "ym-sl-provider-note",
+        text: "Timing may have felt off — this source aligns the lyrics automatically.",
+      })
+    );
+  }
+
+  // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
+  // profile. Used for both the uploader and the maker; only community syncs
+  // (source === "spicy_lyrics") have either.
+  function buildPersonRow(label, uploader) {
+    const row = h("div", { class: "ym-sl-uploader" });
+    row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
+
+    const link = h("a", {
+      class: "ym-sl-uploader-link",
+      // Open the uploader's profile in a NEW TAB so YT Music stays put. Without
+      // target="_blank" the browser navigates THIS tab away from music.youtube.com,
+      // which unloads the SPA and trips the host's "Leave site?" prompt — exactly
+      // the reported bug. rel guards the referrer/opener; the URL is already
+      // validated as http(s) at parse time (parseSpicyLyrics attribution).
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: uploader.url || "",
+    });
+    if (uploader.url) link.href = uploader.url;
+
+    if (uploader.avatar) {
+      const img = h("img", { class: "ym-sl-uploader-avatar", alt: "" });
+      img.src = uploader.avatar;
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      // A dead/blocked avatar must not leave a broken-image glyph in the panel.
+      img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+      link.appendChild(img);
+    }
+    link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
+
+    // If there is nowhere to go, render as plain (non-interactive) content so
+    // it does not look like a dead link.
+    if (!uploader.url) {
+      link.removeAttribute("href");
+      link.classList.add("no-link");
+    }
+    row.appendChild(link);
+    return row;
+  }
+

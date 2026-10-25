@@ -19,10 +19,6 @@
     warmAnimatedArt();
     const exportActions = document.querySelector(".ym-sl-options-overlay .ym-sl-export-actions");
     if (exportActions) exportActions.classList.toggle("hidden", currentTTMLSource !== "imported" || !importedTTMLXml);
-    // Apple-Music-style lyrics are rendered by a separate engine that holds the
-    // previous track's lines until the new ones arrive. Blank it with a skeleton
-    // so a track change never shows the wrong song.
-    amllShowSkeleton();
   }
 
   function getCurrentTrack() {
@@ -376,6 +372,11 @@
 
   // (G) Delete the permanently-saved TTML for the current track. Lets the user
   // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  //
+  // The file being deleted is the one RENDERED right now, so deleting it has to
+  // take it off the screen too. Re-resolve the track exactly like a fresh play
+  // (force=true also skips the permanent-TTML read), and the API result replaces
+  // the imported lines instead of leaving them stranded under a hidden file.
   async function deletePermanentTTMLForCurrentTrack() {
     const key = currentTrackKey || getTrackKey(getCurrentTrack());
     if (!key) {
@@ -384,13 +385,25 @@
     }
     try {
       await removePermanentTTML(key);
-      manualLyricsIsPermanent = false;
-      showLyricsMessage("Permanently-saved TTML removed for this track.");
     } catch (error) {
-      console.warn("[SpicyLyrics] Could not delete permanent TTML:", error);
+      console.warn("[AuroraLyrics] Could not delete permanent TTML:", error);
       showLyricsMessage("Could not delete the saved TTML for this track.");
+      refreshFileTabState();
+      return;
     }
-    refreshPermanentDeleteState();
+    manualLyricsIsPermanent = false;
+    currentLyricsFromSavedTTML = false;
+    manualLyricsTrackKey = "";
+    currentTTMLSource = "none";
+    importedTTMLXml = "";
+    setTTMLExportVisibility();
+    // Clearing the loaded-track key takes syncTrackLyrics past its
+    // `key === currentTrackKey` guard, which would otherwise keep the deleted
+    // file on screen until the next song.
+    currentTrackKey = "";
+    refreshFileTabState();
+    showLyricsMessage("Saved TTML removed. Searching for lyrics…");
+    syncTrackLyrics(true);
   }
 
   // Shows the "Delete saved" button only when a permanent TTML actually exists
@@ -409,7 +422,117 @@
     } catch (error) {
       saved = null;
     }
-    btn.classList.toggle("hidden", !saved);
+    // Offer the button only when the file it would delete is what is on screen.
+    // It used to appear for ANY track that had a permanent TTML stored, even when
+    // that track was playing API lyrics — so a song with no TTML in sight still
+    // showed "Delete saved".
+    const showingSaved = !!saved && (manualLyricsIsPermanent || currentLyricsFromSavedTTML);
+    btn.classList.toggle("hidden", !showingSaved);
+    refreshFileImportedNote(saved);
+  }
+
+  // The File tab says where the lyrics on screen came from whenever that was not
+  // the API: a file uploaded during this session (permanent or one-play), or one
+  // saved earlier and loaded automatically on this track.
+  function refreshFileImportedNote(savedTTML) {
+    if (!fileImportedNote) return;
+    let text = "";
+    if (currentTTMLSource === "imported" && importedTTMLXml) {
+      text = manualLyricsIsPermanent
+        ? "Imported TTML · Permanent — saved for this song."
+        : "Imported TTML · Temporary — this session only.";
+    } else if (savedTTML) {
+      text = "Saved TTML · Permanent — loaded automatically for this song.";
+    }
+    fileImportedNote.textContent = text;
+    fileImportedNote.classList.toggle("hidden", !text);
+  }
+
+  // "Clear cache for this song" must not run while that song is on screen: the
+  // next lookup would re-resolve and repaint it mid-play. So a click only QUEUES
+  // the clear, the entry is stamped to die when the song does (so the promise
+  // survives a reload too), and the queued clear runs at the first track change
+  // or replay after it — see syncTrackLyrics in 15-prefetch-search.
+  function queueSongCacheClear() {
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !key) return;
+    pendingSongCacheClear = { trackKey: key, track };
+    // LRCLIB entries (including a saved search pick) can go now: the lyrics on
+    // screen are already parsed, and nothing reads the entry again until this
+    // song restarts or is replayed. Only the Spicy entry has to wait for the
+    // song to end, because its resolve happens through the id-mapped keys.
+    lrclibCache.delete(key);
+    removeLyricsPersistent(key);
+    refreshSongCacheRow();
+    deferSpicyCacheForTrack(track, songRemainingMs(track)).catch(() => {});
+  }
+
+  function songRemainingMs(track) {
+    const player = window.YTMod && window.YTMod.player;
+    const pos = player && typeof player.getPositionMs === "function"
+      ? Number(player.getPositionMs())
+      : NaN;
+    const total = Number(track && track.durationMs);
+    if (!Number.isFinite(pos) || !Number.isFinite(total) || total <= 0) return 0;
+    return Math.max(0, total - pos);
+  }
+
+  async function flushPendingSongCacheClear() {
+    const pending = pendingSongCacheClear;
+    if (!pending) return;
+    pendingSongCacheClear = null;
+    try {
+      await clearSpicyCacheForTrack(pending.track);
+    } catch (error) {
+      console.warn("[AuroraLyrics] could not clear this song's cache:", error);
+    }
+    refreshSongCacheRow();
+  }
+
+  async function refreshSongCacheRow() {
+    if (!songCacheStatus || !songCacheClearButton) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !key) {
+      songCacheStatus.textContent = "";
+      songCacheStatus.classList.remove("pending");
+      songCacheClearButton.classList.add("hidden");
+      return;
+    }
+    if (pendingSongCacheClear && pendingSongCacheClear.trackKey === key) {
+      songCacheStatus.textContent = "Cache will be cleared after this song ends.";
+      songCacheStatus.classList.add("pending");
+      songCacheClearButton.classList.add("hidden");
+      return;
+    }
+    songCacheStatus.classList.remove("pending");
+    let status = null;
+    try {
+      status = await spicyCacheStatusForTrack(track);
+    } catch (error) {
+      status = null;
+    }
+    // The panel may have been rebuilt while that read was in flight.
+    if (!songCacheStatus.isConnected) return;
+    const spicyCached = !!(status && status.cached);
+    // LRCLIB keeps its own layer. Counting only Spicy made a track whose lyrics
+    // came from LRCLIB read "Not cached" while its result (or a search pick)
+    // was sitting in the persistent cache, and hid the only way to clear it
+    // (AJ, 2026-10-22).
+    const lrclibCached = lrclibCache.has(key) || hasLyricsPersistent(key);
+    const cached = spicyCached || lrclibCached;
+    songCacheStatus.textContent = spicyCached
+      ? `Cached for this song · ${status.daysLeft} ${status.daysLeft === 1 ? "day" : "days"} left.`
+      : lrclibCached
+        ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
+        : "Not cached for this song.";
+    songCacheClearButton.classList.toggle("hidden", !cached);
+  }
+
+  async function refreshFileTabState() {
+    await refreshPermanentDeleteState();
+    await refreshSongCacheRow();
   }
 
   // Shared teardown for "the panel is no longer showing a lyric line". Called by
@@ -467,6 +590,18 @@
     // forever, because only the success paths ever called hideFsSpinner()
     // (AJ, 2026-10-01).
     hideFsSpinner();
+    // Same for the AMLL loading skeleton: a message is a terminal state, so no
+    // shimmer may be left behind. A genuine "no lyrics" / "didn't load" also has
+    // to hand the panel back to the built-in renderer, because the AMLL host is
+    // still showing the previous track's lines and would cover this empty state.
+    amllHideSkeleton();
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+      amllHide();
+      // The cached content still belongs to the PREVIOUS track. Without this a
+      // later re-activation (toggling Apple Music style off and on) would hand it
+      // back to the engine and resurrect the wrong song over this empty state.
+      amllLastContent = null;
+    }
     lastLyricsError = message === LOAD_FAILED_MESSAGE ? "rate" : "";
     if (searchPanelEl && searchPanelEl._foot) {
       searchPanelEl._foot.textContent = lastLyricsError

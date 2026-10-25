@@ -42,6 +42,15 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
+    // In-page fullscreen fades in (AJ, 2026-10-22). Native fullscreen deliberately
+    // gets no entrance: the browser is already repainting the whole display, so a
+    // fade on top of that reads as a late start rather than a transition.
+    if (currentSettings.fullscreenInPage && fsMotionOK() && typeof fsOverlay.animate === "function") {
+      fsEnterAnimation = fsOverlay.animate(
+        [{ opacity: 0, transform: "scale(.99)" }, { opacity: 1, transform: "none" }],
+        { duration: FS_ANIM_MS + 40, easing: "cubic-bezier(.22, .61, .36, 1)" }
+      );
+    }
     // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
     // applying the entry layout to them animates them sliding in from the CSS
     // default (side) — a visible "side layout" flash on cover-art entry. Hold
@@ -118,13 +127,28 @@
     // some Chrome versions when the element had just been appended. Done
     // before the rest of the setup so the activation token cannot be consumed
     // by anything else in this function first.
-    try {
-      const target = document.documentElement;
-      if (target.requestFullscreen) {
-        const p = target.requestFullscreen();
-        if (p && typeof p.catch === "function") p.catch(() => {});
-      }
-    } catch (_) {}
+    //
+    // In-page fullscreen skips this entirely (AJ, 2026-10-22). The overlay is
+    // already `position: fixed; inset: 0`, so it covers the viewport on its own;
+    // native fullscreen only adds taking over the whole display, which also
+    // strands the tab strip and every other tab. Escape still exits, because
+    // handleFsKeydown() exits whenever there is no fullscreenElement.
+    if (!currentSettings.fullscreenInPage) {
+      try {
+        const target = document.documentElement;
+        if (target.requestFullscreen) {
+          fsNativeRequested = true;
+          const p = target.requestFullscreen();
+          if (p && typeof p.catch === "function") p.catch(() => {});
+        }
+      } catch (_) {}
+    } else {
+      // In-page: the document behind is still scrollable, so lock it. Without
+      // this the page can scroll under the overlay and a scrollbar strip stays
+      // visible beside it (native fullscreen normally removes both).
+      fsSavedHtmlOverflow = document.documentElement.style.overflow;
+      document.documentElement.style.overflow = "hidden";
+    }
     fsLyricsShadeTimer = window.setInterval(() => sampleFullscreenLyricsBrightness(), FS_LYRICS_SHADE_SAMPLE_MS);
 
     // Left: YTM's real <video> when there is one, otherwise the cover art.
@@ -197,9 +221,28 @@
       const track = getCurrentTrack();
       const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
       if (artUrl) {
-        fsArtImg = h("img", { class: "ym-sl-fs-art", alt: "" });
-        fsMediaHost.appendChild(fsArtImg);
-        setFsArtSrc(fsArtImg, hiResArt(artUrl));
+        // CREATE-OR-REUSE, never create unconditionally. reconcileFsMediaArt()
+        // already ran above (it is kicked right after the art video is adopted)
+        // and it calls ensureFsArtImg(), so by the time we get here the card
+        // usually EXISTS already. Assigning a fresh <img> over it orphaned the
+        // first one in the pane: both are IMG.ym-sl-fs-art with the same src, the
+        // flex row squeezes them to half width each, and the orphan is only
+        // cleaned up by the next 2s tick — two covers side by side on entry.
+        // Live-captured on the real page (AJ, 2026-10-21):
+        //   'IMG.ym-sl-fs-art 583x583 block/1 | IMG.ym-sl-fs-art 583x583 block/1'
+        // then one card, ~2s later. ensureFsArtImg() also removes any stray card,
+        // so this is the same single-create point reconcile uses.
+        const card = ensureFsArtImg();
+        if (card) {
+          setFsArtSrc(card, hiResArt(artUrl));
+          // A warm animated cover is already ready for this track (it has been
+          // playing in the player view since the track started): do not put the
+          // static card beside it.
+          if (fsArtVideo && fsArtVideo.parentElement === fsMediaHost &&
+              fsArtVideo.classList.contains("ym-sl-fs-art-video-ready")) {
+            card.style.display = "none";
+          }
+        }
       }
       // Song fullscreen: replace the blurred cover backdrop with Kawarp when the
       // Dynamic add-on is active (it suspends its page-wide instance for us).
@@ -258,8 +301,67 @@
     startFsMediaWatchers();
   }
 
-  function exitFullscreenMode() {
+  /* ---- in-page fullscreen: open/close motion (AJ, 2026-10-22) --------------
+     The in-tab fullscreen is a surface INSIDE the page, so it can enter and leave
+     like one. Native fullscreen does not get the closing fade: the browser has
+     already returned to the page, and a 220ms ghost over it reads as lag. */
+  const FS_ANIM_MS = 220;
+  function fsMotionOK() {
+    return !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  function exitFullscreenMode(immediate) {
     if (!fsActive) return;
+    // Strictly boolean. The Exit button used to bind this straight to the click
+    // handler, so `immediate` was a MouseEvent — truthy — and every click tore
+    // the overlay down without the fade. A caller that means "now" passes true.
+    immediate = immediate === true;
+    if (fsExitAnimation) {
+      if (!immediate) return;             // a close is already in flight
+      // Teardown must not wait for a fade that may never finish once the
+      // script's own UI is being removed.
+      try { fsExitAnimation.cancel(); } catch (_) {}
+      fsExitAnimation = null;
+    }
+    const overlay = fsOverlay;
+    const canAnimate = !immediate &&
+      currentSettings.fullscreenInPage &&
+      overlay && overlay.isConnected &&
+      typeof overlay.animate === "function" &&
+      fsMotionOK();
+    // Sample the entrance animation's CURRENT opacity before cancelling it:
+    // cancel() snaps the element straight back to 1, so closing while the fade-in
+    // is still running would flash the overlay at full strength first.
+    let startOpacity = 1;
+    if (canAnimate) {
+      try {
+        const raw = Number(getComputedStyle(overlay).opacity);
+        if (Number.isFinite(raw)) startOpacity = Math.min(1, Math.max(0, raw));
+      } catch (_) {}
+    }
+    if (fsEnterAnimation) {
+      try { fsEnterAnimation.cancel(); } catch (_) {}
+      fsEnterAnimation = null;
+    }
+    if (!canAnimate) {
+      finishFullscreenExit();
+      return;
+    }
+    fsExitAnimation = overlay.animate(
+      [{ opacity: startOpacity, transform: "none" }, { opacity: 0, transform: "scale(.985)" }],
+      { duration: FS_ANIM_MS, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" }
+    );
+    const done = () => {
+      fsExitAnimation = null;
+      finishFullscreenExit();
+    };
+    fsExitAnimation.finished.then(done).catch(done);
+  }
+
+  function finishFullscreenExit() {
+    if (!fsActive) return;
+    fsExitAnimation = null;
+    fsEnterAnimation = null;
     if (fsVideoModeSwapTimer) { clearTimeout(fsVideoModeSwapTimer); fsVideoModeSwapTimer = 0; }
     // Stop the pending-MV attach poll too, or it would keep calling
     // syncFsVideoMode() after the overlay is gone.
@@ -272,6 +374,7 @@
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
     // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
     fsActive = false;
+    fsNativeRequested = false;
     stopFsIdleTracking();
     document.removeEventListener("keydown", handleFsKeydown, true);
     stopFsMediaWatchers();
@@ -370,6 +473,10 @@
     }
     const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
     if (fsOptionsOverlay) fsOptionsOverlay.remove();
+    if (fsSavedHtmlOverflow !== null) {
+      document.documentElement.style.overflow = fsSavedHtmlOverflow;
+      fsSavedHtmlOverflow = null;
+    }
     if (fsOverlay) fsOverlay.remove();
     fsOverlay = null;
     fsMediaHost = null;
@@ -462,7 +569,10 @@
   // If the browser leaves native fullscreen by any other route (F11, browser
   // chrome), unwind our overlay too so nothing is left stranded on screen.
   function handleFsFullscreenChange() {
-    if (fsActive && !document.fullscreenElement) exitFullscreenMode();
+    // Only OUR native fullscreen ending unwinds the overlay. In-page fullscreen
+    // never asks for native, so an unrelated F11 out must leave it alone
+    // (AJ, 2026-10-22).
+    if (fsActive && fsNativeRequested && !document.fullscreenElement) exitFullscreenMode();
   }
 
   /* ---- redirect YTM's own video fullscreen button ------------------------

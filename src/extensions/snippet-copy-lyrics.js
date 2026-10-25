@@ -12,8 +12,8 @@
  *   The panel renders every line as a .line element inside .VirtualLyricsContainer
  *   (the name is legacy — there is no scroll windowing; all lines are in the DOM
  *   at once). So copying is just: read every .line's text, in document order.
- *   - Each .line may carry a .romaji child (a display-only transliteration);
- *     that is stripped so we copy the sung text, not the romaji echo.
+ *   - Each .line may carry a .translation child (a display-only gloss); that
+ *     is stripped so we copy the sung text, not the English underneath it.
  *   - Background-vocal lines (.bg-line) are kept — they are part of the song.
  *   - The empty-state placeholder and the credits footer are not .line elements,
  *     so they are naturally excluded.
@@ -46,7 +46,9 @@
   let poll = 0;
   let btn = null;
 
-  // Read every .line's text, in document order, with romaji stripped.
+  // Read every .line's text, in document order, with the display-only sub-lines
+  // (the on-device translation) stripped: copying lyrics should give the sung
+  // words, not the gloss underneath them.
   function extractLyrics() {
     const panel = document.querySelector("#ym-sl-panel.SpicyRenderer");
     if (!panel) return "";
@@ -58,8 +60,7 @@
     const out = [];
     lines.forEach((line) => {
       const clone = line.cloneNode(true);
-      const romaji = clone.querySelectorAll(".romaji");
-      romaji.forEach((r) => r.remove());
+      clone.querySelectorAll(".translation").forEach((r) => r.remove());
       const t = (clone.textContent || "").replace(/[ \t]+/g, " ").trim();
       if (t) out.push(t);
     });

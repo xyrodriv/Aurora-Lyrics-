@@ -88,6 +88,49 @@
   let searchAbortController = null;
   let searchRequestSeq = 0;
 
+  // Lyrics on LRCLIB are contributed by people, so a genuine gap is something a
+  // listener can close. The empty state points at the place they can do it.
+  const LRCLIB_DISCORD_INVITE = "https://discord.gg/stz5vZqczC";
+
+  // Empty answers before the Search button is spent. Three covers a typo and a
+  // reworded query; past that the same track keeps coming back empty, so the
+  // button greys out instead of asking LRCLIB the same question again.
+  const SEARCH_EMPTY_LIMIT = 3;
+
+  function setSearchSpent(panel, spent) {
+    if (!panel._submit) return;
+    panel._submit.disabled = spent;
+    panel._submit.title = spent
+      ? "No lyrics for this track on LRCLIB — search is off for now."
+      : "";
+  }
+
+  // The panel's two misses are different things and each gets its own answer:
+  //   - an empty list means LRCLIB has no lyrics for this track yet
+  //   - a thrown request means LRCLIB itself did not answer (it rate-limits
+  //     bursty clients, so a busy spell is the usual cause)
+  function showSearchEmptyState(panel) {
+    panel._status.replaceChildren(
+      h("span", {
+        text: "There are no lyrics for this track on LRCLIB yet — they may be added later. " +
+          "Want to contribute them yourself? Join our Discord: ",
+      }),
+      h("a", {
+        class: "ym-sl-search-link",
+        href: LRCLIB_DISCORD_INVITE,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: "discord.gg/stz5vZqczC",
+      })
+    );
+    if (panel._emptyTries >= SEARCH_EMPTY_LIMIT) {
+      panel._status.appendChild(h("div", {
+        class: "ym-sl-search-empty-note",
+        text: "Search is off for this track for now — try again in a little while.",
+      }));
+    }
+  }
+
   function ensureSearchPanel() {
     if (searchPanelEl) return searchPanelEl;
     const panel = h("div", {
@@ -118,6 +161,11 @@
 
     const rememberRow = h("label", { class: "ym-sl-search-remember" });
     const remember = h("input", { type: "checkbox", class: "ym-sl-search-remember-box" });
+    // ON by default. A manual pick exists precisely because the automatic
+    // resolver could not find this track, so without remembering it the next
+    // play (or a page reload) goes back to "No lyrics found" and the pick is
+    // lost — AJ's exact report (2026-10-22). Untick it for a one-off answer.
+    remember.checked = true;
     rememberRow.append(remember, h("span", { text: "Remember for this track" }));
 
     const status = h("div", { class: "ym-sl-search-status", role: "status" });
@@ -135,6 +183,8 @@
     panel._status = status;
     panel._results = results;
     panel._foot = foot;
+    panel._submit = submit;
+    panel._emptyTries = 0;
 
     // Click anywhere outside the sheet (or its Search trigger) to dismiss it.
     document.addEventListener("pointerdown", (event) => {
@@ -182,6 +232,10 @@
       panel._input.value = track ? [track.title, track.artist].filter(Boolean).join(" — ") : "";
       panel._results.replaceChildren();
       panel._status.textContent = "";
+      // A fresh visit gets its three tries back, so a spent button is never a
+      // dead end for the rest of the session.
+      panel._emptyTries = 0;
+      setSearchSpent(panel, false);
       panel._foot.textContent = lastLyricsError
         ? "ERR: rate limited — try again in a couple of minutes."
         : "";
@@ -195,6 +249,8 @@
 
   async function runLyricSearch() {
     const panel = ensureSearchPanel();
+    // Enter in the input can still submit the form around a disabled button.
+    if (panel._submit && panel._submit.disabled) return;
     const query = (panel._input.value || "").trim();
     if (!query) {
       panel._status.textContent = "Type a song title or artist first.";
@@ -219,23 +275,30 @@
       if (!response.ok) throw new Error("LRCLIB search returned HTTP " + response.status);
       const list = Array.isArray(response.data) ? response.data : [];
       if (!list.length) {
-        panel._status.textContent = "No results found.";
+        panel._emptyTries = (panel._emptyTries || 0) + 1;
+        if (panel._emptyTries >= SEARCH_EMPTY_LIMIT) setSearchSpent(panel, true);
+        showSearchEmptyState(panel);
         return;
       }
+      // A hit clears the strike count, so a later miss on another query starts fresh.
+      panel._emptyTries = 0;
+      setSearchSpent(panel, false);
       panel._status.textContent = `${list.length} result${list.length === 1 ? "" : "s"} — pick one to load.`;
       list.slice(0, 25).forEach((item) => {
-        panel._results.appendChild(makeSearchResultRow(item, panel._remember.checked, panel._status));
+        panel._results.appendChild(makeSearchResultRow(item, panel, panel._status));
       });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       if (requestId !== searchRequestSeq) return;
       searchAbortController = null;
-      panel._status.textContent = "Search failed. Try again.";
-      console.warn("[SpicyLyrics] manual lyric search failed:", error);
+      panel._status.textContent = "LRCLIB is currently busy — please try a few more times.";
+      console.warn("[AuroraLyrics] manual lyric search failed:", error);
     }
   }
 
-  function makeSearchResultRow(item, remember, status) {
+  // `panel`, not a captured `remember` boolean: the tick can be changed after
+  // the rows render, so the state that counts is the one at click time.
+  function makeSearchResultRow(item, panel, status) {
     const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
     const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
     const hasSync = !!item.syncedLyrics;
@@ -251,7 +314,7 @@
         row.classList.add("no-sync-available");
         row.title = "Load unsynced lyrics (no timestamps)";
       }
-      row.addEventListener("click", () => applySearchResult(item, remember, status));
+      row.addEventListener("click", () => applySearchResult(item, panel._remember.checked, status));
     } else {
       row.classList.add("no-sync");
       row.disabled = true;
@@ -263,12 +326,38 @@
   function applySearchResult(item, remember, status) {
     const track = getCurrentTrack();
     const durationMs = track ? Number(track.durationMs) : 0;
-    const key = track ? getTrackKey(track) : "";
+    // currentTrackKey first: that is the key the resolver reads, so a pick made
+    // while the track object is briefly unavailable still lands on the entry
+    // the next play will look for.
+    const key = currentTrackKey || (track ? getTrackKey(track) : "");
+    // Kill any lookup still in flight. Without this, a slow automatic answer
+    // can land AFTER the pick and overwrite the lyrics the user just chose.
+    if (activeTrackAbort) {
+      activeTrackAbort.abort();
+      activeTrackAbort = null;
+    }
+    ++trackRequestSeq;
+    // The pick replaces whatever this track was showing before, including a
+    // permanent upload, so the File tab must stop offering to delete that file
+    // and the dormant pause-sync point must not survive into new line times.
+    manualLyricsIsPermanent = false;
+    manualLyricsTrackKey = "";
+    currentLyricsFromSavedTTML = false;
+    pauseSync = null;
     loadLRCLyrics(item, durationMs);
-    cacheLRCLyrics(key, item);
-    if (remember && key) cacheLyricsPersistent(key, item);
+    if (key) {
+      cacheLRCLyrics(key, item);
+      // Remembering writes the manual flag the resolver checks BEFORE it asks
+      // any source. Unticking removes an earlier manual pick, so the next play
+      // is answered by the normal source order again.
+      if (remember) cacheLyricsPersistent(key, item, { manual: true });
+      else removeLyricsPersistent(key);
+      // The File tab reports this track's cache state; update it now instead of
+      // waiting for the next track change.
+      refreshFileTabState();
+    }
     const isUnsynced = !item.syncedLyrics && item.plainLyrics;
-    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (remembered for this track)" : ""}.`;
+    status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (saved for this track)" : ""}.`;
     toggleSearchPanel(false);
   }
 
@@ -290,6 +379,22 @@
       durationMs > 0 &&
       lastObservedPositionMs >= durationMs * 0.9 &&
       positionMs < 5000;
+
+    // A queued per-song cache clear belongs to the song that was playing when it
+    // was queued, so it is released here — on the change of track, or when the
+    // same song restarts from the top (a loop never changes the key).
+    if (pendingSongCacheClear) {
+      const pendingKey = pendingSongCacheClear.trackKey;
+      const queuedSongRestarted =
+        pendingKey === key &&
+        Number.isFinite(positionMs) &&
+        Number.isFinite(lastObservedPositionMs) &&
+        Number.isFinite(durationMs) &&
+        durationMs > 0 &&
+        lastObservedPositionMs >= durationMs * 0.9 &&
+        positionMs < 5000;
+      if (pendingKey !== key || queuedSongRestarted) flushPendingSongCacheClear();
+    }
 
     lastObservedTrackKey = key;
     lastObservedPositionMs = positionMs;
@@ -320,27 +425,37 @@
     }
     const requestId = ++trackRequestSeq;
     showLyricsSkeleton();
+    // Apple-Music-style lyrics render through a separate engine, so it needs its
+    // own skeleton at the same moment; otherwise it keeps the previous track's
+    // lines on screen for the whole lookup.
+    amllShowSkeleton();
 
     let savedTTML = null;
     try {
       savedTTML = await getPermanentTTML(key);
     } catch (error) {
-      console.warn("[SpicyLyrics] Could not read permanent TTML:", error);
+      console.warn("[AuroraLyrics] Could not read permanent TTML:", error);
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
     if (!force && savedTTML) {
-      if (loadTTML(savedTTML, "external")) return;
+      if (loadTTML(savedTTML, "external")) {
+        // This IS the permanently saved file, so the File tab may offer to delete
+        // it (and nothing else claims it once the TRACK changes).
+        currentLyricsFromSavedTTML = true;
+        refreshFileTabState();
+        return;
+      }
       try {
         await removePermanentTTML(key);
       } catch (error) {
-        console.warn("[SpicyLyrics] Could not remove invalid permanent TTML:", error);
+        console.warn("[AuroraLyrics] Could not remove invalid permanent TTML:", error);
       }
       if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
     }
 
     manualLyricsIsPermanent = false;
-    refreshPermanentDeleteState();
+    refreshFileTabState();
     fetchLRCLyrics(track, key);
   }
 

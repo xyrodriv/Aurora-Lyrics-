@@ -225,15 +225,51 @@
   // Icons.ts — Spicy's transport set has no equivalent — so they are plain 24x24
   // solid paths, square like the chip's own buttons, and Repeat-one carries its
   // state in the glyph rather than needing a second badge.
-  const FS_ICON_SHUFFLE = [
-    { tag: "path", attrs: { d: "M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
-  const FS_ICON_REPEAT = [
-    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
-  const FS_ICON_REPEAT_ONE = [
-    { tag: "path", attrs: { d: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
+  // Thick rounded stroke on the 24 grid, the same drawn weight as the volume
+  // glyphs and the transport's own icons at 22px. Filled heads are the SF
+  // Symbols trick: one solid triangle reads sharper at this size than an open
+  // chevron, and it survives the 1.08 hover scale without turning into a notch.
+  const FS_ICON_STROKE = 2.6;
+  function fsThickIcon(parts) {
+    return parts.map((part) => ({
+      tag: part.tag,
+      attrs: Object.assign(
+        {
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": String(FS_ICON_STROKE),
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        },
+        part.attrs
+      ),
+    }));
+  }
+  // Two crossed rails with a solid head on each right-hand end. The glyph uses
+  // 3..21 of the grid (not the usual 5..19) so it carries the same visual
+  // weight as the Spicy prev/next triangles at the same rendered size.
+  const FS_ICON_SHUFFLE = fsThickIcon([
+    { tag: "path", attrs: { d: "M3 7h3.6l9.4 10h0.8" } },
+    { tag: "path", attrs: { d: "M3 17h3.6l9.4-10h0.8" } },
+    { tag: "path", attrs: { d: "M16.9 13.8 21.6 17 16.9 20.2Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M16.9 3.8 21.6 7 16.9 10.2Z", fill: "currentColor", stroke: "none" } },
+  ]);
+  // Rounded loop, open at the top-left and bottom-right, with heads pointing
+  // along the loop (right at the top, left at the bottom).
+  const FS_ICON_REPEAT = fsThickIcon([
+    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
+    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
+    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
+  ]);
+  // Same loop with the numeral riding inside it, so the state lives in the glyph.
+  const FS_ICON_REPEAT_ONE = fsThickIcon([
+    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
+    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
+    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M10.6 10.6 12.5 9.3V15" } },
+  ]);
   // Spicy Lyrics' Volume SVG, namespaced so it does not collide with the
   // upstream extension if both happen to load. All four sub-paths ship at once
   // and CSS toggles their visibility based on .ym-sl-fs-volume-{muted,low,high}
@@ -480,6 +516,10 @@
   function refreshFsRatingState() {
     const videoId = getCurrentFsVideoId();
     if (!videoId) return;
+    // Keep the dissolve's track identity current. A change that arrived without
+    // a fade (a skip suppressed while repeat-one is on) must become the new
+    // baseline, or its own loop restarts would start dissolving again.
+    if (!fsMediaFadingOut) fsFadeTrackId = videoId;
     if (videoId !== fsCurrentFsVideoId) {
       fsCurrentFsVideoId = videoId;
       if (fsRatings[videoId] === undefined) {
@@ -579,10 +619,12 @@
       overlay.classList.toggle("hidden");
       if (opening && overlay._staggerOpen) overlay._staggerOpen();
     });
-    // Order: Exit (left) · Hide lyrics · Layout · Options (right). Cycling the
-    // layout must never sit next to Exit, or a mis-click exits fullscreen
-    // (AJ, 2026-10-19).
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsLyricsToggle, fsLayoutSelect, fsOptionsButton);
+    // Order: Exit · Options · Layout · Hide lyrics (right). Options sits right
+    // next to Exit so the two most-used controls are adjacent, and cycling the
+    // layout still never sits next to Exit, or a mis-click exits fullscreen
+    // (AJ, 2026-10-19). Hide lyrics expands only in Video Background, so for
+    // every other layout the visible row is exactly Exit · Options · Layout.
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLayoutSelect, fsLyricsToggle);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -639,9 +681,25 @@
     const fsVolumeFill = h("div", { class: "ym-sl-fs-volume-fill" });
     const fsVolumeKnob = h("div", { class: "ym-sl-fs-volume-knob" });
     fsPlayerVolumeRange.append(fsVolumeFill, fsVolumeKnob);
-    // Only the slider remains (the mute button was removed); the wrapper keeps
-    // the border-left divider and spacing beside the chip.
-    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, fsPlayerVolumeRange);
+    // Cover-art layout only: a quiet glyph and a loud glyph bracket the bar so
+    // it reads as a scale instead of a stray line under the transport. They are
+    // markers, not buttons — the slider is the control — so they are hidden from
+    // assistive tech and never take a pointer (see .ym-sl-fs-volume-icon).
+    const volumeLowIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
+      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
+    ]);
+    volumeLowIcon.setAttribute("class", "ym-sl-fs-volume-icon");
+    const volumeHighIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
+      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
+      { tag: "path", attrs: { d: "M17.9 6.6a7.5 7.5 0 0 1 0 10.8" } },
+      { tag: "path", attrs: { d: "M20.6 4.2a11 11 0 0 1 0 15.6" } },
+    ]);
+    volumeHighIcon.setAttribute("class", "ym-sl-fs-volume-icon");
+    // Only the slider remains interactive (the mute button was removed); the
+    // wrapper keeps the border-left divider and spacing beside the chip.
+    const volumeGroup = h("div", { class: "ym-sl-fs-volume-group" }, volumeLowIcon, fsPlayerVolumeRange, volumeHighIcon);
     // Transport wrapped in its own group so the side layout can centre the
     // TRANSPORT on the title. The wrapper is a plain 14px flex row, so every other
     // layout is unchanged: the chip's own gap used to space these buttons, and now
@@ -697,7 +755,11 @@
     // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
     fsPlayerStateTimer = window.setInterval(refreshFullscreenPlayerState, 500);
-    exit.addEventListener("click", exitFullscreenMode);
+    // Wrapped, not passed by reference: a listener receives the MouseEvent as
+    // its first argument, and exitFullscreenMode() reads a truthy `immediate`
+    // as "skip the close animation". This is why the overlay used to vanish
+    // without its fade (AJ, 2026-10-22).
+    exit.addEventListener("click", () => exitFullscreenMode());
     previousButton.addEventListener("click", () => clickPlayerButton("previous"));
     playButton.addEventListener("click", () => clickPlayerButton("play"));
     nextButton.addEventListener("click", () => clickPlayerButton("next"));
@@ -832,10 +894,7 @@
       fsLyricsHidden = !fsLyricsHidden;
       if (fsOverlay) {
         fsOverlay.classList.toggle("ym-sl-fs-lyrics-hidden", fsLyricsHidden);
-        if (fsLyricsHidden) {
-      setFullscreenLyricsShadeTarget(0);
-      fsOverlay.style.setProperty("--ym-sl-fs-lyrics-shade-opacity", "0");
-    }
+        syncFullscreenLyricsShade();
       }
       // Update the LABEL span only. Writing textContent straight onto the
       // button would wipe the icon SVG that now also lives inside it.
