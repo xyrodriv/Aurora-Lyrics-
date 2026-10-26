@@ -1,12 +1,12 @@
 {
   "releases": [
     {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "date": "2026-10-26",
-      "title": "Update notice test",
+      "title": "Update check test, run 2",
       "features": [
-        "Test entry for the in-extension update notice. This is not a real release.",
-        "If you can read this inside the extension, the update check works."
+        "Bumped to 1.0.2 so a dismissed 1.0.1 cannot hide this card.",
+        "If this says v1.0.2, the extension is reading the changelog on GitHub and the notice works."
       ],
       "fixes": []
     },
