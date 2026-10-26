@@ -602,6 +602,16 @@
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
 body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
+/* The engine draws every line twice: the real one, plus a blurred backdrop copy
+   that scrolls between the lines. That copy sets visibility:visible on itself,
+   and a visible descendant still paints inside a visibility:hidden ancestor -
+   so once a word-by-word track handed the panel back to the built-in renderer,
+   the engine's leftover backdrop lines kept drawing as ghosts behind the real
+   ones (AJ, 2026-10-26). Hide them whenever the engine is not the active
+   renderer; the host's own visibility still governs everything while it is. */
+body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLine) {
+  visibility: hidden !important;
+}
 /* Credits footer (Written By / Lyrics provided by / Uploaded by / Made by) goes
    into the engine's own bottom-line slot, so it scrolls with the lyrics as the
    last block - the same behaviour as the built-in renderer. The engine watches
@@ -613,6 +623,16 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 #ym-sl-amll-host .FmKaba_bottomLineWrapper {
   filter: none !important;
   opacity: 1 !important;
+}
+/* In a duet song the engine reserves 15% on the opposite side of every line that
+   is NOT a duet line, so the two voices never collide. The bottom line is not a
+   lyric line - it carries the credits - but it matched that selector too, so the
+   footer stopped 15% short of the right-aligned last line above it. Give it the
+   same right padding a duet line has, and the credits line up with the words. */
+#ym-sl-amll-host .FmKaba_hasDuetLine .FmKaba_bottomLine {
+  /* The normal line's .2em, but the bottom line sets its own font size to .7em,
+     so divide by that to land on the same pixel value the duet line uses. */
+  padding-right: calc(.2em / .7) !important;
 }
 /* The host stamps its karaoke face onto EVERYTHING inside it: 700 weight plus a
    0.6px text stroke, in a 1.2 line box. That is right for the lyrics and wrong
