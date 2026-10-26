@@ -1,7 +1,17 @@
 {
   "releases": [
     {
-      "version": "0.1.0",
+      "version": "1.0.1",
+      "date": "2026-10-26",
+      "title": "Update notice test",
+      "features": [
+        "Test entry for the in-extension update notice. This is not a real release.",
+        "If you can read this inside the extension, the update check works."
+      ],
+      "fixes": []
+    },
+    {
+      "version": "1.0.0",
       "date": "2026-10-26",
       "title": "Aurora Lyrics, from the start.",
       "features": [
