@@ -32,16 +32,15 @@ add-ons.
   the panel and apply a match to the track you are playing.
 - **Companion add-ons** (managed from the in-app marketplace panel):
   - **Apple Music Style** — the frosted player bar, wider lyrics column and type
-  - **Aurora Bloom** — dynamic Kawarp backdrop built from the artwork
-  - **Ambient** — artwork glow and a matching player tint
+  - **Aurora Bloom** — dynamic Kawarp backdrop built from the artwork, with the
+    artwork's colour tinting the player bar
   - **Aurora Flow** — smooth motion across the interface
   - **Sleep Timer** — fade out, then pause
   - **PiP Lyrics** — always-on-top lyrics window
-  - **Share a Lyric** — export the current line as a card or clip
-  - **Next Up** — what plays next, in a pill beside the artwork
+  - **Next Up** — what plays next, in the player bar
   - **Song Notes** — per-song notes saved in your browser
-  - Plus optional **snippets**: track-change notification, copy lyrics, centered
-    home, Now Playing panel, and arrow-key seeking
+  - Plus optional **snippets**: track-change notification, centered home, Now
+    Playing panel, and arrow-key seeking
 
 ## Installation
 
@@ -64,8 +63,8 @@ There is nothing else to install. Every add-on ships inside the extension and is
 installed, switched and configured from the in-app marketplace panel; each one
 is a plain script registered through the same `window.YTMod` bridge, so they can
 be enabled and disabled without reloading the extension. On a fresh profile the
-lyrics renderer and **Aurora Bloom** install and enable themselves; everything
-else is opt-in.
+lyrics renderer, **Aurora Bloom**, **Aurora Flow** and **Centered home** install
+and enable themselves; everything else is opt-in.
 
 ## Project structure
 
@@ -94,12 +93,10 @@ Aurora Lyrics/
     │   ├── aurora-lyrics.js   # GENERATED from src/aurora-lyrics/ — do not edit
     │   ├── amll-core.js       # Apple-Music-style lyric engine
     │   ├── kawarp-core.js     # Kawarp WebGL backdrop
-    │   ├── dynamic.js         # Aurora Bloom
-    │   ├── artwork-accent.js  # Ambient
+    │   ├── dynamic.js         # Aurora Bloom (backdrop + artwork accent)
     │   ├── smooth-motion.js   # Aurora Flow
     │   ├── sleep-timer.js
     │   ├── pip-lyrics.js
-    │   ├── share-lyric.js
     │   ├── next-up.js
     │   ├── song-notes.js
     │   ├── snippet-*.js       # Standalone tweaks

@@ -508,6 +508,37 @@
     recentreActiveLineNow();
   }
 
+  /* A playhead that jumped BACKWARDS (repeat-one restarting the track, or any
+     seek longer than PLAYHEAD_JUMP_MS) needs the same handling as (1) above,
+     and for the same reason: the scroll is stale relative to the playhead.
+
+     At the end of a track the scroll is pinned to the credits, and on the next
+     pass there is no active line at all until the first lyric starts - so the
+     normal line-follow retarget has nothing to aim at and the panel sat on the
+     credits for the whole intro, then glided the entire song height in one
+     sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
+     Place it NOW, on the line the new position belongs to (the first line when
+     the pass starts in an intro), and do not animate: the user did not scroll,
+     the track restarted. */
+  function restartPlayheadScroll(lyricPositionMs) {
+    cancelCreditsReveal();
+    lastScrollTargetLine = -1;
+    // A restart is a new pass through the song, so the manual-browse state and
+    // its "Jump to current" button do not survive it.
+    manualScrollActive = false;
+    setJumpButtonVisible(false);
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    if (!lineScrollEl || staticLyricsActive || pausePickMode) return;
+    const index = findLineIndexAt(lyricPositionMs);
+    const element = index >= 0 ? lineElements[index] : lineElements[0];
+    if (!element) return;
+    pendingInstantScroll = true;
+    scrollActiveLineIntoView(element, true);
+  }
+
   // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
   // its tail. Returns true while the reveal owns the scroll target this frame, so
   // animate() can skip the normal line-follow retarget and let the credits glide

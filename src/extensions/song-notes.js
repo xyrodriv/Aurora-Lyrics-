@@ -27,6 +27,15 @@
   const UNDO_LIMIT = 80;
   const TS_LINE = /^\s*\[(\d{1,3}:\d{2}(?::\d{2})?)\]\s*(.*)$/;
 
+  // Bar glyph (see addPlayerBarButton.iconParts): a note page with its lines, at
+  // the bar's 2.4 round weight. The other icons in this file stay Material paths
+  // because they are drawn at 16px inside our own popup, not in the bar.
+  const ICON_NOTE_PARTS = [
+    { d: "M6.4 3.6h11.2a2.8 2.8 0 0 1 2.8 2.8v11.2a2.8 2.8 0 0 1-2.8 2.8H6.4a2.8 2.8 0 0 1-2.8-2.8V6.4a2.8 2.8 0 0 1 2.8-2.8Z" },
+    { d: "M7.8 8.4h8.4", width: 2.2 },
+    { d: "M7.8 12h8.4", width: 2.2 },
+    { d: "M7.8 15.6h5.4", width: 2.2 },
+  ];
   const ICON_EDIT = "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z";
   const ICON_LIB = "M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z";
 
@@ -1251,8 +1260,7 @@
       buttonHandle = window.YTMod.addPlayerBarButton({
         id: "song-notes",
         label: "Song notes",
-        // Material "sticky_note_2" - one filled 24x24 path, as required.
-        iconSvgPath: "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14H7v-2h5v2zm3-4H7v-2h8v2zm0-4H7V7h8v2z",
+        iconParts: ICON_NOTE_PARTS,
         onClick: togglePopup,
       });
     }

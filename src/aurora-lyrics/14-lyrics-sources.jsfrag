@@ -794,15 +794,16 @@
     if (!body || typeof body !== "object") return null;
     const source = typeof body.source === "string" ? body.source.trim().toLowerCase() : "";
     const attr = body && body.UploadAttribution;
-    // Only community syncs carry people. Everything else has a provider and no
-    // one else to credit. A response with no `source` at all is treated as a
-    // community sync: this function only ever runs on a Spicy API response, so
-    // an absent source means an older/partial payload, not an unknown provider.
-    const community = !source || source === "spicy_lyrics";
-    // Same reasoning: the provider is Spicy Lyrics whenever the source is
-    // missing. "Always display the provider" is the binding half of the rule, so
-    // it must never come back empty from an API result.
-    const provider = spicyProviderLabel(source) || "Spicy Lyrics";
+    // Only a community sync carries people, and only a response that SAYS it is
+    // one may be credited as one. An absent `source` means we do not know what
+    // answered, so we do not guess: ToS s6 says to call the source unknown
+    // rather than attribute the data to anyone, and that includes assuming it
+    // came through Spicy Lyrics just because that is the API we called.
+    const community = source === "spicy_lyrics";
+    // "Always display the provider" is the binding half of the rule, so the
+    // credit must never come back empty. It may not be invented either, hence
+    // the explicit unknown label when the response names no source.
+    const provider = source ? spicyProviderLabel(source) : "Unknown source";
     const uploader = community ? attributionPerson(attr && attr.Uploader) : null;
     const maker = community ? attributionPerson(attr && attr.Maker) : null;
     if (!provider && !uploader && !maker) return null;

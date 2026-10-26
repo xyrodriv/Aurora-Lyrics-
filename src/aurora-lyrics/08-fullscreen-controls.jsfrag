@@ -905,6 +905,7 @@
     fsOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
     });
+    attachFineOffsetDrag(fsOffsetRange);
     let savedMode = "side";
     try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
     const hasVideo = !!findPlayerVideo();

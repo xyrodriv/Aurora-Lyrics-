@@ -89,6 +89,15 @@
   let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
+  // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
+  // cover-art side layout. "right" is the composition the overlay shipped
+  // with (art left, words right); "left" mirrors it. Cover art only — the
+  // hover button that sets it is not built for music videos.
+  let fsCoverSide = "right";
+  let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
+  let fsCoverFlipTimer = 0; // drops the flip transition helper class
+  let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
+  let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
   let fsControls = null;
   let fsLayoutSelect = null;
   let fsOptionsButton = null;
@@ -224,6 +233,13 @@
   const RECENTRE_WINDOW_MS = 600;
   let lastFrameTime = performance.now();
   let lastActiveLine = -1;
+  // Whether the depth-blur pass last ran in Low mode. A mode switch changes what
+  // the pass writes (see 19-animation-modes), so it has to re-rank every line
+  // immediately instead of waiting for the next line boundary.
+  let lastDepthBlurLow = false;
+  // Last offset-adjusted playhead. A large backwards step between frames is a
+  // seek or a repeat-one restart, handled by restartPlayheadScroll().
+  let lastLyricPositionMs = -1;
   let manualScrollActive = false;
   // After the user scrolls/keys away to browse lyrics, automatically return to
   // the active line if they stop interacting this long.
@@ -360,9 +376,10 @@
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
     // On-device English translation of non-English lines (Chrome 138+ desktop).
-    // OFF by default: the first foreign song would otherwise download a language
-    // pack and add a second line of text to lyrics the user already knows.
-    autoTranslate: false,
+    // ON by default (AJ, 2026-10-26): a song in a language you don't read is the
+    // one case where the second line is the point. The model download is what
+    // the switch costs, and only a foreign line starts it.
+    autoTranslate: true,
     legibilityBackdrop: false,
     // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
     // prefers the eased glide into the active line. (It was flipped OFF on
@@ -435,6 +452,14 @@
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
     sourceOrder: ["spicy", "lrclib"],
+    // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
+    // content script (not by this add-on) and mirrored into every add-on's
+    // settings payload, so the page backdrop, the Now Playing rail and this
+    // fullscreen view all agree. "ultra" is the untouched product; "normal"
+    // caps Kawarp at 30fps (24 on the rail) and stops live-video sampling;
+    // "low" runs Kawarp at 24fps, leaves the rail without a backdrop and drops
+    // the blur from the shade under the lyrics (the shade stays).
+    performanceMode: "ultra",
   };
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
@@ -457,6 +482,49 @@
     return out;
   }
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
+
+  // ---- performance modes ------------------------------------------------
+  // The mapping lives here and is duplicated ONLY in the two add-ons that own
+  // their own Kawarp (dynamic.js, snippet-npv-panel.js) because they are separate
+  // scripts with separate settings envelopes.
+  const PERFORMANCE_MODES = ["ultra", "normal", "low"];
+
+  function normalizePerformanceMode(value) {
+    const mode = String(value || "").toLowerCase();
+    return PERFORMANCE_MODES.indexOf(mode) === -1 ? "ultra" : mode;
+  }
+
+  function kawarpFpsForPerformance() {
+    const mode = currentSettings.performanceMode;
+    return mode === "low" ? 24 : mode === "normal" ? 30 : 0; // 0 = uncapped
+  }
+
+  function videoSamplingAllowed() {
+    return currentSettings.performanceMode === "ultra";
+  }
+
+  // Everything this side owns that a mode changes: the fullscreen Kawarp's frame
+  // rate, whether it may sample the live video, and the shade under the lyrics
+  // (Low keeps the darkening, drops only the backdrop blur that costs a full-pane
+  // composite every frame — see body.ym-sl-perf-low in 05-styles).
+  function applyPerformanceMode() {
+    document.body.classList.toggle("ym-sl-perf-low", currentSettings.performanceMode === "low");
+    if (fsKawarp) {
+      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+    }
+    if (!fsKawarpActive || !fsKawarp || videoSamplingAllowed() || !fsKawarpVideoEl) return;
+    // A running video feed must not survive a mode that forbids sampling. The
+    // artwork takes over in place (loadImage, no restart) so no second canvas
+    // is ever created.
+    const track = getCurrentTrack();
+    const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
+    fsKawarpVideoEl = null;
+    if (artUrl) {
+      fsKawarpArtUrl = hiResArt(artUrl);
+      try { fsKawarp.loadImage(fsKawarpArtUrl); } catch (_) {}
+    }
+    applyStaticVideoBackdrop();
+  }
 
   // ---- Custom lyrics font (AJ, 2026-10-20) -----------------------------------
   // `customFont` is the src descriptor of a user-supplied @font-face (already
@@ -607,6 +675,7 @@
       currentSettings.joinBgSyllables,
       DEFAULT_SETTINGS.joinBgSyllables
     );
+    currentSettings.performanceMode = normalizePerformanceMode(currentSettings.performanceMode);
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale
     // relative path, javascript:, an SVG (which can smuggle markup) — is dropped
@@ -635,6 +704,7 @@
     // re-publish would be a silent no-op (AJ, 2026-10-07).
     try { publishRendererKit(true); } catch (e) {}
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    applyPerformanceMode();
     // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
     // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
     // being installed (AJ, 2026-10-22).

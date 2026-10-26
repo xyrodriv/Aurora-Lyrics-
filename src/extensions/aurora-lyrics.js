@@ -1386,6 +1386,15 @@
   let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
+  // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
+  // cover-art side layout. "right" is the composition the overlay shipped
+  // with (art left, words right); "left" mirrors it. Cover art only — the
+  // hover button that sets it is not built for music videos.
+  let fsCoverSide = "right";
+  let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
+  let fsCoverFlipTimer = 0; // drops the flip transition helper class
+  let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
+  let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
   let fsControls = null;
   let fsLayoutSelect = null;
   let fsOptionsButton = null;
@@ -1521,6 +1530,13 @@
   const RECENTRE_WINDOW_MS = 600;
   let lastFrameTime = performance.now();
   let lastActiveLine = -1;
+  // Whether the depth-blur pass last ran in Low mode. A mode switch changes what
+  // the pass writes (see 19-animation-modes), so it has to re-rank every line
+  // immediately instead of waiting for the next line boundary.
+  let lastDepthBlurLow = false;
+  // Last offset-adjusted playhead. A large backwards step between frames is a
+  // seek or a repeat-one restart, handled by restartPlayheadScroll().
+  let lastLyricPositionMs = -1;
   let manualScrollActive = false;
   // After the user scrolls/keys away to browse lyrics, automatically return to
   // the active line if they stop interacting this long.
@@ -1657,9 +1673,10 @@
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
     // On-device English translation of non-English lines (Chrome 138+ desktop).
-    // OFF by default: the first foreign song would otherwise download a language
-    // pack and add a second line of text to lyrics the user already knows.
-    autoTranslate: false,
+    // ON by default (AJ, 2026-10-26): a song in a language you don't read is the
+    // one case where the second line is the point. The model download is what
+    // the switch costs, and only a foreign line starts it.
+    autoTranslate: true,
     legibilityBackdrop: false,
     // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
     // prefers the eased glide into the active line. (It was flipped OFF on
@@ -1732,6 +1749,14 @@
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
     sourceOrder: ["spicy", "lrclib"],
+    // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
+    // content script (not by this add-on) and mirrored into every add-on's
+    // settings payload, so the page backdrop, the Now Playing rail and this
+    // fullscreen view all agree. "ultra" is the untouched product; "normal"
+    // caps Kawarp at 30fps (24 on the rail) and stops live-video sampling;
+    // "low" runs Kawarp at 24fps, leaves the rail without a backdrop and drops
+    // the blur from the shade under the lyrics (the shade stays).
+    performanceMode: "ultra",
   };
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
@@ -1754,6 +1779,49 @@
     return out;
   }
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
+
+  // ---- performance modes ------------------------------------------------
+  // The mapping lives here and is duplicated ONLY in the two add-ons that own
+  // their own Kawarp (dynamic.js, snippet-npv-panel.js) because they are separate
+  // scripts with separate settings envelopes.
+  const PERFORMANCE_MODES = ["ultra", "normal", "low"];
+
+  function normalizePerformanceMode(value) {
+    const mode = String(value || "").toLowerCase();
+    return PERFORMANCE_MODES.indexOf(mode) === -1 ? "ultra" : mode;
+  }
+
+  function kawarpFpsForPerformance() {
+    const mode = currentSettings.performanceMode;
+    return mode === "low" ? 24 : mode === "normal" ? 30 : 0; // 0 = uncapped
+  }
+
+  function videoSamplingAllowed() {
+    return currentSettings.performanceMode === "ultra";
+  }
+
+  // Everything this side owns that a mode changes: the fullscreen Kawarp's frame
+  // rate, whether it may sample the live video, and the shade under the lyrics
+  // (Low keeps the darkening, drops only the backdrop blur that costs a full-pane
+  // composite every frame — see body.ym-sl-perf-low in 05-styles).
+  function applyPerformanceMode() {
+    document.body.classList.toggle("ym-sl-perf-low", currentSettings.performanceMode === "low");
+    if (fsKawarp) {
+      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+    }
+    if (!fsKawarpActive || !fsKawarp || videoSamplingAllowed() || !fsKawarpVideoEl) return;
+    // A running video feed must not survive a mode that forbids sampling. The
+    // artwork takes over in place (loadImage, no restart) so no second canvas
+    // is ever created.
+    const track = getCurrentTrack();
+    const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
+    fsKawarpVideoEl = null;
+    if (artUrl) {
+      fsKawarpArtUrl = hiResArt(artUrl);
+      try { fsKawarp.loadImage(fsKawarpArtUrl); } catch (_) {}
+    }
+    applyStaticVideoBackdrop();
+  }
 
   // ---- Custom lyrics font (AJ, 2026-10-20) -----------------------------------
   // `customFont` is the src descriptor of a user-supplied @font-face (already
@@ -1904,6 +1972,7 @@
       currentSettings.joinBgSyllables,
       DEFAULT_SETTINGS.joinBgSyllables
     );
+    currentSettings.performanceMode = normalizePerformanceMode(currentSettings.performanceMode);
     // Custom lyrics font normalisation. Only a safe src survives: an https: URL or
     // a base64 data: URL whose MIME is a real font type. Anything else — a stale
     // relative path, javascript:, an SVG (which can smuggle markup) — is dropped
@@ -1932,6 +2001,7 @@
     // re-publish would be a silent no-op (AJ, 2026-10-07).
     try { publishRendererKit(true); } catch (e) {}
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    applyPerformanceMode();
     // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
     // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
     // being installed (AJ, 2026-10-22).
@@ -2373,55 +2443,41 @@
       pointer-events: none;
     }
     */
-    .ym-sl-tools {
-      position: absolute;
-      top: 2px;
-      right: 14px;
-      left: 14px;
-      z-index: 20;
+    /* Options: a pill beside content.js's song-layout switcher, in the empty
+       band above both panels (AJ, 2026-10-26). It replaces the hover-revealed
+       row that used to live on the panel's own top edge, where nobody who had
+       not already found it would look. Same shell as the pill next to it, so
+       the pair reads as one control group; the label is SpicyLyrics because
+       this is our chrome, not YouTube's. */
+    .ym-sl-options-pill {
       display: flex;
       align-items: center;
-      gap: 6px;
-      min-height: 30px;
-      padding: 8px 0;
-      pointer-events: auto;
-      opacity: 0;
-      transition: opacity .2s ease;
-    }
-    .ym-sl-tools:hover,
-    .ym-sl-tools:focus-within { opacity: 1; }
-    /* At short widths the action row behaves like YT Music's tab strip:
-       controls stay in one horizontal rail and the arrows move the rail
-       left/right instead of clipping Fullscreen or Offset off-screen. */
-    .ym-sl-tools-scroll {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex: 1 1 auto;
-      min-width: 0;
-      overflow-x: auto;
-      overflow-y: hidden;
-      scroll-behavior: smooth;
-      scrollbar-width: none;
-    }
-    .ym-sl-tools-scroll::-webkit-scrollbar { display: none; }
-    .ym-sl-tools-arrow {
-      display: none;
-      flex: 0 0 26px;
-      width: 26px;
-      min-height: 30px;
-      padding: 0;
-      border: 1px solid rgba(255,255,255,.14);
-      border-radius: 7px;
-      background: rgba(255,255,255,.07);
-      color: rgba(255,255,255,.9);
-      font: inherit;
-      font-size: 18px;
+      gap: 7px;
+      height: 28px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09);
+      color: rgba(255, 255, 255, .72);
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .01em;
       line-height: 1;
       cursor: pointer;
-      pointer-events: auto;
+      transition: background .18s ease, color .18s ease, box-shadow .18s ease;
     }
-    .ym-sl-tools-arrow:hover { background: rgba(255,255,255,.16); }
+    .ym-sl-options-pill:hover {
+      background: rgba(255, 255, 255, .1);
+      color: #fff;
+    }
+    .ym-sl-options-pill:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .6);
+      outline-offset: 2px;
+    }
     /* Consolidated options overlay. Holds track / offset / import so the toolbar
        is just [Options] [Fullscreen]. Lives on <body> (see buildUI). The fullscreen
        options overlay reuses the same chrome but with a higher z-index so it
@@ -2813,7 +2869,6 @@
        its own line so nothing overflows the 340px panel. */
     .ym-sl-options-body .ym-sl-video-offset { flex-wrap: wrap; row-gap: 8px; }
     .ym-sl-options-body .ym-sl-video-offset input[type="range"] { width: 100%; min-width: 0; }
-    .ym-sl-options-button { white-space: nowrap; }
     /* Cache section: a short status line above the purge button. */
     .ym-sl-cache-section { gap: 10px; }
     .ym-sl-cache-status {
@@ -3095,6 +3150,17 @@
     }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
       left: 52.5%;
+    }
+    /* Low performance mode: the shade keeps its darkening and loses its blur.
+       backdrop-filter is a render surface that has to be re-rasterized whenever
+       anything underneath changes, and in the video background layout what is
+       underneath is a live 24fps picture - so this single rule is the most
+       expensive effect left in fullscreen (see DEVELOPERS/RENDERING-CPU-VS-GPU.txt,
+       "backdrop-filter (GPU, but expensive)"). The black gradient is what carries
+       readability; the frost is the part that costs (AJ, 2026-10-26). */
+    body.ym-sl-perf-low .ym-sl-fs-lyrics-shade {
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
       position: relative;
@@ -5274,8 +5340,6 @@
       display: flex;
       overflow: hidden;
     }
-    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
-    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
     .ym-sl-track { 
       min-width: 0;
       flex: 1 1 auto;
@@ -5842,32 +5906,10 @@
         transform: translateY(0) scale(.82);
       }
     }
-    /* YT Music-style arrows are only needed below 1920x1080. At or above
-       that resolution the complete options row stays clean and arrow-free. */
-    @media (max-width: 1919px), (max-height: 1079px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        display: block;
-      }
-    }
     /* Lower-resolution YTM pages can have a short viewport where the native
        tab row is clipped by the player/header stack. Keep the existing panel
        mount, but reserve a compact top-safe position for the tab controls. */
     @media (max-height: 700px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
-        top: 0;
-        right: 8px;
-        left: 8px;
-        min-height: 26px;
-        padding: 4px 0;
-        gap: 4px;
-      }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 6px; }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        flex-basis: 24px;
-        width: 24px;
-        min-height: 26px;
-        font-size: 16px;
-      }
       #ym-sl-panel.SpicyRenderer .ym-sl-import,
       #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
       #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
@@ -5876,18 +5918,6 @@
       }
     }
     @media (max-height: 560px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
-        min-height: 22px;
-        padding: 2px 0;
-        gap: 3px;
-      }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 4px; }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        flex-basis: 21px;
-        width: 21px;
-        min-height: 22px;
-        font-size: 14px;
-      }
       #ym-sl-panel.SpicyRenderer .ym-sl-import,
       #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
       #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
@@ -7262,7 +7292,6 @@
        moves it in from <body> and puts it back on close.
        NO BACKTICKS ANYWHERE IN THIS BLOCK -- it lives inside a template literal. */
     .ym-sl-panel.ym-pip-open .LyricsContainer,
-    .ym-sl-panel.ym-pip-open .ym-sl-tools,
     .ym-sl-panel.ym-pip-open .ym-sl-jump { display: none !important; }
     .ym-pip-open-view {
       position: absolute;
@@ -7348,7 +7377,216 @@
       pointer-events: auto;
     }
 
+    /* ===== artwork hover button =========================================
+       Pointing at the cover dims it and fades in ONE round button at its top
+       edge. The button is a toggle, not a menu: its glyph shows the two panes
+       and which side the words are on, and clicking it swaps them. The hover
+       box IS the artwork's own box - same min(100%, 54vh) square, same 4vh
+       downward nudge, same 16px radius as .ym-sl-fs-media > img - so the dim
+       ends exactly at the art's edge instead of tinting the empty column
+       around it. Cover-art side layout only: the button switches a
+       composition nothing else has, and landscape only - the portrait layout
+       turns the art into a corner card the side swap does not apply to, so the
+       button is not rendered there at all. */
+    .ym-sl-fs-art-ui { display: none; }
+    @media (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: min(100%, 54vh);
+        aspect-ratio: 1 / 1;
+        max-width: 100%;
+        max-height: 100%;
+        padding-top: 12px;
+        box-sizing: border-box;
+        transform: translate(-50%, calc(-50% + 4vh));
+        border-radius: 16px;
+        background: rgba(0, 0, 0, 0);
+        transition: background .22s ease;
+        z-index: 4;
+      }
+      /* Idle is exempt on purpose: the class lands after 2s without input, and
+         a pointer resting on the art still reports :hover - without this the
+         button would stay up over a hidden cursor forever. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
+        background: rgba(0, 0, 0, .42);
+      }
+      /* A click pins both for the length of the move: the artwork slides out
+         from under the pointer, so a hover-only reveal blinked the button away
+         on the first frame of the transition. When the helper class drops the
+         base transition takes over and fades the button out over .18s instead
+         of cutting it. */
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+        background: rgba(0, 0, 0, .42);
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        transition-delay: 0s;
+      }
+    }
+    .ym-sl-fs-art-swap {
+      -webkit-appearance: none;
+      appearance: none;
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      margin: 0;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, .18);
+      border-radius: 50%;
+      background: rgba(14, 14, 18, .46);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+      backdrop-filter: blur(16px) saturate(1.4);
+      color: #fff;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-6px) scale(.92);
+      transition:
+        opacity .18s ease,
+        transform .24s cubic-bezier(.22, .61, .36, 1),
+        background .15s ease,
+        border-color .15s ease,
+        visibility 0s linear .18s;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover .ym-sl-fs-art-swap {
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-art-swap:hover {
+      background: rgba(32, 32, 38, .62);
+      border-color: rgba(255, 255, 255, .28);
+    }
+    .ym-sl-fs-art-swap:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .72);
+      outline-offset: 2px;
+    }
+    .ym-sl-fs-art-swap-icon {
+      display: block;
+      width: 22px;
+      height: 22px;
+      transform-origin: 50% 50%;
+      transition: transform .18s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-art-swap:active .ym-sl-fs-art-swap-icon { transform: scale(.86); }
+    /* The glyph swap runs on the SAME clock and curve as the layout move (0.45s
+       cubic-bezier(.22,.61,.36,1)), so the icon and the cover art travel as one
+       gesture. The two panes cross over each other in the middle - the filled
+       one is always the words - which is what makes the direction readable
+       without a label. */
+    .ym-sl-fs-art-swap-art,
+    .ym-sl-fs-art-swap-words {
+      transition: transform .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-art-swap-art {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.6;
+      opacity: .62;
+    }
+    .ym-sl-fs-art-swap-words {
+      fill: currentColor;
+      stroke: none;
+    }
+    .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
+    .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
+
+    /* ===== cover-art flip: lyrics on the left ===========================
+       Every number here is the mirror image of the rule it overrides - the
+       2/50 art column, the 44/54 lyric column and the 27% art midpoint - so
+       change them together. The transport column is pinned to the art's own
+       box (left 27% minus half, width two halves), which is why the mirror is
+       the same expression measured from 73%.
+       Landscape only: the portrait composition shrank the art to a corner
+       card, where there is no side left to swap. */
+    @media (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        left: 48%;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 2%;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        left: calc(73% - min(25%, 27vh));
+      }
+      /* The readability shade lives on the lyric side and fades towards the
+         art, so the mirror flips its box AND its gradient. Those two are NOT
+         part of the layout flip: it gets its own class, applied by JS once the
+         panel has faded out (see setFsShadeSide in 07). Flipping them with the
+         layout swung the gradient's dark end from the screen edge to 44% - the
+         middle of the frame - on the first frame, while the panel was still
+         fully visible, and that read as the shadow darting to the centre. */
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade.ym-sl-fs-shade-left {
+        left: 0;
+        right: 44%;
+        background: linear-gradient(
+          270deg,
+          transparent 0%,
+          rgba(0, 0, 0, .16) 14%,
+          rgba(0, 0, 0, .62) 52%,
+          rgba(0, 0, 0, .9) 100%
+        );
+        -webkit-mask-image: linear-gradient(270deg, transparent 0, rgba(0, 0, 0, .5) 8%, #000 24%, #000 100%);
+        mask-image: linear-gradient(270deg, transparent 0, rgba(0, 0, 0, .5) 8%, #000 24%, #000 100%);
+      }
+    }
+    /* The flip helper class only exists for the 480ms the JS holds it. The two
+       panes and the cover art already transition left; the transport column
+       does not, so without this it would snap while the picture glided. */
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      transition: left .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The media host's own transition is opacity-only (set by the track-change
+       dissolve further up, which deliberately overrides the base left/width
+       list), so the ARTWORK needs its left handed back for the length of the
+       flip or the cover would snap to the other side while the words glided. */
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      transition:
+        opacity .25s ease,
+        left .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The readability shade is LIGHT, not an object: it does not slide, drop,
+       stretch or pop. It fades out where it is, waits for the columns to
+       finish crossing, and only then fades back in on its new side - the move
+       itself is the only motion in the frame, which is what keeps the swap
+       readable. Any travel at all would drag a dark frosted band across the
+       artwork at the midpoint, where the two columns overlap completely.
+       The fade-out is FAST and front-loaded - gone in about 96ms - because the
+       columns start moving on the first frame and their curve is front-loaded
+       too: a slow fade left a half-visible band sitting around the middle of
+       the screen while the words had already left it. It does NOT change sides
+       here either: JS applies the shade's side class at 120ms, once the panel
+       is invisible (see setFsShadeSide). The fade-in waits until 58% - the
+       0.45s layout move has landed by then - and runs over ~220ms, which is why
+       this lives on its own longer class instead of the flip's: the flip is
+       over long before the shadow comes back. */
+    .ym-sl-fs-overlay.ym-sl-fs-shade-swap:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+      animation: ym-sl-fs-shade-dissolve .8s linear both;
+    }
+    @keyframes ym-sl-fs-shade-dissolve {
+      0% {
+        opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+        animation-timing-function: cubic-bezier(.25, .4, .4, 1);
+      }
+      12%, 58% { opacity: 0; }
+      86%, 100% { opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0); }
+    }
+
   `;
+
+  /* Options lives beside the song-layout pill in the empty band above the two
+     panels, so the tab watcher owns re-mounting it when content.js rebuilds that
+     picker. Module scope, like jumpButton. */
+  let optionsButton = null;
 
   function findTabBar() {
     return (
@@ -7393,6 +7631,10 @@
   function runTabWatcher() {
     tabWatchRaf = 0;
     if (tabWatcherNeedsMount()) scheduleMountTab();
+    // content.js owns the layout picker this pill sits beside. A rebuild takes
+    // the pill with it, and a detached pill is the only case that costs a
+    // querySelector — connected is one property read per mutation batch.
+    if (optionsButton && !optionsButton.isConnected) mountOptionsPill();
   }
   function onWatchMutations() {
     if (tabWatchRaf) return;
@@ -7587,24 +7829,28 @@
     videoOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
     });
+    attachFineOffsetDrag(videoOffsetRange);
     videoOffsetNumber.addEventListener("input", () => {
       const seconds = parseFloat(videoOffsetNumber.value);
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
     });
 
-    const optionsButton = h("button", {
-      class: "ym-sl-import ym-sl-options-button",
+    // Options is a pill beside the song-layout switcher, in the empty band
+    // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
+    // across the panel's own top edge, which only appeared for people who
+    // already knew to sweep the pointer there — AJ's friend went looking and
+    // found nothing. Here it is always on screen, on the left of a control
+    // that is also about the song view, and it cannot collide with the tab
+    // labels or push them aside. content.js builds the container; see
+    // mountOptionsPill().
+    optionsButton = h("button", {
+      class: "ym-sl-options-pill",
       type: "button",
       title: "Lyrics options — offset, import, and more",
       "aria-label": "Open lyrics options",
+      "aria-haspopup": "dialog",
       text: "Options",
     });
-    // NOTE: the panel's own "Fullscreen" button was removed here (AJ, 2026-10-02):
-    // new users reach for YouTube Music's native fullscreen button, and that
-    // button is wired to OUR fullscreen, so the panel duplicate only added a
-    // second way in. enterFullscreenMode() is still reachable via the YTM path.
-    const toolsScroll = h("div", { class: "ym-sl-tools-scroll" }, optionsButton);
-    const tools = h("div", { class: "ym-sl-tools" }, toolsScroll);
 
     // The remaining controls (track, offset, import mode, upload) moved out of
     // the toolbar into a draggable overlay. The overlay is a child of <body> on
@@ -7895,8 +8141,24 @@
       staggerIn(optionsRail, true);
       staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
     };
+    // The card opens under the button. It used to appear at the viewport's
+    // top-right because that is where its button was; a card that materialises
+    // somewhere else than the click reads as a different feature. Clamped so a
+    // narrow window cannot push it off-screen.
+    function anchorOptionsCard() {
+      const rect = optionsButton.getBoundingClientRect();
+      const width = optionsOverlay.offsetWidth || 430;
+      const height = optionsOverlay.offsetHeight || 320;
+      const left = Math.min(Math.max(12, rect.left - 6), Math.max(12, innerWidth - width - 12));
+      const top = Math.min(Math.max(12, rect.bottom + 10), Math.max(12, innerHeight - height - 12));
+      optionsOverlay.style.left = left + "px";
+      optionsOverlay.style.top = top + "px";
+      optionsOverlay.style.right = "auto";
+      optionsOverlay.style.bottom = "auto";
+    }
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
+      if (opening) anchorOptionsCard();
       optionsOverlay.classList.toggle("hidden");
       if (opening) {
         refreshFileTabState();
@@ -7921,7 +8183,7 @@
     scrollContainer.appendChild(linesRoot);
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
-    panelEl.append(tools, fileInput, lyricsContainer, jumpButton);
+    panelEl.append(fileInput, lyricsContainer, jumpButton);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -7943,6 +8205,7 @@
     document.body.appendChild(panelEl);
     refreshTrack();
     mountTab();
+    mountOptionsPill();
     startTick();
 
     const watchRoot = document.querySelector("ytmusic-app") ||
@@ -7951,6 +8214,14 @@
       wpObserver = new MutationObserver(onWatchMutations);
       wpObserver.observe(watchRoot, { childList: true, subtree: true });
     }
+  }
+
+  function mountOptionsPill() {
+    const host = document.querySelector(".ym-song-layout");
+    if (!host || !optionsButton) return;
+    if (optionsButton.parentElement === host) return;
+    // First child, so the pill sits to the LEFT of the layout switcher.
+    host.insertBefore(optionsButton, host.firstChild);
   }
 
   function mountPanel(bar) {
@@ -8408,6 +8679,9 @@
     lyrics: "Lyrics Only",
   };
   const FS_LAYOUT_ORDER = ["side", "background", "lyrics"];
+  // Remembered across entries like the layout mode itself: the side is a
+  // preference, not a per-song state.
+  const FS_COVER_SIDE_KEY = "better_lyrics_fullscreen_cover_side_v1";
 
   function hasFsVideo() {
     return !!(fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video"));
@@ -8487,6 +8761,146 @@
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
     recentreActiveLine();
+  }
+
+  /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------
+     The cover-art side layout has two mirror images, and the artwork's own
+     hover surface is where the choice belongs: pointing at the cover dims it a
+     touch and fades in ONE round button at its top edge. The button cycles -
+     click moves the lyrics to the other side, click again brings them back -
+     and its glyph swaps the two panes with it, so the icon is the animation
+     rather than two labels spelling the state out. Music videos never get the
+     switch: a video frame is tied to its own composition, and the edge rating
+     buttons already own its sides. */
+  function readStoredFsCoverSide() {
+    try {
+      return localStorage.getItem(FS_COVER_SIDE_KEY) === "left" ? "left" : "right";
+    } catch (_) {
+      return "right";
+    }
+  }
+
+  function syncFsCoverSwitch() {
+    if (!fsCoverSwitch) return;
+    const left = fsCoverSide === "left";
+    // The class is what animates the glyph; the label names what a click will
+    // do next, which is the only thing a single toggle can usefully announce.
+    fsCoverSwitch.btn.classList.toggle("is-left", left);
+    fsCoverSwitch.btn.setAttribute("aria-pressed", left ? "true" : "false");
+    const label = "Move the lyrics to the " + (left ? "right" : "left");
+    fsCoverSwitch.btn.title = label;
+    fsCoverSwitch.btn.setAttribute("aria-label", label);
+  }
+
+  // Built once per fullscreen entry and parked inside the media host, so it
+  // moves with the artwork for free — the hover box mirrors the cover's box
+  // (see the art-ui rules in 05-styles).
+  function buildFsCoverSwitch() {
+    if (!fsMediaHost || fsCoverSwitch) return;
+    const NS = "http://www.w3.org/2000/svg";
+    // Two panes, one filled: the filled pane IS the lyrics, so swapping them is
+    // the same gesture as the layout change underneath.
+    const pane = (cls, x) => {
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("class", cls);
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", "5.75");
+      rect.setAttribute("width", "8");
+      rect.setAttribute("height", "12.5");
+      rect.setAttribute("rx", "2");
+      return rect;
+    };
+    const icon = document.createElementNS(NS, "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("class", "ym-sl-fs-art-swap-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    // Source order is the "lyrics right" rest state: outline (art) on the left,
+    // filled (words) on the right.
+    icon.appendChild(pane("ym-sl-fs-art-swap-art", 3.25));
+    icon.appendChild(pane("ym-sl-fs-art-swap-words", 12.75));
+    const btn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-swap",
+      "aria-pressed": "false",
+    }, icon);
+    btn.addEventListener("click", (ev) => {
+      // The media pane sits under the overlay's own pointer handling; a button
+      // click is a layout choice, never a play/seek.
+      ev.preventDefault();
+      ev.stopPropagation();
+      applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn);
+    fsMediaHost.appendChild(ui);
+    fsCoverSwitch = { ui, btn };
+    syncFsCoverSwitch();
+  }
+
+  // The shade changes sides on its OWN clock, after it has faded out. Flipping
+  // it with the layout would move the gradient's dark end to the panel's other
+  // edge on the first frame - at 44% of the screen, i.e. the middle - while the
+  // panel is still opaque, which reads as the shadow jumping to the centre
+  // before it disappears. 120ms is just past the 96ms fade-out.
+  const FS_SHADE_SIDE_DELAY_MS = 120;
+  function setFsShadeSide(side) {
+    if (fsLyricsShade) fsLyricsShade.classList.toggle("ym-sl-fs-shade-left", side === "left");
+  }
+
+  function applyFsCoverSide(side, animate) {
+    if (!fsOverlay) return;
+    const next = side === "left" ? "left" : "right";
+    // The helper class is what gives the chrome column its left transition; it
+    // is only present for the length of the move, so a mode change or the entry
+    // paint can never animate a column it is restructuring.
+    const canAnimate = !!animate && fsMotionOK() &&
+      !fsOverlay.classList.contains("ym-sl-fs-no-anim");
+    if (canAnimate) {
+      // Remove-then-add, with a reflow in between: on a rapid second click the
+      // helper classes are still there, and a class that never left does not
+      // restart the shade's dissolve - the flip would land without it.
+      // Removing them first also republishes the panes' start values.
+      fsOverlay.classList.remove("ym-sl-fs-flipping", "ym-sl-fs-shade-swap");
+      // Commit the transition's start value before the flip classes move the
+      // column, or the first frame jumps instead of gliding.
+      void fsOverlay.offsetWidth;
+      fsOverlay.classList.add("ym-sl-fs-flipping", "ym-sl-fs-shade-swap");
+      void fsOverlay.offsetWidth;
+    }
+    fsCoverSide = next;
+    fsOverlay.classList.toggle("ym-sl-fs-cover-left", next === "left");
+    syncFsCoverSwitch();
+    try { localStorage.setItem(FS_COVER_SIDE_KEY, next); } catch (_) {}
+    // Clear any pending side change first: on a rapid second click the timer
+    // from the first could otherwise fire mid-fade and move a visible panel.
+    if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
+    if (!canAnimate) {
+      setFsShadeSide(next);
+      return;
+    }
+    fsCoverShadeSideTimer = window.setTimeout(() => {
+      fsCoverShadeSideTimer = 0;
+      // Read the state, not the captured value: a second click may have landed
+      // while this was pending, and the shade must end up matching what is on.
+      setFsShadeSide(fsCoverSide);
+    }, FS_SHADE_SIDE_DELAY_MS);
+    // No recentre call here, unlike the layout switch: only the column's LEFT
+    // changes, so the active line keeps its vertical position and the scroll
+    // needs no correction.
+    if (fsCoverFlipTimer) window.clearTimeout(fsCoverFlipTimer);
+    fsCoverFlipTimer = window.setTimeout(() => {
+      fsCoverFlipTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-flipping");
+    }, 480);
+    // The shade outlives the move on purpose: it stays away until the columns
+    // have landed, then fades back in on the new side (see the dissolve
+    // keyframes in 05-styles). 0.8s is the animation; the class is dropped just
+    // after it so the element cannot keep a finished animation attached.
+    if (fsCoverShadeTimer) window.clearTimeout(fsCoverShadeTimer);
+    fsCoverShadeTimer = window.setTimeout(() => {
+      fsCoverShadeTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-shade-swap");
+    }, 820);
   }
 
   function findPlayerButton(labels) {
@@ -9500,6 +9914,7 @@
     fsOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
     });
+    attachFineOffsetDrag(fsOffsetRange);
     let savedMode = "side";
     try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
     const hasVideo = !!findPlayerVideo();
@@ -9812,6 +10227,18 @@
 
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
+    // Performance modes: outside "ultra" the backdrop must not sample the live
+    // video at all (that is the per-frame colour read the mode exists to stop).
+    // The track's cover takes over, so the view still has a backdrop instead of
+    // falling back to the blurred-canvas path, which is heavier still.
+    if (videoEl && !videoSamplingAllowed()) {
+      videoEl = null;
+      if (!artUrl) {
+        const track = getCurrentTrack();
+        const fallback = (track && track.artworkUrl) || getDomArtworkUrl();
+        artUrl = fallback ? hiResArt(fallback) : "";
+      }
+    }
     // Gate on the Dynamic add-on: its handshake object is our signal that the
     // page-wide Kawarp exists, and we take the backdrop over from it.
     const dyn = window.__ymAuroraDynamic;
@@ -9855,6 +10282,7 @@
       }
       if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
+      fsKawarp.setMaxFps(kawarpFpsForPerformance());
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
       return true;
@@ -9878,6 +10306,7 @@
   // Swap the backdrop source of an ALREADY running Kawarp (no restart: a second
   // canvas would stack and the older one would paint over the new source).
   function syncFullscreenKawarpVideo(videoEl) {
+    if (!videoSamplingAllowed()) return;
     if (!fsKawarpActive || !fsKawarp || !videoEl || videoEl === fsKawarpVideoEl) return;
     fsKawarpVideoEl = videoEl;
     fsKawarpArtUrl = "";
@@ -9940,7 +10369,11 @@
     const liveVideo = fsSavedVideo.node
       ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
       : null;
-    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" ? liveVideo : null;
+    // Outside "ultra" a music video must not feed the backdrop either: the
+    // cover art is the backdrop and the video stays only in the media pane.
+    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" && videoSamplingAllowed()
+      ? liveVideo
+      : null;
     if (videoNode) {
       if (fsKawarpActive) syncFullscreenKawarpVideo(videoNode);
       else startFullscreenKawarp("", videoNode);
@@ -10963,6 +11396,11 @@
     // in buildFullscreenControls does the actual removal so the opacity fade is
     // live too). Layout cycling on the cycle button keeps animating normally.
     fsOverlay.classList.add("ym-sl-fs-no-anim");
+    // The artwork's layout switch (AJ, 2026-10-26). Built here so it exists
+    // before the first paint; the saved side is applied with no animation, as
+    // the entry paint must not slide the columns into place.
+    buildFsCoverSwitch();
+    applyFsCoverSide(readStoredFsCoverSide(), false);
     // Overlay title ("Artist Track"). Built here rather than inside
     // buildFullscreenControls() because it is not a control: it belongs to the
     // overlay surface and must exist independently of the chrome row.
@@ -11357,6 +11795,12 @@
     fsLyricsHost = null;
     fsControls = null;
     fsLayoutSelect = null;
+    // The switch's nodes went with the overlay; drop the refs and the helper
+    // class's pending timer so a second entry starts clean.
+    fsCoverSwitch = null;
+    if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
+    if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
+    if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
     // Long-title marquee teardown (2026-09-28). Disconnect the resize observer
     // and clear any inline shift/marquee state on the inner so a second
     // fullscreen entry starts from a clean baseline. fsTitleInner is gone
@@ -12087,6 +12531,61 @@
     });
   }
 
+  // A native range maps the whole +/- 60s onto the track's width: at the panel's
+  // ~240px that is half a second per pointer pixel, so a careful nudge of one or
+  // two pixels already reads 0.4s and the 100ms steps are unreachable with a
+  // mouse. Drags are therefore RELATIVE and scaled instead of positional:
+  // 20ms per pixel at a careful pace (0.1s every 5px), with a speed gain so a
+  // deliberate sweep still covers seconds. Keyboard arrows keep the native
+  // 100ms step, and the typed field is untouched. Clicking the track no longer
+  // jumps by up to a minute — a click is zero pixels of drag.
+  const OFFSET_DRAG_MS_PER_PX = 20;
+  const OFFSET_DRAG_GAIN_FROM_PX_PER_MS = 1.2;
+  const OFFSET_DRAG_MAX_GAIN = 8;
+
+  function attachFineOffsetDrag(range) {
+    let drag = null;
+    // Chrome starts the native thumb drag on mousedown; cancelling it is what
+    // makes this handler the only thing that moves the value.
+    range.addEventListener("mousedown", (event) => event.preventDefault());
+    range.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      // Cancelling mousedown also cancels focus, and the arrow keys need it.
+      try { range.focus({ preventScroll: true }); } catch (_) {}
+      const value = Number(range.value) || 0;
+      drag = { id: event.pointerId, x: event.clientX, time: performance.now(), value, shown: value };
+      try { range.setPointerCapture(event.pointerId); } catch (_) {}
+    });
+    range.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dx = event.clientX - drag.x;
+      if (!dx) return;
+      const now = performance.now();
+      const speed = Math.abs(dx) / Math.max(1, now - drag.time); // px per ms
+      const gain = Math.min(OFFSET_DRAG_MAX_GAIN,
+        1 + Math.max(0, speed - OFFSET_DRAG_GAIN_FROM_PX_PER_MS) * 2);
+      drag.value = clamp(drag.value + dx * OFFSET_DRAG_MS_PER_PX * gain, -60000, 60000);
+      drag.x = event.clientX;
+      drag.time = now;
+      const step = Math.max(Number(range.step) || 100, 1);
+      const ms = clamp(Math.round(drag.value / step) * step, -60000, 60000);
+      if (ms === drag.shown) return;
+      drag.shown = ms;
+      // The control's own `input` handler does the rest (clamp, persist, labels).
+      range.value = String(ms);
+      range.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const end = (event) => {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      try { range.releasePointerCapture(drag.id); } catch (_) {}
+      drag = null;
+    };
+    range.addEventListener("pointerup", end);
+    range.addEventListener("pointercancel", end);
+    range.addEventListener("lostpointercapture", end);
+  }
+
   function setVideoOffsetMs(value, save) {
     const numeric = Number(value);
     const ms = Number.isFinite(numeric)
@@ -12472,6 +12971,9 @@
     lineElements = [];
     scrollCandidateIndices = [];
     lastActiveLine = -1;
+    // New lines mean the next position is not a "backwards jump" from the old
+    // track's clock.
+    lastLyricPositionMs = -1;
     manualScrollActive = false;
     if (manualScrollReturnTimer) {
       clearTimeout(manualScrollReturnTimer);
@@ -13138,6 +13640,37 @@
     // animating (hidden tab, no lines yet).
     lastScrollTargetLine = -1;
     recentreActiveLineNow();
+  }
+
+  /* A playhead that jumped BACKWARDS (repeat-one restarting the track, or any
+     seek longer than PLAYHEAD_JUMP_MS) needs the same handling as (1) above,
+     and for the same reason: the scroll is stale relative to the playhead.
+
+     At the end of a track the scroll is pinned to the credits, and on the next
+     pass there is no active line at all until the first lyric starts - so the
+     normal line-follow retarget has nothing to aim at and the panel sat on the
+     credits for the whole intro, then glided the entire song height in one
+     sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
+     Place it NOW, on the line the new position belongs to (the first line when
+     the pass starts in an intro), and do not animate: the user did not scroll,
+     the track restarted. */
+  function restartPlayheadScroll(lyricPositionMs) {
+    cancelCreditsReveal();
+    lastScrollTargetLine = -1;
+    // A restart is a new pass through the song, so the manual-browse state and
+    // its "Jump to current" button do not survive it.
+    manualScrollActive = false;
+    setJumpButtonVisible(false);
+    if (manualScrollReturnTimer) {
+      clearTimeout(manualScrollReturnTimer);
+      manualScrollReturnTimer = 0;
+    }
+    if (!lineScrollEl || staticLyricsActive || pausePickMode) return;
+    const index = findLineIndexAt(lyricPositionMs);
+    const element = index >= 0 ? lineElements[index] : lineElements[0];
+    if (!element) return;
+    pendingInstantScroll = true;
+    scrollActiveLineIntoView(element, true);
   }
 
   // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
@@ -14269,15 +14802,16 @@
     if (!body || typeof body !== "object") return null;
     const source = typeof body.source === "string" ? body.source.trim().toLowerCase() : "";
     const attr = body && body.UploadAttribution;
-    // Only community syncs carry people. Everything else has a provider and no
-    // one else to credit. A response with no `source` at all is treated as a
-    // community sync: this function only ever runs on a Spicy API response, so
-    // an absent source means an older/partial payload, not an unknown provider.
-    const community = !source || source === "spicy_lyrics";
-    // Same reasoning: the provider is Spicy Lyrics whenever the source is
-    // missing. "Always display the provider" is the binding half of the rule, so
-    // it must never come back empty from an API result.
-    const provider = spicyProviderLabel(source) || "Spicy Lyrics";
+    // Only a community sync carries people, and only a response that SAYS it is
+    // one may be credited as one. An absent `source` means we do not know what
+    // answered, so we do not guess: ToS s6 says to call the source unknown
+    // rather than attribute the data to anyone, and that includes assuming it
+    // came through Spicy Lyrics just because that is the API we called.
+    const community = source === "spicy_lyrics";
+    // "Always display the provider" is the binding half of the rule, so the
+    // credit must never come back empty. It may not be invented either, hence
+    // the explicit unknown label when the response names no source.
+    const provider = source ? spicyProviderLabel(source) : "Unknown source";
     const uploader = community ? attributionPerson(attr && attr.Uploader) : null;
     const maker = community ? attributionPerson(attr && attr.Maker) : null;
     if (!provider && !uploader && !maker) return null;
@@ -16605,6 +17139,10 @@
   // Guard: .workbuddy-ai/scratch/test-line-lookup-overlap.mjs drives THIS
   // function, sliced out of this file, over the windows the shipped parser
   // produces — plus a synthetic overlap and a clamped-disjoint control.
+  // A backwards jump in the playhead bigger than this is a seek or a repeat-one
+  // restart, never playback drift. See the restart handling in animate().
+  const PLAYHEAD_JUMP_MS = 2500;
+
   function findLineIndexAt(positionMs) {
     let found = -1;
     for (let index = 0; index < scrollCandidateIndices.length; index++) {
@@ -16660,6 +17198,17 @@
     const lyricPositionMs = Number.isFinite(offsetForPosition)
       ? Math.max(0, positionMs - offsetForPosition)
       : positionMs;
+    // Repeat one (or any real backwards seek) rewinds the song under the panel.
+    // At the end of a track the scroll is pinned to the credits, and the next
+    // pass has NO active line until the first lyric starts, so the normal
+    // line-follow retarget has nothing to aim at — the panel used to sit on the
+    // credits for the whole intro and then sweep the entire song height once
+    // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
+    if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
+      restartPlayheadScroll(lyricPositionMs);
+    }
+    lastLyricPositionMs = lyricPositionMs;
+
     const activeIndex = findLineIndexAt(lyricPositionMs);
 
     updateFullscreenGapDimming(lyricPositionMs, activeIndex);
@@ -16669,6 +17218,12 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    // Evaluated once per frame, not inside the line loop: the depth pass below
+    // writes different values in Low mode, and a mode switch has to repaint the
+    // whole stack now rather than at the next line boundary.
+    const lowPerfMode = currentSettings.performanceMode === "low";
+    const depthModeChanged = lowPerfMode !== lastDepthBlurLow;
+    lastDepthBlurLow = lowPerfMode;
 
     // Scroll target, which is NOT the same question as "which line is active".
     //
@@ -16773,21 +17328,37 @@
       // same write (AJ, 2026-10-23).
       //
       // Background vocals are ranked by the LEAD line they belong to, not by
-      // their own slot. They are separate .line.bg-line entries pushed right
-      // after that lead, so their own index put them at distance 1 from a line
-      // being sung — blurred underneath the words the user was reading — and a
-      // bg that outlived its lead turned into a smudge. Ranking by the parent
-      // instead keeps the whole block in focus while its lead plays and blurs
-      // it with the line once the song moves on (AJ, 2026-10-23).
-      if (activeLineChanged && activeIndex >= 0) {
+      // their own slot: they are separate .line.bg-line entries pushed right
+      // after that lead, so their own index put them at distance 1 from the
+      // line being sung — blurred underneath the words the user was reading
+      // (AJ, 2026-10-23).
+      //
+      // Two rules keep that ranking honest at a line boundary (AJ, 2026-10-26):
+      //
+      // 1. ANY line that is still being sung stays crisp, background vocals
+      //    included. A bg phrase routinely runs past the start of the next lead
+      //    line, and ranking it purely by its lead blurred it mid-phrase while
+      //    it was still the thing playing.
+      // 2. The pass also runs when a line's OWN state flips, not only when the
+      //    active index moves. A line that stopped singing between two active
+      //    lines kept the "none" it was given while it was still singing, so
+      //    the last line of an overlapping block sat in focus — as sharp as the
+      //    line being read — until the reader reached the next line.
+      //
+      // Low performance mode gets a cheaper reading of the same cue: radius
+      // capped at 2px, and only the four nearest rows are filtered at all. A
+      // filtered line is its own compositor surface, so the NUMBER of blurred
+      // lines is what this costs, not the radius — and past four rows the text
+      // is already dimmed by its own state, where a 4-5px blur just reads as
+      // haze (AJ, 2026-10-26).
+      if ((activeLineChanged || stateChanged || depthModeChanged) && activeIndex >= 0) {
         const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
         const distance = Math.abs(anchorIndex - activeIndex);
-        // A bg vocal never inherits focus from its own timing: only its lead
-        // line being the one being sung keeps it crisp.
-        const inFocus = line.DotLine || distance === 0 || (lineState === "Active" && !line.BGLine);
-        const depthBlur = inFocus
+        const inFocus = line.DotLine || distance === 0 || lineState === "Active";
+        const pastLowRange = lowPerfMode && !inFocus && distance > 3;
+        const depthBlur = inFocus || pastLowRange
           ? 0
-          : Math.min(5, 1 + distance);
+          : Math.min(lowPerfMode ? 2 : 5, 1 + distance);
         setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
         if (lineState !== "Active") {
           setStyleIfChanged(line.HTMLElement, "--BlurAmount", "0px", 0.25);

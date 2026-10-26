@@ -1,10 +1,43 @@
-/* Aurora Lyrics — Next Up pill (add-on)
+/* Aurora Lyrics — Next Up (add-on)
    ---------------------------------------------------------------------------
-   A small pill showing what plays next, anchored to the bottom-left (or -right)
-   corner of the artwork / video, OUTSIDE it — in the gutter between the media and
-   the player bar, so it never covers the picture (AJ, 2026-09-28).
+   What plays next, shown IN the player bar instead of floating over the page.
 
-   WHERE THE DATA COMES FROM — verified live before writing a line of this:
+   WHY IT MOVED (AJ, 2026-10-26): the old pill sat in the gutter above the bar
+   inside a translucent glass shell with a two-colour conic glow spinning on a
+   requestAnimationFrame loop — a repaint every ~42ms for as long as a track was
+   playing, and it still read as a badge stuck to the page rather than part of
+   the player. This version is a quiet row in the bar: no animation loop, no
+   backdrop-filter, no gradient, no shadow. The only motion is a 140ms opacity
+   crossfade when the NEXT track changes, and none at all under reduced motion.
+
+   WHERE IT SITS — two seats, one preferred:
+     1. LAST child of .middle-controls, the song row on the left end of the bar
+        (under the theme's "Song info left, controls centred" arrangement, the
+        zone with slack beside the title). Last rather than between the title and
+        the like buttons, so leaving that seat never shifts anything YouTube
+        drew: it just stops.
+     2. FIRST child of #right-controls, immediately left of the volume slider, so
+        the same row of controls reads as "next up · volume · the rest". That is
+        where it goes when the song row cannot spare the room.
+
+   WIDTH: the chip has no cap. It takes exactly the width its next-track title
+   needs and stops where the row stops, so a long "up next" title is allowed to
+   run all the way to the transport and only then gets its ellipsis. When the row
+   is tight the chip gives way 20:1 before the current song name does.
+
+   The seat is chosen from the live layout, never from a breakpoint (see
+   fitChip): the chip takes seat 1 while the title keeps a readable width and the
+   chip clears the transport and the right cluster; otherwise it tries seat 2
+   while it clears the transport and the song row; otherwise it hides. On a
+   1109px bar the song row is already touching the transport, so the chip lives
+   beside the volume slider; on 2100px it sits with the song. In the stock
+   arrangement both rows are the rows it uses anyway.
+
+   COMPACT MODE: the Apple Music Style theme's compact bar is 60px instead of
+   ~100px, so the chip drops to 34px, a 26px thumbnail and a slightly smaller
+   title. One row of CSS under html.ym-yt-compact; nothing measured in JS.
+
+   WHERE THE DATA COMES FROM — verified live before writing the first version:
      document.querySelector("ytmusic-player-queue").data
    is the FULL queue model straight from YouTube's API: an array of
    `{ playlistPanelVideoRenderer: { videoId, title, byline, thumbnail, selected } }`.
@@ -19,187 +52,164 @@
        it — which is why public-api.js's getNextTrack() DOM fallback never worked:
        it looks for `.title`, while the real class is `.song-title`.
 
-   NOTE this pill deliberately shows the QUEUE's next item, not
-   `playerResponse.upcoming` — `upcoming` is the AUTOPLAY recommendation, which is
-   what plays after the queue runs out, not the next track in it.
+   NOTE this shows the QUEUE's next item, not `playerResponse.upcoming` —
+   `upcoming` is the AUTOPLAY recommendation, which is what plays after the queue
+   runs out, not the next track in it.
    --------------------------------------------------------------------------- */
 (() => {
   "use strict";
 
   const EXT_ID = "ytmod-next-up";
   const STYLE_ID = "ym-nu-style";
-  const PILL_ID = "ym-nu-pill";
-  // The queue changes rarely, and the same tick re-measures the anchor so the pill
-  // follows layout changes (resize, tab switch) without a resize listener.
+  const CHIP_ID = "ym-nu-next";
+  // The queue changes rarely; matching the queue panel's own cadence keeps the
+  // reads off the critical path. The same tick re-seats the chip if YTM
+  // re-rendered the row underneath us.
   const TICK_MS = 700;
-  // Gap between the media's bottom edge and the pill.
-  const GAP_PX = 12;
-  // Inset from the player page's left edge when the pill is left-aligned.
-  const SIDE_PAD_PX = 12;
-  // Clearance kept between the pill's box and the player bar. Covers the glow:
-  // ::after is inset -8px with a 6px blur, so it reaches ~14px past the pill.
-  const BAR_CLEARANCE_PX = 16;
+  // Time the content stays invisible while it is replaced (see swapContent).
+  const SWAP_MS = 150;
+  // Clearance the chip keeps from a zone YouTube owns before it hides, and the
+  // narrowest the song title may get while the chip is on screen.
+  const TRANSPORT_CLEARANCE_PX = 12;
+  const MIN_INFO_PX = 150;
 
   const DEFAULT_SETTINGS = {
     showArt: true,
-    alignRight: false,
-    // "Smooth glow (60fps)": drops the glow throttle from ~24fps to ~16ms so the
-    // seam travels at the display rate. OFF by default - it costs a repaint every
-    // frame while the pill is visible.
-    smoothGlow: false,
   };
 
-  // Registered so Chrome definitely re-resolves the conic when the JS rAF updates
-  // the angle. Copied from the panel's credit-pill glow (aurora-lyrics.js:4628):
-  // an UNregistered custom property driving a conic would not reliably repaint on
-  // AJ's Chrome. inherits:true so the pill's own value reaches its ::before/::after.
+  // Every property that matters is set here because `all: unset` starts the
+  // element from nothing: the bar is full of YTM's own button/toolbar rules and
+  // inheriting them is how a stray border or 14px font shows up.
+  //
+  // The look is deliberately NOT a pill and NOT glass: artwork, a 9px "up next"
+  // kicker and one line of title, on nothing. Hover is the only state that draws
+  // a surface, and the chevron is the only thing that moves.
   const CSS = `
-@property --ym-nu-spin {
-  syntax: "<angle>";
-  inherits: true;
-  initial-value: 0deg;
-}
-#${PILL_ID} {
-  position: absolute;
-  z-index: 2147482000;
-  display: flex; align-items: center; gap: 10px;
-  max-width: 320px;
-  padding: 7px 14px 7px 7px;
-  border-radius: 999px;
-  /* TRANSPARENT fill (AJ, 2026-09-28): the glass comes from the backdrop blur and
-     the glow ring, not from a dark tint.
-     NOTE the box-shadow had to go with it — a shadow is painted BEHIND the
-     element's background, so with a transparent fill a dark blurred rect shows
-     straight through the pill and reads as exactly the dark fill we just removed.
-     The glow ring does the separating instead. */
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, .16);
-  backdrop-filter: blur(18px) saturate(120%);
-  -webkit-backdrop-filter: blur(18px) saturate(120%);
-  color: #f1f1f1;
+#${CHIP_ID} {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  margin-left: 14px;
+  margin-right: 14px;
+  padding: 4px 12px 4px 4px;
+  border-radius: 10px;
+  color: #b9b9b9;
   font-family: "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
+  /* No max-width: the chip takes exactly the width its next-track title needs
+     and stops where the row stops — just before the transport. It yields 20:1
+     before the song name does, so a long next title never squeezes the current
+     one; below MIN_PX it is a readable stub with an ellipsis. The floor matters:
+     a flex item's automatic minimum is its min-content, which for a nowrap title
+     is the whole string — without it the chip could never shrink at all. */
+  flex: 0 20 auto;
+  min-width: 120px;
   cursor: pointer;
-  opacity: 0;
-  transform: translateY(8px) scale(.97);
-  /* left/top/right are transitioned so a reposition GLIDES instead of snapping —
-     the tick re-measures the anchor every 700ms, and the layout can move under it
-     (window resize, tab switch, queue panel opening). */
-  transition:
-    opacity .3s cubic-bezier(.22,.61,.36,1),
-    transform .3s cubic-bezier(.22,.61,.36,1),
-    left .34s cubic-bezier(.22,.61,.36,1),
-    top .34s cubic-bezier(.22,.61,.36,1),
-    right .34s cubic-bezier(.22,.61,.36,1),
-    background .16s ease;
-  pointer-events: none;
+  transition: background-color .14s ease;
 }
-/* The FIRST placement must not animate, or the pill would glide in from 0,0.
-   Applied by JS around that one write. */
-#${PILL_ID}.ym-nu-no-pos-trans {
-  transition-property: opacity, transform, background;
-}
-#${PILL_ID}.ym-nu-in {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  pointer-events: auto;
-}
-#${PILL_ID}:hover { background: rgba(255, 255, 255, .10); }
-#${PILL_ID}:active { transform: translateY(0) scale(.98); }
-/* Aurora's fullscreen overlay is z-index 2147483000, so the pill has to rise
-   above it to be visible there. Deliberately NOT the base z-index: at
-   2147482000 the pill stays UNDER the marketplace panel (also 2147483000) and
-   under the share preview (2147483600), which is what we want everywhere else. */
-#${PILL_ID}.ym-nu-fs { z-index: 2147483200; }
-#${PILL_ID} .ym-nu-thumb {
-  width: 34px; height: 34px; flex: 0 0 auto;
-  border-radius: 50%;
+#${CHIP_ID}[hidden] { display: none; }
+#${CHIP_ID}:hover { background: rgba(255, 255, 255, .075); }
+#${CHIP_ID}:active { background: rgba(255, 255, 255, .12); }
+#${CHIP_ID}:focus-visible { outline: 2px solid rgba(255, 255, 255, .55); outline-offset: 2px; }
+
+#${CHIP_ID} .ym-nu-art {
+  width: 32px; height: 32px; flex: 0 0 auto;
+  border-radius: 6px;
   object-fit: cover;
-  background: rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .06);
 }
-#${PILL_ID} .ym-nu-text { min-width: 0; display: flex; flex-direction: column; }
-#${PILL_ID} .ym-nu-label {
-  font-size: 9px; font-weight: 700; letter-spacing: .1em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, .5);
-  line-height: 1.3;
+#${CHIP_ID} .ym-nu-art[hidden] { display: none; }
+#${CHIP_ID}.ym-nu-no-art { padding-left: 10px; }
+#${CHIP_ID} .ym-nu-copy {
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 0;
 }
-#${PILL_ID} .ym-nu-title {
-  font-size: 13px; font-weight: 600;
+#${CHIP_ID} .ym-nu-label {
+  font-size: 9px; font-weight: 700; line-height: 1.15;
+  letter-spacing: .1em; text-transform: uppercase;
+  color: rgba(255, 255, 255, .42);
+}
+#${CHIP_ID} .ym-nu-title {
+  font-size: 12.5px; font-weight: 500; line-height: 1.25;
+  color: #e4e4e4;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  line-height: 1.35;
 }
-/* Content crossfade when the "next up" track changes (song transition / skip).
-   Only the CONTENT fades + slides, so the pill (glass + glow) stays put and the
-   re-labelling reads as a smooth update instead of a hard swap (AJ, 2026-09-28). */
-#${PILL_ID} .ym-nu-thumb,
-#${PILL_ID} .ym-nu-text {
-  transition: opacity .2s ease, transform .2s ease;
+#${CHIP_ID}:hover .ym-nu-title { color: #fff; }
+#${CHIP_ID}:hover .ym-nu-label { color: rgba(255, 255, 255, .6); }
+
+/* Revealed on hover only: it says "this is a control", not "here is a badge". */
+#${CHIP_ID} .ym-nu-chev {
+  width: 13px; height: 13px; flex: 0 0 auto;
+  opacity: 0; transform: translateX(-2px);
+  transition: opacity .12s ease, transform .12s ease;
 }
-#${PILL_ID}.ym-nu-swap .ym-nu-thumb,
-#${PILL_ID}.ym-nu-swap .ym-nu-text {
-  opacity: 0;
-  transform: translateY(-5px);
+#${CHIP_ID}:hover .ym-nu-chev { opacity: .7; transform: none; }
+
+/* Content crossfade when the next track changes. Opacity only — no layout, no
+   filter, nothing that would make the bar repaint while a track plays. */
+#${CHIP_ID} .ym-nu-art,
+#${CHIP_ID} .ym-nu-copy { transition: opacity .14s ease; }
+#${CHIP_ID}.ym-nu-swap .ym-nu-art,
+#${CHIP_ID}.ym-nu-swap .ym-nu-copy { opacity: 0; }
+
+/* The theme's compact bar: 60px tall, so the chip loses 6px of height and 6px of
+   artwork rather than looking wedged. */
+html.ym-yt-compact #${CHIP_ID} {
+  height: 34px; gap: 8px;
+  margin-left: 12px; margin-right: 12px;
+  min-width: 96px;
+  padding: 3px 10px 3px 3px;
 }
-/* Two-colour edge glow, copied from the credit pills (aurora-lyrics.js:4657). A
-   MASKED pill-shaped ring painted with a conic-gradient whose 'from' angle is the
-   registered --ym-nu-spin. The pill's SHAPE stays static — only the colour seam
-   glides, which reads as travelling light rather than a rigid spin. ::before is
-   the crisp ring (2px), ::after the wider blurred halo behind it. No fill inside. */
-#${PILL_ID}::before {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  padding: 2px;
-  background: conic-gradient(
-    from var(--ym-nu-spin, 0deg),
-    var(--ym-nu-accent-a, #ff5b8e) 0deg 180deg,
-    var(--ym-nu-accent-b, #5be0ff) 180deg 360deg
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: -1;
+html.ym-yt-compact #${CHIP_ID} .ym-nu-art { width: 26px; height: 26px; border-radius: 5px; }
+html.ym-yt-compact #${CHIP_ID} .ym-nu-title { font-size: 12px; }
+
+/* Seat 2, squeezed bar: the right cluster is anchored to the right edge, so
+   every pixel the chip keeps comes out of the time label on its left. It gives
+   up text before it gives up its seat — the kicker and the chevron first, then
+   the title. What is left is the artwork, which still says "next track", with
+   the full name in the tooltip. */
+html.ym-yt-compact #${CHIP_ID}.ym-nu-tight,
+#${CHIP_ID}.ym-nu-tight {
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 9px 3px 3px;
 }
-#${PILL_ID}::after {
-  content: "";
-  position: absolute;
-  inset: -8px;
-  border-radius: inherit;
-  background: conic-gradient(
-    from var(--ym-nu-spin, 0deg),
-    var(--ym-nu-accent-a, #ff5b8e) 0deg 180deg,
-    var(--ym-nu-accent-b, #5be0ff) 180deg 360deg
-  );
-  filter: blur(6px);
-  opacity: .35;
-  pointer-events: none;
-  z-index: -2;
+#${CHIP_ID}.ym-nu-tight .ym-nu-label,
+#${CHIP_ID}.ym-nu-tight .ym-nu-chev { display: none; }
+
+html.ym-yt-compact #${CHIP_ID}.ym-nu-artonly,
+#${CHIP_ID}.ym-nu-artonly {
+  gap: 0;
+  min-width: 0;
+  padding: 3px;
 }
+#${CHIP_ID}.ym-nu-artonly .ym-nu-copy,
+#${CHIP_ID}.ym-nu-artonly .ym-nu-chev { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
-  #${PILL_ID} {
-    transition: opacity .18s ease;
-    transform: none;
-  }
-  #${PILL_ID}.ym-nu-in { transform: none; }
+  #${CHIP_ID},
+  #${CHIP_ID} .ym-nu-art,
+  #${CHIP_ID} .ym-nu-copy,
+  #${CHIP_ID} .ym-nu-chev { transition: none; }
 }
 `;
 
   let settings = Object.assign({}, DEFAULT_SETTINGS);
-  let pill = null;
-  let thumbEl = null;
+  // Which seat the chip is in. Left is preferred; fitChip moves it.
+  const PLACE_LEFT = "left";
+  const PLACE_RIGHT = "right";
+
+  let chip = null;
+  let artEl = null;
   let titleEl = null;
   let tickTimer = 0;
+  let swapTimer = 0;
+  let fitTimer = 0;
   let currentKey = "";
-  // The first placement writes left/top with the position transition suppressed,
-  // or the pill would glide in from 0,0 on its very first frame.
-  let positioned = false;
+  let placement = PLACE_LEFT;
+  let rowObservers = [];
 
   function makeEl(tag, cls, text) {
     const el = document.createElement(tag);
@@ -225,168 +235,6 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  /* ---- two-colour sampling -------------------------------------------------
-     Copied from the credit pills (aurora-lyrics.js:10889). The sampler averages
-     the LEFT and RIGHT halves of a 24x24 downscale to get two colours; when they
-     are too alike to read as motion it pushes the second round the hue wheel and
-     lifts its saturation. Here the source is the NEXT TRACK'S THUMBNAIL — which
-     the pill is already showing — and it silently keeps the CSS default pair when
-     the canvas is unreadable. */
-  const accentCache = new Map();
-
-  function rgbToHsl(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    if (max === min) return { h: 0, s: 0, l: l };
-    const d = max - min;
-    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    let h;
-    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-    else if (max === g) h = ((b - r) / d + 2) / 6;
-    else h = ((r - g) / d + 4) / 6;
-    return { h: h, s: s, l: l };
-  }
-
-  function hue2rgb(p, q, t) {
-    let u = t;
-    if (u < 0) u += 1;
-    if (u > 1) u -= 1;
-    if (u < 1 / 6) return p + (q - p) * 6 * u;
-    if (u < 1 / 2) return q;
-    if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
-    return p;
-  }
-
-  function hslToRgb(h, s, l) {
-    if (s === 0) { const v = Math.round(l * 255); return [v, v, v]; }
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    return [
-      Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
-      Math.round(hue2rgb(p, q, h) * 255),
-      Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
-    ];
-  }
-
-  // Average colour of columns [from, to) in a 24x24 RGBA buffer, skipping
-  // near-transparent pixels. Null when nothing usable is there.
-  function averageSlice(data, from, to) {
-    let r = 0, g = 0, b = 0, n = 0;
-    for (let y = 0; y < 24; y++) {
-      for (let x = from; x < to; x++) {
-        const i = (y * 24 + x) * 4;
-        if (data[i + 3] < 128) continue;
-        r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
-      }
-    }
-    return n ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : null;
-  }
-
-  function sampleThumbColors(url) {
-    if (!url) return Promise.resolve(null);
-    if (accentCache.has(url)) return Promise.resolve(accentCache.get(url));
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.referrerPolicy = "no-referrer";
-      img.onload = () => {
-        let pair = null;
-        try {
-          const canvas = makeEl("canvas");
-          canvas.width = 24;
-          canvas.height = 24;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, 24, 24);
-            const data = ctx.getImageData(0, 0, 24, 24).data;
-            const left = averageSlice(data, 0, 12);
-            const right = averageSlice(data, 12, 24);
-            const first = left || right;
-            let second = right || left;
-            if (first && second) {
-              const dist = Math.abs(first[0] - second[0]) +
-                Math.abs(first[1] - second[1]) +
-                Math.abs(first[2] - second[2]);
-              if (dist < 70) {
-                // Too alike to read as motion: push the second round the hue wheel
-                // so the colour seam actually travels.
-                const hsl = rgbToHsl(second[0], second[1], second[2]);
-                second = hslToRgb(
-                  (hsl.h + 0.11) % 1,
-                  Math.min(1, Math.max(0.45, hsl.s * 1.1 + 0.15)),
-                  Math.min(0.78, Math.max(0.42, hsl.l))
-                );
-              }
-              pair = {
-                a: "rgb(" + first[0] + ", " + first[1] + ", " + first[2] + ")",
-                b: "rgb(" + second[0] + ", " + second[1] + ", " + second[2] + ")",
-              };
-            }
-          }
-        } catch (_) { pair = null; }
-        if (accentCache.size > 120) accentCache.clear();
-        accentCache.set(url, pair);
-        resolve(pair);
-      };
-      img.onerror = () => { accentCache.set(url, null); resolve(null); };
-      img.src = url;
-    });
-  }
-
-  /* ---- glow engine ---------------------------------------------------------
-     JS rAF, NOT a CSS @keyframes animation: AJ's Chrome reliably repaints the
-     conic on a JS setProperty but NOT on a keyframe animation of the same
-     registered @property (the v6/v9 freeze). The angle is set on the PILL, never
-     on :root — a root-level setProperty cascade-invalidates the whole tree and
-     tanked the panel to ~20fps.
-     Throttled to ~24fps and gated on the pill actually being shown, so a hidden
-     pill costs zero repaints. */
-  const GLOW_PERIOD_MS = 5200;
-  // ~24fps by default; the "Smooth glow (60fps)" setting drops the throttle to
-  // ~16ms. Either way the seam keeps the same 5.2s revolution - only the
-  // smoothness changes, so the glow never speeds up or slows down.
-  const GLOW_STEP_MS_NORMAL = 42;
-  const GLOW_STEP_MS_SMOOTH = 16;
-  let glowStepMs = GLOW_STEP_MS_NORMAL;
-  let glowStepDeg = 360 / (GLOW_PERIOD_MS / glowStepMs);
-  let glowRAF = 0;
-  let glowDeg = 0;
-  let lastGlowAt = 0;
-
-  function setGlowRate(smooth) {
-    glowStepMs = smooth ? GLOW_STEP_MS_SMOOTH : GLOW_STEP_MS_NORMAL;
-    glowStepDeg = 360 / (GLOW_PERIOD_MS / glowStepMs);
-  }
-
-  function spinPill(deg) {
-    if (pill) pill.style.setProperty("--ym-nu-spin", deg.toFixed(2) + "deg");
-  }
-
-  function glowFrame(now) {
-    glowRAF = requestAnimationFrame(glowFrame);
-    if (now - lastGlowAt < glowStepMs) return;
-    lastGlowAt = now;
-    if (!pill || !pill.classList.contains("ym-nu-in")) return;
-    glowDeg = (glowDeg + glowStepDeg) % 360;
-    spinPill(glowDeg);
-  }
-
-  function startGlow() {
-    if (glowRAF) return;
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      // No rAF at all: the seam stays two-colour, it just does not travel.
-      spinPill(0);
-      return;
-    }
-    glowRAF = requestAnimationFrame(glowFrame);
-  }
-
-  function stopGlow() {
-    if (glowRAF) { cancelAnimationFrame(glowRAF); glowRAF = 0; }
-  }
-
   /* ---- queue model ------------------------------------------------------- */
   // `title` / `byline` are YouTube renderer objects: either { simpleText } or
   // { runs: [{ text }] }. Handle both rather than assuming one.
@@ -402,7 +250,7 @@
   function thumbnailOf(renderer) {
     const list = renderer && renderer.thumbnail && renderer.thumbnail.thumbnails;
     if (!Array.isArray(list) || !list.length) return "";
-    // Largest available; CSS scales it down to the pill, so this stays crisp.
+    // Largest available; CSS scales it down to the chip, so this stays crisp.
     return list[list.length - 1].url || "";
   }
 
@@ -480,305 +328,355 @@
         }
       }
       // A queue with a known playing index but nothing after it: there IS no next
-      // track, so the pill should hide rather than guess.
+      // track, so the chip should hide rather than guess.
       if (idx >= 0) return null;
     }
     return nextFromDom();
   }
 
-  /* ---- the media anchor -------------------------------------------------- */
-  // Whichever of the video / artwork is actually laid out. Verified live: on a
-  // cover-art track the <video> is 0x0 AND #movie_player is 0x0, while the
-  // artwork <img> is the real box — so "the media" cannot be a fixed selector.
-  function mediaBox() {
-    const cands = [
-      document.querySelector("ytmusic-player-page video.html5-main-video"),
-      document.querySelector("ytmusic-player-page img"),
-    ];
-    for (let i = 0; i < cands.length; i++) {
-      const el = cands[i];
-      if (!el) continue;
-      const r = el.getBoundingClientRect();
-      if (r.width > 40 && r.height > 40) return r;
-    }
-    return null;
-  }
-
-  // Left edge of the player page — which is what "beside the nav rail" means.
-  function playerPageLeft() {
-    const el = document.querySelector("ytmusic-player-page");
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return r.width > 100 ? r.left : null;
-  }
-
-  // Top edge of the player bar. Its progress slider sits at the very top of the
-  // bar, so clearing this clears the slider too.
-  function playerBarTop() {
-    const bar = document.querySelector("ytmusic-player-bar");
-    if (!bar) return null;
-    const r = bar.getBoundingClientRect();
-    return r.height > 20 ? r.top : null;
-  }
-
-  // Aurora's own fullscreen overlay reparents the media, so the pill's anchor no
-  // longer means anything there. Hide instead of floating somewhere wrong.
-  function inAuroraFullscreen() {
-    return !!document.querySelector(".ym-sl-fs-overlay");
-  }
-
-  /* ---- render ------------------------------------------------------------ */
-  function buildPill() {
+  /* ---- the chip ---------------------------------------------------------- */
+  function buildChip() {
     ensureStyle();
-    thumbEl = makeEl("img", "ym-nu-thumb");
-    thumbEl.alt = "";
-    titleEl = makeEl("div", "ym-nu-title");
-    const label = makeEl("div", "ym-nu-label", "Next");
-    const text = makeEl("div", "ym-nu-text");
-    text.appendChild(label);
-    text.appendChild(titleEl);
-    pill = makeEl("div");
-    pill.id = PILL_ID;
-    pill.setAttribute("role", "button");
-    pill.appendChild(thumbEl);
-    pill.appendChild(text);
-    pill.addEventListener("click", () => {
-      // The pill shows the track IMMEDIATELY after the current one, so a single
-      // `next()` is exactly right.
+    artEl = makeEl("img", "ym-nu-art");
+    artEl.alt = "";
+    titleEl = makeEl("span", "ym-nu-title");
+    const copy = makeEl("span", "ym-nu-copy");
+    copy.appendChild(makeEl("span", "ym-nu-label", "Up next"));
+    copy.appendChild(titleEl);
+
+    const chev = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chev.setAttribute("viewBox", "0 0 24 24");
+    chev.setAttribute("aria-hidden", "true");
+    chev.setAttribute("class", "ym-nu-chev");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M9 6l6 6-6 6");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "2.4");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    chev.appendChild(path);
+
+    chip = makeEl("button");
+    chip.id = CHIP_ID;
+    chip.type = "button";
+    chip.hidden = true;
+    chip.appendChild(artEl);
+    chip.appendChild(copy);
+    chip.appendChild(chev);
+    chip.addEventListener("click", (event) => {
+      // The bar itself is clickable in places; never let a skip also toggle it.
+      event.preventDefault();
+      event.stopPropagation();
+      // The chip shows the track IMMEDIATELY after the current one, so a single
+      // `next()` is exactly what the user asked for.
       try {
         if (window.YTMod && window.YTMod.player && window.YTMod.player.next) {
           window.YTMod.player.next();
         }
       } catch (_) {}
     });
-    // NEST in YTM's own player page so the pill is "actually in the website"
-    // (AJ, 2026-09-29). Falls back to body only if that element isn't ready yet;
-    // the per-tick ensureParent() re-seats it correctly either way.
-    const host = document.querySelector("ytmusic-player-page") || document.body;
-    host.appendChild(pill);
   }
 
-  function hidePill() {
-    currentKey = "";
-    if (pill) pill.classList.remove("ym-nu-in");
+  function barEl() {
+    return document.querySelector("ytmusic-player-bar");
+  }
+  function leftHost() {
+    const bar = barEl();
+    return (bar && bar.querySelector(".middle-controls")) || document.querySelector(".middle-controls");
+  }
+  function rightHost() {
+    const bar = barEl();
+    return (bar && bar.querySelector("#right-controls")) || document.querySelector("#right-controls");
   }
 
-  // Swap the pill's text + thumbnail. On a real change (not the first paint) the
-  // content fades + slides out, the new data is written while it is invisible, then
-  // it eases back in — so a song transition reads as a smooth update, not a hard
-  // swap (AJ, 2026-09-28). Reduced-motion users get the instant swap.
+  // Seat 1 ends the song row, after the artwork, the title and the like buttons;
+  // seat 2 opens the right cluster, before the volume slider. Either way the
+  // chip goes where it adds nothing to reorder — a repair never nudges YouTube.
+  function ensureMounted() {
+    if (!chip) return false;
+    const right = rightHost();
+    const row = placement === PLACE_RIGHT ? right : leftHost();
+    if (!row) return false;
+    if (row === right) {
+      if (chip.parentElement !== row || row.firstElementChild !== chip) {
+        row.insertBefore(chip, row.firstElementChild);
+      }
+    } else if (chip.parentElement !== row || row.lastElementChild !== chip) {
+      row.appendChild(chip);
+    }
+    return true;
+  }
+
+  function setPlacement(next) {
+    if (placement === next) return;
+    placement = next;
+    // The cap and the shrink stage below belong to seat 2 only; seat 1 sizes
+    // itself with flex.
+    if (next !== PLACE_RIGHT && chip) {
+      chip.style.removeProperty("max-width");
+      applyStage("");
+    }
+    ensureMounted();
+  }
+
+  // YTM re-renders both rows on some player-state changes and our chip is not
+  // part of either template, so it can be silently dropped. Watch both so a
+  // re-render is repaired at once rather than up to a tick later. childList only:
+  // our own insert fires one callback, and ensureMounted is a no-op the second
+  // time round.
+  function watchRows() {
+    if (!chip || typeof MutationObserver !== "function") return;
+    const rows = [leftHost(), rightHost()].filter(Boolean);
+    const same = rows.length === rowObservers.length &&
+      rows.every((row, i) => rowObservers[i].__target === row && row.isConnected);
+    if (same) return;
+    for (const observer of rowObservers) observer.disconnect();
+    rowObservers = rows.map((row) => {
+      const observer = new MutationObserver(() => { if (chip) ensureMounted(); });
+      observer.__target = row;
+      observer.observe(row, { childList: true });
+      return observer;
+    });
+  }
+
+  // A guest in a bar YTM owns: rather than a breakpoint guess, ask the layout.
+  //   1. seat 1 holds while the title keeps a readable width AND the chip clears
+  //      the transport and the right cluster. The title is the row's only
+  //      shrinkable child, so a chip that "fits" can still leave "Song na…";
+  //   2. seat 2 holds while the chip clears the transport's time label and the
+  //      song row — at which point the volume slider is untouched, because the
+  //      right track sizes to its own contents;
+  //   3. neither: hide. Everything here is measured, so the seat follows the
+  //      window instead of a number picked on one monitor.
+  // Runs on mount, on a track change (the new title changes what fits) and on
+  // resize.
+  function fitChip() {
+    if (!chip) return;
+    const left = leftHost();
+    const right = rightHost();
+    if (!left && !right) return;
+
+    if (left) {
+      setPlacement(PLACE_LEFT);
+      // Seat 2's cap and shrink stage do not travel to seat 1.
+      chip.style.removeProperty("max-width");
+      applyStage("");
+      const rect = measureChip();
+      if (rect && !titleSqueezed() &&
+          !overlapsZone(rect, ["#left-controls", "#right-controls"])) {
+        chip.hidden = false;
+        return;
+      }
+    }
+    if (right) {
+      setPlacement(PLACE_RIGHT);
+      if (fitRightSeat()) {
+        chip.hidden = false;
+        return;
+      }
+    }
+    chip.hidden = true;
+  }
+
+  // Seat 2 lives in a row that is sized to its contents (#right-controls is
+  // width:auto), so flexbox cannot shrink the chip there — a long next title
+  // would push the cluster left onto the time label, and the chip would have to
+  // hide for a reason that is fixable. So: ask for the natural width, then give
+  // back exactly the width that is not there, in the order the chip can bear to
+  // lose it — text first, artwork last. Because the right cluster is anchored
+  // to the right edge, every pixel a stage gives back also moves the chip right,
+  // away from the label. The cap and the stage class are cleared the moment the
+  // chip leaves this seat.
+  const RIGHT_STAGES = [
+    { cls: "", min: 0, artOnly: false },          // min 0 = the stylesheet's floor
+    { cls: "ym-nu-tight", min: 88, artOnly: false },
+    { cls: "ym-nu-artonly", min: 32, artOnly: true },
+  ];
+
+  function fitRightSeat() {
+    const barrier = rightBarrier() + TRANSPORT_CLEARANCE_PX;
+    const artShown = !!(artEl && !artEl.hidden);
+    for (const stage of RIGHT_STAGES) {
+      if (stage.artOnly && !artShown) continue;
+      applyStage(stage.cls);
+      chip.style.removeProperty("max-width");
+      const rect = measureChip();
+      if (!rect) return false;
+      if (rect.left >= barrier) return true;
+      const room = Math.floor(rect.width - (barrier - rect.left));
+      const floor = stage.min || parseFloat(getComputedStyle(chip).minWidth) || 0;
+      if (room < floor) continue;
+      chip.style.maxWidth = room + "px";
+      const capped = measureChip();
+      if (capped && capped.left >= barrier - 0.5) return true;
+    }
+    chip.style.removeProperty("max-width");
+    applyStage("");
+    return false;
+  }
+
+  function applyStage(cls) {
+    chip.classList.remove("ym-nu-tight", "ym-nu-artonly");
+    if (cls) chip.classList.add(cls);
+  }
+
+  // Everything YTM owns that the right cluster could reach backwards into.
+  // The container's own box is not enough: when the bar is squeezed YTM lets
+  // the time label overhang #left-controls by tens of pixels, so the chip has to
+  // clear the label, not the box that was meant to hold it.
+  function rightBarrier() {
+    const bar = barEl();
+    if (!bar) return 0;
+    let edge = 0;
+    for (const sel of ["#left-controls", ".middle-controls"]) {
+      const zone = bar.querySelector(sel);
+      if (!zone || zone.contains(chip)) continue;
+      edge = Math.max(edge, rightEdgeOf(zone));
+    }
+    return edge;
+  }
+
+  // Deepest right edge in a subtree; the chip is skipped so a fit never reads
+  // its own current width back as a constraint.
+  function rightEdgeOf(root) {
+    let edge = root.getBoundingClientRect().right;
+    for (const el of root.querySelectorAll("*")) {
+      if (chip && (el === chip || el.contains(chip))) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0) edge = Math.max(edge, r.right);
+    }
+    return edge;
+  }
+
+  // display:none reports a 0x0 rect, so the chip is laid out for the length of
+  // one task; nothing is painted between the unhide and the decision.
+  function measureChip() {
+    if (chip.hidden) chip.hidden = false;
+    const rect = chip.getBoundingClientRect();
+    return rect.width > 0 ? rect : null;
+  }
+
+  // Measured with the chip in seat 1: this is the width the title is left with.
+  function titleSqueezed() {
+    const info = infoEl();
+    if (!info) return false;
+    return info.getBoundingClientRect().width < MIN_INFO_PX;
+  }
+
+  function infoEl() {
+    const row = leftHost();
+    if (!row) return null;
+    return row.querySelector(".content-info-wrapper") || row.querySelector(".content-info");
+  }
+
+  function overlapsZone(rect, selectors) {
+    const bar = barEl();
+    if (!bar) return false;
+    for (const sel of selectors) {
+      const zone = bar.querySelector(sel);
+      if (!zone || zone.contains(chip)) continue;
+      const r = zone.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (rect.left < r.right + TRANSPORT_CLEARANCE_PX &&
+          rect.right > r.left - TRANSPORT_CLEARANCE_PX &&
+          rect.top < r.bottom && rect.bottom > r.top) return true;
+    }
+    return false;
+  }
+
+  function scheduleFit() {
+    if (fitTimer) clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => {
+      fitTimer = 0;
+      fitChip();
+    }, 150);
+  }
+
   function swapContent(next, animate) {
     const apply = () => {
-      titleEl.textContent = next.title;
-      titleEl.title = next.artist ? next.title + " \u2014 " + next.artist : next.title;
+      const title = next.title || "Unknown track";
+      titleEl.textContent = title;
+      const label = "Play next: " + (next.artist ? title + " \u2014 " + next.artist : title);
+      chip.title = label;
+      chip.setAttribute("aria-label", label);
       if (settings.showArt && next.thumb) {
-        thumbEl.src = next.thumb;
-        thumbEl.style.display = "";
+        artEl.src = next.thumb;
+        artEl.hidden = false;
       } else {
-        thumbEl.removeAttribute("src");
-        thumbEl.style.display = "none";
+        artEl.removeAttribute("src");
+        artEl.hidden = true;
       }
-      pill.style.paddingLeft = settings.showArt && next.thumb ? "" : "16px";
-      // Re-stamp the glide angle so a NEW pill never flashes at 0deg before the
-      // rAF catches up (the credit pills do the same).
-      spinPill(glowDeg);
-      // Two glow colours from the NEW thumbnail. Cached, async, and it silently
-      // keeps the CSS default pair when the canvas is unreadable.
-      sampleThumbColors(next.thumb).then((pair) => {
-        if (!pair || !pill) return;
-        pill.style.setProperty("--ym-nu-accent-a", pair.a);
-        pill.style.setProperty("--ym-nu-accent-b", pair.b);
-      });
+      chip.classList.toggle("ym-nu-no-art", artEl.hidden);
+      fitChip();
     };
     const reduce = window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (!animate || reduce) { apply(); return; }
-    let done = false;
-    const fadeIn = () => {
-      if (done) return;
-      done = true;
-      pill.removeEventListener("transitionend", onOut);
+    if (!animate || reduce) {
+      if (swapTimer) { clearTimeout(swapTimer); swapTimer = 0; chip.classList.remove("ym-nu-swap"); }
       apply();
-      // Next frame(s): drop the swap state so the content rises + fades back in.
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        pill.classList.remove("ym-nu-swap");
-      }));
-    };
-    const onOut = (e) => { if (e.propertyName === "opacity") fadeIn(); };
-    pill.classList.add("ym-nu-swap");
-    pill.addEventListener("transitionend", onOut);
-    // Safety net: if transitionend never fires (e.g. the pill is off-screen),
-    // still complete the swap so the content never gets stuck invisible.
-    setTimeout(fadeIn, 280);
+      return;
+    }
+    if (swapTimer) clearTimeout(swapTimer);
+    chip.classList.add("ym-nu-swap");
+    // A timer rather than transitionend: the chip may be hidden by the fit check
+    // (or the bar re-rendered) between the two halves of the swap, and a missed
+    // event would leave the label stuck at opacity 0.
+    swapTimer = setTimeout(() => {
+      swapTimer = 0;
+      apply();
+      chip.classList.remove("ym-nu-swap");
+    }, SWAP_MS);
   }
 
-  // Mount the pill into the right surface: the player page in normal view (so it is
-  // NESTED in YTM's own DOM and moves with the layout — "actually in the website",
-  // AJ 2026-09-29), and the fullscreen overlay when Aurora's FS is active (so it
-  // stays ABOVE the overlay instead of being trapped behind it). Re-parents only
-  // when the target changes; runs every tick so a YTM re-render that wipes the
-  // player page silently re-attaches it.
-  // The pill's ONLY home: YTM's player page, so it is nested in the real DOM and
-  // moves with the layout ("actually in the website", AJ 2026-09-29). It is no
-  // longer re-parented into the fullscreen overlay — tick() hides it there instead
-  // (AJ, 2026-10-01) — but it is STILL parked here while hidden, because the
-  // overlay is removed wholesale on exit and would take a nested pill with it.
-  // The body fallback covers the moment YTM has no player page.
-  function ensureParent() {
-    if (!pill) return;
-    const target = document.querySelector("ytmusic-player-page") || document.body;
-    if (target && pill.parentElement !== target) {
-      target.appendChild(pill);
-      // A fresh parent resets the layout: the next position write must land
-      // UNtransitioned or the pill would glide in from 0,0 on the reparent.
-      // (Only fires when the parent actually changes, so steady-state resize
-      // still glides smoothly.)
-      positioned = false;
-    }
-  }
-
-  function positionPill(box) {
-    if (!pill) return;
-    const h = pill.offsetHeight || 48;
-    // The pill is ABSOLUTE inside its parent, so its top/left/right are relative to
-    // that parent's box. That parent is ALWAYS the player page now — the fullscreen
-    // overlay branch is gone, because tick() hides the pill in fullscreen rather
-    // than re-parenting it into the overlay (AJ, 2026-10-01).
-    const parent = document.querySelector("ytmusic-player-page") || document.body;
-    const pr = parent.getBoundingClientRect();
-    if (!box) return;
-    // AJ (2026-09-29): sit in the BOTTOM corner, just ABOVE the progress bar /
-    // player bar — NOT hugging the video's bottom edge. Horizontal anchor
-    // (player-page edge) is unchanged. If the bar can't be measured, fall back
-    // to tucking just under the media.
-    const barTop = playerBarTop();
-    let top;
-    if (barTop != null) {
-      top = barTop - h - BAR_CLEARANCE_PX;
-      // The glow ::after reaches ~14px past the pill; BAR_CLEARANCE_PX covers it.
-      // Don't climb higher than the media bottom (would overlap the artwork).
-      const minTop = box.bottom + 2;
-      if (top < minTop) top = minTop;
-    } else {
-      top = box.bottom + GAP_PX;
-    }
-    // Viewport → parent-relative (the pill now lives INSIDE the player page).
-    pill.style.top = Math.round(top - pr.top) + "px";
-    if (settings.alignRight) {
-      pill.style.left = "auto";
-      pill.style.right = Math.round(pr.right - box.right) + "px";
-    } else {
-      // LEFT anchors to the PLAYER PAGE's own left edge — i.e. right beside the
-      // nav rail — rather than to the artwork, which sits centred in a much wider
-      // column and left the pill stranded mid-screen (AJ, 2026-09-28).
-      const pageLeft = playerPageLeft();
-      const leftVp = pageLeft == null ? box.left : pageLeft + SIDE_PAD_PX;
-      pill.style.right = "auto";
-      pill.style.left = Math.round(leftVp - pr.left) + "px";
-    }
+  function hideChip() {
+    currentKey = "";
+    if (chip) chip.hidden = true;
   }
 
   function tick() {
-    if (!pill) return;
-    // Aurora's fullscreen overlay owns the whole viewport, and the pill has no
-    // sensible anchor inside it. It used to RE-PARENT into the overlay and pin to
-    // its top-left corner, which just cluttered the view (AJ, 2026-10-01). Hide it
-    // outright instead.
-    const fs = inAuroraFullscreen();
-    pill.classList.toggle("ym-nu-fs", fs);
-    // Seat the pill in its surface BEFORE the early return. ensureParent(false) is
-    // NOT optional here: the overlay is removed wholesale when fullscreen exits, so
-    // a pill left nested inside it would be destroyed with it and never come back.
-    // Parking it in the player page keeps it alive behind the overlay.
-    ensureParent();
-    // Record the mount surface so the bridge (which has no JS-eval) can verify
-    // nesting. Harmless debug signal.
-    pill.setAttribute("data-host", "player-page");
-    if (fs) { hidePill(); return; }
-    const box = mediaBox();
-    if (!box) { hidePill(); return; }
+    if (!chip) return;
+    if (!ensureMounted()) return;
+    watchRows();
     const next = readNext();
-    if (!next) { hidePill(); return; }
-    // Keyed so the DOM is only touched when the track actually changes.
+    if (!next) { hideChip(); return; }
+    // Keyed so the DOM is only touched when the next track actually changes.
     const key = next.title + "|" + next.artist + "|" + next.thumb;
-    if (key !== currentKey) {
-      const firstRender = currentKey === "";
-      currentKey = key;
-      // First paint skips the crossfade (nothing to fade FROM); later changes
-      // fade the content out, swap, then fade back in via swapContent().
-      swapContent(next, !firstRender);
-    }
-    if (!positioned) {
-      // Suppress the position transition for this ONE write, or the pill glides in
-      // from 0,0 on its first frame.
-      pill.classList.add("ym-nu-no-pos-trans");
-      positionPill(box);
-      void pill.offsetWidth; // flush, so the write lands untransitioned
-      pill.classList.remove("ym-nu-no-pos-trans");
-      positioned = true;
-    } else {
-      positionPill(box);
-    }
-    pill.classList.add("ym-nu-in");
-  }
-
-  // Reposition IMMEDIATELY on layout changes instead of waiting up to TICK_MS for
-  // the next poll — this kills the ~500ms lag AJ saw where the pill sat in its old
-  // spot when entering/leaving fullscreen or resizing (AJ, 2026-09-29). A plain
-  // resize glides (same parent → the transition carries). A fullscreen toggle
-  // re-parents the pill, so it lands instantly — a cross-parent CSS glide isn't
-  // possible, and an instant land on a fullscreen switch reads fine anyway.
-  let repaintQueued = false;
-  function scheduleReposition() {
-    if (repaintQueued || !pill) return;
-    repaintQueued = true;
-    requestAnimationFrame(() => {
-      repaintQueued = false;
-      tick();
-    });
-  }
-  function onFullscreenChange() {
-    if (!pill) return;
-    tick();
-    // The overlay can settle a frame after the event; re-check so the pill lands
-    // correctly even if it appeared just after fullscreenchange fired.
-    setTimeout(tick, 80);
+    if (key === currentKey) return;
+    const firstRender = currentKey === "";
+    currentKey = key;
+    swapContent(next, !firstRender);
   }
 
   function applySettings(next) {
     if (!next || typeof next !== "object") return;
-    settings = {
-      showArt: typeof next.showArt === "boolean" ? next.showArt : DEFAULT_SETTINGS.showArt,
-      alignRight: typeof next.alignRight === "boolean" ? next.alignRight : DEFAULT_SETTINGS.alignRight,
-      smoothGlow: typeof next.smoothGlow === "boolean" ? next.smoothGlow : DEFAULT_SETTINGS.smoothGlow,
-    };
-    // Apply the glow rate immediately so the toggle takes effect without a reload.
-    setGlowRate(settings.smoothGlow);
-    currentKey = ""; // force a re-render on the next tick
+    settings.showArt = typeof next.showArt === "boolean" ? next.showArt : DEFAULT_SETTINGS.showArt;
+    currentKey = ""; // force a re-render with the new shape
+    tick();
   }
 
   function start() {
-    buildPill();
-    startGlow();
+    buildChip();
+    ensureMounted();
+    watchRows();
     tickTimer = window.setInterval(tick, TICK_MS);
     tick();
     window.postMessage({ type: "ytmod-settings-request", id: EXT_ID }, "*");
-    // React to layout changes at once (kills the fullscreen/resize lag).
-    window.addEventListener("resize", scheduleReposition);
-    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("resize", scheduleFit);
   }
 
   function teardown() {
     if (tickTimer) { window.clearInterval(tickTimer); tickTimer = 0; }
-    stopGlow();
-    window.removeEventListener("resize", scheduleReposition);
-    document.removeEventListener("fullscreenchange", onFullscreenChange);
-    if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
-    pill = null;
-    thumbEl = null;
+    if (swapTimer) { clearTimeout(swapTimer); swapTimer = 0; }
+    if (fitTimer) { clearTimeout(fitTimer); fitTimer = 0; }
+    for (const observer of rowObservers) observer.disconnect();
+    rowObservers = [];
+    window.removeEventListener("resize", scheduleFit);
+    if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
+    chip = null;
+    artEl = null;
     titleEl = null;
     currentKey = "";
-    positioned = false;
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
   }

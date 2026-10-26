@@ -52,10 +52,14 @@
 
   // The bar's own buttons are 36px on a 48px pitch; the host widens the track
   // and pads the middle column so our buttons do not drag the song title left.
-  const ICON_TIMER =
-    "M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 " +
-    "1.42C16.07 4.74 14.12 4 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07" +
-    "-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z";
+  // Bar glyph: a crescent moon, drawn at the bar's own 2.4 round weight (see
+  // addPlayerBarButton.iconParts) rather than borrowed from the Material set.
+  // Two equal-radius arcs whose centres sit ~6.4 units apart is the classic
+  // crescent construction: the tips stay pointed, and the body keeps roughly
+  // four units of hollow at 24px, so it does not collapse into a blob.
+  const ICON_TIMER_PARTS = [
+    { d: "M20.2 15.7A9 9 0 1 1 8.3 3.8A9 9 0 0 0 20.2 15.7Z" },
+  ];
 
   const CSS = `
     /* ===== Sleep Timer (Aurora Lyrics) ===== */
@@ -694,7 +698,7 @@
     btnHandle = window.YTMod.addPlayerBarButton({
       id: "sleep-timer",
       label: "Sleep timer",
-      iconSvgPath: ICON_TIMER,
+      iconParts: ICON_TIMER_PARTS,
       onClick: () => { if (isOpen()) closePopup(); else openPopup(); },
     });
   }

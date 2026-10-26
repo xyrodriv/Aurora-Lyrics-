@@ -407,6 +407,10 @@
   // Guard: .workbuddy-ai/scratch/test-line-lookup-overlap.mjs drives THIS
   // function, sliced out of this file, over the windows the shipped parser
   // produces — plus a synthetic overlap and a clamped-disjoint control.
+  // A backwards jump in the playhead bigger than this is a seek or a repeat-one
+  // restart, never playback drift. See the restart handling in animate().
+  const PLAYHEAD_JUMP_MS = 2500;
+
   function findLineIndexAt(positionMs) {
     let found = -1;
     for (let index = 0; index < scrollCandidateIndices.length; index++) {
@@ -462,6 +466,17 @@
     const lyricPositionMs = Number.isFinite(offsetForPosition)
       ? Math.max(0, positionMs - offsetForPosition)
       : positionMs;
+    // Repeat one (or any real backwards seek) rewinds the song under the panel.
+    // At the end of a track the scroll is pinned to the credits, and the next
+    // pass has NO active line until the first lyric starts, so the normal
+    // line-follow retarget has nothing to aim at — the panel used to sit on the
+    // credits for the whole intro and then sweep the entire song height once
+    // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
+    if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
+      restartPlayheadScroll(lyricPositionMs);
+    }
+    lastLyricPositionMs = lyricPositionMs;
+
     const activeIndex = findLineIndexAt(lyricPositionMs);
 
     updateFullscreenGapDimming(lyricPositionMs, activeIndex);
@@ -471,6 +486,12 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    // Evaluated once per frame, not inside the line loop: the depth pass below
+    // writes different values in Low mode, and a mode switch has to repaint the
+    // whole stack now rather than at the next line boundary.
+    const lowPerfMode = currentSettings.performanceMode === "low";
+    const depthModeChanged = lowPerfMode !== lastDepthBlurLow;
+    lastDepthBlurLow = lowPerfMode;
 
     // Scroll target, which is NOT the same question as "which line is active".
     //
@@ -575,21 +596,37 @@
       // same write (AJ, 2026-10-23).
       //
       // Background vocals are ranked by the LEAD line they belong to, not by
-      // their own slot. They are separate .line.bg-line entries pushed right
-      // after that lead, so their own index put them at distance 1 from a line
-      // being sung — blurred underneath the words the user was reading — and a
-      // bg that outlived its lead turned into a smudge. Ranking by the parent
-      // instead keeps the whole block in focus while its lead plays and blurs
-      // it with the line once the song moves on (AJ, 2026-10-23).
-      if (activeLineChanged && activeIndex >= 0) {
+      // their own slot: they are separate .line.bg-line entries pushed right
+      // after that lead, so their own index put them at distance 1 from the
+      // line being sung — blurred underneath the words the user was reading
+      // (AJ, 2026-10-23).
+      //
+      // Two rules keep that ranking honest at a line boundary (AJ, 2026-10-26):
+      //
+      // 1. ANY line that is still being sung stays crisp, background vocals
+      //    included. A bg phrase routinely runs past the start of the next lead
+      //    line, and ranking it purely by its lead blurred it mid-phrase while
+      //    it was still the thing playing.
+      // 2. The pass also runs when a line's OWN state flips, not only when the
+      //    active index moves. A line that stopped singing between two active
+      //    lines kept the "none" it was given while it was still singing, so
+      //    the last line of an overlapping block sat in focus — as sharp as the
+      //    line being read — until the reader reached the next line.
+      //
+      // Low performance mode gets a cheaper reading of the same cue: radius
+      // capped at 2px, and only the four nearest rows are filtered at all. A
+      // filtered line is its own compositor surface, so the NUMBER of blurred
+      // lines is what this costs, not the radius — and past four rows the text
+      // is already dimmed by its own state, where a 4-5px blur just reads as
+      // haze (AJ, 2026-10-26).
+      if ((activeLineChanged || stateChanged || depthModeChanged) && activeIndex >= 0) {
         const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
         const distance = Math.abs(anchorIndex - activeIndex);
-        // A bg vocal never inherits focus from its own timing: only its lead
-        // line being the one being sung keeps it crisp.
-        const inFocus = line.DotLine || distance === 0 || (lineState === "Active" && !line.BGLine);
-        const depthBlur = inFocus
+        const inFocus = line.DotLine || distance === 0 || lineState === "Active";
+        const pastLowRange = lowPerfMode && !inFocus && distance > 3;
+        const depthBlur = inFocus || pastLowRange
           ? 0
-          : Math.min(5, 1 + distance);
+          : Math.min(lowPerfMode ? 2 : 5, 1 + distance);
         setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
         if (lineState !== "Active") {
           setStyleIfChanged(line.HTMLElement, "--BlurAmount", "0px", 0.25);

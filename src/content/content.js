@@ -66,6 +66,15 @@
   const ICON_FLOAT = "M4 4h16v16H4V4zm2 2v12h12V6H6zm2 2h8v2H8V8zm0 4h5v2H8v-2z";
   const ICON_DELETE = "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM8 9h8v10H8V9zm7.5-5-1-1h-5l-1 1H5v2h14V4z";
   const ICON_CHEVRON = "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z";
+  // Sliders, drawn as three line + knob pairs. The lines STOP short of each knob:
+  // every icon svg here is filled with fill-rule="evenodd", so a line crossing a
+  // knob would punch a hole through it instead of passing underneath. This is the
+  // Settings button's glyph, not an add-on's tile, so it is drawn here rather than
+  // taken from MK_GLYPH (AJ, 2026-10-26).
+  const ICON_SETTINGS =
+    "M4 6h8.8v2H4z M17.2 6H20v2h-2.8z M15 4.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z " +
+    "M4 12h2.8v2H4z M11.2 12H20v2h-8.8z M9 10.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z " +
+    "M4 18h10.8v2H4z M19.2 18H20v2h-.8z M17 16.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z";
 
   function makeIconButton(iconPath, onClick, title) {
     const b = h("button", { class: "ym-icon-btn", title: title || "", "aria-label": title || "" });
@@ -166,6 +175,134 @@
       dev: ui.dev,
     }, patch),
   });
+  // Performance mode (AJ, 2026-10-26). GLOBAL, not per add-on: one governor over
+  // the three Kawarp backdrops (page, Now Playing rail, fullscreen), so it is
+  // stored once and mirrored into every add-on's settings envelope by
+  // postExtensionSettings(). Add-ons treat it as a cap on top of their own
+  // toggles; nothing here flips a user's add-on switch behind their back.
+  const PERFORMANCE_KEY = "ytmod_performance_mode";
+  const PERFORMANCE_MODES = ["ultra", "normal", "low"];
+  // Add-ons Low mode takes out entirely. Aurora Flow is pure motion — page
+  // transitions, panel reflow, micro-interactions — so it is the one add-on
+  // where a slower machine buys back real frames by losing it. It has no on/off
+  // switch of its own (once installed it is always on), so a "disabled" record
+  // would leave a row that still says Installed with nothing running; Low
+  // UNINSTALLS it instead and remembers that it did, so Normal/Ultra puts it
+  // back and nothing the user removed themselves is ever reinstalled
+  // (AJ, 2026-10-26).
+  const LOW_MODE_SUSPENDED = ["ytmod-smooth-motion"];
+  const PERF_SUSPENDED_KEY = "ytmod_perf_suspended";
+  let performanceMode = "ultra";
+  let performanceModeReady = null;
+  const normalizePerformanceMode = (value) => {
+    const mode = String(value || "").toLowerCase();
+    return PERFORMANCE_MODES.indexOf(mode) === -1 ? "ultra" : mode;
+  };
+  const lowModeBlocks = (id) =>
+    performanceMode === "low" && LOW_MODE_SUSPENDED.indexOf(id) !== -1;
+  const lowModeNotice = (id) => {
+    const ext = findAvail(id);
+    return "Performance mode is set to Low. Choose Normal or Ultra in Settings to use " +
+      (ext ? ext.name : "this add-on") + ".";
+  };
+  const getPerformanceSuspended = () => safeStorageGet(PERF_SUSPENDED_KEY, {});
+  const setPerformanceSuspended = (map) => safeStorageSet({ [PERF_SUSPENDED_KEY]: map });
+  // Removes an add-on without the "restart required" notice: the governor is not
+  // the user uninstalling something, and its teardown is the same one the normal
+  // path sends. Mirrors uninstall() minus the UI, the toast and the scrim.
+  async function suspendAddon(id) {
+    const reg = await getReg();
+    if (!reg[id]) return;
+    applyExtension(id, false);
+    delete reg[id];
+    await setReg(reg);
+    await removeExtensionSettings(id);
+    await bgDel(id);
+  }
+
+  // Puts back one Low removed. Re-added at enabled:true because that is the only
+  // state Aurora Flow ever has.
+  async function restoreSuspendedAddon(id) {
+    const ext = findAvail(id);
+    const reg = await getReg();
+    if (!ext || reg[id]) return;
+    reg[id] = { enabled: true, version: ext.version || "?", installedAt: Date.now() };
+    await setReg(reg);
+    applyExtension(id, true);
+  }
+
+  // Applies the mode's add-on restrictions: out on the way into Low, back on the
+  // way out. Runs BEFORE the registry is applied at boot, so Low never mounts an
+  // add-on just to tear it down.
+  async function applyPerformanceRestrictions(mode) {
+    const suspended = (await getPerformanceSuspended()) || {};
+    const reg = await getReg();
+    let dirty = false;
+    if (mode === "low") {
+      for (const id of LOW_MODE_SUSPENDED) {
+        if (!reg[id]) continue;
+        // Quiet: the mode toast is the notification, not a second one.
+        await suspendAddon(id);
+        suspended[id] = true;
+        dirty = true;
+      }
+    } else {
+      const ids = Object.keys(suspended);
+      for (const id of ids) {
+        // Only what Low removed — the map never holds anything the user
+        // uninstalled for their own reasons.
+        if (!reg[id]) await restoreSuspendedAddon(id);
+        delete suspended[id];
+      }
+      if (ids.length) dirty = true;
+    }
+    if (dirty) await setPerformanceSuspended(suspended);
+  }
+  const loadPerformanceMode = () => {
+    if (!performanceModeReady) {
+      performanceModeReady = safeStorageGet(PERFORMANCE_KEY, "ultra").then((value) => {
+        performanceMode = normalizePerformanceMode(value);
+        return performanceMode;
+      });
+    }
+    return performanceModeReady;
+  };
+  const storePerformanceMode = (value) => {
+    performanceMode = normalizePerformanceMode(value);
+    performanceModeReady = Promise.resolve(performanceMode);
+    return safeStorageSet({ [PERFORMANCE_KEY]: performanceMode });
+  };
+  // Re-post every enabled add-on's settings so a mode change lands immediately
+  // instead of on the next track change or reload.
+  const pushPerformanceMode = async () => {
+    const reg = await getReg();
+    for (const id of Object.keys(reg)) {
+      if (!reg[id] || !reg[id].enabled) continue;
+      const ext = findAvail(id);
+      if (!ext) continue;
+      const settings = await getExtensionSettings(ext);
+      postExtensionSettings(id, settings);
+    }
+  };
+  // Set by the Settings page while it is on screen, so a value that lands late
+  // (storage read, or a change made elsewhere) repaints the chosen mode.
+  let performancePaint = null;
+  const performanceLabel = (mode) => mode.charAt(0).toUpperCase() + mode.slice(1);
+  // Called straight from the Settings page — no message round-trip: the page and
+  // the store live in this same script, and a postMessage would only be read
+  // back by the page world, which has no use for it.
+  async function choosePerformanceMode(raw) {
+    const mode = normalizePerformanceMode(raw);
+    await storePerformanceMode(mode);
+    await pushPerformanceMode();
+    // Off/on for the add-ons Low does not run, then a quiet re-render so the
+    // rail greys those rows out (or un-greys them) immediately.
+    await applyPerformanceRestrictions(mode);
+    renderSection(true);
+    if (performancePaint) performancePaint(mode);
+    toast("Performance: " + performanceLabel(mode));
+  }
+
   const EXT_SETTINGS_KEY = "ytmod_settings";
   let extensionSettingsStore = null;
   let extensionSettingsWrite = Promise.resolve();
@@ -264,7 +401,14 @@
     return extensionSettingsWrite;
   };
   const postExtensionSettings = (id, settings) => {
-    window.postMessage({ type: "ytmod-settings", id, settings }, "*");
+    // performanceMode rides along in EVERY add-on's envelope: it is one global
+    // governor (see PERFORMANCE_KEY above), and this is the only chokepoint every
+    // settings post passes through.
+    window.postMessage({
+      type: "ytmod-settings",
+      id,
+      settings: Object.assign({}, settings, { performanceMode }),
+    }, "*");
   };
   const PERMANENT_LYRICS_KEY = "ytmod_spicy_lyrics_ttml";
   const getPermanentLyrics = (trackKey) => new Promise((res) => {
@@ -731,9 +875,6 @@
       version: "1.0.0",
       lastUpdated: "2026-09-28",
       jsUrl: chrome.runtime.getURL("src/extensions/dynamic.js"),
-      // Per-add-on showcase art (AJ, 2026-09-28). Paths are extension-relative and
-      // resolved with chrome.runtime.getURL() at render time.
-      art: { video: "assets/art/aurora-bloom.mp4", poster: "assets/art/aurora-bloom.jpg" },
       settings: [
         { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 1.12, display: "decimal" },
         { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.60, display: "decimal" },
@@ -750,6 +891,10 @@
         // Never sample the live video; keep the backdrop on the track's cover
         // art even for music videos (AJ, 2026-10-20).
         { key: "kawarpCoverArtOnly", label: "Cover art only (ignore video)", type: "toggle", default: false },
+        // The Ambient add-on is this theme's other half: the same artwork, used
+        // to tint the player bar and the sliders. It ships ON, which is what
+        // Ambient's own default was (AJ, 2026-10-26).
+        { key: "artworkAccent", label: "Artwork glow and accent colour", type: "toggle", default: true },
         // Custom background (AJ, 2026-10-21). The blob lives in IndexedDB; the
         // key is only the boolean "an image is set and should be used".
         // The header gives the block its own labelled section instead of letting
@@ -763,24 +908,9 @@
         { key: "contrast", label: "Contrast", min: 0.6, max: 1.6, step: 0.01, default: 1, display: "decimal" },
       ],
     },
-    {
-      id: "ytmod-artwork-accent",
-      name: "Ambient",
-      author: "Aurora Lyrics",
-      category: "Themes",
-      stars: 5,
-      tags: ["artwork", "accent", "dynamic", "theme"],
-      description: "Adds a soft glow around the now-playing artwork and tints the player controls to match.",
-      version: "1.0.2",
-      lastUpdated: "2026-09-28",
-      jsUrl: chrome.runtime.getURL("src/extensions/artwork-accent.js"),
-      art: { video: "assets/art/ambient.mp4", poster: "assets/art/ambient.jpg" },
-      // Glow slider removed from the UI on AJ's call (2026-09-28). The add-on
-      // still ships a glow value internally — DEFAULT_SETTINGS.glow = 1.5
-      // (150%) — so new installs land on a strong glow without exposing the
-      // control. Existing users keep whatever glow they had stored.
-      settings: [],
-    },
+    // Ambient used to live here as its own card. It read the same artwork the
+    // backdrop does, so it is now a switch on Aurora Bloom above (AJ,
+    // 2026-10-26). Its registry record is dropped by the orphan sweep at boot.
     {
       id: "ytmod-spicy-lyrics",
       name: "Aurora Lyrics",
@@ -802,7 +932,6 @@
       lastUpdated: "2026-10-07",
       github: "https://github.com/xyrodriv/Aurora-Lyrics-",
       jsUrl: chrome.runtime.getURL("src/extensions/aurora-lyrics.js"),
-      art: { video: "assets/art/aurora-lyrics.mp4", poster: "assets/art/aurora-lyrics.jpg" },
       settings: [
         // Order is the reading order of the page. Everything WITHOUT `dev: true`
         // shows to everyone; everything with it is hidden until the 6-tap gesture
@@ -820,9 +949,10 @@
         { key: "amllWordTracks", label: "Apple Music for word-by-word", type: "toggle", default: false },
         { key: "spicyLineTracks", label: "Spicy lyrics for line-by-line", type: "toggle", default: false },
         // On-device English translation of non-English lines (Chrome 138+ desktop).
-        // OFF by default: it may download a language pack and adds a second line
-        // under the lyrics, so it is a choice rather than part of the look.
-        { key: "autoTranslate", label: "English translation of foreign lyrics", type: "toggle", default: false },
+        // ON by default (AJ, 2026-10-26). It may download a language pack, but
+        // only when a foreign line actually appears, and that is the song where
+        // the second line earns its space.
+        { key: "autoTranslate", label: "English translation of foreign lyrics", type: "toggle", default: true },
         { key: "legibilityBackdrop", label: "Dark shade behind lyrics", type: "toggle", default: false },
         // In-page fullscreen (AJ, 2026-10-22): the overlay stays inside the tab,
         // so the tab strip, other tabs and the rest of the desktop keep working
@@ -901,7 +1031,6 @@
       version: "1.0.0",
       lastUpdated: "2026-09-16",
       jsUrl: chrome.runtime.getURL("src/extensions/sleep-timer.js"),
-      art: { image: "assets/art/sleep-timer.png" }, // still only — no video for this one
       // Settings removed on AJ's call (2026-09-28): the add-on injects its own
       // control panel at the bottom-right player bar, so duplicating them here was
       // redundant. An empty array renders NO Settings section at all (same as
@@ -928,51 +1057,18 @@
       settings: [],
     },
     {
-      id: "ytmod-share-lyric",
-      name: "Share a Lyric",
-      author: "Aurora Lyrics",
-      category: "Extensions",
-      stars: 5,
-      tags: ["lyrics", "share", "image", "export", "png"],
-      description: "Turns the line you are on into a square image you can post anywhere - the lyric, the artwork and the track, drawn on your own machine. Nothing is uploaded.",
-      version: "1.0.0",
-      lastUpdated: "2026-09-28",
-      jsUrl: chrome.runtime.getURL("src/extensions/share-lyric.js"),
-      // Showcase clip, recorded by the add-on itself (3:4, Kawarp backdrop). The
-      // poster is optional: without it the sheet falls back to the card's thumb
-      // and the grid to the category gradient.
-      art: { video: "assets/art/share-lyric.mp4" },
-      settings: [
-        { key: "showArt", label: "Show the artwork on the card", type: "toggle", default: true },
-        { key: "showTrackInfo", label: "Show the track name and artist", type: "toggle", default: true },
-        { key: "showTimestamp", label: "Show the lyric timestamp on the card", type: "toggle", default: true },
-        // These two are driven by the toggles in the share preview popup, not by
-        // the settings list. `dev: true` keeps them out of the visible list while
-        // leaving them IN the schema — which is what makes them persist and be
-        // delivered, since content.js only sends keys it declares here.
-        { key: "portrait", label: "3:4 portrait card", type: "toggle", default: false, dev: true },
-        { key: "video", label: "4-second video export", type: "toggle", default: false, dev: true },
-      ],
-    },
-    {
       id: "ytmod-next-up",
       name: "Next Up",
       author: "Aurora Lyrics",
       category: "Extensions",
       stars: 5,
-      tags: ["queue", "next", "up-next", "pill", "playback"],
-      description: "Shows what is playing next in a small pill beside the artwork, so you can see it without opening the queue. Click the pill to skip straight to that track.",
-      version: "1.0.0",
-      lastUpdated: "2026-09-28",
+      tags: ["queue", "next", "up-next", "player-bar", "playback"],
+      description: "Shows what plays next in the player bar, with its cover art. Click it to skip straight to that track.",
+      version: "2.0.0",
+      lastUpdated: "2026-10-26",
       jsUrl: chrome.runtime.getURL("src/extensions/next-up.js"),
-      // Still-only art: the 3:4 card exported from the preview page
-      // (DEVELOPERS/previews/next-up.html, --layout player).
-      art: { image: "assets/art/next-up.png" },
       settings: [
-        { key: "showArt", label: "Show the cover art in the pill", type: "toggle", default: true },
-        { key: "alignRight", label: "Put the pill on the right instead of the left", type: "toggle", default: false },
-        // Off by default: it repaints every frame while the pill is visible.
-        { key: "smoothGlow", label: "Smooth glow (60fps)", type: "toggle", default: false },
+        { key: "showArt", label: "Show the cover art", type: "toggle", default: true },
       ],
     },
     {
@@ -986,10 +1082,6 @@
       version: "1.0.0",
       lastUpdated: "2026-09-29",
       jsUrl: chrome.runtime.getURL("src/extensions/song-notes.js"),
-      // Still-only art (like Sleep Timer): the 3:4 Kawarp card exported from the
-      // preview page. Paths are extension-relative and assets/art/* is already
-      // covered by web_accessible_resources.
-      art: { image: "assets/art/song-notes.png" },
       // No settings: the add-on is a single button plus its own popup, and empty
       // settings render no Settings section at all (same as Ambient / Sleep Timer).
       settings: [],
@@ -1033,20 +1125,6 @@
       version: "0.1.0",
       lastUpdated: "2026-10-08",
       jsUrl: chrome.runtime.getURL("src/extensions/snippet-track-toast.js"),
-      // No art: the card falls back to its monogram tile.
-      settings: [],
-    },
-    {
-      id: "snippet-copy-lyrics",
-      name: "Copy lyrics",
-      author: "Aurora Lyrics",
-      category: "Snippets",
-      stars: 5,
-      tags: ["lyrics", "copy", "clipboard"],
-      description: "Adds a Copy lyrics button that puts the whole song on your clipboard in one click.",
-      version: "0.1.0",
-      lastUpdated: "2026-10-08",
-      jsUrl: chrome.runtime.getURL("src/extensions/snippet-copy-lyrics.js"),
       // No art: the card falls back to its monogram tile.
       settings: [],
     },
@@ -2057,11 +2135,9 @@
     const byId = {
       "ytmod-spicy-lyrics": ["Lyrics not showing", "Fullscreen", "Lyric sources", "Other"],
       "ytmod-smooth-motion": ["Animations look wrong", "Panel / corner motion", "Performance / lag", "Buttons / controls", "Other"],
-      "ytmod-artwork-accent": ["Ambient glow / accent color", "Colors", "Performance", "Other"],
       "ytmod-dynamic": ["Cover art animation", "Video background / backdrop", "Gallery dimming", "Performance", "Other"],
       "ytmod-sleep-timer": ["Timer never fires", "Fade / volume", "Pause behaviour", "Other"],
       "ytmod-pip-lyrics": ["Picture-in-picture window", "Lyrics inside PiP", "Controls", "Other"],
-      "ytmod-share-lyric": ["Sharing", "Exported image", "Other"],
     };
     return (ext && byId[ext.id]) || ["Doesn't work", "Visual / layout", "Performance", "Buttons / controls", "Other"];
   }
@@ -3058,6 +3134,9 @@
   async function install(id) {
     const ext = findAvail(id);
     if (!ext || ext.comingSoon) return;
+    // Defense in depth: the rail, the detail button and the page-world API all
+    // arrive here, and Low mode must refuse all three.
+    if (lowModeBlocks(id)) { toast(lowModeNotice(id)); return; }
     const reg = await getReg();
     reg[id] = { enabled: true, version: ext.version || "?", installedAt: Date.now() };
     await setReg(reg);
@@ -3278,7 +3357,11 @@
     if (d.type === "ytmod-settings-request" && typeof d.id === "string") {
       const ext = findAvail(d.id);
       if (ext && ext.settings) {
-        getExtensionSettings(ext).then((settings) => postExtensionSettings(d.id, settings));
+        // The mode must be known BEFORE the first envelope goes out, or an add-on
+        // that mounts early would start in Ultra and never be corrected.
+        loadPerformanceMode()
+          .then(() => getExtensionSettings(ext))
+          .then((settings) => postExtensionSettings(d.id, settings));
       }
       return;
     }
@@ -3360,11 +3443,6 @@
   // Only these add-ons carry a preview clip (AJ, 2026-10-19).
   // PiP Lyrics removed entirely: its preview showed real lyric text, and even
   // the logo fallback read as a preview slot (AJ, 2026-10-19).
-  const MK_PROMO = new Set([
-    "ytmod-sleep-timer", "ytmod-share-lyric",
-    "ytmod-next-up", "ytmod-song-notes",
-  ]);
-
   // Plain-language "what it does / pros / cons" shown from the info button next
   // to each add-on's Settings heading. Kept short and concrete — this is the
   // text a first-time user actually reads before installing (AJ, 2026-10-19).
@@ -3373,11 +3451,6 @@
       what: "Replaces the flat page background with a live, blurred version of the current artwork (or music video).",
       pros: ["Ties the whole app to the song you're playing", "Follows the video on music videos", "Adjustable brightness, saturation and warp"],
       cons: ["Uses GPU continuously while playing", "Most visible on pages with large empty areas"],
-    },
-    "ytmod-artwork-accent": {
-      what: "Samples the cover art and tints Aurora Lyrics to match it.",
-      pros: ["Every song feels themed without any setup", "Keeps lyric colours readable on dark art"],
-      cons: ["Very colourful art can shift the accent mid-song", "Tint is subtle on near-monochrome covers"],
     },
     "ytmod-spicy-lyrics": {
       what: "The lyric engine: synced lyrics, word-by-word animation, TTML import, offset control and fullscreen layouts.",
@@ -3399,15 +3472,10 @@
       pros: ["Lyrics stay visible while you use other apps", "Follows the main renderer's styling"],
       cons: ["Needs a second window open", "Limited to one line of context"],
     },
-    "ytmod-share-lyric": {
-      what: "Turns the current lyric line into a shareable image card.",
-      pros: ["Clean, consistent output", "Includes artwork and track credits"],
-      cons: ["Image is rendered locally, so custom fonts must be installed", "No built-in social posting"],
-    },
     "ytmod-next-up": {
-      what: "Shows what's playing next, with a queue preview and quick jump.",
-      pros: ["See the queue without leaving the page", "One click to jump to a track"],
-      cons: ["Reads YouTube's queue, so it matches YTM's own ordering", "Long queues need scrolling"],
+      what: "Shows the next track in the player bar, with its cover art.",
+      pros: ["See the queue without opening it", "One click to skip straight to that track"],
+      cons: ["Reads YouTube's queue, so it follows YTM's own ordering", "Hides itself when the bar has no room for it"],
     },
     "ytmod-song-notes": {
       what: "Lets you attach private notes to a track and read them back later.",
@@ -3418,11 +3486,6 @@
       what: "Pops a small notification with the song, artist and cover art whenever a track starts.",
       pros: ["Useful when the player bar is hidden", "Unobtrusive and auto-dismisses"],
       cons: ["Can overlap content briefly", "Duplicates the player bar on the song view"],
-    },
-    "snippet-copy-lyrics": {
-      what: "Adds a button that copies the full lyric text of the current song.",
-      pros: ["One click, no selection dragging", "Works with imported TTML too"],
-      cons: ["Plain text only — no timestamps", "Copies the whole song, not a single line"],
     },
     "snippet-centered-home": {
       what: "Centers the home page section headers and filter chips.",
@@ -3444,16 +3507,13 @@
   // Per-add-on glyph + tint for the rail tiles and the detail monogram.
   const MK_GLYPH = {
     "ytmod-dynamic":      { c: "#ff4d6a", d: "M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z" },
-    "ytmod-artwork-accent": { c: "#8e0b26", d: "M12 4a8 8 0 100 16 8 8 0 000-16zm0 3a5 5 0 110 10 5 5 0 010-10z" },
     "ytmod-spicy-lyrics": { c: "#ff5c9e", d: "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z" },
     "ytmod-smooth-motion": { c: "#7aa2ff", d: "M3 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0v3c-2-3-4-3-6 0s-4 3-6 0-4-3-6 0z" },
     "ytmod-sleep-timer":  { c: "#9b8cff", d: "M12 3a9 9 0 108.5 12A7 7 0 1112 3z" },
     "ytmod-pip-lyrics":   { c: "#ffb454", d: "M3 5h18v14H3V5zm2 2v10h14V7H5zm6 4h6v4h-6v-4z" },
-    "ytmod-share-lyric":  { c: "#ff7a59", d: "M14 3l7 7-7 7v-4c-5 0-8 2-10 5 0-6 4-9 10-9V3z" },
     "ytmod-next-up":      { c: "#4fd1c5", d: "M4 6h12v2H4V6zm0 5h12v2H4v-2zm0 5h8v2H4v-2zm14-5l4 3-4 3v-6z" },
     "ytmod-song-notes":   { c: "#f5c542", d: "M4 4h16v12H8l-4 4V4zm3 4h10v2H7V8zm0 4h7v2H7v-2z" },
     "snippet-track-toast":{ c: "#9aa7ff", d: "M12 22a2 2 0 002-2h-4a2 2 0 002 2zm7-6V11a7 7 0 10-14 0v5l-2 2v1h18v-1l-2-2z" },
-    "snippet-copy-lyrics":{ c: "#7bd88f", d: "M8 3h10v14H8V3zm-2 4H4v14h10v-2H6V7z" },
     "snippet-centered-home": { c: "#a78bfa", d: "M7 5h10v2H7zM5 9h14v2H5zM8 13h8v2H8zM6 17h12v2H6z" },
     "snippet-npv-panel":  { c: "#ff4d6a", d: "M3 4h18v16H3V4zm2 2v12h4V6H5zm6 0v12h8V6h-9z" },
     // Two outward triangles = seek back / forward. Deep accent so it does not
@@ -3577,7 +3637,20 @@
       chk.classList.add("ym-mk-check");
       card.appendChild(chk);
     }
-    const go = () => { mkSelect(id); };
+    // Low performance mode greys the add-ons it will not run and says why on
+    // click, instead of opening a page whose Install button cannot work. Low also
+    // uninstalls them (see applyPerformanceRestrictions), so the row reads as an
+    // ordinary catalog entry plus this class. The rail is re-rendered on every
+    // mode change, so `blocked` is always current.
+    const blocked = lowModeBlocks(id);
+    if (blocked) {
+      card.classList.add("ym-mk-card-blocked");
+      card.setAttribute("aria-disabled", "true");
+    }
+    const go = () => {
+      if (blocked) { toast(lowModeNotice(id)); return; }
+      mkSelect(id);
+    };
     card.addEventListener("click", go);
     card.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
@@ -3795,34 +3868,6 @@
     return box;
   }
 
-  function mkPromoBox(ext, caption) {
-    const box = h("div", { class: "ym-mk-promobox" });
-    const art = ext.art || {};
-    if (art.video) {
-      const v = h("video", {
-        class: "ym-mk-promomedia",
-        src: extArtUrl(art.video),
-        poster: extArtUrl(art.poster || art.image || ""),
-        loop: "", autoplay: "", muted: "", playsinline: "",
-        disablepictureinpicture: "",
-      });
-      v.muted = true;
-      box.appendChild(v);
-    } else if (art.image || art.poster) {
-      // Still-only add-ons (Sleep Timer, Next Up, Song Notes) ship a 3:4 card.
-      const still = h("div", { class: "ym-mk-promomedia ym-mk-promofallback" });
-      still.style.backgroundImage = 'url("' + extArtUrl(art.image || art.poster) + '")';
-      box.appendChild(still);
-    } else {
-      const fb = h("div", { class: "ym-mk-promomedia ym-mk-promofallback" });
-      const url = mkLogoUrl();
-      if (url) fb.style.backgroundImage = 'url("' + url + '")';
-      box.appendChild(fb);
-    }
-    if (!caption) return box;
-    return h("div", { class: "ym-mk-promo" }, box, h("div", { class: "ym-mk-promocap", text: caption }));
-  }
-
   // Change the label AND morph the width in the same beat, so the button never
   // jumps between "Uninstall" and "Uninstalling…".
   function mkBtnLabel(btn, text) {
@@ -3880,10 +3925,14 @@
       acts.appendChild(b);
     } else {
       const b = h("button", { class: "ym-mk-btn-in", type: "button" });
+      // Greyed like the rail row: the click still answers (with the reason)
+      // rather than doing nothing at all.
+      if (lowModeBlocks(ext.id)) b.classList.add("ym-mk-btn-off");
       b.appendChild(svgIcon(MK_PLUS));
       b.appendChild(h("span", { text: "Install" }));
       b.addEventListener("click", async () => {
         if (b.dataset.busy) return;
+        if (lowModeBlocks(ext.id)) { toast(lowModeNotice(ext.id)); return; }
         b.dataset.busy = "1";
         b.classList.add("busy");
         mkBtnLabel(b, "Installing…");
@@ -3922,16 +3971,13 @@
   const MK_BLURB = {
     [APPLE_THEME_ID]: "A frosted player bar, a wider lyrics column and glass chrome.",
     "ytmod-dynamic": "The playing artwork becomes a full-page backdrop.",
-    "ytmod-artwork-accent": "A glow around the artwork, with the controls tinted to match.",
     "ytmod-smooth-motion": "The page eases between states instead of snapping.",
     "ytmod-spicy-lyrics": "Word-by-word lyrics in the panel and in fullscreen.",
     "ytmod-sleep-timer": "Fades the music out and pauses it, on a timer or at the end of the track.",
     "ytmod-pip-lyrics": "The current lyric line in a small always-on-top window.",
-    "ytmod-share-lyric": "Saves the line you are on as a square image.",
-    "ytmod-next-up": "What plays next, in a pill beside the artwork.",
+    "ytmod-next-up": "What plays next, in the player bar.",
     "ytmod-song-notes": "Private notes on a song, saved in the browser.",
     "snippet-track-toast": "A notification with the artwork whenever the track changes.",
-    "snippet-copy-lyrics": "Copies the whole song to the clipboard in one click.",
     "snippet-centered-home": "Centers the home page headers and filter chips.",
     "snippet-npv-panel": "A side panel with the artwork, the song and live lyrics.",
     "snippet-arrow-seek": "Left and right arrows scrub the song, five seconds a press.",
@@ -4034,7 +4080,7 @@
     return wrap;
   }
 
-  function mkQuietPolish(prevBtnW, prevPillBg, keepPromo) {
+  function mkQuietPolish(prevBtnW, prevPillBg) {
     if (!mkDetail) return;
     // Button width: FLIP from the previous width so Install <-> Uninstall grows
     // and shrinks instead of snapping.
@@ -4057,13 +4103,6 @@
           { backgroundColor: getComputedStyle(pill).backgroundColor, opacity: 1, transform: "none" },
         ], { duration: 340, easing: "cubic-bezier(.34,1.3,.5,1)" });
       }
-    }
-    // Preview: put the original node back so the clip does not restart.
-    if (keepPromo) {
-      const fresh = mkDetail.querySelector(".ym-mk-promo");
-      if (fresh) fresh.replaceWith(keepPromo);
-      const v = keepPromo.querySelector("video");
-      if (v) { try { v.play(); } catch (_) {} }
     }
   }
 
@@ -4558,6 +4597,120 @@
     }
   }
 
+  /* ---- player bar: a progress line that moves like time -------------------
+     YouTube steps the seek slider in whole seconds, so the played line and the
+     dot at its end jump a second at a time — the snap AJ hit in fullscreen on a
+     word-by-word track, on 2026-10-26. While the switch is on, one animation
+     frame follows the media element instead: the line is the bar's own scaleX,
+     the dot is the knob slid by a transform, and neither costs a layout.
+
+     Only the PAINT is ours. The slider's value, its ARIA readout and its hit
+     area stay YouTube's, and a drag belongs to the pointer: while it is down the
+     dot follows the slider's own value, which is what YouTube is drawing too. */
+  let ytProgressRaf = 0;
+  let ytProgressParts = null;
+  let ytProgressWidth = 0;
+  let ytProgressPct = -1;
+  let ytProgressResize = null;
+
+  function ytProgressLookup() {
+    const slider = document.querySelector("ytmusic-player-bar #progress-bar");
+    if (!slider) return null;
+    const primary = slider.querySelector("#primaryProgress");
+    const knob = slider.querySelector("#sliderKnob");
+    if (!primary || !knob) return null;
+    return { slider, primary, knob };
+  }
+
+  function ytProgressMedia() {
+    return document.querySelector("ytmusic-player video, #movie_player video, video");
+  }
+
+  // The dot is centred on the line's end (YTM gives the knob a -16px margin),
+  // so sliding it by `pct * width` puts its centre exactly on the bar's edge.
+  function ytProgressPaint(parts, pct) {
+    parts.primary.style.transform = "scaleX(" + pct.toFixed(6) + ")";
+    parts.knob.style.transform = "translateX(" + (pct * ytProgressWidth).toFixed(2) + "px)";
+  }
+
+  function ytProgressStep() {
+    // The bar outlives every page in YTM, but a fullscreen transition can rebuild
+    // the slider under us — re-resolve whenever the node we hold is gone.
+    if (!ytProgressParts || !ytProgressParts.slider.isConnected) {
+      ytProgressParts = ytProgressLookup();
+      ytProgressWidth = 0;
+      if (ytProgressParts && ytProgressResize) ytProgressResize.observe(ytProgressParts.slider);
+    }
+    const parts = ytProgressParts;
+    if (!parts) return;
+    if (!ytProgressWidth) ytProgressWidth = parts.slider.getBoundingClientRect().width;
+    if (!(ytProgressWidth > 0)) return;
+    if (parts.slider.dragging) {
+      const max = Number(parts.slider.max);
+      if (!(max > 0)) return;
+      const pct = Math.min(1, Math.max(0, Number(parts.slider.value) / max));
+      if (pct === ytProgressPct) return;
+      ytProgressPct = pct;
+      ytProgressPaint(parts, pct);
+      return;
+    }
+    const video = ytProgressMedia();
+    if (!video) return;
+    const duration = video.duration;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    const pct = Math.min(1, Math.max(0, video.currentTime / duration));
+    if (pct === ytProgressPct) return;
+    ytProgressPct = pct;
+    ytProgressPaint(parts, pct);
+  }
+
+  function ytProgressFrame() {
+    ytProgressRaf = window.requestAnimationFrame(ytProgressFrame);
+    ytProgressStep();
+  }
+
+  function ytStartSmoothProgress() {
+    if (ytProgressRaf) return;
+    if (!ytProgressResize && typeof ResizeObserver === "function") {
+      // A resize — the window, a fullscreen pass, a theme that changes the bar's
+      // width — invalidates the width the dot is slid by. One observer clears it
+      // and the next frame re-measures, so no frame reads layout while painting.
+      ytProgressResize = new ResizeObserver(() => {
+        ytProgressWidth = 0;
+        ytProgressPct = -1;
+      });
+    }
+    if (ytProgressParts && ytProgressResize) ytProgressResize.observe(ytProgressParts.slider);
+    // One immediate paint: the class hands the dot over on this very tick, and it
+    // should not sit at the start of the bar waiting for a frame.
+    ytProgressPct = -1;
+    ytProgressStep();
+    ytProgressRaf = window.requestAnimationFrame(ytProgressFrame);
+  }
+
+  function ytStopSmoothProgress() {
+    if (ytProgressRaf) window.cancelAnimationFrame(ytProgressRaf);
+    ytProgressRaf = 0;
+    if (ytProgressResize) {
+      ytProgressResize.disconnect();
+      ytProgressResize = null;
+    }
+    const parts = ytProgressParts;
+    ytProgressParts = null;
+    ytProgressWidth = 0;
+    ytProgressPct = -1;
+    if (!parts || !parts.slider.isConnected) return;
+    // Hand both pieces back where the playhead actually is: the line's transform
+    // is ours now, and leaving it would freeze it a fraction of a second ahead of
+    // YouTube's next whole-second value.
+    parts.knob.style.transform = "";
+    const video = ytProgressMedia();
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      const pct = Math.min(1, Math.max(0, video.currentTime / video.duration));
+      parts.primary.style.transform = "scaleX(" + pct.toFixed(6) + ")";
+    }
+  }
+
   /* ===== YouTube page (AJ, 2026-10-22) =====================================
      Settings for YouTube Music ITSELF — not for the lyrics, and deliberately NOT
      part of an add-on. They get their own rail page and their own storage key so
@@ -4615,9 +4768,58 @@
   const YT_DOCK_CLASS = "ym-yt-dock";
   const YT_GLASSCHROME_CLASS = "ym-yt-glass-chrome";
   const YT_NODIVIDERS_CLASS = "ym-yt-no-dividers";
+  // The class only hands the seek knob over to the progress painter below; the
+  // animation itself is the rAF loop that runs while the switch is on.
+  const YT_SMOOTHPROGRESS_CLASS = "ym-yt-smooth-progress";
   const YT_SCALE_MIN = 0.85;
   const YT_SCALE_MAX = 1.2;
+  // The Apple Music look is the shipped default, so every switch it owns is ON
+  // and the two that are a matter of taste are off: the glass top bar and side
+  // nav, and the transparent album-art chrome that goes with it. Type sits at
+  // 120% (AJ, 2026-10-26) — the stock size read small next to the wider column.
+  // The home/library/explore levers stay off: those pages are YouTube's own.
   const DEFAULT_YT_PREFS = {
+    font: true,
+    scale: 1.2,
+    compact: true,
+    volume: true,
+    noChips: false,
+    tightHome: false,
+    noCaptions: false,
+    wideShelves: false,
+    smallTitles: false,
+    libHideEmpty: false,
+    libBig: false,
+    libWide: false,
+    exploreWide: false,
+    exploreMoods: false,
+    exploreNoShortcuts: false,
+    // Wider column on by default too: the lyrics get a usable measure without
+    // anyone finding the lever first (AJ, 2026-10-23).
+    songWide: true,
+    songTabs: true,
+    // Which of the four player-page layouts is drawn. A string, not a switch,
+    // so loadYtPrefs() normalises it by hand (see the schema pass there).
+    songLayout: "default",
+    // On by default: this is the look the Aurora theme shipped, and moving it
+    // here should not silently hand people the stock chrome back (AJ,
+    // 2026-10-23). Every one of them is a switch on the YouTube page.
+    darkBar: true,
+    // The custom set ships on: it is the look the Apple Music card is for
+    // (AJ, 2026-10-23).
+    customIcons: true,
+    dock: true,
+    glassChrome: false,
+    noDividers: true,
+    // On by default: a progress line that moves once a second reads as broken
+    // next to everything else on this page (AJ, 2026-10-26).
+    smoothProgress: true,
+  };
+  let ytPrefs = Object.assign({}, DEFAULT_YT_PREFS);
+  // Profiles saved before 2026-10-26 hold these values. Kept ONLY to recognise
+  // one that never touched a switch: it gets the new defaults, while anything
+  // customised is left alone (see loadYtPrefs). Never applied as a value.
+  const LEGACY_YT_PREFS = {
     font: false,
     scale: 1,
     compact: false,
@@ -4633,29 +4835,23 @@
     exploreWide: false,
     exploreMoods: false,
     exploreNoShortcuts: false,
-    // Wider column on by default too: the lyrics get a usable measure without
-    // anyone finding the lever first (AJ, 2026-10-23).
     songWide: true,
     songTabs: false,
-    // Which of the four player-page layouts is drawn. A string, not a switch,
-    // so loadYtPrefs() normalises it by hand (see the schema pass there).
     songLayout: "default",
-    // On by default: this is the look the Aurora theme shipped, and moving it
-    // here should not silently hand people the stock chrome back (AJ,
-    // 2026-10-23). Every one of them is a switch on the YouTube page.
     darkBar: true,
-    // The custom set ships on: it is the look the Apple Music card is for
-    // (AJ, 2026-10-23).
     customIcons: true,
     dock: true,
     glassChrome: true,
     noDividers: true,
   };
-  let ytPrefs = Object.assign({}, DEFAULT_YT_PREFS);
+  const YT_DEFAULTS_REV_KEY = "ytmod_youtube_defaults_rev";
+  const YT_DEFAULTS_REV = 1;
+  const matchesLegacyYtPrefs = (saved) =>
+    Object.keys(LEGACY_YT_PREFS).every((key) => saved[key] === LEGACY_YT_PREFS[key]);
 
   const clampYtScale = (value) => {
     const n = Number(value);
-    if (!Number.isFinite(n)) return 1;
+    if (!Number.isFinite(n)) return DEFAULT_YT_PREFS.scale;
     return Math.round(Math.min(YT_SCALE_MAX, Math.max(YT_SCALE_MIN, n)) * 100) / 100;
   };
 
@@ -4714,6 +4910,10 @@
     root.classList.toggle(YT_DOCK_CLASS, ytPrefs.dock === true);
     root.classList.toggle(YT_GLASSCHROME_CLASS, ytPrefs.glassChrome === true);
     root.classList.toggle(YT_NODIVIDERS_CLASS, ytPrefs.noDividers === true);
+    const smoothProgress = ytPrefs.smoothProgress === true;
+    root.classList.toggle(YT_SMOOTHPROGRESS_CLASS, smoothProgress);
+    if (smoothProgress) ytStartSmoothProgress();
+    else ytStopSmoothProgress();
     // The capsule needs the selected tab's box the moment the lever turns on,
     // not at the next tab switch. One frame, because the class has to paint
     // before anything can be measured.
@@ -4877,6 +5077,7 @@
 
   async function loadYtPrefs() {
     const saved = await safeStorageGet(YT_PREFS_KEY, null);
+    const defaultsRev = Number(await safeStorageGet(YT_DEFAULTS_REV_KEY, 0)) || 0;
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
       // Read through the schema instead of naming the keys. The first three
       // home switches were added to the page and to applyYtPrefs() but not
@@ -4889,6 +5090,13 @@
         else if (typeof saved[key] === "boolean") next[key] = saved[key];
       }
       ytPrefs = next;
+      // The shipped look changed on 2026-10-26 (every Apple Music switch on,
+      // glass chrome off, type at 120%). A profile still holding the old set
+      // exactly never chose any of it, so it moves to the new defaults; one
+      // customised switch keeps the whole set it was using. Runs once.
+      if (defaultsRev < YT_DEFAULTS_REV && matchesLegacyYtPrefs(saved)) {
+        ytPrefs = Object.assign({}, DEFAULT_YT_PREFS);
+      }
     } else {
       // One-time migration from the build where this switch lived in Aurora
       // Lyrics' own settings. Without it, updating would quietly switch the font
@@ -4898,6 +5106,9 @@
       if (legacy && legacy.youtubeFont === true) {
         ytPrefs = Object.assign({}, DEFAULT_YT_PREFS, { font: true });
       }
+    }
+    if (defaultsRev < YT_DEFAULTS_REV) {
+      await safeStorageSet({ [YT_DEFAULTS_REV_KEY]: YT_DEFAULTS_REV });
     }
     applyYtPrefs();
     // Armed once at boot; it stays idle unless the Library filter is on.
@@ -5037,11 +5248,11 @@
       // tile that collects the next site-wide lever too (AJ, 2026-10-22).
       id: "global",
       name: "Global",
-      desc: "The hairlines between regions.",
+      desc: "The player bar's line, the hairlines.",
       art: "global",
       title: "Global",
-      blurb: "The divider lines that separate one region from the next, on every page. The player bar, the lyrics column, the type and the chrome now live on the Apple Music theme.",
-      active: () => (ytPrefs.noDividers ? 1 : 0),
+      blurb: "The player bar's progress line, and the divider lines that separate one region from the next. Both apply on every page. The lyrics column, the type and the rest of the chrome live on the Apple Music theme.",
+      active: () => (ytPrefs.smoothProgress ? 1 : 0) + (ytPrefs.noDividers ? 1 : 0),
       panels: () => [ytChromePanel()],
     },
   ];
@@ -5064,15 +5275,27 @@
 
   // The hairlines were the one lever in Global that was not part of the Apple
   // Music look, so they stayed behind when the rest moved to the theme card
-  // (AJ, 2026-10-23).
+  // (AJ, 2026-10-23). The progress line joined them as a second block: it is a
+  // player-bar lever that applies on every page, not a page layout of its own.
   function ytChromePanel() {
+    const frag = document.createDocumentFragment();
+
+    const bar = ytPanel("Player bar");
+    bar.appendChild(ytToggleRow("ytSmoothProgress", "Smooth progress line", ytPrefs.smoothProgress, (on) => {
+      ytPrefs.smoothProgress = on;
+      applyYtPrefs();
+      saveYtPrefs();
+    }));
+    frag.appendChild(bar);
+
     const sec = ytPanel("Dividers");
     sec.appendChild(ytToggleRow("ytNoDividers", "Hide divider lines", ytPrefs.noDividers, (on) => {
       ytPrefs.noDividers = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
-    return sec;
+    frag.appendChild(sec);
+    return frag;
   }
 
   /* The theme's type block. The font, the interface size and the glass chrome
@@ -5483,6 +5706,69 @@
     return wrap;
   }
 
+  /* ---- Settings page (AJ, 2026-10-26) ----------------------------------
+     The home for switches that are not an add-on. Performance is the first one:
+     one governor over the three Kawarp backdrops (page, Now Playing rail,
+     fullscreen), so a slower machine does not have to disable features one by
+     one. Reached from the header button, never the rail: it is not something to
+     install. */
+  function mkSettingsPage() {
+    const wrap = h("div", { class: "ym-mk-dwrap" });
+    const head = h("div", { class: "ym-mk-dhead" });
+    const mono = h("div", { class: "ym-mk-dmono ym-mk-setmono" }, svgIcon(ICON_SETTINGS));
+    head.appendChild(mono);
+    head.appendChild(h("div", { class: "ym-mk-dtitles" },
+      h("h1", { text: "Settings" }),
+      h("p", { class: "ym-mk-dby", text: "App-wide switches, not add-ons." })
+    ));
+    wrap.appendChild(head);
+    wrap.appendChild(h("p", {
+      class: "ym-mk-lead",
+      text: "Performance sets how much of the animated backdrop runs. One choice caps every Kawarp at once — the page backdrop, the Now Playing rail and the fullscreen view — so a slower machine stays smooth without uninstalling anything.",
+    }));
+
+    const section = h("section", { class: "ym-perf" });
+    section.appendChild(h("div", { class: "ym-detail-setting-section", text: "Performance mode" }));
+    const modes = h("div", { class: "ym-perf-modes" });
+    const options = [
+      ["ultra", "Ultra", "Everything on: uncapped frame rate, and the live video feeds the backdrop."],
+      ["normal", "Normal", "30fps backdrop, no video sampling, Now Playing rail at 24fps."],
+      ["low", "Low", "24fps, no rail backdrop, no video sampling, a cheaper lyric blur, and no blur under the lyrics in fullscreen."],
+    ];
+    const buttons = new Map();
+    const paint = (mode) => {
+      buttons.forEach((b, key) => {
+        b.classList.toggle("on", key === mode);
+        b.setAttribute("aria-pressed", key === mode ? "true" : "false");
+      });
+    };
+    for (const [mode, name, desc] of options) {
+      const b = h("button", { class: "ym-perf-mode", type: "button", "aria-pressed": "false" },
+        h("b", { text: name }),
+        h("span", { text: desc })
+      );
+      b.addEventListener("click", () => {
+        if (b.classList.contains("on")) return;
+        paint(mode); // optimistic: the store round-trip is one tick away
+        choosePerformanceMode(mode).catch(() => paint(performanceMode));
+      });
+      buttons.set(mode, b);
+      modes.appendChild(b);
+    }
+    paint(performanceMode);
+    // A value that lands after this page painted (storage read, or a change made
+    // from the same page in another tab) repaints the choice.
+    performancePaint = (mode) => { if (wrap.isConnected) paint(mode); };
+    section.appendChild(modes);
+    section.appendChild(h("p", {
+      class: "ym-perf-note",
+      text: "Applies everywhere the moment you pick one, and is remembered next time.",
+    }));
+    wrap.appendChild(section);
+    loadPerformanceMode().then((mode) => { if (wrap.isConnected) paint(mode); });
+    return wrap;
+  }
+
   async function mkRenderDetail(reg, quiet) {
     if (!mkDetail) return;
     const keepScroll = quiet ? mkDetail.scrollTop : 0;
@@ -5495,8 +5781,6 @@
     // Did the previous view already show a settings block? Used to animate the
     // block growing in after an install instead of snapping the actions row down.
     const prevHadSettings = quiet && !!mkDetail.querySelector(".ym-mk-settings");
-    const keepPromo = quiet ? mkDetail.querySelector(".ym-mk-promo") : null;
-    if (keepPromo) keepPromo.remove(); // detach so the <video> keeps its position
     // ⭐ Hold the pane invisible until mkAnimateIn() has ARMED its stagger. Without
     // this the first paint showed the finished layout at full opacity for a frame
     // and THEN the stagger restarted it from 0 — the "home screen flashes, then
@@ -5522,6 +5806,14 @@
     // an Install button, so it is matched before the findAvail fallback.
     if (mkSel === APPLE_THEME_ID) {
       mkDetail.appendChild(mkAppleThemePage());
+      if (!quiet) mkAnimateIn();
+      mkDetail.classList.remove("ym-mk-anim-hold");
+      mkDetail.scrollTop = keepScroll;
+      return;
+    }
+    // Not an add-on, so it has to be matched before the findAvail() fallback.
+    if (mkSel === "settings") {
+      mkDetail.appendChild(mkSettingsPage());
       if (!quiet) mkAnimateIn();
       mkDetail.classList.remove("ym-mk-anim-hold");
       mkDetail.scrollTop = keepScroll;
@@ -5570,7 +5862,7 @@
     const src = MK_SOURCES[ext.id];
     if (src) wrap.appendChild(mkSources(src));
 
-    const cols = h("div", { class: "ym-mk-dcols" + (MK_PROMO.has(ext.id) ? "" : " solo") });
+    const cols = h("div", { class: "ym-mk-dcols solo" });
     const left = h("div", { class: "ym-mk-left" });
     if (installed && ext.settings && ext.settings.length) {
       const settings = await buildSettingsSection(ext);
@@ -5587,7 +5879,6 @@
     }
     left.appendChild(mkActions(ext, installed));
     cols.appendChild(left);
-    if (MK_PROMO.has(ext.id)) cols.appendChild(mkPromoBox(ext, ""));
     wrap.appendChild(cols);
     mountReportButton(wrap, ext);
     mkDetail.appendChild(wrap);
@@ -5599,7 +5890,7 @@
         const se = mkDetail.querySelector(".ym-mk-settings");
         if (se) mkGrowIn(se);
       }
-      mkQuietPolish(prevBtnW, prevPillBg, keepPromo);
+      mkQuietPolish(prevBtnW, prevPillBg);
     }
     mkDetail.classList.remove("ym-mk-anim-hold");
     mkDetail.scrollTop = keepScroll;
@@ -5643,13 +5934,24 @@
     const logoUrl = mkLogoUrl();
     if (logoUrl) logo.style.backgroundImage = 'url("' + logoUrl + '")';
 
+    // Settings is a BUTTON, not a rail row (AJ, 2026-10-26): it is an app-wide page,
+    // so it must not read as another add-on to install.
+    const settingsBtn = h("button", {
+      class: "ym-mk-setbtn",
+      type: "button",
+      title: "Settings",
+      "aria-label": "Open settings",
+    });
+    settingsBtn.appendChild(svgIcon(ICON_SETTINGS));
+    settingsBtn.addEventListener("click", () => { if (mkSel !== "settings") mkSelect("settings"); });
+
     const title = h("h1", { text: "Add-ons" });
     // Secret entry point for developer mode — see onTitleTap(). Bound to
     // pointerdown rather than click on purpose: in floating mode
     // enableMarketplaceDrag() calls preventDefault() on the header's pointerdown,
     // which suppresses the derived mouse events.
     title.addEventListener("pointerdown", onTitleTap);
-    const header = h("div", { class: "ym-head ym-mk-head" }, collapse, logo, title, close);
+    const header = h("div", { class: "ym-head ym-mk-head" }, collapse, logo, title, settingsBtn, close);
 
     const seg = h("div", { class: "ym-mk-seg" });
     mkSegPill = h("span", { class: "ym-mk-segpill" });
@@ -5706,7 +6008,7 @@
       return;
     }
     const list = mkFilteredList();
-    if (mkSel !== "home" && !list.some((e) => e.id === mkSel)) mkSel = "home";
+    if (mkSel !== "home" && mkSel !== "settings" && !list.some((e) => e.id === mkSel)) mkSel = "home";
     mkBuildRows(list, reg);
     if (quiet && mkRows) {
       const chk = mkRows.querySelector(".ym-mk-card.sel .ym-mk-check");
@@ -7344,16 +7646,23 @@
       try { await bgDel(id); } catch (_) {}
       console.debug("[YTMod] dropped orphaned add-on record:", id);
     }
-    // First-run seeding: the two core add-ons (synced lyrics + dynamic theme)
-    // install and enable themselves on a fresh profile, so a new user gets the
-    // full experience without opening the Marketplace. Runs once per browser
-    // profile (ytmod_defaults_seeded flag); afterwards the user's own
+    // First-run seeding: the core add-ons install and enable themselves on a
+    // fresh profile, so a new user gets the full experience without opening the
+    // Marketplace. Lyrics and the Bloom backdrop were the two it shipped with;
+    // Aurora Flow and Centered home joined them on 2026-10-26 — they are the
+    // motion and the home layout the rest of the defaults assume. Runs once per
+    // browser profile (ytmod_defaults_seeded flag); afterwards the user's own
     // install/uninstall choices are always respected.
     const defaultsSeeded = await new Promise((res) =>
       chrome.storage.local.get("ytmod_defaults_seeded", (r) => res(!!r["ytmod_defaults_seeded"]))
     );
     if (!defaultsSeeded) {
-      for (const id of ["ytmod-spicy-lyrics", "ytmod-dynamic"]) {
+      for (const id of [
+        "ytmod-spicy-lyrics",
+        "ytmod-dynamic",
+        "ytmod-smooth-motion",
+        "snippet-centered-home",
+      ]) {
         if (!reg[id]) {
           const ext = findAvail(id);
           reg[id] = { enabled: true, version: (ext && ext.version) || "?", installedAt: Date.now() };
@@ -7363,12 +7672,21 @@
       await new Promise((res) => chrome.storage.local.set({ ytmod_defaults_seeded: true }, res));
     }
     if (registryChanged) await setReg(reg);
-    for (const id in reg) if (reg[id].enabled) applyExtension(id, true);
+    // BEFORE the add-ons mount: a Low mode that suspends one of them must not
+    // start it first and tear it down a tick later. Same read the Settings page
+    // uses, and it is memoised, so this costs nothing.
+    await applyPerformanceRestrictions(await loadPerformanceMode());
+    // Re-read: the governor writes the registry when it switches an add-on off,
+    // and mounting from the pre-governor copy would start it anyway.
+    const bootReg = await getReg();
+    for (const id in bootReg) if (bootReg[id].enabled) applyExtension(id, true);
     // view / density / floating are PINNED (toolbar removed, AJ 2026-09-28) and
     // the card is CENTRED: the old dragged position is deliberately NOT restored,
     // so an accidental header drag (e.g. tapping the title 6× for dev mode) can't
     // leave the panel stranded in a corner across reloads.
     const savedUI = await getUI();
+    // Before buildMarketplace(), so the Settings page never paints a stale mode.
+    await loadPerformanceMode();
     // Deliberately an explicit `=== true`: an absent or junk key means off, and
     // nothing but the 6-tap gesture is allowed to turn this on.
     if (savedUI.dev === true) ui.dev = true;

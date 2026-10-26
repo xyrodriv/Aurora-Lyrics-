@@ -372,6 +372,12 @@ export class Kawarp {
         this._tintIntensity = options.tintIntensity ?? 0.15;
         this._dithering = options.dithering ?? 0.008;
         this._scale = options.scale ?? 1.0;
+        // Optional frame cap (fps). 0 = uncapped, the historical behaviour.
+        // The performance modes use it to run the same shader at 30 or 24 fps
+        // instead of switching the backdrop off entirely.
+        this._maxFps = Math.max(0, Number(options.maxFps) || 0);
+        this._minFrameMs = this._maxFps ? 1000 / this._maxFps : 0;
+        this._lastPaintAt = 0;
         // Create shader programs
         this.blurProgram = this.createProgram(VERTEX_SHADER, KAWASE_BLUR_SHADER);
         this.blendProgram = this.createProgram(VERTEX_SHADER, BLEND_SHADER);
@@ -532,6 +538,8 @@ export class Kawarp {
             this.tintIntensity = options.tintIntensity;
         if (options.dithering !== undefined)
             this.dithering = options.dithering;
+        if (options.maxFps !== undefined)
+            this.setMaxFps(options.maxFps);
         if (options.scale !== undefined)
             this.scale = options.scale;
     }
@@ -1236,9 +1244,24 @@ export class Kawarp {
         this.deleteFramebuffer(this.nextAlbumFBO);
         this.deleteFramebuffer(this.warpFBO);
     }
+    /** Cap the paint rate without touching the clock: skipped frames do not
+     *  advance lastFrameTime, so dt (and the animation speed) stays correct and
+     *  the motion simply becomes steppier. 0 lifts the cap. */
+    setMaxFps(fps) {
+        const value = Math.max(0, Number(fps) || 0);
+        if (value === this._maxFps)
+            return;
+        this._maxFps = value;
+        this._minFrameMs = value ? 1000 / value : 0;
+    }
     renderLoop = (timestamp) => {
         if (!this.isPlaying)
             return;
+        if (this._minFrameMs && timestamp - this._lastPaintAt < this._minFrameMs - 1) {
+            this.animationId = requestAnimationFrame(this.renderLoop);
+            return;
+        }
+        this._lastPaintAt = timestamp;
         const dt = (timestamp - this.lastFrameTime) / 1000;
         this.lastFrameTime = timestamp;
         this._animationSpeed +=

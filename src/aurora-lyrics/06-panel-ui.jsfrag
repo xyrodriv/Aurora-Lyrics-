@@ -1,3 +1,8 @@
+  /* Options lives beside the song-layout pill in the empty band above the two
+     panels, so the tab watcher owns re-mounting it when content.js rebuilds that
+     picker. Module scope, like jumpButton. */
+  let optionsButton = null;
+
   function findTabBar() {
     return (
       document.querySelector("ytmusic-player-page tp-yt-paper-tabs.tab-header-container") ||
@@ -41,6 +46,10 @@
   function runTabWatcher() {
     tabWatchRaf = 0;
     if (tabWatcherNeedsMount()) scheduleMountTab();
+    // content.js owns the layout picker this pill sits beside. A rebuild takes
+    // the pill with it, and a detached pill is the only case that costs a
+    // querySelector — connected is one property read per mutation batch.
+    if (optionsButton && !optionsButton.isConnected) mountOptionsPill();
   }
   function onWatchMutations() {
     if (tabWatchRaf) return;
@@ -235,24 +244,28 @@
     videoOffsetRange.addEventListener("input", () => {
       setVideoOffsetMs(Number(videoOffsetRange.value) || 0, true);
     });
+    attachFineOffsetDrag(videoOffsetRange);
     videoOffsetNumber.addEventListener("input", () => {
       const seconds = parseFloat(videoOffsetNumber.value);
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
     });
 
-    const optionsButton = h("button", {
-      class: "ym-sl-import ym-sl-options-button",
+    // Options is a pill beside the song-layout switcher, in the empty band
+    // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
+    // across the panel's own top edge, which only appeared for people who
+    // already knew to sweep the pointer there — AJ's friend went looking and
+    // found nothing. Here it is always on screen, on the left of a control
+    // that is also about the song view, and it cannot collide with the tab
+    // labels or push them aside. content.js builds the container; see
+    // mountOptionsPill().
+    optionsButton = h("button", {
+      class: "ym-sl-options-pill",
       type: "button",
       title: "Lyrics options — offset, import, and more",
       "aria-label": "Open lyrics options",
+      "aria-haspopup": "dialog",
       text: "Options",
     });
-    // NOTE: the panel's own "Fullscreen" button was removed here (AJ, 2026-10-02):
-    // new users reach for YouTube Music's native fullscreen button, and that
-    // button is wired to OUR fullscreen, so the panel duplicate only added a
-    // second way in. enterFullscreenMode() is still reachable via the YTM path.
-    const toolsScroll = h("div", { class: "ym-sl-tools-scroll" }, optionsButton);
-    const tools = h("div", { class: "ym-sl-tools" }, toolsScroll);
 
     // The remaining controls (track, offset, import mode, upload) moved out of
     // the toolbar into a draggable overlay. The overlay is a child of <body> on
@@ -543,8 +556,24 @@
       staggerIn(optionsRail, true);
       staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
     };
+    // The card opens under the button. It used to appear at the viewport's
+    // top-right because that is where its button was; a card that materialises
+    // somewhere else than the click reads as a different feature. Clamped so a
+    // narrow window cannot push it off-screen.
+    function anchorOptionsCard() {
+      const rect = optionsButton.getBoundingClientRect();
+      const width = optionsOverlay.offsetWidth || 430;
+      const height = optionsOverlay.offsetHeight || 320;
+      const left = Math.min(Math.max(12, rect.left - 6), Math.max(12, innerWidth - width - 12));
+      const top = Math.min(Math.max(12, rect.bottom + 10), Math.max(12, innerHeight - height - 12));
+      optionsOverlay.style.left = left + "px";
+      optionsOverlay.style.top = top + "px";
+      optionsOverlay.style.right = "auto";
+      optionsOverlay.style.bottom = "auto";
+    }
     optionsButton.addEventListener("click", () => {
       const opening = optionsOverlay.classList.contains("hidden");
+      if (opening) anchorOptionsCard();
       optionsOverlay.classList.toggle("hidden");
       if (opening) {
         refreshFileTabState();
@@ -569,7 +598,7 @@
     scrollContainer.appendChild(linesRoot);
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
-    panelEl.append(tools, fileInput, lyricsContainer, jumpButton);
+    panelEl.append(fileInput, lyricsContainer, jumpButton);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -591,6 +620,7 @@
     document.body.appendChild(panelEl);
     refreshTrack();
     mountTab();
+    mountOptionsPill();
     startTick();
 
     const watchRoot = document.querySelector("ytmusic-app") ||
@@ -599,6 +629,14 @@
       wpObserver = new MutationObserver(onWatchMutations);
       wpObserver.observe(watchRoot, { childList: true, subtree: true });
     }
+  }
+
+  function mountOptionsPill() {
+    const host = document.querySelector(".ym-song-layout");
+    if (!host || !optionsButton) return;
+    if (optionsButton.parentElement === host) return;
+    // First child, so the pill sits to the LEFT of the layout switcher.
+    host.insertBefore(optionsButton, host.firstChild);
   }
 
   function mountPanel(bar) {

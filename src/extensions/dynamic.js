@@ -52,6 +52,10 @@
     customBgKawarp: true,
     customBgBlur: 24,
     contrast: 1,
+    // Absorbed from the Ambient add-on (AJ, 2026-10-26): the same artwork that
+    // feeds the backdrop also tints the player bar. ON, which is what Ambient
+    // shipped with.
+    artworkAccent: true,
   };
   let currentSettings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -80,7 +84,28 @@
   // restores it on exit.
   let kawarpSuspended = false;
 
+  // Performance mode (AJ, 2026-10-26), mirrored into every add-on's settings by
+  // the content script. Ultra = the untouched theme; Normal = 30fps backdrop and
+  // no live-video sampling; Low = 24fps, same cover-art-only rule. The numbers
+  // match the copies in 04-state-settings.jsfrag and snippet-npv-panel.js.
+  const PERFORMANCE_MODES = ["ultra", "normal", "low"];
+  let performanceMode = "ultra";
+
+  function normalizePerformanceMode(value) {
+    const mode = String(value || "").toLowerCase();
+    return PERFORMANCE_MODES.indexOf(mode) === -1 ? "ultra" : mode;
+  }
+
+  function kawarpFpsForPerformance() {
+    return performanceMode === "low" ? 24 : performanceMode === "normal" ? 30 : 0;
+  }
+
+  function videoSamplingAllowed() {
+    return performanceMode === "ultra";
+  }
+
   function applySettings(next) {
+    performanceMode = normalizePerformanceMode(next && next.performanceMode);
     currentSettings = Object.assign({}, currentSettings, next || {});
     currentSettings.brightness = Math.min(1.2, Math.max(0.5, Number(currentSettings.brightness) || DEFAULT_SETTINGS.brightness));
     currentSettings.saturation = Math.min(2.5, Math.max(0.5, Number(currentSettings.saturation) || DEFAULT_SETTINGS.saturation));
@@ -95,6 +120,9 @@
       Number(currentSettings.customBgBlur) || DEFAULT_SETTINGS.customBgBlur));
     currentSettings.contrast = Math.min(1.6, Math.max(0.6,
       Number(currentSettings.contrast) || DEFAULT_SETTINGS.contrast));
+    // !== false, so a settings message that arrives before the key exists keeps
+    // the glow rather than reading "missing" as off.
+    currentSettings.artworkAccent = currentSettings.artworkAccent !== false;
     KAWARP_OPTIONS.warpIntensity = currentSettings.warpIntensity;
     KAWARP_OPTIONS.blurPasses = currentSettings.blurPasses;
     KAWARP_OPTIONS.saturation = currentSettings.saturation;
@@ -108,9 +136,15 @@
         blurPasses: currentSettings.blurPasses,
         saturation: currentSettings.saturation,
       });
+      try { kawarpInstance.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
     }
+    // A mode that forbids live sampling has to let go of a feed that is already
+    // running, not just refuse the next one.
+    if (!videoSamplingAllowed()) syncVideoFeed();
     // Custom background: reload the blob if the flag flipped, then repaint.
     if (customBgState === "ready" && customImgEl) applyCustomImgFilter();
+    syncArtworkAccent();
+    updateArtworkAccent(getCurrentTrack());
     syncCustomBg().then(() => {
       if (customBgState === "ready" && customBgUrl && !currentSettings.customBgKawarp) {
         showCustomImg();
@@ -119,6 +153,204 @@
       if (currentSettings.customBgKawarp) removeCustomImg();
       updateKawarpBackground(getCurrentTrack());
     });
+  }
+
+  /* ===== artwork accent (AJ, 2026-10-26) =================================
+     Absorbed from the Ambient add-on, which shipped as a card of its own. It
+     reads the same artwork this theme's backdrop is built from, so it lives
+     here: the cover is sampled once per track, and the player bar's progress
+     line, sliders and switches take its colour, with a soft glow on the line.
+
+     Sampling is Ambient's, unchanged: a 32px draw weighted by saturation, so a
+     dark or washed-out cover still yields something readable, and a green
+     fallback when the image cannot be read at all. The style element exists only
+     while the switch is on, so turning it off leaves the bar as YouTube paints
+     it. */
+  const ACCENT_FALLBACK = "#1DB954";
+  // Ambient's glow slider was removed from the UI before it was retired, and the
+  // stronger look it shipped with is the one to keep.
+  const ACCENT_GLOW = 1.5;
+  let accentStyle = null;
+  let accentColor = ACCENT_FALLBACK;
+  let accentArtworkUrl = "";
+  let accentRequestSeq = 0;
+
+  const accentClamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+  function accentRgbToHsl(r, g, b) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const lightness = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l: lightness };
+    const delta = max - min;
+    const saturation = lightness > 0.5
+      ? delta / (2 - max - min)
+      : delta / (max + min);
+    let hue;
+    switch (max) {
+      case r: hue = (g - b) / delta + (g < b ? 6 : 0); break;
+      case g: hue = (b - r) / delta + 2; break;
+      default: hue = (r - g) / delta + 4; break;
+    }
+    return { h: hue / 6, s: saturation, l: lightness };
+  }
+
+  function accentHueToRgb(p, q, t) {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  }
+
+  function accentHslToHex(h, s, l) {
+    let r;
+    let g;
+    let b;
+    if (s === 0) {
+      r = g = b = l;
+    } else {
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = accentHueToRgb(p, q, h + 1 / 3);
+      g = accentHueToRgb(p, q, h);
+      b = accentHueToRgb(p, q, h - 1 / 3);
+    }
+    return "#" + [r, g, b]
+      .map((value) => Math.round(value * 255).toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  function sampleAccentColour(url) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.crossOrigin = "anonymous";
+      image.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 32;
+        canvas.height = 32;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (!context) return reject(new Error("Canvas sampling is unavailable."));
+        try {
+          context.drawImage(image, 0, 0, 32, 32);
+          const pixels = context.getImageData(0, 0, 32, 32).data;
+          let red = 0;
+          let green = 0;
+          let blue = 0;
+          let weightTotal = 0;
+          for (let i = 0; i < pixels.length; i += 4) {
+            const r = pixels[i];
+            const g = pixels[i + 1];
+            const b = pixels[i + 2];
+            const hsl = accentRgbToHsl(r, g, b);
+            if (hsl.l < 0.08 || hsl.l > 0.94) continue;
+            const weight = 0.25 + hsl.s * 1.8;
+            red += r * weight;
+            green += g * weight;
+            blue += b * weight;
+            weightTotal += weight;
+          }
+          if (!weightTotal) return resolve(ACCENT_FALLBACK);
+          const hsl = accentRgbToHsl(red / weightTotal, green / weightTotal, blue / weightTotal);
+          if (hsl.s < 0.08) {
+            return resolve(accentHslToHex(0, 0, accentClamp(hsl.l, 0.52, 0.78)));
+          }
+          resolve(accentHslToHex(
+            hsl.h,
+            accentClamp(Math.max(hsl.s, 0.58) * 1.12, 0.58, 0.92),
+            accentClamp(hsl.l, 0.42, 0.6)
+          ));
+        } catch (error) {
+          reject(error);
+        }
+      };
+      image.onerror = () => reject(new Error("The artwork could not be sampled."));
+      image.src = url;
+    });
+  }
+
+  function buildAccentCSS() {
+    const glow = ACCENT_GLOW;
+    const strongBlur = (5 * glow).toFixed(2);
+    const softBlur = (11 * glow).toFixed(2);
+    const strongAlpha = Math.round(52 * glow);
+    const softAlpha = Math.round(24 * glow);
+    return `
+      :root {
+        --ym-artwork-accent: ${accentColor};
+      }
+      tp-yt-paper-slider {
+        --paper-slider-knob-color: var(--ym-artwork-accent) !important;
+        --paper-slider-active-color: var(--ym-artwork-accent) !important;
+        --paper-slider-secondary-color: color-mix(in srgb, var(--ym-artwork-accent) 48%, transparent) !important;
+      }
+      tp-yt-paper-toggle-button {
+        --paper-toggle-button-checked-bar-color: var(--ym-artwork-accent) !important;
+        --paper-toggle-button-checked-button-color: var(--ym-artwork-accent) !important;
+        --paper-toggle-button-checked-ink-color: var(--ym-artwork-accent) !important;
+      }
+      ytmusic-player-bar tp-yt-paper-slider .slider-bar.active,
+      ytmusic-player-bar tp-yt-paper-slider #sliderKnob .slider-knob-inner,
+      ytmusic-player-bar .progress-bar,
+      ytmusic-player-bar .bar,
+      ytmusic-player-bar #progress {
+        background: var(--ym-artwork-accent) !important;
+        transition: background-color .45s ease, box-shadow .45s ease;
+        box-shadow:
+          0 0 ${strongBlur}px color-mix(in srgb, var(--ym-artwork-accent) ${strongAlpha}%, transparent),
+          0 0 ${softBlur}px color-mix(in srgb, var(--ym-artwork-accent) ${softAlpha}%, transparent);
+      }
+    `;
+  }
+
+  function setAccent(color) {
+    accentColor = color || ACCENT_FALLBACK;
+    document.documentElement.style.setProperty("--ym-artwork-accent", accentColor);
+  }
+
+  // The switch is the style element's lifetime: on, the tint is in the document;
+  // off, the player bar is YouTube's own again with nothing left behind.
+  function syncArtworkAccent() {
+    if (!currentSettings.artworkAccent) {
+      dropArtworkAccent();
+      return;
+    }
+    if (!accentStyle) {
+      accentStyle = document.createElement("style");
+      accentStyle.id = "ym-dynamic-accent-style";
+      document.head.appendChild(accentStyle);
+    }
+    accentStyle.textContent = buildAccentCSS();
+    setAccent(accentColor);
+  }
+
+  function updateArtworkAccent(track) {
+    if (!currentSettings.artworkAccent) return;
+    const artworkUrl = track && track.artworkUrl ? track.artworkUrl : "";
+    if (!artworkUrl || artworkUrl === accentArtworkUrl) return;
+    accentArtworkUrl = artworkUrl;
+    const seq = ++accentRequestSeq;
+    sampleAccentColour(artworkUrl).then((color) => {
+      if (seq === accentRequestSeq) setAccent(color);
+    }, (error) => {
+      if (seq === accentRequestSeq) setAccent(ACCENT_FALLBACK);
+      console.debug("[Aurora Bloom] Could not sample the artwork:", error);
+    });
+  }
+
+  function dropArtworkAccent() {
+    ++accentRequestSeq;
+    accentArtworkUrl = "";
+    accentColor = ACCENT_FALLBACK;
+    if (accentStyle) {
+      accentStyle.remove();
+      accentStyle = null;
+    }
+    document.documentElement.style.removeProperty("--ym-artwork-accent");
   }
 
   const CSS = `
@@ -622,7 +854,7 @@
     // an MV it quietly replaced the uploaded image with the video. updateKawarp
     // Background() already refused the video, but this second path did not.
     const usingCustom = customBgState === "ready" && !!customBgUrl;
-    const v = (usingCustom || currentSettings.kawarpCoverArtOnly)
+    const v = (usingCustom || currentSettings.kawarpCoverArtOnly || !videoSamplingAllowed())
       ? null
       : findPlayingVideo();
     if (v) {
@@ -768,7 +1000,10 @@
         !pageBgHost.isConnected
       ) return;
       sizeKawarpCanvas();
-      if (!kawarpInstance) kawarpInstance = new Kawarp(kawarpCanvas, KAWARP_OPTIONS);
+      if (!kawarpInstance) {
+        kawarpInstance = new Kawarp(kawarpCanvas, KAWARP_OPTIONS);
+        try { kawarpInstance.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+      }
       // Music videos: feed the live <video> so the backdrop moves with the
       // picture instead of sitting on a still. Kawarp samples a small colour
       // map, so this stays cheap. Audio tracks fall through to loadImage.
@@ -776,7 +1011,7 @@
       // branch runs BEFORE the source comparison, so an MV would always win and
       // the uploaded image never appeared (AJ, 2026-10-21).
       const usingCustom = customBgState === "ready" && !!customBgUrl;
-      const playingVideo = (usingCustom || currentSettings.kawarpCoverArtOnly)
+      const playingVideo = (usingCustom || currentSettings.kawarpCoverArtOnly || !videoSamplingAllowed())
         ? null
         : findPlayingVideo();
       if (playingVideo) {
@@ -889,6 +1124,7 @@
         showCustomImg();
       }
       const track = getCurrentTrack();
+      updateArtworkAccent(track);
       const artworkUrl = track && track.artworkUrl ? track.artworkUrl : "";
       // Skip artwork swaps while suspended: the hidden page Kawarp should do no
       // work at all while the fullscreen one is on screen.
@@ -906,6 +1142,7 @@
 
   function teardown() {
     kawarpSuspended = false;
+    dropArtworkAccent();
     try { delete window.__ymAuroraDynamic; } catch (_) { window.__ymAuroraDynamic = undefined; }
     if (raf) cancelAnimationFrame(raf);
     raf = 0;

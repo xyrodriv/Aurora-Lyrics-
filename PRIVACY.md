@@ -1,6 +1,6 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 25 October 2026
+**Last updated:** 26 October 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -28,10 +28,10 @@ This data never leaves your browser. Uninstalling the extension removes it.
 
 ## What is transmitted, and to whom
 
-To find lyrics and artwork for the track you are playing, Aurora Lyrics sends
-**the track's metadata** (title, artist, album, and duration) to third-party
-lyric and artwork services. This is necessary: a lyric service cannot return
-lyrics without being told which song you want.
+To find lyrics for the track you are playing, Aurora Lyrics sends **the track's
+metadata** (title, artist, album, and duration) to third-party lyric services.
+This is necessary: a lyric service cannot return lyrics without being told which
+song you want.
 
 **No personal information is included.** No account, no identifiers, no browsing
 history. The requests contain only what is needed to identify the song.
@@ -43,10 +43,6 @@ The services contacted are:
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
-| `itunes.apple.com` | Artwork lookup |
-| `api.deezer.com` | Artwork lookup |
-| `musicbrainz.org` | Artwork lookup |
-| `open.spotify.com` | Artwork lookup |
 | `raw.githubusercontent.com` | Update check (release notes only) |
 | `fonts.spikerko.org` | Lyrics typeface stylesheet |
 
@@ -83,17 +79,16 @@ request is never made.
 
 - **`storage`**: saves your settings, lyric cache, and imported TTML locally on
   your device.
-- **Host permissions**: allow the extension to request lyrics and artwork from
-  the services listed above, and to run on YouTube Music.
+- **Host permissions**: allow the extension to request lyrics from the services
+  listed above, and to run on YouTube Music.
 
 ## Limited Use
 
 Aurora Lyrics uses the information it accesses only to provide its single
-purpose: synced lyrics and the artwork that goes with them. It does not sell
-that information, use it for advertising, or transfer it to anyone except the
-lyric and artwork services listed above, or where the law requires it. This use
-follows the Chrome Web Store User Data Policy, including the Limited Use
-requirements.
+purpose: synced lyrics. It does not sell that information, use it for
+advertising, or transfer it to anyone except the lyric services listed above, or
+where the law requires it. This use follows the Chrome Web Store User Data
+Policy, including the Limited Use requirements.
 
 ## Children
 

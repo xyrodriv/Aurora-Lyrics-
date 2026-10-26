@@ -324,55 +324,41 @@
       pointer-events: none;
     }
     */
-    .ym-sl-tools {
-      position: absolute;
-      top: 2px;
-      right: 14px;
-      left: 14px;
-      z-index: 20;
+    /* Options: a pill beside content.js's song-layout switcher, in the empty
+       band above both panels (AJ, 2026-10-26). It replaces the hover-revealed
+       row that used to live on the panel's own top edge, where nobody who had
+       not already found it would look. Same shell as the pill next to it, so
+       the pair reads as one control group; the label is SpicyLyrics because
+       this is our chrome, not YouTube's. */
+    .ym-sl-options-pill {
       display: flex;
       align-items: center;
-      gap: 6px;
-      min-height: 30px;
-      padding: 8px 0;
-      pointer-events: auto;
-      opacity: 0;
-      transition: opacity .2s ease;
-    }
-    .ym-sl-tools:hover,
-    .ym-sl-tools:focus-within { opacity: 1; }
-    /* At short widths the action row behaves like YT Music's tab strip:
-       controls stay in one horizontal rail and the arrows move the rail
-       left/right instead of clipping Fullscreen or Offset off-screen. */
-    .ym-sl-tools-scroll {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex: 1 1 auto;
-      min-width: 0;
-      overflow-x: auto;
-      overflow-y: hidden;
-      scroll-behavior: smooth;
-      scrollbar-width: none;
-    }
-    .ym-sl-tools-scroll::-webkit-scrollbar { display: none; }
-    .ym-sl-tools-arrow {
-      display: none;
-      flex: 0 0 26px;
-      width: 26px;
-      min-height: 30px;
-      padding: 0;
-      border: 1px solid rgba(255,255,255,.14);
-      border-radius: 7px;
-      background: rgba(255,255,255,.07);
-      color: rgba(255,255,255,.9);
-      font: inherit;
-      font-size: 18px;
+      gap: 7px;
+      height: 28px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09);
+      color: rgba(255, 255, 255, .72);
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .01em;
       line-height: 1;
       cursor: pointer;
-      pointer-events: auto;
+      transition: background .18s ease, color .18s ease, box-shadow .18s ease;
     }
-    .ym-sl-tools-arrow:hover { background: rgba(255,255,255,.16); }
+    .ym-sl-options-pill:hover {
+      background: rgba(255, 255, 255, .1);
+      color: #fff;
+    }
+    .ym-sl-options-pill:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .6);
+      outline-offset: 2px;
+    }
     /* Consolidated options overlay. Holds track / offset / import so the toolbar
        is just [Options] [Fullscreen]. Lives on <body> (see buildUI). The fullscreen
        options overlay reuses the same chrome but with a higher z-index so it
@@ -764,7 +750,6 @@
        its own line so nothing overflows the 340px panel. */
     .ym-sl-options-body .ym-sl-video-offset { flex-wrap: wrap; row-gap: 8px; }
     .ym-sl-options-body .ym-sl-video-offset input[type="range"] { width: 100%; min-width: 0; }
-    .ym-sl-options-button { white-space: nowrap; }
     /* Cache section: a short status line above the purge button. */
     .ym-sl-cache-section { gap: 10px; }
     .ym-sl-cache-status {
@@ -1046,6 +1031,17 @@
     }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
       left: 52.5%;
+    }
+    /* Low performance mode: the shade keeps its darkening and loses its blur.
+       backdrop-filter is a render surface that has to be re-rasterized whenever
+       anything underneath changes, and in the video background layout what is
+       underneath is a live 24fps picture - so this single rule is the most
+       expensive effect left in fullscreen (see DEVELOPERS/RENDERING-CPU-VS-GPU.txt,
+       "backdrop-filter (GPU, but expensive)"). The black gradient is what carries
+       readability; the frost is the part that costs (AJ, 2026-10-26). */
+    body.ym-sl-perf-low .ym-sl-fs-lyrics-shade {
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
       position: relative;
@@ -3225,8 +3221,6 @@
       display: flex;
       overflow: hidden;
     }
-    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
-    .ym-sl-fs-lyrics .ym-sl-tools { display: none !important; }
     .ym-sl-track { 
       min-width: 0;
       flex: 1 1 auto;
@@ -3793,32 +3787,10 @@
         transform: translateY(0) scale(.82);
       }
     }
-    /* YT Music-style arrows are only needed below 1920x1080. At or above
-       that resolution the complete options row stays clean and arrow-free. */
-    @media (max-width: 1919px), (max-height: 1079px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        display: block;
-      }
-    }
     /* Lower-resolution YTM pages can have a short viewport where the native
        tab row is clipped by the player/header stack. Keep the existing panel
        mount, but reserve a compact top-safe position for the tab controls. */
     @media (max-height: 700px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
-        top: 0;
-        right: 8px;
-        left: 8px;
-        min-height: 26px;
-        padding: 4px 0;
-        gap: 4px;
-      }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 6px; }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        flex-basis: 24px;
-        width: 24px;
-        min-height: 26px;
-        font-size: 16px;
-      }
       #ym-sl-panel.SpicyRenderer .ym-sl-import,
       #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
       #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
@@ -3827,18 +3799,6 @@
       }
     }
     @media (max-height: 560px) {
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools {
-        min-height: 22px;
-        padding: 2px 0;
-        gap: 3px;
-      }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-scroll { gap: 4px; }
-      #ym-sl-panel.SpicyRenderer .ym-sl-tools-arrow {
-        flex-basis: 21px;
-        width: 21px;
-        min-height: 22px;
-        font-size: 14px;
-      }
       #ym-sl-panel.SpicyRenderer .ym-sl-import,
       #ym-sl-panel.SpicyRenderer .ym-sl-import-mode,
       #ym-sl-panel.SpicyRenderer .ym-sl-video-offset {
@@ -5213,7 +5173,6 @@
        moves it in from <body> and puts it back on close.
        NO BACKTICKS ANYWHERE IN THIS BLOCK -- it lives inside a template literal. */
     .ym-sl-panel.ym-pip-open .LyricsContainer,
-    .ym-sl-panel.ym-pip-open .ym-sl-tools,
     .ym-sl-panel.ym-pip-open .ym-sl-jump { display: none !important; }
     .ym-pip-open-view {
       position: absolute;
@@ -5297,6 +5256,210 @@
     .ym-sl-options-overlay.ym-sl-options-docked.hidden .ym-sl-options-panel.active {
       visibility: visible;
       pointer-events: auto;
+    }
+
+    /* ===== artwork hover button =========================================
+       Pointing at the cover dims it and fades in ONE round button at its top
+       edge. The button is a toggle, not a menu: its glyph shows the two panes
+       and which side the words are on, and clicking it swaps them. The hover
+       box IS the artwork's own box - same min(100%, 54vh) square, same 4vh
+       downward nudge, same 16px radius as .ym-sl-fs-media > img - so the dim
+       ends exactly at the art's edge instead of tinting the empty column
+       around it. Cover-art side layout only: the button switches a
+       composition nothing else has, and landscape only - the portrait layout
+       turns the art into a corner card the side swap does not apply to, so the
+       button is not rendered there at all. */
+    .ym-sl-fs-art-ui { display: none; }
+    @media (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: min(100%, 54vh);
+        aspect-ratio: 1 / 1;
+        max-width: 100%;
+        max-height: 100%;
+        padding-top: 12px;
+        box-sizing: border-box;
+        transform: translate(-50%, calc(-50% + 4vh));
+        border-radius: 16px;
+        background: rgba(0, 0, 0, 0);
+        transition: background .22s ease;
+        z-index: 4;
+      }
+      /* Idle is exempt on purpose: the class lands after 2s without input, and
+         a pointer resting on the art still reports :hover - without this the
+         button would stay up over a hidden cursor forever. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
+        background: rgba(0, 0, 0, .42);
+      }
+      /* A click pins both for the length of the move: the artwork slides out
+         from under the pointer, so a hover-only reveal blinked the button away
+         on the first frame of the transition. When the helper class drops the
+         base transition takes over and fades the button out over .18s instead
+         of cutting it. */
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+        background: rgba(0, 0, 0, .42);
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        transition-delay: 0s;
+      }
+    }
+    .ym-sl-fs-art-swap {
+      -webkit-appearance: none;
+      appearance: none;
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      margin: 0;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, .18);
+      border-radius: 50%;
+      background: rgba(14, 14, 18, .46);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+      backdrop-filter: blur(16px) saturate(1.4);
+      color: #fff;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-6px) scale(.92);
+      transition:
+        opacity .18s ease,
+        transform .24s cubic-bezier(.22, .61, .36, 1),
+        background .15s ease,
+        border-color .15s ease,
+        visibility 0s linear .18s;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover .ym-sl-fs-art-swap {
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-art-swap:hover {
+      background: rgba(32, 32, 38, .62);
+      border-color: rgba(255, 255, 255, .28);
+    }
+    .ym-sl-fs-art-swap:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .72);
+      outline-offset: 2px;
+    }
+    .ym-sl-fs-art-swap-icon {
+      display: block;
+      width: 22px;
+      height: 22px;
+      transform-origin: 50% 50%;
+      transition: transform .18s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-art-swap:active .ym-sl-fs-art-swap-icon { transform: scale(.86); }
+    /* The glyph swap runs on the SAME clock and curve as the layout move (0.45s
+       cubic-bezier(.22,.61,.36,1)), so the icon and the cover art travel as one
+       gesture. The two panes cross over each other in the middle - the filled
+       one is always the words - which is what makes the direction readable
+       without a label. */
+    .ym-sl-fs-art-swap-art,
+    .ym-sl-fs-art-swap-words {
+      transition: transform .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-art-swap-art {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.6;
+      opacity: .62;
+    }
+    .ym-sl-fs-art-swap-words {
+      fill: currentColor;
+      stroke: none;
+    }
+    .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
+    .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
+
+    /* ===== cover-art flip: lyrics on the left ===========================
+       Every number here is the mirror image of the rule it overrides - the
+       2/50 art column, the 44/54 lyric column and the 27% art midpoint - so
+       change them together. The transport column is pinned to the art's own
+       box (left 27% minus half, width two halves), which is why the mirror is
+       the same expression measured from 73%.
+       Landscape only: the portrait composition shrank the art to a corner
+       card, where there is no side left to swap. */
+    @media (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+        left: 48%;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+        left: 2%;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+        left: calc(73% - min(25%, 27vh));
+      }
+      /* The readability shade lives on the lyric side and fades towards the
+         art, so the mirror flips its box AND its gradient. Those two are NOT
+         part of the layout flip: it gets its own class, applied by JS once the
+         panel has faded out (see setFsShadeSide in 07). Flipping them with the
+         layout swung the gradient's dark end from the screen edge to 44% - the
+         middle of the frame - on the first frame, while the panel was still
+         fully visible, and that read as the shadow darting to the centre. */
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade.ym-sl-fs-shade-left {
+        left: 0;
+        right: 44%;
+        background: linear-gradient(
+          270deg,
+          transparent 0%,
+          rgba(0, 0, 0, .16) 14%,
+          rgba(0, 0, 0, .62) 52%,
+          rgba(0, 0, 0, .9) 100%
+        );
+        -webkit-mask-image: linear-gradient(270deg, transparent 0, rgba(0, 0, 0, .5) 8%, #000 24%, #000 100%);
+        mask-image: linear-gradient(270deg, transparent 0, rgba(0, 0, 0, .5) 8%, #000 24%, #000 100%);
+      }
+    }
+    /* The flip helper class only exists for the 480ms the JS holds it. The two
+       panes and the cover art already transition left; the transport column
+       does not, so without this it would snap while the picture glided. */
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      transition: left .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The media host's own transition is opacity-only (set by the track-change
+       dissolve further up, which deliberately overrides the base left/width
+       list), so the ARTWORK needs its left handed back for the length of the
+       flip or the cover would snap to the other side while the words glided. */
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      transition:
+        opacity .25s ease,
+        left .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The readability shade is LIGHT, not an object: it does not slide, drop,
+       stretch or pop. It fades out where it is, waits for the columns to
+       finish crossing, and only then fades back in on its new side - the move
+       itself is the only motion in the frame, which is what keeps the swap
+       readable. Any travel at all would drag a dark frosted band across the
+       artwork at the midpoint, where the two columns overlap completely.
+       The fade-out is FAST and front-loaded - gone in about 96ms - because the
+       columns start moving on the first frame and their curve is front-loaded
+       too: a slow fade left a half-visible band sitting around the middle of
+       the screen while the words had already left it. It does NOT change sides
+       here either: JS applies the shade's side class at 120ms, once the panel
+       is invisible (see setFsShadeSide). The fade-in waits until 58% - the
+       0.45s layout move has landed by then - and runs over ~220ms, which is why
+       this lives on its own longer class instead of the flip's: the flip is
+       over long before the shadow comes back. */
+    .ym-sl-fs-overlay.ym-sl-fs-shade-swap:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+      animation: ym-sl-fs-shade-dissolve .8s linear both;
+    }
+    @keyframes ym-sl-fs-shade-dissolve {
+      0% {
+        opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
+        animation-timing-function: cubic-bezier(.25, .4, .4, 1);
+      }
+      12%, 58% { opacity: 0; }
+      86%, 100% { opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0); }
     }
 
   `;

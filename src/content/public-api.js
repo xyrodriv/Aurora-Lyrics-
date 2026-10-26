@@ -656,6 +656,49 @@
     sync();
   }
 
+  /* ---- injected bar glyphs --------------------------------------------------
+     `iconSvgPath` is one Material-style filled path, which is what the first
+     add-ons shipped. `iconParts` is the house style instead: a list of
+     { d, mode, width } drawn on the 24 grid at the same 2.4 round-cap weight as
+     the bar glyphs we redraw ourselves (YT_ICON_STROKE in content.js), so an
+     injected icon weighs the same as the shuffle/repeat beside it instead of
+     looking like a borrowed YouTube Music glyph.
+       mode "stroke" (default) — outline at 2.4, round caps and joins
+       mode "solid"           — filled, plus a 2px stroke of the same colour so
+                                the corners read rounded rather than cut
+       mode "fill"            — filled, no stroke, for shapes that are already
+                                drawn with their own rounded corners            */
+  const PB_ICON_NS = "http://www.w3.org/2000/svg";
+  const PB_ICON_STROKE = 2.4;
+  function pbIconSvg(parts) {
+    const svg = document.createElementNS(PB_ICON_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const part of parts) {
+      if (!part || !part.d) continue;
+      const path = document.createElementNS(PB_ICON_NS, "path");
+      path.setAttribute("d", String(part.d));
+      const mode = part.mode || "stroke";
+      if (mode === "fill") {
+        path.setAttribute("fill", "currentColor");
+        path.setAttribute("stroke", "none");
+      } else if (mode === "solid") {
+        path.setAttribute("fill", "currentColor");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", String(part.width || 2));
+        path.setAttribute("stroke-linejoin", "round");
+      } else {
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", String(part.width || PB_ICON_STROKE));
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+      }
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
   function addPlayerBarButton(opts) {
     const o = opts || {};
     if (!o.id) return null;
@@ -678,7 +721,9 @@
     btn.className = "ym-pb-btn";
     btn.title = String(o.label || o.id);
     btn.setAttribute("aria-label", String(o.label || o.id));
-    if (o.iconSvgPath) {
+    if (Array.isArray(o.iconParts) && o.iconParts.length) {
+      btn.appendChild(pbIconSvg(o.iconParts));
+    } else if (o.iconSvgPath) {
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
       svg.setAttribute("aria-hidden", "true");

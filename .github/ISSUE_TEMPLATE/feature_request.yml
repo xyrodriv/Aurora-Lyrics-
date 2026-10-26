@@ -1,0 +1,42 @@
+name: Feature request
+description: An idea for the extension, an add-on or the site.
+title: "[idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Aurora Lyrics stays free, accountless and serverless by design, so ideas that need a backend, a login or telemetry will not fit. Anything else is fair game.
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What it does, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is worth having
+      description: The situation where you would reach for it.
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Where it belongs
+      options:
+        - Lyrics panel
+        - Fullscreen lyrics
+        - A backdrop or theme
+        - An add-on of its own
+        - Settings
+        - The website
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Optional — the workaround, or the other extension that does it.

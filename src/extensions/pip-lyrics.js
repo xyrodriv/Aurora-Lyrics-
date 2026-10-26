@@ -29,9 +29,17 @@
   const DEFAULTS = { master: true, showTransport: true };
   let settings = Object.assign({}, DEFAULTS);
 
-  const ICON_PIP =
-    "M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 " +
-    "2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z";
+  // Bar glyph: a screen with the mini player docked in its corner. `iconParts`
+  // rather than Material's one filled path, so it carries the bar's own 2.4
+  // round weight (see addPlayerBarButton in public-api.js) instead of YouTube
+  // Music's speaker-box shape.
+  const ICON_PIP_PARTS = [
+    { d: "M6 5h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3Z" },
+    {
+      d: "M13.7 12.2h3.4a1.1 1.1 0 0 1 1.1 1.1v2a1.1 1.1 0 0 1-1.1 1.1h-3.4a1.1 1.1 0 0 1-1.1-1.1v-2a1.1 1.1 0 0 1 1.1-1.1Z",
+      mode: "fill",
+    },
+  ];
 
   const ICON_PLAY = "M8 5v14l11-7z";
   const ICON_PAUSE = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
@@ -2995,7 +3003,7 @@
     btnHandle = window.YTMod.addPlayerBarButton({
       id: "pip-lyrics",
       label: "Lyrics in picture-in-picture",
-      iconSvgPath: ICON_PIP,
+      iconParts: ICON_PIP_PARTS,
       onClick: () => togglePip(),
     });
   }

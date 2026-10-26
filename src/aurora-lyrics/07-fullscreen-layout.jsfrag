@@ -439,6 +439,9 @@
     lyrics: "Lyrics Only",
   };
   const FS_LAYOUT_ORDER = ["side", "background", "lyrics"];
+  // Remembered across entries like the layout mode itself: the side is a
+  // preference, not a per-song state.
+  const FS_COVER_SIDE_KEY = "better_lyrics_fullscreen_cover_side_v1";
 
   function hasFsVideo() {
     return !!(fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video"));
@@ -518,6 +521,146 @@
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
     recentreActiveLine();
+  }
+
+  /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------
+     The cover-art side layout has two mirror images, and the artwork's own
+     hover surface is where the choice belongs: pointing at the cover dims it a
+     touch and fades in ONE round button at its top edge. The button cycles -
+     click moves the lyrics to the other side, click again brings them back -
+     and its glyph swaps the two panes with it, so the icon is the animation
+     rather than two labels spelling the state out. Music videos never get the
+     switch: a video frame is tied to its own composition, and the edge rating
+     buttons already own its sides. */
+  function readStoredFsCoverSide() {
+    try {
+      return localStorage.getItem(FS_COVER_SIDE_KEY) === "left" ? "left" : "right";
+    } catch (_) {
+      return "right";
+    }
+  }
+
+  function syncFsCoverSwitch() {
+    if (!fsCoverSwitch) return;
+    const left = fsCoverSide === "left";
+    // The class is what animates the glyph; the label names what a click will
+    // do next, which is the only thing a single toggle can usefully announce.
+    fsCoverSwitch.btn.classList.toggle("is-left", left);
+    fsCoverSwitch.btn.setAttribute("aria-pressed", left ? "true" : "false");
+    const label = "Move the lyrics to the " + (left ? "right" : "left");
+    fsCoverSwitch.btn.title = label;
+    fsCoverSwitch.btn.setAttribute("aria-label", label);
+  }
+
+  // Built once per fullscreen entry and parked inside the media host, so it
+  // moves with the artwork for free — the hover box mirrors the cover's box
+  // (see the art-ui rules in 05-styles).
+  function buildFsCoverSwitch() {
+    if (!fsMediaHost || fsCoverSwitch) return;
+    const NS = "http://www.w3.org/2000/svg";
+    // Two panes, one filled: the filled pane IS the lyrics, so swapping them is
+    // the same gesture as the layout change underneath.
+    const pane = (cls, x) => {
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("class", cls);
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", "5.75");
+      rect.setAttribute("width", "8");
+      rect.setAttribute("height", "12.5");
+      rect.setAttribute("rx", "2");
+      return rect;
+    };
+    const icon = document.createElementNS(NS, "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("class", "ym-sl-fs-art-swap-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    // Source order is the "lyrics right" rest state: outline (art) on the left,
+    // filled (words) on the right.
+    icon.appendChild(pane("ym-sl-fs-art-swap-art", 3.25));
+    icon.appendChild(pane("ym-sl-fs-art-swap-words", 12.75));
+    const btn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-swap",
+      "aria-pressed": "false",
+    }, icon);
+    btn.addEventListener("click", (ev) => {
+      // The media pane sits under the overlay's own pointer handling; a button
+      // click is a layout choice, never a play/seek.
+      ev.preventDefault();
+      ev.stopPropagation();
+      applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn);
+    fsMediaHost.appendChild(ui);
+    fsCoverSwitch = { ui, btn };
+    syncFsCoverSwitch();
+  }
+
+  // The shade changes sides on its OWN clock, after it has faded out. Flipping
+  // it with the layout would move the gradient's dark end to the panel's other
+  // edge on the first frame - at 44% of the screen, i.e. the middle - while the
+  // panel is still opaque, which reads as the shadow jumping to the centre
+  // before it disappears. 120ms is just past the 96ms fade-out.
+  const FS_SHADE_SIDE_DELAY_MS = 120;
+  function setFsShadeSide(side) {
+    if (fsLyricsShade) fsLyricsShade.classList.toggle("ym-sl-fs-shade-left", side === "left");
+  }
+
+  function applyFsCoverSide(side, animate) {
+    if (!fsOverlay) return;
+    const next = side === "left" ? "left" : "right";
+    // The helper class is what gives the chrome column its left transition; it
+    // is only present for the length of the move, so a mode change or the entry
+    // paint can never animate a column it is restructuring.
+    const canAnimate = !!animate && fsMotionOK() &&
+      !fsOverlay.classList.contains("ym-sl-fs-no-anim");
+    if (canAnimate) {
+      // Remove-then-add, with a reflow in between: on a rapid second click the
+      // helper classes are still there, and a class that never left does not
+      // restart the shade's dissolve - the flip would land without it.
+      // Removing them first also republishes the panes' start values.
+      fsOverlay.classList.remove("ym-sl-fs-flipping", "ym-sl-fs-shade-swap");
+      // Commit the transition's start value before the flip classes move the
+      // column, or the first frame jumps instead of gliding.
+      void fsOverlay.offsetWidth;
+      fsOverlay.classList.add("ym-sl-fs-flipping", "ym-sl-fs-shade-swap");
+      void fsOverlay.offsetWidth;
+    }
+    fsCoverSide = next;
+    fsOverlay.classList.toggle("ym-sl-fs-cover-left", next === "left");
+    syncFsCoverSwitch();
+    try { localStorage.setItem(FS_COVER_SIDE_KEY, next); } catch (_) {}
+    // Clear any pending side change first: on a rapid second click the timer
+    // from the first could otherwise fire mid-fade and move a visible panel.
+    if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
+    if (!canAnimate) {
+      setFsShadeSide(next);
+      return;
+    }
+    fsCoverShadeSideTimer = window.setTimeout(() => {
+      fsCoverShadeSideTimer = 0;
+      // Read the state, not the captured value: a second click may have landed
+      // while this was pending, and the shade must end up matching what is on.
+      setFsShadeSide(fsCoverSide);
+    }, FS_SHADE_SIDE_DELAY_MS);
+    // No recentre call here, unlike the layout switch: only the column's LEFT
+    // changes, so the active line keeps its vertical position and the scroll
+    // needs no correction.
+    if (fsCoverFlipTimer) window.clearTimeout(fsCoverFlipTimer);
+    fsCoverFlipTimer = window.setTimeout(() => {
+      fsCoverFlipTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-flipping");
+    }, 480);
+    // The shade outlives the move on purpose: it stays away until the columns
+    // have landed, then fades back in on the new side (see the dissolve
+    // keyframes in 05-styles). 0.8s is the animation; the class is dropped just
+    // after it so the element cannot keep a finished animation attached.
+    if (fsCoverShadeTimer) window.clearTimeout(fsCoverShadeTimer);
+    fsCoverShadeTimer = window.setTimeout(() => {
+      fsCoverShadeTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-shade-swap");
+    }, 820);
   }
 
   function findPlayerButton(labels) {

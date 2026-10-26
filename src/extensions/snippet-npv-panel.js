@@ -1525,7 +1525,27 @@ return Kawarp;
   let npvWidth = WIDTH_DEFAULT; // last applied rail width (see applyWidth)
   let npvCloseTimer = 0; // clears the ym-npv-closing class after the slide-out
   let npvShiftTimer = 0; // scopes the page-content transition to the toggle
-  let kawarpOn = true; // from the add-on's "Ambient background" setting
+  let kawarpOn = true; // EFFECTIVE state: the user's toggle AND the performance mode
+  // Performance modes (AJ, 2026-10-26), mirrored into every add-on's settings by
+  // the content script. Low removes the rail's backdrop entirely; Normal keeps it
+  // at 24fps and stops it sampling the live video. Ultra is the untouched theme.
+  let kawarpUserOn = true; // the add-on's own "Ambient background" toggle
+  let performanceMode = "ultra";
+
+  function normalizePerformanceMode(value) {
+    const mode = String(value || "").toLowerCase();
+    return mode === "low" || mode === "normal" ? mode : "ultra";
+  }
+
+  function kawarpFpsForPerformance() {
+    // The rail is secondary to the fullscreen view, so it runs slower in Normal
+    // than the page-wide backdrop does (24 vs 30).
+    return performanceMode === "normal" ? 24 : 0;
+  }
+
+  function videoSamplingAllowed() {
+    return performanceMode === "ultra";
+  }
   let kawarpOffTimer = 0; // deferred teardown so the fade-out can finish
   let dragState = null;
   // Document-level resize listeners are wired once per page, not once per arm():
@@ -3928,6 +3948,7 @@ function syncLyricsDock() {
         saturation: s ? s.saturation : 1.12,
         scale: 1.18,
       });
+      try { bgKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (e) {}
       bgKawarp.start();
       sizeKawarp();
       syncKawarpSettings();
@@ -4001,6 +4022,9 @@ function syncLyricsDock() {
       const s = dyn && typeof dyn.getSettings === "function" ? dyn.getSettings() : null;
       coverOnly = !!(s && s.kawarpCoverArtOnly);
     } catch (e) { /* ignore */ }
+    // Outside "ultra" the rail never follows the live video (see the mode doc at
+    // kawarpOn above).
+    if (!videoSamplingAllowed()) coverOnly = true;
     const node = !coverOnly && heldVideo && heldVideo.isConnected
       ? heldVideo.querySelector("video")
       : null;
@@ -5115,11 +5139,22 @@ function syncLyricsDock() {
       // "Ambient background" lives in the add-on's Settings panel; the content
       // script posts the whole settings object whenever it changes.
       const s = data.settings || {};
-      const next = s.kawarp === undefined ? true : !!s.kawarp;
+      const nextMode = normalizePerformanceMode(s.performanceMode);
+      kawarpUserOn = s.kawarp === undefined ? true : !!s.kawarp;
+      // Low is the only mode that removes the rail's backdrop; the user's own
+      // toggle still wins when it is off.
+      const next = kawarpUserOn && nextMode !== "low";
+      const modeChanged = nextMode !== performanceMode;
+      performanceMode = nextMode;
       if (next !== kawarpOn) {
         kawarpOn = next;
         applyKawarpState();
+      } else if (modeChanged && bgKawarp) {
+        try { bgKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (e) {}
       }
+      // A feed that was already running has to be handed back to the cover, not
+      // just refused on the next track change.
+      if (modeChanged && !videoSamplingAllowed() && bgKawarp) updateKawarpSource(true);
       return;
     }
     if (data.type !== "ytmod-ext") return;

@@ -58,6 +58,11 @@
     // in buildFullscreenControls does the actual removal so the opacity fade is
     // live too). Layout cycling on the cycle button keeps animating normally.
     fsOverlay.classList.add("ym-sl-fs-no-anim");
+    // The artwork's layout switch (AJ, 2026-10-26). Built here so it exists
+    // before the first paint; the saved side is applied with no animation, as
+    // the entry paint must not slide the columns into place.
+    buildFsCoverSwitch();
+    applyFsCoverSide(readStoredFsCoverSide(), false);
     // Overlay title ("Artist Track"). Built here rather than inside
     // buildFullscreenControls() because it is not a control: it belongs to the
     // overlay surface and must exist independently of the chrome row.
@@ -452,6 +457,12 @@
     fsLyricsHost = null;
     fsControls = null;
     fsLayoutSelect = null;
+    // The switch's nodes went with the overlay; drop the refs and the helper
+    // class's pending timer so a second entry starts clean.
+    fsCoverSwitch = null;
+    if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
+    if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
+    if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
     // Long-title marquee teardown (2026-09-28). Disconnect the resize observer
     // and clear any inline shift/marquee state on the inner so a second
     // fullscreen entry starts from a clean baseline. fsTitleInner is gone

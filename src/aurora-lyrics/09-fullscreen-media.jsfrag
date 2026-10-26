@@ -96,6 +96,18 @@
 
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
+    // Performance modes: outside "ultra" the backdrop must not sample the live
+    // video at all (that is the per-frame colour read the mode exists to stop).
+    // The track's cover takes over, so the view still has a backdrop instead of
+    // falling back to the blurred-canvas path, which is heavier still.
+    if (videoEl && !videoSamplingAllowed()) {
+      videoEl = null;
+      if (!artUrl) {
+        const track = getCurrentTrack();
+        const fallback = (track && track.artworkUrl) || getDomArtworkUrl();
+        artUrl = fallback ? hiResArt(fallback) : "";
+      }
+    }
     // Gate on the Dynamic add-on: its handshake object is our signal that the
     // page-wide Kawarp exists, and we take the backdrop over from it.
     const dyn = window.__ymAuroraDynamic;
@@ -139,6 +151,7 @@
       }
       if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
+      fsKawarp.setMaxFps(kawarpFpsForPerformance());
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
       return true;
@@ -162,6 +175,7 @@
   // Swap the backdrop source of an ALREADY running Kawarp (no restart: a second
   // canvas would stack and the older one would paint over the new source).
   function syncFullscreenKawarpVideo(videoEl) {
+    if (!videoSamplingAllowed()) return;
     if (!fsKawarpActive || !fsKawarp || !videoEl || videoEl === fsKawarpVideoEl) return;
     fsKawarpVideoEl = videoEl;
     fsKawarpArtUrl = "";
@@ -224,7 +238,11 @@
     const liveVideo = fsSavedVideo.node
       ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
       : null;
-    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" ? liveVideo : null;
+    // Outside "ultra" a music video must not feed the backdrop either: the
+    // cover art is the backdrop and the video stays only in the media pane.
+    const videoNode = liveVideo && liveVideo.tagName === "VIDEO" && videoSamplingAllowed()
+      ? liveVideo
+      : null;
     if (videoNode) {
       if (fsKawarpActive) syncFullscreenKawarpVideo(videoNode);
       else startFullscreenKawarp("", videoNode);

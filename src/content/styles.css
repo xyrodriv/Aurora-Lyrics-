@@ -1458,13 +1458,37 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-cbtn svg { width: 18px; height: 18px; }
 #ym-market .ym-mk-cbtn:hover { background: rgba(255,255,255,.08); color: #fff; }
+/* Settings: a header BUTTON, not a rail row (AJ, 2026-10-26). It opens an
+   app-wide page, so it must not read as another add-on to install. Same 26px
+   target as the close button, outline glyph, sits with it at the right edge. */
+#ym-market .ym-mk-setbtn {
+  width: 26px; height: 26px; flex: 0 0 auto; margin-left: auto;
+  display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: transparent;
+  color: rgba(255,255,255,.5); cursor: pointer;
+  transition: background .2s, color .2s, opacity .26s ease;
+}
+#ym-market .ym-mk-setbtn svg { width: 17px; height: 17px; fill: currentColor; }
+#ym-market .ym-mk-setbtn:hover { color: #fff; background: rgba(255,255,255,.08); }
+/* Settings and Close read as one control pair at the edge: the settings button
+   takes the free space (margin-left:auto above), so the close only needs the
+   header's own gap — the old margin-left:auto on BOTH split the slack between
+   them and parked the sliders out in the middle of the header (AJ, 2026-10-26). */
+#ym-market.ym-mk-collapsed .ym-mk-setbtn { opacity: 0; pointer-events: none; }
+#ym-market .ym-mk-settings-page .ym-mk-setmono { color: rgba(255,255,255,.82); }
 #ym-market .ym-mk-logo {
   width: 26px; height: 26px; border-radius: 8px; flex: 0 0 auto;
   background: var(--mk-surf2) center/cover no-repeat;
   border: 1px solid var(--mk-line2);
 }
 #ym-market .ym-mk-head #ym-close {
-  width: 26px; height: 26px; margin-left: auto;
+  width: 26px; height: 26px;
+  /* Explicitly NOT auto: the legacy `#ym-market #ym-close` rule above still
+     carries margin-left:auto, and leaving this unset let it through — two auto
+     margins split the header's free space, which is what parked the settings
+     button in the middle of the rail instead of beside the close (AJ,
+     2026-10-26). The settings button owns the only auto margin now. */
+  margin-left: 2px;
   color: rgba(255,255,255,.5);
 }
 #ym-market .ym-mk-head #ym-close svg { width: 15px; height: 15px; }
@@ -1520,6 +1544,13 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-card:hover { background: rgba(255,255,255,.045); }
 #ym-market .ym-mk-card.sel { background: rgba(255,255,255,.075); }
+/* Low performance mode switches some add-ons off. They stay listed — a catalog
+   that silently drops an entry is worse than a dimmed one — but read as
+   unavailable: no hover lift, not-allowed cursor, and a click explains why
+   instead of opening a page whose Install button cannot work. */
+#ym-market .ym-mk-card-blocked { opacity: .42; cursor: not-allowed; }
+#ym-market .ym-mk-card-blocked:hover { background: transparent; }
+#ym-market .ym-mk-card-blocked.sel { background: rgba(255,255,255,.075); }
 #ym-market .ym-mk-card:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
 #ym-market .ym-mk-mono {
   width: 38px; height: 38px; border-radius: 10px; flex: 0 0 auto;
@@ -1670,24 +1701,11 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-lnk { animation: none; filter: none; }
 }
 
-/* settings + promo */
+/* settings */
 #ym-market .ym-mk-dcols { display: grid; grid-template-columns: minmax(0,1fr) 292px; gap: 30px; align-items: start; margin-top: 6px; }
 #ym-market .ym-mk-dcols.solo { grid-template-columns: minmax(0,1fr); max-width: 520px; }
 #ym-market .ym-mk-left { min-width: 0; }
 #ym-market .ym-mk-hint { font-size: 13px; color: var(--mk-dim2); padding: 10px 0 0; }
-#ym-market .ym-mk-promo { position: sticky; top: 6px; }
-#ym-market .ym-mk-promobox {
-  position: relative; aspect-ratio: 3/4; border-radius: 14px;
-  overflow: hidden; background: var(--mk-surf);
-  border: 1px solid var(--mk-line2);
-}
-#ym-market .ym-mk-promomedia { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-#ym-market .ym-mk-promofallback {
-  inset: -5%; width: 110%; height: 110%;
-  background-size: cover; background-position: center; background-repeat: no-repeat;
-  animation: ym-mk-ken 24s ease-in-out infinite alternate;
-}
-@keyframes ym-mk-ken { from { transform: scale(1.02); } to { transform: scale(1.12) translate(-2.5%,-3.5%); } }
 #ym-market .ym-mk-badge {
   position: absolute; left: 10px; bottom: 10px;
   display: inline-flex; align-items: center; gap: 6px;
@@ -1696,7 +1714,6 @@ ytmusic-player-bar .ym-pb-btn:active,
   border: 1px solid rgba(255,255,255,.16); padding: 4px 8px; border-radius: 6px;
 }
 #ym-market .ym-mk-badge i { width: 5px; height: 5px; border-radius: 50%; background: var(--mk-grad); }
-#ym-market .ym-mk-promocap { margin-top: 10px; font-size: 11px; color: var(--mk-dim2); text-align: center; }
 
 /* existing settings markup, re-skinned */
 #ym-market .ym-mk-settings { margin: 0; padding: 0; border: 0; background: none; }
@@ -1838,6 +1855,10 @@ ytmusic-player-bar .ym-pb-btn:active,
   transition-duration: .26s;
 }
 #ym-market .ym-mk-btn-un.busy, #ym-market .ym-mk-btn-in.busy { opacity: .7; pointer-events: none; }
+/* Install button for an add-on Low mode refuses to run (AJ, 2026-10-26). */
+#ym-market .ym-mk-btn-off { background: rgba(255,255,255,.1); color: var(--mk-dim); cursor: not-allowed; }
+#ym-market .ym-mk-btn-off:hover { transform: none; background: rgba(255,255,255,.1); }
+#ym-market .ym-mk-btn-off:active { transform: none; }
 #ym-market .ym-mk-ghlink {
   display: inline-flex; align-items: center; gap: 7px;
   color: var(--mk-dim); font-size: 13px; font-weight: 600; text-decoration: none;
@@ -1985,8 +2006,6 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-detail { padding: 24px 22px 30px; }
   #ym-market .ym-mk-dtitles h1 { font-size: 24px; }
   #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr); }
-  #ym-market .ym-mk-promo { position: static; max-width: 210px; margin-top: 24px; }
-  #ym-market .ym-mk-promocap { display: none; }
   #ym-market .ym-mk-mast-title { font-size: 34px; }
   #ym-market .ym-mk-mast-meta { font-size: 11px; }
   #ym-market .ym-mk-entry { gap: 10px; }
@@ -2942,6 +2961,15 @@ html.ym-yt-volume .volume-slider.ytmusic-player-bar {
   pointer-events: auto !important;
 }
 
+/* ---- smooth progress -----------------------------------------------------
+   With the switch on, the seek knob is drawn by a transform every frame
+   (ytProgressStep in content.js) instead of YouTube's percentage `left`, which
+   it rewrites on every whole-second value update — left in place, that write
+   would fight the transform and put the dot a second ahead of its line. */
+html.ym-yt-smooth-progress ytmusic-player-bar #progress-bar #sliderKnob {
+  left: 0 !important;
+}
+
 /* ---- dark frosted shelf ---------------------------------------------------
    The bar's background is its OWN fixed layer behind `ytmusic-player-bar`,
    which is transparent — so this is the node to frost, not the bar. !important
@@ -3008,6 +3036,12 @@ html.ym-yt-dock ytmusic-player-bar .middle-controls {
   grid-row: 1;
   justify-content: flex-start;
   margin-left: 16px !important;
+  /* public-api.js pads this row by one extra button-track (96px) so the CENTRED
+     title stays put when the right track widens for add-on buttons. The dock
+     sizes the bar as 1fr | auto | 1fr and centres the transport itself, so that
+     padding is nothing but dead space at the left end of the bar — the gap AJ
+     saw. Here the song row starts at its own 16px margin instead. */
+  padding-left: 0 !important;
 }
 
 html.ym-yt-dock ytmusic-player-bar #left-controls {
@@ -3806,6 +3840,12 @@ ytmusic-player-page > .ym-song-layout {
   top: 6px;
   right: var(--ytmusic-player-page-horizontal-padding, 64px);
   z-index: 5;
+  /* Two pills share this row: the panel's Options button is prepended by
+     aurora-lyrics.js (see mountOptionsPill), so the group grows to the left
+     from the layout switcher instead of moving it. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
   /* The anchor follows the tab strip, which moves when the column does — the
      pill glides with it instead of teleporting. */
   transition: right .42s cubic-bezier(.22, 1, .36, 1);
@@ -4009,4 +4049,30 @@ ytmusic-player-page .content > #side-panel.ym-song-panel-swap {
   ytmusic-player-page .content > #side-panel.ym-song-panel-enter {
     animation: none;
   }
+}
+
+/* ---- Settings page: performance modes (AJ, 2026-10-26) ------------------- */
+/* Three choices, each carrying its consequence in a line of body copy, so the
+   trade-off is legible without a tooltip. Cards rather than a native <select>:
+   the current mode has to be readable at a glance from across the panel. */
+#ym-market .ym-perf { margin-top: 26px; }
+#ym-market .ym-perf-modes { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+#ym-market .ym-perf-mode {
+  flex: 1 1 150px; min-width: 0; text-align: left;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--mk-line2); border-radius: 12px;
+  background: rgba(255,255,255,.028); color: inherit; font: inherit;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, transform .2s ease;
+}
+#ym-market .ym-perf-mode b { display: block; font-size: 13.5px; font-weight: 700; letter-spacing: -.005em; }
+#ym-market .ym-perf-mode span { display: block; margin-top: 4px; font-size: 11.5px; line-height: 1.38; color: var(--mk-dim); }
+#ym-market .ym-perf-mode:hover { border-color: rgba(255,255,255,.24); background: rgba(255,255,255,.06); }
+#ym-market .ym-perf-mode:active { transform: scale(.99); }
+#ym-market .ym-perf-mode.on { border-color: rgba(255,74,88,.5); background: rgba(255,74,88,.11); }
+#ym-market .ym-perf-mode.on b { color: #ffe3e5; }
+#ym-market .ym-perf-mode.on span { color: rgba(255,226,228,.8); }
+#ym-market .ym-perf-note { margin: 12px 0 0; font-size: 11.5px; color: var(--mk-dim2); }
+@media (prefers-reduced-motion: reduce) {
+  #ym-market .ym-perf-mode { transition: none; }
 }

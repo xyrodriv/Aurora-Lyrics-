@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discord — help and quick questions
+    url: https://discord.gg/wsZxTSnaMa
+    about: Faster than an issue for setup trouble, lyrics that are wrong or missing, and anything you are not sure is a bug.
+  - name: Privacy policy
+    url: https://github.com/xyrodriv/Aurora-Lyrics-/blob/main/PRIVACY.md
+    about: What the extension sends, and what it never touches.
