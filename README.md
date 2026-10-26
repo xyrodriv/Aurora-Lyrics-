@@ -129,8 +129,9 @@ though its number is lower.
   reload picks up a change, no extension reload needed.
 - `src/content/content.js` and `src/content/styles.css` are `content_scripts`
   entries and need a full `chrome://extensions` reload **and** a tab reload.
-- Behavioural harnesses live in `.scratch/` and are git-ignored; they are plain
-  Node scripts, so run them with `node .scratch/<name>.cjs`.
+- There is no committed test suite. Behavioural checks are throwaway Node +
+  headless-Chrome scripts, run while making a change; `--check` above is the one
+  automated gate that stays in the loop.
 - Some CSS lives **inside JavaScript template literals**. After editing CSS in
   those files, run `node --check <file>` before committing — an unescaped
   backtick there terminates the literal early and silently breaks the script.
