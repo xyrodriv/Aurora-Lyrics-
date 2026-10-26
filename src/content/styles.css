@@ -2820,27 +2820,6 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-card-yt.sel .ym-mk-name,
 #ym-market .ym-mk-card-yt:hover .ym-mk-name { color: #fff; }
 
-/* Apple Music Style is a built-in theme, not an add-on: the same "nothing to
-   install" reading as the YouTube row, in the theme's own pink. The monogram
-   keeps the inline glyph tint mkCard sets, so only the row and name change. */
-#ym-market .ym-mk-card-apple {
-  background: rgba(250,45,72,.07);
-  box-shadow: inset 0 0 0 1px rgba(250,45,72,.45);
-  transition: background-color .22s ease, box-shadow .22s ease,
-              transform .18s cubic-bezier(.34,1.4,.5,1);
-}
-#ym-market .ym-mk-card-apple.sel {
-  background: rgba(250,45,72,.13);
-  box-shadow: inset 0 0 0 1px rgba(250,45,72,.75);
-}
-#ym-market .ym-mk-card-apple:hover {
-  background: rgba(250,45,72,.16);
-  box-shadow: inset 0 0 0 1px rgba(250,45,72,.9);
-}
-#ym-market .ym-mk-card-apple .ym-mk-name { color: var(--mk-dim); }
-#ym-market .ym-mk-card-apple.sel .ym-mk-name,
-#ym-market .ym-mk-card-apple:hover .ym-mk-name { color: #fff; }
-
 /* ===== custom image picker (AJ, 2026-10-21) ==============================
    Fully custom chrome: the row stacks its label above a card holding a raw
    thumbnail, the filename + dimensions, and two buttons. The only native part is

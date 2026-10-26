@@ -3628,9 +3628,6 @@
         mkRows.appendChild(h("div", { class: "ym-mk-cat", text: ext.category || "Add-ons" }));
       }
       const card = mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false);
-      // Apple Music Style is built in like the YouTube page, so its row wears
-      // the "not an add-on" tint instead of an installed check.
-      if (ext.id === APPLE_THEME_ID) card.classList.add("ym-mk-card-apple");
       mkRows.appendChild(card);
     }
     mkPositionInd(true);
