@@ -1,14 +1,14 @@
 {
   "releases": [
     {
-      "version": "0.7.5",
-      "date": "2026-10-24",
-      "title": "Aurora Lyrics is on the Chrome Web Store",
+      "version": "0.1.0",
+      "date": "2026-10-26",
+      "title": "Aurora Lyrics, from the start.",
       "features": [
         "Word-level synced lyrics in the YouTube Music Lyrics tab, with the active word lit and the lines around it stepping back.",
         "A fullscreen view over the artwork, with a per-track offset and romanization for Japanese and Korean tracks.",
         "Lyrics from Spicy Lyrics and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
-        "Optional add-ons: the Aurora Bloom backdrop, artwork tinting, share cards, Next Up, song notes, a sleep timer and picture-in-picture lyrics.",
+        "Optional add-ons: the Aurora Bloom backdrop with artwork tinting, Aurora Flow, Next Up, song notes, a sleep timer and picture-in-picture lyrics, plus snippets.",
         "No account, no analytics, no Aurora server. The track's title, artist, album and duration are the only things sent anywhere."
       ],
       "fixes": []

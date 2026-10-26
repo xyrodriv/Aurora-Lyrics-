@@ -2914,7 +2914,6 @@
      injected by boot(). The content script runs in an isolated world, so its own
      window.YTMod is invisible to the console. Player readers + open/install controls
      are bridged to this isolated world via window.postMessage. */
-  const VERSION = "0.5.73";
   const ui = {
     category: "Extensions",
     // view / density / floating are PINNED (AJ, 2026-09-28): the toolbar was
@@ -7710,7 +7709,7 @@
     // Always-on, too: the layout of the player page, from a pill beside the tabs.
     initSongLayoutPicker();
 
-    console.log("[Aurora Lyrics] booted v" + VERSION);
+    console.log("[Aurora Lyrics] booted v" + (runningVersion() || "unknown"));
   }
 
   if (document.readyState === "complete" || document.readyState === "interactive") setTimeout(boot, 600);
