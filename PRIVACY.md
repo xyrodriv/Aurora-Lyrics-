@@ -1,6 +1,6 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 26 October 2026
+**Last updated:** 27 October 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -29,12 +29,14 @@ This data never leaves your browser. Uninstalling the extension removes it.
 ## What is transmitted, and to whom
 
 To find lyrics for the track you are playing, Aurora Lyrics sends **the track's
-metadata** (title, artist, album, and duration) to third-party lyric services.
-This is necessary: a lyric service cannot return lyrics without being told which
-song you want.
+metadata** (title, artist, album, and duration) to third-party lyric and
+metadata services. This is necessary: a lyric service cannot return lyrics
+without being told which song you want.
 
 **No personal information is included.** No account, no identifiers, no browsing
-history. The requests contain only what is needed to identify the song.
+history. The requests contain only what is needed to identify the song. They do
+come from your browser, so the service answering one sees your IP address, the
+same way it would for any page you opened.
 
 The services contacted are:
 
@@ -43,6 +45,10 @@ The services contacted are:
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
+| `itunes.apple.com` | Artwork and metadata search |
+| `api.deezer.com` | Artwork and metadata search |
+| `musicbrainz.org` | Release lookup, for matching a track |
+| `open.spotify.com` | Artwork and artist lookup (oEmbed) |
 | `raw.githubusercontent.com` | Update check (release notes only) |
 | `fonts.spikerko.org` | Lyrics typeface stylesheet |
 
@@ -79,8 +85,8 @@ request is never made.
 
 - **`storage`**: saves your settings, lyric cache, and imported TTML locally on
   your device.
-- **Host permissions**: allow the extension to request lyrics from the services
-  listed above, and to run on YouTube Music.
+- **Host permissions**: allow the extension to request lyrics and track metadata
+  from the services listed above, and to run on YouTube Music.
 
 ## Limited Use
 
