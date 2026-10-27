@@ -1,23 +1,13 @@
 {
   "releases": [
     {
-      "version": "1.0.2",
-      "date": "2026-10-26",
-      "title": "Update check test, run 2",
-      "features": [
-        "Bumped to 1.0.2 so a dismissed 1.0.1 cannot hide this card.",
-        "If this says v1.0.2, the extension is reading the changelog on GitHub and the notice works."
-      ],
-      "fixes": []
-    },
-    {
       "version": "1.0.0",
       "date": "2026-10-26",
       "title": "Aurora Lyrics, from the start.",
       "features": [
         "Word-level synced lyrics in the YouTube Music Lyrics tab, with the active word lit and the lines around it stepping back.",
         "A fullscreen view over the artwork, with a per-track offset and romanization for Japanese and Korean tracks.",
-        "Lyrics from Spicy Lyrics and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
+        "Lyrics from the Spicy Lyrics API and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
         "Optional add-ons: the Aurora Bloom backdrop with artwork tinting, Aurora Flow, Next Up, song notes, a sleep timer and picture-in-picture lyrics, plus snippets.",
         "No account, no analytics, no Aurora server. The track's title, artist, album and duration are the only things sent anywhere."
       ],
