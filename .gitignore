@@ -162,3 +162,6 @@ website/
 
 # Chrome Web Store packaging output
 build/
+
+# The store-packaging helper stays local; the extension is zipped by hand.
+scripts/package-extension.mjs
