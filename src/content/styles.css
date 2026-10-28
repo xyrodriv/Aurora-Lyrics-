@@ -2970,6 +2970,26 @@ html.ym-yt-smooth-progress ytmusic-player-bar #progress-bar #sliderKnob {
   left: 0 !important;
 }
 
+/* The 2026 mini-player bar is a plain range input, and YouTube paints its line
+   from ONE inline gradient that only moves when its whole-second value ticks.
+   With the switch on, a two-stop line is painted over it from YouTube's own
+   tokens, and the played end is `--ym-mini-progress` — a custom property
+   ytMiniProgressStep writes every frame on the bar's wrapper. The inline
+   gradient underneath is never touched, so switching off brings YouTube's own
+   line, most-replayed band included, straight back. */
+html.ym-yt-smooth-progress ytmusic-miniplayer .ytMusicMiniPlayerProgressBarWrapper {
+  --ym-mini-progress: 0%;
+}
+html.ym-yt-smooth-progress ytmusic-miniplayer input.ytMusicMiniPlayerProgressBar {
+  background-image: linear-gradient(
+    to right,
+    var(--yt-sys-color-baseline--static-brand-red, #f03) 0%,
+    var(--yt-sys-color-baseline--static-brand-red, #f03) var(--ym-mini-progress, 0%),
+    var(--yt-sys-color-baseline--ten-percent-layer, rgba(255, 255, 255, 0.1)) var(--ym-mini-progress, 0%),
+    var(--yt-sys-color-baseline--ten-percent-layer, rgba(255, 255, 255, 0.1)) 100%
+  ) !important;
+}
+
 /* ---- dark frosted shelf ---------------------------------------------------
    The bar's background is its OWN fixed layer behind `ytmusic-player-bar`,
    which is transparent — so this is the node to frost, not the bar. !important
@@ -3019,6 +3039,13 @@ html.ym-yt-custom-icons ytmusic-player-bar .left-controls-buttons > yt-icon-butt
    paths are still in the svg — and still getting YouTube's state updates — but
    they must not paint under ours. */
 html.ym-yt-custom-icons ytmusic-player-bar svg[data-ym-icon] > :not([data-ym-part]) {
+  display: none;
+}
+
+/* The 2026 mini-player bar is a Wiz surface: the same 24px svg, but no
+   yt-icon-button wrapper. The painter's parts have to hide YouTube's paths
+   there too, or both glyphs draw on top of each other. */
+html.ym-yt-custom-icons ytmusic-miniplayer svg[data-ym-icon] > :not([data-ym-part]) {
   display: none;
 }
 

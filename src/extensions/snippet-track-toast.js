@@ -49,6 +49,21 @@
   }
 
   function trackInfo() {
+    const mini = document.querySelector("ytmusic-miniplayer");
+    if (mini) {
+      const pick = (sel) => {
+        const el = mini.querySelector(sel);
+        return el ? (el.textContent || "").trim() : "";
+      };
+      const byline = mini.querySelector(".ytmusicTrackInfoByline");
+      const firstLink = byline && byline.querySelector("a");
+      const img = mini.querySelector("img");
+      return {
+        title: pick(".ytmusicTrackInfoTitle"),
+        artist: (firstLink && firstLink.textContent.trim()) || pick(".ytmusicTrackInfoByline").split("•")[0].trim(),
+        art: img && img.src ? img.src : "",
+      };
+    }
     const bar = document.querySelector("ytmusic-player-bar");
     if (!bar) return null;
     const pick = (sel) => {

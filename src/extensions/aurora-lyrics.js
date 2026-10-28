@@ -8904,7 +8904,10 @@
   }
 
   function findPlayerButton(labels) {
-    const bar = document.querySelector("ytmusic-player-bar");
+    // Both bottom bars: the new one is a Wiz surface whose buttons carry the
+    // same aria-labels, so the label scan below works unchanged.
+    const bar = document.querySelector("ytmusic-miniplayer") ||
+      document.querySelector("ytmusic-player-bar");
     if (!bar) return null;
     const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
     return buttons.find((button) => {
@@ -8934,7 +8937,8 @@
 
   function findPlayerVolumeRange() {
     return document.querySelector("ytmusic-player-bar tp-yt-paper-slider[aria-label*='volume' i]") ||
-      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]");
+      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]") ||
+      document.querySelector("ytmusic-miniplayer input[type='range'][aria-label*='volume' i]");
   }
 
   function setPlayerVolume(value) {
@@ -9111,7 +9115,8 @@
      Read from the real control, not our own toggle state, so the buttons can
      never lie about the real YTM mode. */
   function readPlayerToggle(kind) {
-    const bar = document.querySelector("ytmusic-player-bar");
+    const bar = document.querySelector("ytmusic-miniplayer") ||
+      document.querySelector("ytmusic-player-bar");
     if (!bar) return null;
     const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
     const button = buttons.find((candidate) => {
@@ -9466,8 +9471,20 @@
   // click (which would trigger smooth-motion's emoji particles).
   function getYtmLikeRenderer() {
     const bar = document.querySelector("ytmusic-player-bar");
-    if (!bar) return null;
-    return bar.querySelector("ytmusic-like-button-renderer") || null;
+    if (bar) {
+      const renderer = bar.querySelector("ytmusic-like-button-renderer");
+      if (renderer) return renderer;
+    }
+    // New bar: rating is two plain aria-pressed buttons, no renderer object.
+    // Expose the same two attributes the caller reads so the seed still works.
+    const mini = document.querySelector("ytmusic-miniplayer");
+    const like = mini && mini.querySelector("button[aria-pressed][aria-label^='like' i]");
+    const dislike = mini && mini.querySelector("button[aria-pressed][aria-label^='dislike' i]");
+    if (!like && !dislike) return null;
+    const status = like && like.getAttribute("aria-pressed") === "true" ? "LIKE"
+      : dislike && dislike.getAttribute("aria-pressed") === "true" ? "DISLIKE"
+        : "INDIFFERENT";
+    return { getAttribute: (name) => (name === "like-status" ? status : null) };
   }
   function getYtmLikeStatus() {
     // Reliable, label-independent (INDIFFERENT / LIKE / DISLIKE). Used only to
@@ -9497,13 +9514,30 @@
   // is expected when syncing a real dislike.
   function syncFsRatingToYtm(target) {
     const renderer = getYtmLikeRenderer();
-    if (!renderer || typeof renderer.updateLikeStatus !== "function") return;
-    const current = getYtmLikeStatus();
-    try {
-      if (target === "like" && current !== "LIKE") renderer.updateLikeStatus("LIKE");
-      else if (target === "dislike" && current !== "DISLIKE") renderer.updateLikeStatus("DISLIKE");
-      else if (target === null && (current === "LIKE" || current === "DISLIKE")) renderer.updateLikeStatus(current);
-    } catch (_) { /* visual state is authoritative; ignore YTM sync failure */ }
+    if (renderer && typeof renderer.updateLikeStatus === "function") {
+      const current = getYtmLikeStatus();
+      try {
+        if (target === "like" && current !== "LIKE") renderer.updateLikeStatus("LIKE");
+        else if (target === "dislike" && current !== "DISLIKE") renderer.updateLikeStatus("DISLIKE");
+        else if (target === null && (current === "LIKE" || current === "DISLIKE")) renderer.updateLikeStatus(current);
+      } catch (_) { /* visual state is authoritative; ignore YTM sync failure */ }
+      return;
+    }
+    // New mini-player bar: the like-status renderer is gone, so the two real
+    // buttons are the only rating API left. Clicking one is the whole sync —
+    // our own state never reads back from YTM, so the buttons cannot fight it.
+    const mini = document.querySelector("ytmusic-miniplayer");
+    if (!mini) return;
+    const like = mini.querySelector("button[aria-pressed][aria-label^='like' i]");
+    const dislike = mini.querySelector("button[aria-pressed][aria-label^='dislike' i]");
+    const on = (btn) => !!btn && btn.getAttribute("aria-pressed") === "true";
+    const press = (btn) => { if (btn) { try { btn.click(); } catch (_) {} } };
+    if (target === "like" && !on(like)) press(like);
+    else if (target === "dislike" && !on(dislike)) press(dislike);
+    else if (target === null) {
+      if (on(like)) press(like);
+      else if (on(dislike)) press(dislike);
+    }
   }
 
   function clickFsRating(kind) {
@@ -10345,7 +10379,11 @@
   // parsed title the last, which degrades to "never static" rather than
   // guessing wrong.
   function getRawVideoTitle() {
-    const selectors = ["#movie_player .ytp-title-link", "ytmusic-player-bar .title"];
+    const selectors = [
+      "#movie_player .ytp-title-link",
+      "ytmusic-player-bar .title",
+      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
+    ];
     for (let i = 0; i < selectors.length; i++) {
       const el = document.querySelector(selectors[i]);
       const text = el && el.textContent ? el.textContent.trim() : "";
@@ -11196,7 +11234,9 @@
   // by a beat - and a lagging read is exactly what left the fullscreen pane
   // empty after a skip (AJ, 2026-09-28).
   function getDomArtworkUrl() {
-    const img = document.querySelector("ytmusic-player-bar img.image") ||
+    const img = document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
+      document.querySelector("ytmusic-miniplayer img") ||
+      document.querySelector("ytmusic-player-bar img.image") ||
       document.querySelector("ytmusic-player-bar .thumbnail img") ||
       document.querySelector("ytmusic-player-bar img");
     if (!img) return "";
@@ -14455,6 +14495,7 @@
       "ytmusic-player-bar .title",
       "ytmusic-player-bar #song-title",
       "ytmusic-player-bar yt-formatted-string.title",
+      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
     ];
     for (const selector of selectors) {
       const el = document.querySelector(selector);

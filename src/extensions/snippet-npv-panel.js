@@ -2679,7 +2679,8 @@ body.ym-npv-docked ytmusic-player-page {
   right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
-body.ym-npv-docked ytmusic-player-bar {
+body.ym-npv-docked ytmusic-player-bar,
+body.ym-npv-docked ytmusic-miniplayer {
   right: var(--ym-npv-offset, 0px) !important;
   width: auto !important;
 }
@@ -2730,6 +2731,7 @@ body.ym-npv-docked ytmusic-section-list-renderer {
 body.ym-npv-animating ytmusic-nav-bar,
 body.ym-npv-animating ytmusic-player-page,
 body.ym-npv-animating ytmusic-player-bar,
+body.ym-npv-animating ytmusic-miniplayer,
 body.ym-npv-animating #player-bar-background,
 body.ym-npv-animating #nav-bar-background,
 body.ym-npv-animating ytmusic-app-layout > #content,
@@ -2928,6 +2930,26 @@ body.ym-npv-animating ytmusic-player-page#player-page {
         };
       }
     } catch (e) {}
+    // New bar has its own track-info block; keep the old bar as the fallback.
+    const mini = document.querySelector("ytmusic-miniplayer");
+    if (mini) {
+      const pick = (sel) => {
+        const el = mini.querySelector(sel);
+        return el ? (el.textContent || "").trim() : "";
+      };
+      const byline = mini.querySelector(".ytmusicTrackInfoByline");
+      const artistLinks = byline
+        ? Array.from(byline.querySelectorAll("a")).map((a) => (a.textContent || "").trim()).filter(Boolean)
+        : [];
+      const img = mini.querySelector("img.ytmusicTrackInfoThumbnail") || mini.querySelector("img");
+      return {
+        title: pick(".ytmusicTrackInfoTitle"),
+        artist: artistLinks[0] || pick(".ytmusicTrackInfoByline").split("•")[0].trim(),
+        album: artistLinks[1] || "",
+        art: bumpArtQuality(img && img.src ? img.src : ""),
+        videoId: currentVideoId(),
+      };
+    }
     const bar = document.querySelector("ytmusic-player-bar");
     if (!bar) return null;
     const pick = (sel) => {
@@ -3394,7 +3416,9 @@ function syncLyricsDock() {
           if (m) return m[1];
         }
       }
-      const p = document.querySelector("ytmusic-player");
+      // getPlayerResponse moved from <ytmusic-player> to the #movie_player div
+      // in the 2026 shell; ask both so artist pages keep resolving.
+      const p = document.querySelector("#movie_player") || document.querySelector("ytmusic-player");
       const resp = p && typeof p.getPlayerResponse === "function" ? p.getPlayerResponse() : null;
       const v = resp && (resp.videoDetails || {});
       const id = v.channelId || v.ownerChannelId || (resp && resp.microformat && resp.microformat.ownerChannelId);
@@ -3479,9 +3503,11 @@ function syncLyricsDock() {
       }
     }
     // The title is a yt-formatted-string in newer builds (no anchor). YTM still
-    // attaches its own navigation handler to it.
+    // attaches its own navigation handler to it. The mini-player bar exposes the
+    // same text as .ytmusicTrackInfoTitle.
     const title = document.querySelector(
-      "ytmusic-player-bar #song-title, ytmusic-player-bar .title"
+      "ytmusic-player-bar #song-title, ytmusic-player-bar .title, " +
+      "ytmusic-miniplayer .ytmusicTrackInfoTitle, ytmusic-miniplayer .ytmusicTrackInfoTitle *"
     );
     if (title && typeof title.click === "function") {
       title.click();

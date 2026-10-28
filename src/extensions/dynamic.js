@@ -304,6 +304,20 @@
           0 0 ${strongBlur}px color-mix(in srgb, var(--ym-artwork-accent) ${strongAlpha}%, transparent),
           0 0 ${softBlur}px color-mix(in srgb, var(--ym-artwork-accent) ${softAlpha}%, transparent);
       }
+      /* New mini-player bar (2026): the progress line is ONE range input whose
+         played fraction lives in an inline gradient that references YouTube's
+         baseline tokens — and YouTube rewrites that gradient every second, so
+         it cannot be replaced from CSS. Re-point the played-part token inside
+         the slider wrapper instead; the inline gradient resolves against it and
+         the line follows the artwork with no script on the hot path. */
+      ytmusic-miniplayer .ytMusicMiniPlayerProgressBarWrapper {
+        --yt-sys-color-baseline--static-brand-red: var(--ym-artwork-accent) !important;
+        /* The bar also blends to YouTube's magenta across the most-replayed
+           band, so tinting only the red left the line running red-to-pink as it
+           grew. Both tokens are the accent now and the played line is one
+           colour; the band's unplayed half stays YouTube's grey. */
+        --yt-sys-color-baseline--static-magenta: var(--ym-artwork-accent) !important;
+      }
     `;
   }
 
@@ -414,6 +428,7 @@
     .ym-dynamic-page-bg-root ytmusic-player-page,
     .ym-dynamic-page-bg-root ytmusic-watch-page,
     .ym-dynamic-page-bg-root ytmusic-player-bar,
+    .ym-dynamic-page-bg-root ytmusic-miniplayer,
     .ym-dynamic-page-bg-root ytmusic-guide-renderer,
     .ym-dynamic-page-bg-root ytmusic-left-nav-bar,
     .ym-dynamic-page-bg-root #layout,
@@ -651,7 +666,9 @@
        cause was #player-bar-background intercepting pointer events — see that
        rule. The transparent background below is all the Dynamic theme needs. */
     .ym-dynamic-page-bg-root.ym-dynamic-song-mode ytmusic-player-bar,
-    .ym-dynamic-page-bg-root.ym-dynamic-home-mode ytmusic-player-bar {
+    .ym-dynamic-page-bg-root.ym-dynamic-home-mode ytmusic-player-bar,
+    .ym-dynamic-page-bg-root.ym-dynamic-song-mode ytmusic-miniplayer,
+    .ym-dynamic-page-bg-root.ym-dynamic-home-mode ytmusic-miniplayer {
       background: transparent !important;
       background-color: transparent !important;
       background-image: none !important;

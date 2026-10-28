@@ -1,13 +1,30 @@
 {
   "releases": [
     {
+      "version": "1.0.1",
+      "date": "2026-10-28",
+      "title": "Ready for YouTube Music's new player bar.",
+      "features": [],
+      "fixes": [
+        "Lyrics load again now that YouTube Music has replaced its player bar.",
+        "Play, pause, skip, seek, volume, artwork and the fullscreen title all work with the new bar, and the old bar still works exactly as before.",
+        "Like and dislike in fullscreen now rate the song instead of only changing the icon.",
+        "Custom player-bar icons cover the playback and menu buttons on the new bar.",
+        "The Dynamic theme's frosted bar and artwork accent colour follow the new bar, including a progress line that takes the thumbnail's colour.",
+        "The Now Playing panel's page shift and the fullscreen chrome follow the new bar too.",
+        "The 'Song info left, controls centred' switch is greyed out when the new bar already lays itself out that way.",
+        "Artwork tinting now colours the whole progress line, so the colour no longer turns pink as the song plays.",
+        "Smooth progress line now works on the new bar, so the line glides instead of jumping once a second."
+      ]
+    },
+    {
       "version": "1.0.0",
       "date": "2026-10-26",
       "title": "Aurora Lyrics, from the start.",
       "features": [
         "Word-level synced lyrics in the YouTube Music Lyrics tab, with the active word lit and the lines around it stepping back.",
         "A fullscreen view over the artwork, with a per-track offset and romanization for Japanese and Korean tracks.",
-        "Lyrics from the Spicy Lyrics API and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
+        "Lyrics from Spicy Lyrics and LRCLIB, with a manual search in the panel when the automatic lookup misses.",
         "Optional add-ons: the Aurora Bloom backdrop with artwork tinting, Aurora Flow, Next Up, song notes, a sleep timer and picture-in-picture lyrics, plus snippets.",
         "No account, no analytics, no Aurora server. The track's title, artist, album and duration are the only things sent anywhere."
       ],

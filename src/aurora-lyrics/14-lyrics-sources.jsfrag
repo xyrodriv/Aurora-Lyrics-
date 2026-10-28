@@ -447,6 +447,7 @@
       "ytmusic-player-bar .title",
       "ytmusic-player-bar #song-title",
       "ytmusic-player-bar yt-formatted-string.title",
+      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
     ];
     for (const selector of selectors) {
       const el = document.querySelector(selector);

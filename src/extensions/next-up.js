@@ -379,15 +379,20 @@ html.ym-yt-compact #${CHIP_ID}.ym-nu-artonly,
   }
 
   function barEl() {
-    return document.querySelector("ytmusic-player-bar");
+    return document.querySelector("ytmusic-miniplayer") ||
+      document.querySelector("ytmusic-player-bar");
   }
   function leftHost() {
     const bar = barEl();
-    return (bar && bar.querySelector(".middle-controls")) || document.querySelector(".middle-controls");
+    return (bar && (bar.querySelector(".middle-controls") ||
+      bar.querySelector(".ytMusicMiniPlayerLeftSection"))) ||
+      document.querySelector(".middle-controls");
   }
   function rightHost() {
     const bar = barEl();
-    return (bar && bar.querySelector("#right-controls")) || document.querySelector("#right-controls");
+    return (bar && (bar.querySelector("#right-controls") ||
+      bar.querySelector(".ytMusicMiniPlayerRightSection"))) ||
+      document.querySelector("#right-controls");
   }
 
   // Seat 1 ends the song row, after the artwork, the title and the like buttons;

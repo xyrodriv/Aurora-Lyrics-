@@ -100,6 +100,11 @@
   // duration in seconds, so we disambiguate by excluding the volume sliders. Add
   // #slider / #seek-bar for precision where present.
   function findSeekSlider() {
+    // New bottom bar: one plain range input whose max is the duration in
+    // seconds. It replaces the whole paper-slider tree, so check it first when
+    // that bar is the one on screen.
+    const mini = $("ytmusic-miniplayer");
+    if (mini) return $("input[aria-label='Seek slider']", mini);
     const exact = $("#progress-bar") || $("#slider") || $("#seek-bar") || $(".seek-bar") || $("ytmusic-player-bar #slider");
     if (exact) return exact;
     const all = $$("tp-yt-paper-slider");
@@ -146,12 +151,105 @@
     return fallback;
   }
 
-  function readPlayerPauseState() {
+  /* ---- player bar compatibility (old and new) -------------------------------
+     YTM is rolling the bottom bar out again: the long-lived
+     <ytmusic-player-bar> is replaced by <ytmusic-miniplayer>, whose transport
+     controls are Wiz <button>s identified only by aria-label (no
+     `play-pause-button` / `next-button` classes), and the progress and volume
+     sliders are plain range inputs instead of paper sliders. At the same time
+     <ytmusic-player> lost getPlayerResponse() — the #movie_player div inside it
+     still exposes one.
+
+     Both bars ship to users at once, so every reader here prefers whichever bar
+     is actually mounted and falls back to the old selectors. Nothing below
+     assumes only one of them exists.
+  */
+  function playerBar() {
+    return $("ytmusic-miniplayer") || $("ytmusic-player-bar");
+  }
+
+  function transportButton(name) {
+    const labels = {
+      playPause: /^(play|pause)$/i,
+      next: /^next$/i,
+      previous: /^previous$/i,
+    };
+    const mini = $("ytmusic-miniplayer");
+    if (mini) {
+      const hit = $$("button[aria-label]", mini).find((btn) =>
+        labels[name].test((btn.getAttribute("aria-label") || "").trim())
+      );
+      if (hit) return hit;
+    }
+    const legacy = {
+      playPause: "#play-pause-button, .play-pause-button",
+      next: ".next-button",
+      previous: ".previous-button",
+    }[name];
     const bar = $("ytmusic-player-bar");
-    const button =
-      $("#play-pause-button", bar) ||
-      $("tp-yt-paper-icon-button#play-pause-button", bar) ||
-      $("button[aria-label]", bar && bar.querySelector("#play-pause-button"));
+    return (bar && $(legacy, bar)) || $(legacy) || null;
+  }
+
+  // <ytmusic-player> answered this before the mini-player rollout.
+  function playerResponse() {
+    for (const holder of [$("#movie_player"), $("ytmusic-player")]) {
+      try {
+        const resp = holder && typeof holder.getPlayerResponse === "function" && holder.getPlayerResponse();
+        if (resp) return resp;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  function playerResponseVideo(resp) {
+    return (resp && (resp.videoDetails || (resp.microformat && resp.microformat.microformatDataRenderer))) || null;
+  }
+
+  // Same cover at a usable size: the bar and Media Session hand out 60-120px
+  // thumbs, which turn to mush in the panel. Google's image CDN honours any
+  // w/h pair in the URL, so widen the one that is already there.
+  function upgradeArtworkSize(url) {
+    if (!url) return "";
+    return String(url).replace(/([=/-])w\d+-h\d+/, "$1w544-h544");
+  }
+
+  // New bar: one track-info block, with the byline as "artist • album • year"
+  // links. No reliance on .title/.byline classes from the old bar.
+  function miniPlayerTrack() {
+    const mini = $("ytmusic-miniplayer");
+    if (!mini) return null;
+    const clean = (el) => (el && el.textContent ? el.textContent.replace(/\s+/g, " ").trim() : "");
+    const titleEl = $(".ytmusicTrackInfoTitle", mini);
+    const byline = $(".ytmusicTrackInfoByline", mini);
+    const links = byline ? $$("a", byline).map(clean).filter(Boolean) : [];
+    const img = $("img.ytmusicTrackInfoThumbnail", mini) || $("img", mini);
+    const src = (img && (img.currentSrc || img.src)) || "";
+    const title = clean(titleEl && (titleEl.getAttribute("title") || titleEl.textContent));
+    if (!title) return null;
+    return {
+      title,
+      artist: cleanArtist(links[0] || clean(byline)),
+      album: links[1] || "",
+      artworkUrl: upgradeArtworkSize(src),
+    };
+  }
+
+  // YTM fills Media Session for every track, video or audio only, so this still
+  // answers while the bar is rebuilding after a navigation.
+  function mediaSessionTrack() {
+    const md = navigator.mediaSession && navigator.mediaSession.metadata;
+    if (!md || !md.title) return null;
+    const art = (md.artwork || []).map((a) => a && a.src).filter(Boolean);
+    return {
+      title: md.title,
+      artist: cleanArtist(md.artist || ""),
+      album: md.album || "",
+      artworkUrl: upgradeArtworkSize(art[art.length - 1] || ""),
+    };
+  }
+
+  function readPlayerPauseState() {
+    const button = transportButton("playPause");
     if (!button) return null;
     const label = [
       button.getAttribute("aria-label"),
@@ -172,16 +270,15 @@
     },
 
     getTrack() {
-      const bar = $("ytmusic-player-bar");
+      const mini = $("ytmusic-miniplayer");
+      const oldBar = $("ytmusic-player-bar");
       let title = null, artist = "", album = "", artworkUrl = "", videoId = "", isrc = "";
-      const p = $("ytmusic-player");
 
       // The player response is the authoritative video title. YTM's player
       // bar contains other `.title` nodes (including album metadata), so
       // reading that selector first can send the wrong song to lyric services.
       try {
-        const resp = p && p.getPlayerResponse && p.getPlayerResponse();
-        const v = resp && (resp.videoDetails || (resp.microformat && resp.microformat.microformatDataRenderer));
+        const v = playerResponseVideo(playerResponse());
         if (v) isrc = extractIsrc(v);
         if (v && v.title) {
           videoId = String(v.videoId || "");
@@ -191,35 +288,54 @@
         }
       } catch (e) {}
 
-      if (bar) {
+      // New bar first. Its title/byline are structured, so they are a safer
+      // fallback than the old bar's loose `.title` nodes — and it can supply
+      // artwork while the player response is still empty at track change.
+      if (mini) {
+        const info = miniPlayerTrack();
+        if (info) {
+          if (!title) title = cleanTrackTitle(info.title, artist || info.artist) || null;
+          if (!artist) artist = info.artist;
+          if (!album) album = info.album;
+          if (!artworkUrl) artworkUrl = info.artworkUrl;
+        }
+        if (!album) {
+          const albumLink =
+            $("a[href*='/album/']", mini) ||
+            $("a[href*='/browse/']", mini);
+          if (albumLink) album = albumLink.textContent.trim();
+        }
+      }
+
+      if (oldBar) {
         if (!artworkUrl) {
-          const artwork = $("img", bar);
+          const artwork = $("img", oldBar);
           artworkUrl = artwork && (artwork.currentSrc || artwork.src) || "";
         }
-        const barArtist = cleanArtist(($(".subtitle", bar) || $(".byline", bar))?.textContent?.trim());
+        const barArtist = cleanArtist(($(".subtitle", oldBar) || $(".byline", oldBar))?.textContent?.trim());
         if (!artist) artist = barArtist;
         const albumLink =
-          $("a[href*='/album/']", bar) ||
-          $("a[href*='/browse/']", bar);
+          $("a[href*='/album/']", oldBar) ||
+          $("a[href*='/browse/']", oldBar);
         if (albumLink) album = albumLink.textContent.trim();
         if (!title) {
           title = cleanTrackTitle(
-            ($(".title", bar) || $(".song-title", bar))?.textContent?.trim() || "",
+            ($(".title", oldBar) || $(".song-title", oldBar))?.textContent?.trim() || "",
             artist
           ) || null;
         }
       }
-      if (!title) {
-        try {
-          const resp = p && p.getPlayerResponse && p.getPlayerResponse();
-          const v = resp && (resp.videoDetails || (resp.microformat && resp.microformat.microformatDataRenderer));
-          if (v && v.title) {
-            videoId = videoId || String(v.videoId || "");
-            title = cleanTrackTitle(v.title, artist);
-            artworkUrl = artworkUrl || pickArtworkUrl(v.thumbnail && v.thumbnail.thumbnails);
-            artist = artist || cleanArtist(($(".subtitle", $("ytmusic-player-bar"))?.textContent?.trim()) || "");
-          }
-        } catch (e) {}
+
+      // Media Session: last resort, and the only source that survives a bar
+      // rebuild between two tracks.
+      if (!title || !artist || !artworkUrl) {
+        const session = mediaSessionTrack();
+        if (session) {
+          if (!title) title = cleanTrackTitle(session.title, artist || session.artist) || null;
+          if (!artist) artist = session.artist;
+          if (!album) album = session.album;
+          if (!artworkUrl) artworkUrl = session.artworkUrl;
+        }
       }
       return title ? { title, artist, album, videoId, isrc, durationMs: this.getDurationMs(), artworkUrl } : null;
     },
@@ -258,6 +374,10 @@
     seek(ms) {
       const p = $("ytmusic-player");
       if (p && typeof p.seekTo === "function") { try { p.seekTo(ms / 1000); } catch (e) {} }
+      // The new shell moved seekTo off <ytmusic-player> onto the #movie_player
+      // div inside it. Both are tried; the media check below is still the judge.
+      const movie = $("#movie_player");
+      if (movie && typeof movie.seekTo === "function") { try { movie.seekTo(ms / 1000); } catch (e) {} }
       // seekTo() can EXIST yet silently no-op on some YTM builds — when that
       // happened the fullscreen thumb snapped back to the pre-drag position
       // because the media never actually moved (AJ, 2026-10-03). Verify the
@@ -277,9 +397,8 @@
     // fallback scrapes the YTM queue panel DOM, which is fragile across UI
     // updates, so it is wrapped in try/catch and may return null.
     getNextTrack() {
-      const p = $("ytmusic-player");
       try {
-        const resp = p && p.getPlayerResponse && p.getPlayerResponse();
+        const resp = playerResponse();
         const up = resp && resp.upcoming;
         let item = null;
         if (Array.isArray(up)) item = up[0];
@@ -327,7 +446,7 @@
     // session and YTM's own listeners in sync. The media element is only a
     // fallback for the case where the bar has not rendered yet.
     playPauseButton() {
-      return $("#play-pause-button") || $("ytmusic-player-bar .play-pause-button");
+      return transportButton("playPause");
     },
     isPlaying() {
       const paused = this.isPaused();
@@ -352,12 +471,12 @@
       return this.setPaused(!now);
     },
     next() {
-      const btn = $(".next-button") || $("ytmusic-player-bar .next-button");
+      const btn = transportButton("next");
       if (!btn) return false;
       try { btn.click(); return true; } catch (e) { return false; }
     },
     previous() {
-      const btn = $(".previous-button") || $("ytmusic-player-bar .previous-button");
+      const btn = transportButton("previous");
       if (!btn) return false;
       try { btn.click(); return true; } catch (e) { return false; }
     },
@@ -368,7 +487,7 @@
     // multiplier on whatever the pipeline already produces.
     getVolume() {
       const media = findPlaybackMedia();
-      const slider = $("#volume-slider");
+      const slider = $("#volume-slider") || $("ytmusic-miniplayer input[aria-label='Volume']");
       let sliderValue = null;
       if (slider) {
         const raw = Number(slider.value);
@@ -702,11 +821,17 @@
   function addPlayerBarButton(opts) {
     const o = opts || {};
     if (!o.id) return null;
-    const container = $(".right-controls-buttons");
+    // Old bar: the carousel lives in .right-controls-buttons. New bar: the same
+    // corner is .ytMusicMiniPlayerRightSection, which has no carousel machinery
+    // — buttons are small and few, so they sit straight in the row, just before
+    // the overflow menu.
+    const legacyContainer = $(".right-controls-buttons");
+    const miniContainer = legacyContainer ? null : $(".ytMusicMiniPlayerRightSection");
+    const container = legacyContainer || miniContainer;
     if (!container) return null;
     ensurePlayerBarStyle();
-    watchPlayerBarRow();
-    const carousel = getOrCreatePlayerBarCarousel();
+    if (legacyContainer) watchPlayerBarRow();
+    const carousel = legacyContainer ? getOrCreatePlayerBarCarousel() : null;
     const target = carousel ? carousel.querySelector(".ym-pb-carousel-viewport") : container;
     const id = "ym-pb-" + o.id;
     const existing = document.getElementById(id);
@@ -738,7 +863,13 @@
       e.stopPropagation();
       if (typeof o.onClick === "function") o.onClick(e, playerBarHandle(btn));
     });
-    target.appendChild(btn);
+    if (miniContainer) {
+      const more = $('button[aria-label="MORE" i]', miniContainer) ||
+        $('button[aria-label="More" i]', miniContainer);
+      miniContainer.insertBefore(btn, more || null);
+    } else {
+      target.appendChild(btn);
+    }
     // A new icon can push the row past its visible width, which is what makes
     // the arrows meaningful — re-decide whether they are live.
     if (carousel && carousel.__syncArrows) carousel.__syncArrows();

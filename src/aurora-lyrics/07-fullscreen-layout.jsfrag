@@ -664,7 +664,10 @@
   }
 
   function findPlayerButton(labels) {
-    const bar = document.querySelector("ytmusic-player-bar");
+    // Both bottom bars: the new one is a Wiz surface whose buttons carry the
+    // same aria-labels, so the label scan below works unchanged.
+    const bar = document.querySelector("ytmusic-miniplayer") ||
+      document.querySelector("ytmusic-player-bar");
     if (!bar) return null;
     const buttons = Array.from(bar.querySelectorAll("button, tp-yt-paper-icon-button"));
     return buttons.find((button) => {
@@ -694,7 +697,8 @@
 
   function findPlayerVolumeRange() {
     return document.querySelector("ytmusic-player-bar tp-yt-paper-slider[aria-label*='volume' i]") ||
-      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]");
+      document.querySelector("ytmusic-player-bar input[type='range'][aria-label*='volume' i]") ||
+      document.querySelector("ytmusic-miniplayer input[type='range'][aria-label*='volume' i]");
   }
 
   function setPlayerVolume(value) {

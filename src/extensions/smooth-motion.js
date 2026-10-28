@@ -502,6 +502,7 @@
        invisibly at mount, and removing the override cannot restart what has
        already finished. */
     html.ym-sm-song-open ytmusic-player-bar,
+    html.ym-sm-song-open ytmusic-miniplayer,
     html.ym-sm-song-open #player-bar-background,
     html.ym-sm-song-open ytmusic-player#player {
       animation-duration: 0s !important;

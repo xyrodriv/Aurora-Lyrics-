@@ -3246,6 +3246,8 @@
   // dimmed, so the panel picks up the track's colour. Falls back to the logo.
   function currentTrackArt() {
     const img =
+      document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
+      document.querySelector("ytmusic-miniplayer img") ||
       document.querySelector("ytmusic-player-bar img.image") ||
       document.querySelector("ytmusic-player-bar img") ||
       document.querySelector("#song-image img") ||
@@ -4437,7 +4439,14 @@
   };
 
   function ytPlayerBar() {
-    return document.querySelector("ytmusic-player-bar");
+    // 2026 rollout: the bar is now <ytmusic-miniplayer>, slotted into the app
+    // layout where <ytmusic-player-bar> used to be. Both are supported; the
+    // new host wins whenever it is mounted.
+    return document.querySelector("ytmusic-miniplayer") ||
+      document.querySelector("ytmusic-player-bar");
+  }
+  function ytIsMiniBar(bar) {
+    return !!bar && bar.tagName.toLowerCase() === "ytmusic-miniplayer";
   }
   // The media element is the truth for play vs pause; the button's label is the
   // fallback for the rare frame before a track has loaded.
@@ -4445,9 +4454,11 @@
     const video = document.querySelector("ytmusic-player video, #movie_player video, video");
     if (video) return video.paused === true;
     const bar = ytPlayerBar();
-    const btn = bar && bar.querySelector("yt-icon-button.play-pause-button");
+    const btn = bar && (bar.querySelector("yt-icon-button.play-pause-button") ||
+      bar.querySelector("button[aria-label='Pause'], button[aria-label='Play'], button[aria-label='pause'], button[aria-label='play']"));
     const inner = btn && btn.querySelector("button");
-    const label = (btn && btn.getAttribute("title")) || (inner && inner.getAttribute("aria-label")) || "";
+    const label = (btn && (btn.getAttribute("title") || btn.getAttribute("aria-label"))) ||
+      (inner && inner.getAttribute("aria-label")) || "";
     return !/pause/i.test(label);
   }
   function ytRepeatIsOne(btn) {
@@ -4461,7 +4472,8 @@
     const video = document.querySelector("ytmusic-player video, #movie_player video, video");
     if (video && video.muted === true) return "mute";
     const bar = ytPlayerBar();
-    const slider = bar && bar.querySelector("#volume-slider");
+    const slider = bar && (bar.querySelector("#volume-slider") ||
+      bar.querySelector("input[aria-label='Volume']"));
     const raw = slider ? (slider.getAttribute("aria-valuenow") || slider.value) : 100;
     const value = Number(raw);
     if (!Number.isFinite(value) || value <= 0) return "mute";
@@ -4504,9 +4516,53 @@
     svg.setAttribute("data-ym-icon", key);
   }
 
+  // The mini-player bar has no `yt-icon-button` wrappers: each control is a Wiz
+  // <button> whose only stable identity is its aria-label. Same glyph set, same
+  // painter — only the lookup differs. Unmapped controls (Playback Speed,
+  // Rewind 10, Fast forward 30) keep YouTube's own icons.
+  const YT_MINI_ICON_JOBS = [
+    [/^shuffle$/i, () => "shuffle"],
+    [/^repeat/i, (btn) => (ytRepeatIsOne(btn) ? "repeatOne" : "repeat")],
+    [/^(play|pause)$/i, () => (ytPlayerPaused() ? "play" : "pause")],
+    [/^previous$/i, () => "prev"],
+    [/^next$/i, () => "next"],
+    [/^(mute|unmute)$/i, () => "volume-" + ytVolumeLevel()],
+    [/^more$/i, () => "more"],
+  ];
+
+  function ytPaintMiniPlayerIcons(bar) {
+    const buttons = bar.querySelectorAll("button[aria-label]");
+    for (const button of buttons) {
+      const label = (button.getAttribute("aria-label") || "").trim();
+      const job = YT_MINI_ICON_JOBS.find(([re]) => re.test(label));
+      if (job) {
+        ytPaintIcon(button.querySelector("svg"), job[1](button));
+        continue;
+      }
+      // Like/dislike stay YouTube's here. The new bar draws the like button with
+      // an ANIMATED Lottie icon on a 48-unit viewBox, not the 24-unit svg every
+      // other control uses — painting our glyph into it rendered half-size in
+      // the corner and hid the animation. Unpaint anything a previous pass left
+      // there so the stock icon comes back.
+      if (button.hasAttribute("aria-pressed")) ytUnpaintIcon(button.querySelector("svg"));
+    }
+  }
+
+  function ytUnpaintIcon(svg) {
+    if (!svg || !svg.getAttribute("data-ym-icon")) return;
+    for (const node of Array.from(svg.children)) {
+      if (node.getAttribute("data-ym-part")) svg.removeChild(node);
+    }
+    svg.removeAttribute("data-ym-icon");
+  }
+
   function ytPaintPlayerIcons() {
     const bar = ytPlayerBar();
     if (!bar) return;
+    if (ytIsMiniBar(bar)) {
+      ytPaintMiniPlayerIcons(bar);
+      return;
+    }
     for (const job of YT_ICON_JOBS) {
       const buttons = bar.querySelectorAll(job[0]);
       for (const button of buttons) {
@@ -4614,11 +4670,49 @@
 
   function ytProgressLookup() {
     const slider = document.querySelector("ytmusic-player-bar #progress-bar");
+    const primary = slider && slider.querySelector("#primaryProgress");
+    const knob = slider && slider.querySelector("#sliderKnob");
+    if (primary && knob && slider.getClientRects().length) return { slider, primary, knob };
+    return ytMiniProgressLookup();
+  }
+
+  // The 2026 bar's slider. It is one plain range input: no knob and no primary
+  // node to translate, and its line is an inline gradient YouTube rewrites on
+  // whole seconds. Only a VISIBLE one counts — YTM can leave a hidden old
+  // player bar, or a second mini bar, in the document.
+  function ytMiniProgressLookup() {
+    const sliders = Array.from(document.querySelectorAll("input.ytMusicMiniPlayerProgressBar"));
+    const slider = sliders.find((el) => el.getClientRects().length) || sliders[0];
     if (!slider) return null;
-    const primary = slider.querySelector("#primaryProgress");
-    const knob = slider.querySelector("#sliderKnob");
-    if (!primary || !knob) return null;
-    return { slider, primary, knob };
+    return {
+      slider,
+      mini: true,
+      host: slider.closest(".ytMusicMiniPlayerProgressBarWrapper") || slider.parentElement,
+    };
+  }
+
+  // The new bar's line is painted by a class rule (styles.css) from this
+  // custom property: set it on the wrapper so YouTube rewriting the input's own
+  // inline gradient cannot take the value with it. A drag is the pointer's
+  // value; otherwise the media element is the clock.
+  function ytMiniProgressStep(parts) {
+    const slider = parts.slider;
+    let pct;
+    if (slider.matches(":active")) {
+      const max = Number(slider.max);
+      if (!(max > 0)) return;
+      pct = Number(slider.value) / max;
+    } else {
+      const video = ytProgressMedia();
+      if (!video) return;
+      const duration = video.duration;
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      pct = video.currentTime / duration;
+    }
+    pct = Math.min(1, Math.max(0, pct));
+    if (pct === ytProgressPct) return;
+    ytProgressPct = pct;
+    if (parts.host) parts.host.style.setProperty("--ym-mini-progress", (pct * 100).toFixed(3) + "%");
   }
 
   function ytProgressMedia() {
@@ -4638,10 +4732,19 @@
     if (!ytProgressParts || !ytProgressParts.slider.isConnected) {
       ytProgressParts = ytProgressLookup();
       ytProgressWidth = 0;
-      if (ytProgressParts && ytProgressResize) ytProgressResize.observe(ytProgressParts.slider);
+      ytProgressPct = -1;
+      if (ytProgressParts && ytProgressResize) {
+        // Only the old slider is measured; a range input is not resized by the
+        // line moving inside it.
+        if (ytProgressParts.mini) ytProgressResize.disconnect();
+        else ytProgressResize.observe(ytProgressParts.slider);
+      }
     }
     const parts = ytProgressParts;
     if (!parts) return;
+    // The new bar has no width to measure and no nodes to transform: its line
+    // is a gradient, repainted from a custom property.
+    if (parts.mini) { ytMiniProgressStep(parts); return; }
     if (!ytProgressWidth) ytProgressWidth = parts.slider.getBoundingClientRect().width;
     if (!(ytProgressWidth > 0)) return;
     if (parts.slider.dragging) {
@@ -4679,7 +4782,7 @@
         ytProgressPct = -1;
       });
     }
-    if (ytProgressParts && ytProgressResize) ytProgressResize.observe(ytProgressParts.slider);
+    if (ytProgressParts && ytProgressResize && !ytProgressParts.mini) ytProgressResize.observe(ytProgressParts.slider);
     // One immediate paint: the class hands the dot over on this very tick, and it
     // should not sit at the start of the bar waiting for a frame.
     ytProgressPct = -1;
@@ -4698,6 +4801,12 @@
     ytProgressParts = null;
     ytProgressWidth = 0;
     ytProgressPct = -1;
+    // The new bar is painted by a class rule, and the class is already off: drop
+    // the frame value so a re-enable starts from a clean slate.
+    if (parts && parts.mini) {
+      if (parts.host) parts.host.style.removeProperty("--ym-mini-progress");
+      return;
+    }
     if (!parts || !parts.slider.isConnected) return;
     // Hand both pieces back where the playhead actually is: the line's transform
     // is ours now, and leaving it would freeze it a fraction of a second ahead of
@@ -5460,11 +5569,26 @@
       applyYtPrefs();
       saveYtPrefs();
     }));
-    sec.appendChild(ytToggleRow("ytDock", "Song info left, controls centred", ytPrefs.dock, (on) => {
+    // The 2026 mini-player bar ships this arrangement natively — song info on
+    // the left, transport centred — so there is nothing left for the switch to
+    // change there. Dim it instead of letting it look broken, and keep it live
+    // on the old bar, which still needs the re-layout.
+    const dockRow = ytToggleRow("ytDock", "Song info left, controls centred", ytPrefs.dock, (on) => {
       ytPrefs.dock = on;
       applyYtPrefs();
       saveYtPrefs();
-    }));
+    });
+    if (document.querySelector("ytmusic-miniplayer")) {
+      dockRow.classList.add("is-locked");
+      dockRow.setAttribute("aria-disabled", "true");
+      dockRow.title = "YouTube Music's new player bar already lays the bar out this way";
+      const dockInput = dockRow.querySelector("input");
+      if (dockInput) {
+        dockInput.disabled = true;
+        dockInput.tabIndex = -1;
+      }
+    }
+    sec.appendChild(dockRow);
     sec.appendChild(ytToggleRow("ytCompact", "Compact header and player bar", ytPrefs.compact, (on) => {
       ytPrefs.compact = on;
       applyYtPrefs();
@@ -6452,6 +6576,19 @@
 
   function readPlayerBarTrack() {
     const clean = (el) => (el && el.textContent ? el.textContent.replace(/\s+/g, " ").trim() : "");
+    // New bar: one track-info block whose byline is "artist • album • year".
+    const mini = document.querySelector("ytmusic-miniplayer");
+    if (mini) {
+      const byline = mini.querySelector(".ytmusicTrackInfoByline");
+      const links = byline ? Array.from(byline.querySelectorAll("a")).map(clean).filter(Boolean) : [];
+      const img = mini.querySelector("img.ytmusicTrackInfoThumbnail") || mini.querySelector("img");
+      const src = img && (img.currentSrc || img.getAttribute("src"));
+      return {
+        title: clean(mini.querySelector(".ytmusicTrackInfoTitle")),
+        artist: links.length ? links.join(", ") : clean(byline).split("•")[0].trim(),
+        art: src && /^https?:/.test(src) ? src : "",
+      };
+    }
     const bar = document.querySelector("ytmusic-player-bar");
     const byline = bar && bar.querySelector(".byline");
     let artist = "";
@@ -7553,6 +7690,8 @@
   let publishedArtUrl = "";
   function publishArtUrl() {
     const img =
+      document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
+      document.querySelector("ytmusic-miniplayer img") ||
       document.querySelector("ytmusic-player-bar img.image") ||
       document.querySelector("ytmusic-player-bar img") ||
       document.querySelector("ytmusic-player-page #song-image img") ||

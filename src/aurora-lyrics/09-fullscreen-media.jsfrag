@@ -214,7 +214,11 @@
   // parsed title the last, which degrades to "never static" rather than
   // guessing wrong.
   function getRawVideoTitle() {
-    const selectors = ["#movie_player .ytp-title-link", "ytmusic-player-bar .title"];
+    const selectors = [
+      "#movie_player .ytp-title-link",
+      "ytmusic-player-bar .title",
+      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
+    ];
     for (let i = 0; i < selectors.length; i++) {
       const el = document.querySelector(selectors[i]);
       const text = el && el.textContent ? el.textContent.trim() : "";
@@ -1065,7 +1069,9 @@
   // by a beat - and a lagging read is exactly what left the fullscreen pane
   // empty after a skip (AJ, 2026-09-28).
   function getDomArtworkUrl() {
-    const img = document.querySelector("ytmusic-player-bar img.image") ||
+    const img = document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
+      document.querySelector("ytmusic-miniplayer img") ||
+      document.querySelector("ytmusic-player-bar img.image") ||
       document.querySelector("ytmusic-player-bar .thumbnail img") ||
       document.querySelector("ytmusic-player-bar img");
     if (!img) return "";
