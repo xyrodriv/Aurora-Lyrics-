@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "1.0.2",
+      "date": "2026-10-28",
+      "title": "New player bar fixes.",
+      "features": [],
+      "fixes": [
+        "The dot on the progress line now takes the artwork's colour and glides smoothly with the line.",
+        "The 'Always show the volume slider' switch is greyed out on the new player bar, which has its own volume slider."
+      ]
+    },
+    {
       "version": "1.0.1",
       "date": "2026-10-28",
       "title": "Ready for YouTube Music's new player bar.",

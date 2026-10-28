@@ -5552,6 +5552,20 @@
     return sec;
   }
 
+  // A switch the current player bar has made irrelevant: dim it the same way as
+  // any other locked row instead of letting it look broken, and leave its stored
+  // value alone — the old bar still reads it if YouTube rolls back.
+  function ytLockRow(row, why) {
+    row.classList.add("is-locked");
+    row.setAttribute("aria-disabled", "true");
+    row.title = why;
+    const input = row.querySelector("input");
+    if (input) {
+      input.disabled = true;
+      input.tabIndex = -1;
+    }
+  }
+
   function applePlayerPanel() {
     const sec = ytPanel("Player bar and song view");
     // The bar's own look and arrangement. Independent of the compact lever
@@ -5579,14 +5593,7 @@
       saveYtPrefs();
     });
     if (document.querySelector("ytmusic-miniplayer")) {
-      dockRow.classList.add("is-locked");
-      dockRow.setAttribute("aria-disabled", "true");
-      dockRow.title = "YouTube Music's new player bar already lays the bar out this way";
-      const dockInput = dockRow.querySelector("input");
-      if (dockInput) {
-        dockInput.disabled = true;
-        dockInput.tabIndex = -1;
-      }
+      ytLockRow(dockRow, "YouTube Music's new player bar already lays the bar out this way");
     }
     sec.appendChild(dockRow);
     sec.appendChild(ytToggleRow("ytCompact", "Compact header and player bar", ytPrefs.compact, (on) => {
@@ -5599,6 +5606,13 @@
       applyYtPrefs();
       saveYtPrefs();
     }));
+    // The new bar paints its own volume slider, so this switch has nothing left
+    // to do there. Dim it, same as the dock switch above, and deliberately stop
+    // short of making it work — the stored value stays for the old bar.
+    const volumeRow = sec.querySelector('[data-key="ytVolume"]');
+    if (volumeRow && document.querySelector("ytmusic-miniplayer")) {
+      ytLockRow(volumeRow, "YouTube Music's new player bar has its own volume slider");
+    }
     // The column beside the cover. Independent levers: the width one is about
     // how much lyric fits on a line, the tab one about how the four labels
     // share that width.

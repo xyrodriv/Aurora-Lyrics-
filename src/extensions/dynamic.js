@@ -310,6 +310,16 @@
          it cannot be replaced from CSS. Re-point the played-part token inside
          the slider wrapper instead; the inline gradient resolves against it and
          the line follows the artwork with no script on the hot path. */
+      /* The 2026 bar's hover dot is a plain range thumb, not a paper-slider
+         knob: without this it keeps YouTube's own #ff0033 while the line takes
+         the artwork's colour. */
+      ytmusic-miniplayer input.ytMusicMiniPlayerProgressBar::-webkit-slider-thumb {
+        background-color: var(--ym-artwork-accent) !important;
+      }
+      ytmusic-miniplayer input.ytMusicMiniPlayerProgressBar::-moz-range-thumb {
+        background-color: var(--ym-artwork-accent) !important;
+        border: 0;
+      }
       ytmusic-miniplayer .ytMusicMiniPlayerProgressBarWrapper {
         --yt-sys-color-baseline--static-brand-red: var(--ym-artwork-accent) !important;
         /* The bar also blends to YouTube's magenta across the most-replayed

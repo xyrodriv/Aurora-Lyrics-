@@ -2980,6 +2980,36 @@ html.ym-yt-smooth-progress ytmusic-player-bar #progress-bar #sliderKnob {
 html.ym-yt-smooth-progress ytmusic-miniplayer .ytMusicMiniPlayerProgressBarWrapper {
   --ym-mini-progress: 0%;
 }
+/* The dot at the end of the line is YouTube's OWN range thumb: a fixed red
+   circle whose position comes from the input's value, so it sits a whole second
+   ahead of the line we paint. With the switch on the native thumb goes
+   invisible (its hit area stays, so dragging still works) and this dot is
+   driven by the same `--ym-mini-progress` as the line, so the two travel
+   together every frame. It takes the artwork accent when tinting is on and
+   YouTube's own red when it is not. */
+html.ym-yt-smooth-progress ytmusic-miniplayer input.ytMusicMiniPlayerProgressBar::-webkit-slider-thumb {
+  opacity: 0 !important;
+}
+html.ym-yt-smooth-progress ytmusic-miniplayer .ytMusicMiniPlayerProgressBarWrapper::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: var(--ym-mini-progress, 0%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ym-artwork-accent, #ff0033);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.25);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+  pointer-events: none;
+}
+html.ym-yt-smooth-progress .ytMusicMiniPlayerHost:hover .ytMusicMiniPlayerProgressBarWrapper::after,
+html.ym-yt-smooth-progress .ytMusicMiniPlayerProgressBarWrapper:has(input:active)::after,
+html.ym-yt-smooth-progress .ytMusicMiniPlayerProgressBarWrapper:has(input:focus-visible)::after {
+  opacity: 1;
+}
 html.ym-yt-smooth-progress ytmusic-miniplayer input.ytMusicMiniPlayerProgressBar {
   background-image: linear-gradient(
     to right,
