@@ -1392,6 +1392,7 @@
   // hover button that sets it is not built for music videos.
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
+  let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
   let fsCoverFlipTimer = 0; // drops the flip transition helper class
   let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
   let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
@@ -3585,6 +3586,34 @@
       z-index: 23;
     }
     .ym-sl-fs-scrub-tip.ym-sl-fs-scrub-tip-on { opacity: 1; }
+    /* Transient arrow-key readout. Same dark pill as the scrub tip, with a
+       hairline border so it still reads over bright artwork. JS writes its
+       left/top from the live scrubber or volume rect. */
+    .ym-sl-fs-hud {
+      position: absolute;
+      transform: translate(-50%, 4px);
+      background: rgba(18, 18, 20, .92);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 8px 12px;
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: 9px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+      white-space: nowrap;
+      letter-spacing: .01em;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .16s ease, transform .2s cubic-bezier(.22, .61, .36, 1);
+      z-index: 23;
+    }
+    .ym-sl-fs-hud.ym-sl-fs-hud-on {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
     /* Custom <div> volume slider. The track is the hit area; the unplayed line is
        drawn with ::before, the white fill with .ym-sl-fs-volume-fill, the knob with
        .ym-sl-fs-volume-knob. On hover the track GROWS IN THICKNESS (3px -> 9px),
@@ -7499,6 +7528,66 @@
     }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
+    /* The heart sits in the middle of the cover, the way it does in Spicy
+       Lyrics' NowBar. It shares the art-ui reveal with the swap button, so
+       both appear from one hover; the glyph and its fill come straight from
+       their Icons.Heart, including the long spring curve on the scale. */
+    .ym-sl-fs-art-like {
+      -webkit-appearance: none;
+      appearance: none;
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 68%;
+      max-width: 300px;
+      min-width: 120px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: #fff;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transform: translate(-50%, -50%) scale(.92);
+      transition:
+        opacity .18s ease,
+        transform .24s cubic-bezier(.22, .61, .36, 1),
+        visibility 0s linear .18s;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover .ym-sl-fs-art-like,
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-50%, -50%) scale(1);
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-art-like svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+      filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .35));
+      transition: scale .85s
+        linear(
+          0, 0.009 0.9%, 0.037 1.9%, 0.088 3%, 0.155 4.1%, 0.307 6.1%,
+          0.783 11.7%, 1.007 15%, 1.088 16.6%, 1.146 18.1%, 1.189 19.7%,
+          1.215 21.4%, 1.224 23.6%, 1.207 26%, 1.171 28.4%, 1.057 34.4%,
+          1.009 37.4%, 0.971 40.8%, 0.953 44.2%, 0.953 49.1%, 0.997 60.4%,
+          1.01 66.8%, 1
+        );
+    }
+    .ym-sl-fs-heart-fill { opacity: 0; transition: opacity .25s; }
+    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-heart-fill { opacity: .25; }
+    .ym-sl-fs-art-like.is-liked .ym-sl-fs-heart-fill { opacity: 1; }
+    .ym-sl-fs-art-like:hover svg { scale: .925; }
+    .ym-sl-fs-art-like.is-press svg { scale: 1.245; }
+    .ym-sl-fs-art-like.is-release svg { scale: .755; }
+    .ym-sl-fs-art-like:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .72);
+      outline-offset: 6px;
+      border-radius: 50%;
+    }
 
     /* ===== cover-art flip: lyrics on the left ===========================
        Every number here is the mirror image of the rule it overrides - the
@@ -8795,6 +8884,57 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
+  // Spicy Lyrics' own heart (their Icons.Heart outline + HeartFill ellipses),
+  // rebuilt with DOM calls rather than innerHTML: YouTube Music enforces
+  // Trusted Types, so assigning markup throws and aborts the whole fullscreen
+  // entry (AJ, 2026-10-30). currentColor lets the CSS own the colour; the fill
+  // group's opacity is what animates between outline, hover hint and liked.
+  function fsHeartSvg() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 1000 1000");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const outline = document.createElementNS(NS, "g");
+    outline.setAttribute("class", "ym-sl-fs-heart-outline");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M982.995 324.097C982.995 180.45 866.598 64 723.02 64C628.493 64 545.998 114.641 500.496 190.119C454.992 114.641 372.499 64 277.973 64C134.394 64 18 180.45 18 324.097C18 356.935 24.3385 388.224 35.436 417.155C121.399 664.536 500.499 936 500.499 936C500.499 936 879.595 664.536 965.562 417.155C976.659 388.226 982.995 356.935 982.995 324.097Z");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "22");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    outline.appendChild(path);
+    svg.appendChild(outline);
+    const fill = document.createElementNS(NS, "g");
+    fill.setAttribute("class", "ym-sl-fs-heart-fill");
+    const ellipse = (cx, cy, rx, ry, rotate) => {
+      const node = document.createElementNS(NS, "ellipse");
+      node.setAttribute("cx", cx);
+      node.setAttribute("cy", cy);
+      node.setAttribute("rx", rx);
+      node.setAttribute("ry", ry);
+      if (rotate) node.setAttribute("transform", rotate);
+      node.setAttribute("fill", "currentColor");
+      return node;
+    };
+    fill.append(
+      ellipse("276.5", "285.5", "244.5", "215.5"),
+      ellipse("725", "285.5", "247", "217.5"),
+      ellipse("189", "325.5", "165", "214.5"),
+      ellipse("234.335", "472.198", "150", "272", "rotate(-34.3576 234.335 472.198)"),
+      ellipse("298.508", "629.28", "97.5117", "183.378", "rotate(-42.2757 298.508 629.28)"),
+      ellipse("390.743", "718.138", "102.44", "192.646", "rotate(-42.2757 390.743 718.138)"),
+      ellipse("669.263", "652.69", "102.44", "328.343", "rotate(42.28 669.263 652.69)"),
+      ellipse("788.346", "447.149", "150", "262.498", "rotate(-143.364 788.346 447.149)"),
+      ellipse("500", "588", "150", "327"),
+      ellipse("499.5", "914.5", "24.5", "13.5"),
+      ellipse("822.516", "623.447", "55.9753", "13.5", "rotate(-52.0641 822.516 623.447)")
+    );
+    svg.appendChild(fill);
+    return svg;
+  }
+
   function buildFsCoverSwitch() {
     if (!fsMediaHost || fsCoverSwitch) return;
     const NS = "http://www.w3.org/2000/svg";
@@ -8831,10 +8971,36 @@
       ev.stopPropagation();
       applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn);
+    // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
+    // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
+    // the hover surface for music videos and portrait.
+    const heart = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-like",
+      "aria-pressed": "false",
+      "aria-label": "Add to liked songs",
+      title: "Add to liked songs",
+    });
+    heart.appendChild(fsHeartSvg());
+    fsArtLikeButton = heart;
+    heart.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const videoId = getCurrentFsVideoId();
+      if (!videoId) return;
+      const wasLiked = getFsRating(videoId) === "like";
+      // Spicy's one-shot pop: grow on like, shrink on un-like, then release
+      // the class so the spring transition carries the glyph back to rest.
+      heart.classList.remove("is-press", "is-release");
+      heart.classList.add(wasLiked ? "is-release" : "is-press");
+      window.setTimeout(() => heart.classList.remove("is-press", "is-release"), 160);
+      clickFsRating("like");
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, heart);
     fsMediaHost.appendChild(ui);
     fsCoverSwitch = { ui, btn };
     syncFsCoverSwitch();
+    applyFsRatingToButtons(getCurrentFsVideoId());
   }
 
   // The shade changes sides on its OWN clock, after it has faded out. Flipping
@@ -8948,6 +9114,22 @@
       range.dispatchEvent(new Event("input", { bubbles: true }));
       range.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
+
+  // One write path for the fullscreen volume, shared by the slider's own handler
+  // and the overlay's arrow keys (handleFsKeydown in 10-fullscreen-entry): the
+  // custom track, its ARIA value and YTM's real volume move together, clamped the
+  // same way in both places.
+  function setFullscreenVolumePercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return;
+    const v = clamp(Math.round(n), 0, 100);
+    fsPlayerVolumeValue = v;
+    if (fsPlayerVolumeRange) {
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
+    }
+    setPlayerVolume(v);
   }
 
   function syncFullscreenVolumeControl() {
@@ -9354,6 +9536,10 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
+  // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
+  // gestures: above the scrubber for seeks, under the volume bar for volume.
+  let fsHudEl = null;
+  let fsHudTimer = 0;
 
   function loadFsRatings() {
     try {
@@ -9499,10 +9685,19 @@
   }
 
   function applyFsRatingToButtons(videoId) {
-    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     const state = getFsRating(videoId);
     const likeOn = state === "like";
     const dislikeOn = state === "dislike";
+    // The artwork heart is the ONLY like affordance in the cover-art layout
+    // (the edge thumbs are hidden there), so paint it BEFORE the early return.
+    if (fsArtLikeButton) {
+      fsArtLikeButton.classList.toggle("is-liked", likeOn);
+      fsArtLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
+      const label = likeOn ? "Remove from liked songs" : "Add to liked songs";
+      fsArtLikeButton.title = label;
+      fsArtLikeButton.setAttribute("aria-label", label);
+    }
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     fsPlayerLikeButton.classList.toggle("active", likeOn);
     fsPlayerLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
     fsPlayerDislikeButton.classList.toggle("active", dislikeOn);
@@ -9575,6 +9770,62 @@
   // (Like/Dislike handlers are defined above: clickFsRating() and
   // refreshFsRatingState(). The old YTM-mirroring functions were removed
   // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+
+  /* ---- transient HUD for the arrow keys (AJ, 2026-10-30) -----------------
+     The keys are otherwise silent: a seek only moves the thumb and a volume
+     step only moves a 3px line. Each press writes what it did into one small
+     pill that fades on its own. Positions come from the live rects inside
+     .ym-sl-fs-player-controls, so the pill follows every layout: the seek
+     readout sits ABOVE the scrubber, the volume readout UNDER its bar (and
+     flips above it when the bar is already at the bottom edge). */
+  const FS_HUD_HOLD_MS = 900;
+
+  function ensureFsHud() {
+    if (!fsPlayerControls) return null;
+    if (fsHudEl && fsHudEl.isConnected) return fsHudEl;
+    fsHudEl = h("div", { class: "ym-sl-fs-hud", "aria-hidden": "true" });
+    fsPlayerControls.appendChild(fsHudEl);
+    return fsHudEl;
+  }
+
+  function showFsHud(kind, text) {
+    if (!fsActive || !fsPlayerControls) return;
+    const anchor = kind === "volume" ? fsPlayerVolumeRange : fsPlayerSeekRange;
+    if (!anchor) return;
+    const hud = ensureFsHud();
+    if (!hud) return;
+    hud.textContent = text;
+    hud.classList.toggle("ym-sl-fs-hud-volume", kind === "volume");
+    // Measure AFTER the text lands: "100%" and "12:34  +15s" differ in width,
+    // and a clamp against the wrong width would let the pill leave the screen.
+    const hudW = hud.offsetWidth;
+    const hudH = hud.offsetHeight;
+    const layer = fsPlayerControls.getBoundingClientRect();
+    // Clamp against the OVERLAY, not the control layer: in the cover layout
+    // that layer is only the artwork's column (648x217), so the volume pill
+    // legitimately hangs BELOW the layer and must not be flipped back above it.
+    const bounds = (fsOverlay || fsPlayerControls).getBoundingClientRect();
+    const box = anchor.getBoundingClientRect();
+    const half = hudW / 2;
+    const pad = 12;
+    const left = clamp(box.left + box.width / 2, bounds.left + half + pad, bounds.right - half - pad);
+    hud.style.left = (left - layer.left) + "px";
+    let top;
+    if (kind === "volume") {
+      top = box.bottom + pad;
+      if (top + hudH > bounds.bottom - 8) top = box.top - hudH - pad;
+    } else {
+      top = box.top - hudH - pad;
+      if (top < bounds.top + 8) top = box.bottom + pad;
+    }
+    hud.style.top = (top - layer.top) + "px";
+    hud.classList.add("ym-sl-fs-hud-on");
+    if (fsHudTimer) window.clearTimeout(fsHudTimer);
+    fsHudTimer = window.setTimeout(() => {
+      fsHudTimer = 0;
+      if (fsHudEl) fsHudEl.classList.remove("ym-sl-fs-hud-on");
+    }, FS_HUD_HOLD_MS);
+  }
 
   function buildFullscreenControls() {
     if (!fsOverlay || fsControls) return;
@@ -9813,11 +10064,8 @@
     // Single source of truth for the custom slider: writes the fill (via
     // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
     function applyFullscreenVolume(v) {
-      v = clamp(Math.round(v), 0, 100);
-      fsPlayerVolumeValue = v;
-      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
-      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
-      setPlayerVolume(v);
+      // Shared with the overlay's arrow keys, so both paths clamp and paint alike.
+      setFullscreenVolumePercent(v);
     }
     // ---- drag affordances (AJ's "for tmr" note, 2026-10-03) ----------------
     // While a slider is dragged: hide the cursor (an accident AJ liked), and
@@ -11838,6 +12086,9 @@
     // The switch's nodes went with the overlay; drop the refs and the helper
     // class's pending timer so a second entry starts clean.
     fsCoverSwitch = null;
+    fsArtLikeButton = null;
+    if (fsHudTimer) { window.clearTimeout(fsHudTimer); fsHudTimer = 0; }
+    fsHudEl = null;
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
     if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
     if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
@@ -11918,10 +12169,83 @@
   // overlay, which is the same path F11 and the browser chrome already use.
   // The explicit exit is kept ONLY for the case where native fullscreen never
   // engaged (requestFullscreen can be refused), where no fullscreenchange fires.
+  //
+  // Arrow keys (AJ, 2026-10-30): every fullscreen player — YouTube's own included —
+  // seeks with Left/Right and changes the volume with Up/Down, and YTM's page has
+  // no equivalent. This overlay does, in every layout, because the listener lives
+  // on the document rather than on one layout's chrome:
+  //   ArrowLeft / ArrowRight -> seek -/+ 5s
+  //   ArrowUp   / ArrowDown  -> volume +5 / -5
+  // Shift multiplies either step by 3, the same rule the page's arrow-seek add-on
+  // uses, and holding a key repeats so you can scrub.
+  //
+  // DELIBERATE CHOICES
+  //   - Only the keys actually handled are claimed, so Escape, Tab, Space and the
+  //     rest keep their default behaviour.
+  //   - Ctrl / Meta / Alt are ignored entirely: those belong to the browser.
+  //   - Typing and the two focusable sliders are never intercepted: the seek bar is
+  //     an <input>, and the volume track is a div with role="slider" + tabindex, so
+  //     both bring their own arrow/PageUp/Home/End handling.
+  //   - defaultPrevented is respected, so having the "Arrow-key seeking" add-on
+  //     enabled cannot seek twice for one press.
+  const FS_ARROW_SEEK_MS = 5000;
+  const FS_ARROW_VOLUME = 5;
+  const FS_ARROW_LARGE = 3;
+
+  function isFsArrowTypingTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const tag = node.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (node.isContentEditable) return true;
+    return !!(node.closest && node.closest("input, textarea, select, [contenteditable='true']"));
+  }
+
+  function handleFsArrowKey(event) {
+    if (event.defaultPrevented) return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (isFsArrowTypingTarget(event.target)) return false;
+    if (event.target === fsPlayerVolumeRange || event.target === fsPlayerSeekRange) return false;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player) return false;
+    const step = event.shiftKey ? FS_ARROW_LARGE : 1;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (typeof player.seek !== "function" || typeof player.getPositionMs !== "function") return false;
+      const position = Number(player.getPositionMs());
+      if (!Number.isFinite(position)) return false;
+      let target = position + (event.key === "ArrowRight" ? 1 : -1) * FS_ARROW_SEEK_MS * step;
+      if (typeof player.getDurationMs === "function") {
+        const duration = Number(player.getDurationMs());
+        // Stop just shy of the end, like the add-on does: seeking onto the exact
+        // duration can trip YTM into an immediate next-track.
+        if (Number.isFinite(duration) && duration > 0) target = Math.min(duration - 250, target);
+      }
+      const landed = Math.max(0, target);
+      player.seek(landed);
+      const seconds = Math.round((landed - position) / 1000);
+      showFsHud("seek", formatClock(landed) + "  " + (seconds >= 0 ? "+" : "−") + Math.abs(seconds) + "s");
+      return true;
+    }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const delta = (event.key === "ArrowUp" ? 1 : -1) * FS_ARROW_VOLUME * step;
+      const next = Math.min(100, Math.max(0, Math.round(fsPlayerVolumeValue + delta)));
+      setFullscreenVolumePercent(next);
+      showFsHud("volume", next + "%");
+      return true;
+    }
+    return false;
+  }
+
   function handleFsKeydown(event) {
-    if (!fsActive || event.key !== "Escape") return;
-    if (document.fullscreenElement) return;
-    exitFullscreenMode();
+    if (!fsActive) return;
+    if (event.key === "Escape") {
+      // Let the browser leave native fullscreen; fullscreenchange unwinds the overlay.
+      if (document.fullscreenElement) return;
+      exitFullscreenMode();
+      return;
+    }
+    if (!handleFsArrowKey(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   // If the browser leaves native fullscreen by any other route (F11, browser
@@ -13291,8 +13615,20 @@
     // the built-in camera has nothing to move here. resetScroll() is the engine's
     // supported "back to the playing line" (it clears the manual offset and
     // un-suspends auto-align), which is exactly what this button promises.
-    if (amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
-      try { amllPlayer.resetScroll(); } catch (e) {}
+    // Only when the engine actually OWNS the track: it stays alive (hidden) for
+    // Spicy tracks too, and routing their click here moved a player nobody sees.
+    if (!amllSpicyTrack && amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
+      try {
+        amllPlayer.resetScroll();
+        // resetScroll() only clears the engine's manual offset and suspension
+        // flags; it does not re-run layout. Without this the view stayed put
+        // until the next line diff happened to call calcLayout, which is the
+        // "click does nothing, next line jumps" bug. Use the seek reason so
+        // the engine re-resolves the focus target immediately.
+        if (typeof amllPlayer.calcLayout === "function") {
+          amllPlayer.calcLayout("seek");
+        }
+      } catch (e) {}
       setJumpButtonVisible(false);
       return;
     }
@@ -13338,6 +13674,10 @@
       clearTimeout(manualScrollReturnTimer);
       manualScrollReturnTimer = 0;
     }
+    // Spicy keeps the user's scroll position: the pill is the way back, and
+    // the idle timer pulling them back to the playhead read as the panel
+    // fighting their scroll. AMLL path is unchanged.
+    if (amllSpicyTrack) return;
     manualScrollReturnTimer = window.setTimeout(() => {
       manualScrollReturnTimer = 0;
       if (manualScrollActive && lineScrollEl && lastActiveLine >= 0 && lineElements[lastActiveLine]) {
@@ -19687,6 +20027,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      that hides the pill on a track change is respected on the next frame. */
   function amllSyncJumpButton() {
     if (!amllPlayer || !jumpButton) return;
+    // The built-in renderer owns this track (word tracks pointed at Spicy, or
+    // line tracks when Spicy is selected). Its wheel handler owns the pill.
+    // The hidden engine keeps driving and its suspension state is stale here,
+    // so syncing it hid the pill one frame after Spicy showed it.
+    if (amllSpicyTrack) return;
     let suspended = false;
     try { suspended = !!amllPlayer.scrollState.isAutoAlignSuspended; } catch (e) {}
     const shown = !jumpButton.classList.contains("hidden");

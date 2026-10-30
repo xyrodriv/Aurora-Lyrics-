@@ -460,6 +460,9 @@
     // The switch's nodes went with the overlay; drop the refs and the helper
     // class's pending timer so a second entry starts clean.
     fsCoverSwitch = null;
+    fsArtLikeButton = null;
+    if (fsHudTimer) { window.clearTimeout(fsHudTimer); fsHudTimer = 0; }
+    fsHudEl = null;
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
     if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
     if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
@@ -540,10 +543,83 @@
   // overlay, which is the same path F11 and the browser chrome already use.
   // The explicit exit is kept ONLY for the case where native fullscreen never
   // engaged (requestFullscreen can be refused), where no fullscreenchange fires.
+  //
+  // Arrow keys (AJ, 2026-10-30): every fullscreen player — YouTube's own included —
+  // seeks with Left/Right and changes the volume with Up/Down, and YTM's page has
+  // no equivalent. This overlay does, in every layout, because the listener lives
+  // on the document rather than on one layout's chrome:
+  //   ArrowLeft / ArrowRight -> seek -/+ 5s
+  //   ArrowUp   / ArrowDown  -> volume +5 / -5
+  // Shift multiplies either step by 3, the same rule the page's arrow-seek add-on
+  // uses, and holding a key repeats so you can scrub.
+  //
+  // DELIBERATE CHOICES
+  //   - Only the keys actually handled are claimed, so Escape, Tab, Space and the
+  //     rest keep their default behaviour.
+  //   - Ctrl / Meta / Alt are ignored entirely: those belong to the browser.
+  //   - Typing and the two focusable sliders are never intercepted: the seek bar is
+  //     an <input>, and the volume track is a div with role="slider" + tabindex, so
+  //     both bring their own arrow/PageUp/Home/End handling.
+  //   - defaultPrevented is respected, so having the "Arrow-key seeking" add-on
+  //     enabled cannot seek twice for one press.
+  const FS_ARROW_SEEK_MS = 5000;
+  const FS_ARROW_VOLUME = 5;
+  const FS_ARROW_LARGE = 3;
+
+  function isFsArrowTypingTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const tag = node.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (node.isContentEditable) return true;
+    return !!(node.closest && node.closest("input, textarea, select, [contenteditable='true']"));
+  }
+
+  function handleFsArrowKey(event) {
+    if (event.defaultPrevented) return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (isFsArrowTypingTarget(event.target)) return false;
+    if (event.target === fsPlayerVolumeRange || event.target === fsPlayerSeekRange) return false;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player) return false;
+    const step = event.shiftKey ? FS_ARROW_LARGE : 1;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (typeof player.seek !== "function" || typeof player.getPositionMs !== "function") return false;
+      const position = Number(player.getPositionMs());
+      if (!Number.isFinite(position)) return false;
+      let target = position + (event.key === "ArrowRight" ? 1 : -1) * FS_ARROW_SEEK_MS * step;
+      if (typeof player.getDurationMs === "function") {
+        const duration = Number(player.getDurationMs());
+        // Stop just shy of the end, like the add-on does: seeking onto the exact
+        // duration can trip YTM into an immediate next-track.
+        if (Number.isFinite(duration) && duration > 0) target = Math.min(duration - 250, target);
+      }
+      const landed = Math.max(0, target);
+      player.seek(landed);
+      const seconds = Math.round((landed - position) / 1000);
+      showFsHud("seek", formatClock(landed) + "  " + (seconds >= 0 ? "+" : "−") + Math.abs(seconds) + "s");
+      return true;
+    }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const delta = (event.key === "ArrowUp" ? 1 : -1) * FS_ARROW_VOLUME * step;
+      const next = Math.min(100, Math.max(0, Math.round(fsPlayerVolumeValue + delta)));
+      setFullscreenVolumePercent(next);
+      showFsHud("volume", next + "%");
+      return true;
+    }
+    return false;
+  }
+
   function handleFsKeydown(event) {
-    if (!fsActive || event.key !== "Escape") return;
-    if (document.fullscreenElement) return;
-    exitFullscreenMode();
+    if (!fsActive) return;
+    if (event.key === "Escape") {
+      // Let the browser leave native fullscreen; fullscreenchange unwinds the overlay.
+      if (document.fullscreenElement) return;
+      exitFullscreenMode();
+      return;
+    }
+    if (!handleFsArrowKey(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   // If the browser leaves native fullscreen by any other route (F11, browser

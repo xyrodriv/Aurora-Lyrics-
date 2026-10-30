@@ -341,6 +341,10 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
+  // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
+  // gestures: above the scrubber for seeks, under the volume bar for volume.
+  let fsHudEl = null;
+  let fsHudTimer = 0;
 
   function loadFsRatings() {
     try {
@@ -486,10 +490,19 @@
   }
 
   function applyFsRatingToButtons(videoId) {
-    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     const state = getFsRating(videoId);
     const likeOn = state === "like";
     const dislikeOn = state === "dislike";
+    // The artwork heart is the ONLY like affordance in the cover-art layout
+    // (the edge thumbs are hidden there), so paint it BEFORE the early return.
+    if (fsArtLikeButton) {
+      fsArtLikeButton.classList.toggle("is-liked", likeOn);
+      fsArtLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
+      const label = likeOn ? "Remove from liked songs" : "Add to liked songs";
+      fsArtLikeButton.title = label;
+      fsArtLikeButton.setAttribute("aria-label", label);
+    }
+    if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
     fsPlayerLikeButton.classList.toggle("active", likeOn);
     fsPlayerLikeButton.setAttribute("aria-pressed", likeOn ? "true" : "false");
     fsPlayerDislikeButton.classList.toggle("active", dislikeOn);
@@ -562,6 +575,62 @@
   // (Like/Dislike handlers are defined above: clickFsRating() and
   // refreshFsRatingState(). The old YTM-mirroring functions were removed
   // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+
+  /* ---- transient HUD for the arrow keys (AJ, 2026-10-30) -----------------
+     The keys are otherwise silent: a seek only moves the thumb and a volume
+     step only moves a 3px line. Each press writes what it did into one small
+     pill that fades on its own. Positions come from the live rects inside
+     .ym-sl-fs-player-controls, so the pill follows every layout: the seek
+     readout sits ABOVE the scrubber, the volume readout UNDER its bar (and
+     flips above it when the bar is already at the bottom edge). */
+  const FS_HUD_HOLD_MS = 900;
+
+  function ensureFsHud() {
+    if (!fsPlayerControls) return null;
+    if (fsHudEl && fsHudEl.isConnected) return fsHudEl;
+    fsHudEl = h("div", { class: "ym-sl-fs-hud", "aria-hidden": "true" });
+    fsPlayerControls.appendChild(fsHudEl);
+    return fsHudEl;
+  }
+
+  function showFsHud(kind, text) {
+    if (!fsActive || !fsPlayerControls) return;
+    const anchor = kind === "volume" ? fsPlayerVolumeRange : fsPlayerSeekRange;
+    if (!anchor) return;
+    const hud = ensureFsHud();
+    if (!hud) return;
+    hud.textContent = text;
+    hud.classList.toggle("ym-sl-fs-hud-volume", kind === "volume");
+    // Measure AFTER the text lands: "100%" and "12:34  +15s" differ in width,
+    // and a clamp against the wrong width would let the pill leave the screen.
+    const hudW = hud.offsetWidth;
+    const hudH = hud.offsetHeight;
+    const layer = fsPlayerControls.getBoundingClientRect();
+    // Clamp against the OVERLAY, not the control layer: in the cover layout
+    // that layer is only the artwork's column (648x217), so the volume pill
+    // legitimately hangs BELOW the layer and must not be flipped back above it.
+    const bounds = (fsOverlay || fsPlayerControls).getBoundingClientRect();
+    const box = anchor.getBoundingClientRect();
+    const half = hudW / 2;
+    const pad = 12;
+    const left = clamp(box.left + box.width / 2, bounds.left + half + pad, bounds.right - half - pad);
+    hud.style.left = (left - layer.left) + "px";
+    let top;
+    if (kind === "volume") {
+      top = box.bottom + pad;
+      if (top + hudH > bounds.bottom - 8) top = box.top - hudH - pad;
+    } else {
+      top = box.top - hudH - pad;
+      if (top < bounds.top + 8) top = box.bottom + pad;
+    }
+    hud.style.top = (top - layer.top) + "px";
+    hud.classList.add("ym-sl-fs-hud-on");
+    if (fsHudTimer) window.clearTimeout(fsHudTimer);
+    fsHudTimer = window.setTimeout(() => {
+      fsHudTimer = 0;
+      if (fsHudEl) fsHudEl.classList.remove("ym-sl-fs-hud-on");
+    }, FS_HUD_HOLD_MS);
+  }
 
   function buildFullscreenControls() {
     if (!fsOverlay || fsControls) return;
@@ -800,11 +869,8 @@
     // Single source of truth for the custom slider: writes the fill (via
     // --vol-fill), the ARIA value, the icon, and the real YTM volume together.
     function applyFullscreenVolume(v) {
-      v = clamp(Math.round(v), 0, 100);
-      fsPlayerVolumeValue = v;
-      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
-      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
-      setPlayerVolume(v);
+      // Shared with the overlay's arrow keys, so both paths clamp and paint alike.
+      setFullscreenVolumePercent(v);
     }
     // ---- drag affordances (AJ's "for tmr" note, 2026-10-03) ----------------
     // While a slider is dragged: hide the cursor (an accident AJ liked), and

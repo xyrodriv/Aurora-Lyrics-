@@ -1,6 +1,20 @@
 {
   "releases": [
     {
+      "version": "1.0.3",
+      "date": "2026-10-30",
+      "title": "More control in fullscreen.",
+      "features": [
+        "Use the arrow keys in fullscreen: left and right seek, and up and down change the volume. Hold Shift for bigger steps.",
+        "Hover over the cover art in fullscreen to like the song without leaving the view.",
+        "The fullscreen title now follows the cover art when you switch which side the lyrics are on."
+      ],
+      "fixes": [
+        "The Jump to current button now appears after you scroll in both lyrics styles, and clicking it returns to the playing line right away.",
+        "Spicy lyrics now stay where you scroll instead of jumping back to the current line after a few seconds."
+      ]
+    },
+    {
       "version": "1.0.2",
       "date": "2026-10-28",
       "title": "New player bar fixes.",

@@ -117,8 +117,20 @@
     // the built-in camera has nothing to move here. resetScroll() is the engine's
     // supported "back to the playing line" (it clears the manual offset and
     // un-suspends auto-align), which is exactly what this button promises.
-    if (amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
-      try { amllPlayer.resetScroll(); } catch (e) {}
+    // Only when the engine actually OWNS the track: it stays alive (hidden) for
+    // Spicy tracks too, and routing their click here moved a player nobody sees.
+    if (!amllSpicyTrack && amllActive && amllPlayer && typeof amllPlayer.resetScroll === "function") {
+      try {
+        amllPlayer.resetScroll();
+        // resetScroll() only clears the engine's manual offset and suspension
+        // flags; it does not re-run layout. Without this the view stayed put
+        // until the next line diff happened to call calcLayout, which is the
+        // "click does nothing, next line jumps" bug. Use the seek reason so
+        // the engine re-resolves the focus target immediately.
+        if (typeof amllPlayer.calcLayout === "function") {
+          amllPlayer.calcLayout("seek");
+        }
+      } catch (e) {}
       setJumpButtonVisible(false);
       return;
     }
@@ -164,6 +176,10 @@
       clearTimeout(manualScrollReturnTimer);
       manualScrollReturnTimer = 0;
     }
+    // Spicy keeps the user's scroll position: the pill is the way back, and
+    // the idle timer pulling them back to the playhead read as the panel
+    // fighting their scroll. AMLL path is unchanged.
+    if (amllSpicyTrack) return;
     manualScrollReturnTimer = window.setTimeout(() => {
       manualScrollReturnTimer = 0;
       if (manualScrollActive && lineScrollEl && lastActiveLine >= 0 && lineElements[lastActiveLine]) {

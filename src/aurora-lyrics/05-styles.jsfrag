@@ -1466,6 +1466,34 @@
       z-index: 23;
     }
     .ym-sl-fs-scrub-tip.ym-sl-fs-scrub-tip-on { opacity: 1; }
+    /* Transient arrow-key readout. Same dark pill as the scrub tip, with a
+       hairline border so it still reads over bright artwork. JS writes its
+       left/top from the live scrubber or volume rect. */
+    .ym-sl-fs-hud {
+      position: absolute;
+      transform: translate(-50%, 4px);
+      background: rgba(18, 18, 20, .92);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 8px 12px;
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: 9px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+      white-space: nowrap;
+      letter-spacing: .01em;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .16s ease, transform .2s cubic-bezier(.22, .61, .36, 1);
+      z-index: 23;
+    }
+    .ym-sl-fs-hud.ym-sl-fs-hud-on {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
     /* Custom <div> volume slider. The track is the hit area; the unplayed line is
        drawn with ::before, the white fill with .ym-sl-fs-volume-fill, the knob with
        .ym-sl-fs-volume-knob. On hover the track GROWS IN THICKNESS (3px -> 9px),
@@ -5380,6 +5408,66 @@
     }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
+    /* The heart sits in the middle of the cover, the way it does in Spicy
+       Lyrics' NowBar. It shares the art-ui reveal with the swap button, so
+       both appear from one hover; the glyph and its fill come straight from
+       their Icons.Heart, including the long spring curve on the scale. */
+    .ym-sl-fs-art-like {
+      -webkit-appearance: none;
+      appearance: none;
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 68%;
+      max-width: 300px;
+      min-width: 120px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: #fff;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transform: translate(-50%, -50%) scale(.92);
+      transition:
+        opacity .18s ease,
+        transform .24s cubic-bezier(.22, .61, .36, 1),
+        visibility 0s linear .18s;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover .ym-sl-fs-art-like,
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-50%, -50%) scale(1);
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-art-like svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+      filter: drop-shadow(0 4px 14px rgba(0, 0, 0, .35));
+      transition: scale .85s
+        linear(
+          0, 0.009 0.9%, 0.037 1.9%, 0.088 3%, 0.155 4.1%, 0.307 6.1%,
+          0.783 11.7%, 1.007 15%, 1.088 16.6%, 1.146 18.1%, 1.189 19.7%,
+          1.215 21.4%, 1.224 23.6%, 1.207 26%, 1.171 28.4%, 1.057 34.4%,
+          1.009 37.4%, 0.971 40.8%, 0.953 44.2%, 0.953 49.1%, 0.997 60.4%,
+          1.01 66.8%, 1
+        );
+    }
+    .ym-sl-fs-heart-fill { opacity: 0; transition: opacity .25s; }
+    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-heart-fill { opacity: .25; }
+    .ym-sl-fs-art-like.is-liked .ym-sl-fs-heart-fill { opacity: 1; }
+    .ym-sl-fs-art-like:hover svg { scale: .925; }
+    .ym-sl-fs-art-like.is-press svg { scale: 1.245; }
+    .ym-sl-fs-art-like.is-release svg { scale: .755; }
+    .ym-sl-fs-art-like:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .72);
+      outline-offset: 6px;
+      border-radius: 50%;
+    }
 
     /* ===== cover-art flip: lyrics on the left ===========================
        Every number here is the mirror image of the rule it overrides - the

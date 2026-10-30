@@ -555,6 +555,57 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
+  // Spicy Lyrics' own heart (their Icons.Heart outline + HeartFill ellipses),
+  // rebuilt with DOM calls rather than innerHTML: YouTube Music enforces
+  // Trusted Types, so assigning markup throws and aborts the whole fullscreen
+  // entry (AJ, 2026-10-30). currentColor lets the CSS own the colour; the fill
+  // group's opacity is what animates between outline, hover hint and liked.
+  function fsHeartSvg() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 1000 1000");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const outline = document.createElementNS(NS, "g");
+    outline.setAttribute("class", "ym-sl-fs-heart-outline");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M982.995 324.097C982.995 180.45 866.598 64 723.02 64C628.493 64 545.998 114.641 500.496 190.119C454.992 114.641 372.499 64 277.973 64C134.394 64 18 180.45 18 324.097C18 356.935 24.3385 388.224 35.436 417.155C121.399 664.536 500.499 936 500.499 936C500.499 936 879.595 664.536 965.562 417.155C976.659 388.226 982.995 356.935 982.995 324.097Z");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "22");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    outline.appendChild(path);
+    svg.appendChild(outline);
+    const fill = document.createElementNS(NS, "g");
+    fill.setAttribute("class", "ym-sl-fs-heart-fill");
+    const ellipse = (cx, cy, rx, ry, rotate) => {
+      const node = document.createElementNS(NS, "ellipse");
+      node.setAttribute("cx", cx);
+      node.setAttribute("cy", cy);
+      node.setAttribute("rx", rx);
+      node.setAttribute("ry", ry);
+      if (rotate) node.setAttribute("transform", rotate);
+      node.setAttribute("fill", "currentColor");
+      return node;
+    };
+    fill.append(
+      ellipse("276.5", "285.5", "244.5", "215.5"),
+      ellipse("725", "285.5", "247", "217.5"),
+      ellipse("189", "325.5", "165", "214.5"),
+      ellipse("234.335", "472.198", "150", "272", "rotate(-34.3576 234.335 472.198)"),
+      ellipse("298.508", "629.28", "97.5117", "183.378", "rotate(-42.2757 298.508 629.28)"),
+      ellipse("390.743", "718.138", "102.44", "192.646", "rotate(-42.2757 390.743 718.138)"),
+      ellipse("669.263", "652.69", "102.44", "328.343", "rotate(42.28 669.263 652.69)"),
+      ellipse("788.346", "447.149", "150", "262.498", "rotate(-143.364 788.346 447.149)"),
+      ellipse("500", "588", "150", "327"),
+      ellipse("499.5", "914.5", "24.5", "13.5"),
+      ellipse("822.516", "623.447", "55.9753", "13.5", "rotate(-52.0641 822.516 623.447)")
+    );
+    svg.appendChild(fill);
+    return svg;
+  }
+
   function buildFsCoverSwitch() {
     if (!fsMediaHost || fsCoverSwitch) return;
     const NS = "http://www.w3.org/2000/svg";
@@ -591,10 +642,36 @@
       ev.stopPropagation();
       applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn);
+    // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
+    // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
+    // the hover surface for music videos and portrait.
+    const heart = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-like",
+      "aria-pressed": "false",
+      "aria-label": "Add to liked songs",
+      title: "Add to liked songs",
+    });
+    heart.appendChild(fsHeartSvg());
+    fsArtLikeButton = heart;
+    heart.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const videoId = getCurrentFsVideoId();
+      if (!videoId) return;
+      const wasLiked = getFsRating(videoId) === "like";
+      // Spicy's one-shot pop: grow on like, shrink on un-like, then release
+      // the class so the spring transition carries the glyph back to rest.
+      heart.classList.remove("is-press", "is-release");
+      heart.classList.add(wasLiked ? "is-release" : "is-press");
+      window.setTimeout(() => heart.classList.remove("is-press", "is-release"), 160);
+      clickFsRating("like");
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, heart);
     fsMediaHost.appendChild(ui);
     fsCoverSwitch = { ui, btn };
     syncFsCoverSwitch();
+    applyFsRatingToButtons(getCurrentFsVideoId());
   }
 
   // The shade changes sides on its OWN clock, after it has faded out. Flipping
@@ -708,6 +785,22 @@
       range.dispatchEvent(new Event("input", { bubbles: true }));
       range.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
+
+  // One write path for the fullscreen volume, shared by the slider's own handler
+  // and the overlay's arrow keys (handleFsKeydown in 10-fullscreen-entry): the
+  // custom track, its ARIA value and YTM's real volume move together, clamped the
+  // same way in both places.
+  function setFullscreenVolumePercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return;
+    const v = clamp(Math.round(n), 0, 100);
+    fsPlayerVolumeValue = v;
+    if (fsPlayerVolumeRange) {
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
+    }
+    setPlayerVolume(v);
   }
 
   function syncFullscreenVolumeControl() {

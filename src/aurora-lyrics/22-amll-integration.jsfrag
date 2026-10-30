@@ -1809,6 +1809,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      that hides the pill on a track change is respected on the next frame. */
   function amllSyncJumpButton() {
     if (!amllPlayer || !jumpButton) return;
+    // The built-in renderer owns this track (word tracks pointed at Spicy, or
+    // line tracks when Spicy is selected). Its wheel handler owns the pill.
+    // The hidden engine keeps driving and its suspension state is stale here,
+    // so syncing it hid the pill one frame after Spicy showed it.
+    if (amllSpicyTrack) return;
     let suspended = false;
     try { suspended = !!amllPlayer.scrollState.isAutoAlignSuspended; } catch (e) {}
     const shown = !jumpButton.classList.contains("hidden");

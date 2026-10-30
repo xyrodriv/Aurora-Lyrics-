@@ -95,6 +95,7 @@
   // hover button that sets it is not built for music videos.
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
+  let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
   let fsCoverFlipTimer = 0; // drops the flip transition helper class
   let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
   let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
