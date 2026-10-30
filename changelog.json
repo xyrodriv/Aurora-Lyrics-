@@ -6,8 +6,7 @@
       "title": "More control in fullscreen.",
       "features": [
         "Use the arrow keys in fullscreen: left and right seek, and up and down change the volume. Hold Shift for bigger steps.",
-        "Hover over the cover art in fullscreen to like the song without leaving the view.",
-        "The fullscreen title now follows the cover art when you switch which side the lyrics are on."
+        "Hover over the cover art in fullscreen to like the song without leaving the view."
       ],
       "fixes": [
         "The Jump to current button now appears after you scroll in both lyrics styles, and clicking it returns to the playing line right away.",
