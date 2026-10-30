@@ -1866,120 +1866,231 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-ghlink svg { width: 15px; height: 15px; fill: currentColor; opacity: .75; }
 #ym-market .ym-mk-ghlink:hover { color: #fff; }
 
-/* home: a catalog spread, not a landing page ------------------------------
-   The rail already lists every add-on, so the pane does not repeat it as one
-   tall column. A masthead, a narrow setup margin, and the catalog beside it:
-   space and alignment carry the structure, so no rules, cards, icons or
-   artwork. The add-on artwork is out of date, and a stale screenshot is worse
-   than none. */
-#ym-market .ym-mk-home { max-width: 780px; }
-#ym-market .ym-mk-mast {
-  display: flex; align-items: flex-end; justify-content: space-between;
-  gap: 16px 20px; flex-wrap: wrap;
-  padding-bottom: 22px;
+/* home: a landing screen, not a storefront --------------------------------
+   The rail owns the catalog. Home is the page that knows what is playing, what
+   changed in this build and where the two useful controls are. One cover, one
+   heading, no card grid and no inventory. */
+#ym-market .ym-mk-home { max-width: 860px; }
+#ym-market .ym-home-now {
+  display: grid;
+  grid-template-columns: minmax(132px, 196px) minmax(0, 1fr);
+  gap: 34px;
+  align-items: end;
+  padding: 4px 0 34px;
+  border-bottom: 1px solid var(--mk-line);
 }
-#ym-market .ym-mk-mast-title {
-  margin: 0; font-size: 46px; font-weight: 700;
-  letter-spacing: -.035em; line-height: .94;
+#ym-market .ym-home-art {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  background-color: #18181f;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  overflow: hidden;
 }
-#ym-market .ym-mk-mast-meta {
-  display: flex; flex-direction: column; align-items: flex-end;
-  gap: 3px; padding-bottom: 4px; white-space: nowrap;
-  font-size: 11.5px; color: var(--mk-dim);
+#ym-market .ym-home-art-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
-#ym-market .ym-mk-mast-on { color: rgba(255,255,255,.78); }
-#ym-market .ym-mk-home-grid {
-  display: grid; grid-template-columns: 184px minmax(0,1fr);
-  gap: 36px; padding-top: 26px; align-items: start;
+/* No cover yet: the mark, centred and small. Not a category gradient. */
+#ym-market .ym-home-art.is-fallback {
+  background-color: #15151b;
+  background-size: 46%;
 }
-/* The margin note, not a second sidebar: the gap separates it from the
-   catalog, and the note follows the catalog as it scrolls. */
-#ym-market .ym-mk-side {
-  min-width: 0; position: sticky; top: 30px;
+#ym-market .ym-home-copy { min-width: 0; padding-bottom: 4px; }
+#ym-market .ym-home-kicker {
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.62);
 }
-/* First run: no setup to keep at hand, so the note and the catalog go full
-   width. The catalog is what this screen is for. */
-#ym-market .ym-mk-home.is-empty .ym-mk-home-grid {
-  grid-template-columns: minmax(0,1fr); gap: 26px;
+#ym-market .ym-home-track {
+  margin: 9px 0 0;
+  font-size: clamp(30px, 3.3vw, 44px);
+  font-weight: 700;
+  line-height: 1.1;
+  padding-bottom: .1em;
+  letter-spacing: -.035em;
+  color: #fff;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-#ym-market .ym-mk-home.is-empty .ym-mk-side {
-  position: static; padding: 0 0 20px;
+#ym-market .ym-home-artist {
+  margin: 8px 0 0;
+  max-width: 44ch;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: rgba(255,255,255,.64);
+  overflow-wrap: anywhere;
 }
-#ym-market .ym-mk-sechead {
-  display: flex; align-items: baseline; gap: 7px;
-  margin: 0; padding-bottom: 8px;
-  font-size: 10.5px; font-weight: 700; letter-spacing: .12em;
-  text-transform: uppercase; color: var(--mk-dim);
+#ym-market .ym-home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
 }
-#ym-market .ym-mk-sechead-label { flex: 0 1 auto; min-width: 0; }
-#ym-market .ym-mk-sechead-n {
-  flex: 0 0 auto; font-weight: 600; letter-spacing: 0;
-  color: var(--mk-dim); font-variant-numeric: tabular-nums;
+#ym-market .ym-home-btn {
+  min-height: 44px;
+  padding: 10px 18px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background .2s ease, border-color .2s ease, color .2s ease, transform .18s ease;
 }
-#ym-market .ym-mk-side-item {
-  display: flex; align-items: center;
-  width: 100%; min-height: 44px; padding: 8px 0;
-  border: 0;
-  background: transparent; color: inherit; font-family: inherit;
-  font-size: 14.5px; font-weight: 600; letter-spacing: -.01em;
-  text-align: left; cursor: pointer;
-  transition: color .2s;
+#ym-market .ym-home-btn.primary {
+  background: var(--mk-accent);
+  color: #fff;
 }
-#ym-market .ym-mk-side-item:hover { color: #fff; }
-#ym-market .ym-mk-side-item:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
-#ym-market .ym-mk-side-name {
-  display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+#ym-market .ym-home-btn.primary:hover { background: var(--mk-accent-dim); }
+#ym-market .ym-home-btn.primary:active { background: var(--mk-accent-deep); transform: translateY(1px); }
+#ym-market .ym-home-btn.quiet {
+  background: transparent;
+  border-color: rgba(255,255,255,.22);
+  color: rgba(255,255,255,.82);
 }
-#ym-market .ym-mk-side-empty {
-  margin: 0; padding: 12px 0 2px;
-  font-size: 12.5px; line-height: 1.55; color: var(--mk-dim);
+#ym-market .ym-home-btn.quiet:hover { background: rgba(255,255,255,.06); color: #fff; }
+#ym-market .ym-home-btn.quiet:active { transform: translateY(1px); }
+#ym-market .ym-home-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+#ym-market .ym-home-btn:disabled {
+  background: rgba(255,255,255,.07);
+  border-color: rgba(255,255,255,.08);
+  color: rgba(255,255,255,.48);
+  cursor: not-allowed;
 }
-#ym-market .ym-mk-catalog { min-width: 0; }
-#ym-market .ym-mk-group + .ym-mk-group { margin-top: 38px; }
-/* The row's padding hangs outside the text column, so the hover pill has air
-   on both sides without moving the name off the section head's left edge. */
-#ym-market .ym-mk-entry {
-  display: flex; align-items: center; gap: 14px;
-  width: calc(100% + 24px); margin: 0 -12px; padding: 11px 12px 12px;
-  border: 0; border-radius: 10px; background: transparent;
-  color: inherit; font-family: inherit; text-align: left; cursor: pointer;
-  transition: background .2s;
+#ym-market .ym-home-btn:disabled:hover { background: rgba(255,255,255,.07); transform: none; }
+
+#ym-market .ym-home-news {
+  max-width: 720px;
+  margin-top: 34px;
 }
-#ym-market .ym-mk-entry:hover { background: rgba(255,255,255,.05); }
-#ym-market .ym-mk-entry:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
-#ym-market .ym-mk-entry-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-#ym-market .ym-mk-entry-name {
-  font-size: 17px; font-weight: 600; letter-spacing: -.015em;
-  color: rgba(255,255,255,.86);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+#ym-market .ym-home-news[hidden] { display: none; }
+#ym-market .ym-home-news-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
 }
-#ym-market .ym-mk-entry.is-on .ym-mk-entry-name { color: #fff; }
-#ym-market .ym-mk-entry-desc {
-  font-size: 12.5px; line-height: 1.5; color: var(--mk-dim);
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  max-width: 56ch;
+#ym-market .ym-home-news-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  color: #fff;
 }
-#ym-market .ym-mk-entry-check { width: 15px; height: 15px; flex: 0 0 auto; fill: var(--mk-accent-soft); }
-#ym-market .ym-mk-entry-go {
-  width: 17px; height: 17px; flex: 0 0 auto; fill: var(--mk-dim2);
-  /* .6 keeps the open affordance above 3:1 on the panel while still quieter
-     than the red installed check. */
-  opacity: .6; transition: opacity .2s, transform .24s cubic-bezier(.34,1.4,.5,1);
+#ym-market .ym-home-news-version {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: rgba(255,255,255,.6);
+  font-variant-numeric: tabular-nums;
 }
-#ym-market .ym-mk-entry:hover .ym-mk-entry-go,
-#ym-market .ym-mk-entry:focus-visible .ym-mk-entry-go { opacity: 1; transform: translateX(2px); }
-#ym-market .ym-mk-empty { padding: 40px 8px; font-size: 13px; line-height: 1.6; color: var(--mk-dim); }
+#ym-market .ym-home-news-lead {
+  margin: 5px 0 20px;
+  max-width: 58ch;
+  font-size: 14px;
+  line-height: 1.5;
+  color: rgba(255,255,255,.82);
+}
+#ym-market .ym-home-news-group + .ym-home-news-group { margin-top: 17px; }
+#ym-market .ym-home-news-label {
+  margin: 0 0 7px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.56);
+}
+#ym-market .ym-home-news-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+#ym-market .ym-home-news-list li {
+  position: relative;
+  max-width: 66ch;
+  padding-left: 16px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: rgba(255,255,255,.66);
+  overflow-wrap: anywhere;
+}
+#ym-market .ym-home-news-list li::before {
+  content: "\2014";
+  position: absolute;
+  left: 0;
+  color: rgba(255,255,255,.36);
+}
+
+#ym-market .ym-home-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 40px;
+  padding-top: 18px;
+  border-top: 1px solid var(--mk-line);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: rgba(255,255,255,.56);
+}
+#ym-market .ym-home-foot-item { white-space: nowrap; }
+#ym-market .ym-home-foot-item b { font-weight: 700; color: rgba(255,255,255,.78); }
+#ym-market .ym-home-foot-sep { color: rgba(255,255,255,.24); }
+
+@media (prefers-reduced-motion: reduce) {
+  #ym-market .ym-home-btn { transition: none; }
+  #ym-market .ym-home-btn:active { transform: none; }
+}
+@media (max-width: 1100px), (max-height: 720px) {
+  #ym-market .ym-home-now {
+    grid-template-columns: minmax(112px, 154px) minmax(0, 1fr);
+    gap: 26px;
+    padding-bottom: 26px;
+  }
+  #ym-market .ym-home-track { font-size: 34px; }
+  #ym-market .ym-home-news { margin-top: 26px; }
+  #ym-market .ym-home-news-lead { margin-bottom: 16px; }
+  #ym-market .ym-home-foot { margin-top: 30px; }
+}
+@media (max-width: 860px) {
+  #ym-market .ym-home-now { grid-template-columns: 132px minmax(0, 1fr); gap: 20px; }
+  #ym-market .ym-home-track { font-size: 30px; }
+  #ym-market .ym-home-actions { gap: 8px; margin-top: 18px; }
+  #ym-market .ym-home-btn { padding: 9px 14px; font-size: 12.5px; }
+  #ym-market .ym-home-news-title { font-size: 17px; }
+  #ym-market .ym-home-news-list li { font-size: 13px; }
+}
+@media (max-height: 560px) {
+  #ym-market .ym-home-now {
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: 20px;
+    padding-bottom: 20px;
+  }
+  #ym-market .ym-home-track { font-size: 28px; }
+  #ym-market .ym-home-news { margin-top: 22px; }
+  #ym-market .ym-home-news-lead { margin: 4px 0 14px; }
+  #ym-market .ym-home-news-group + .ym-home-news-group { margin-top: 14px; }
+  #ym-market .ym-home-foot { margin-top: 24px; padding-top: 14px; }
+}
 
 /* ---- compact / narrow / short ---- */
-/* The pane is narrower than the window in floating mode, so the spread folds
-   before the usual 1100px detail breakpoint: below this the 184px margin
-   would leave the catalog too narrow for its descriptions. */
-@media (max-width: 1280px) {
-  #ym-market .ym-mk-home-grid { grid-template-columns: minmax(0,1fr); gap: 26px; padding-top: 22px; }
-  #ym-market .ym-mk-side {
-    position: static; padding: 0 0 20px;
-  }
-}
 @media (max-width: 1100px), (max-height: 720px) {
   #ym-market.ym-mk2 { grid-template-columns: 282px minmax(0,1fr); }
   #ym-market .ym-mk-detail { padding: 28px 30px 34px; }
@@ -1994,10 +2105,6 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] { width: 150px; }
   #ym-market .ym-mk-btn-un, #ym-market .ym-mk-btn-in { padding: 10px 16px; font-size: 13px; }
   #ym-market .ym-mk-acts { margin-top: 24px; gap: 11px; }
-  #ym-market .ym-mk-mast-title { font-size: 38px; }
-  #ym-market .ym-mk-mast { padding-bottom: 18px; }
-  #ym-market .ym-mk-home-grid { padding-top: 20px; }
-  #ym-market .ym-mk-entry-name { font-size: 16.5px; }
   #ym-market .ym-mk-mono { width: 34px; height: 34px; font-size: 14px; border-radius: 9px; }
   #ym-market .ym-mk-card { padding: 8px 9px; gap: 10px; }
   #ym-market .ym-mk-name { font-size: 13.5px; }
@@ -2006,20 +2113,11 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-detail { padding: 24px 22px 30px; }
   #ym-market .ym-mk-dtitles h1 { font-size: 24px; }
   #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr); }
-  #ym-market .ym-mk-mast-title { font-size: 34px; }
-  #ym-market .ym-mk-mast-meta { font-size: 11px; }
-  #ym-market .ym-mk-entry { gap: 10px; }
-  #ym-market .ym-mk-entry-name { font-size: 16px; }
-  #ym-market .ym-mk-side-item { font-size: 14px; }
 }
 @media (max-height: 560px) {
   #ym-market .ym-mk-detail { padding: 20px 24px 24px; }
   #ym-market .ym-mk-sweep { margin: 14px 0 16px; }
   #ym-market .ym-mk-lead { margin-bottom: 16px; }
-  #ym-market .ym-mk-mast { padding-bottom: 14px; }
-  #ym-market .ym-mk-home-grid { padding-top: 16px; }
-  #ym-market .ym-mk-entry { padding: 8px 12px 9px; }
-  #ym-market .ym-mk-group + .ym-mk-group { margin-top: 22px; }
   #ym-market .ym-mk-acts { margin-top: 20px; }
 }
 

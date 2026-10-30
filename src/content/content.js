@@ -3001,6 +3001,7 @@
     }
     overlay.classList.remove("hidden", "ym-leaving", "ym-opening");
     refreshPanelArt();
+    startHomeTrackWatch();
     // QUIET refresh: the section was already rendered while the overlay was
     // hidden, and the open animation below fades the whole panel in. A normal
     // renderSection() replays mkAnimateIn()'s stagger on top of that, so the
@@ -3020,6 +3021,7 @@
   }
 
   function closeMarketplace() {
+    stopHomeTrackWatch();
     if (!overlay || overlay.classList.contains("hidden") || overlay.classList.contains("ym-leaving")) return;
     // Reset the detail sheet instantly (no morph) so reopening starts clean.
     if (sheetOpen) finishCloseDetail();
@@ -3959,125 +3961,257 @@
   const MK_ARROW_PATH = "M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z";
 
 
-  /* The home screen is a catalog spread now, not a homepage (AJ, 2026-10-25).
-     The first pass removed the hero but still stacked "installed" over a
-     two-column index, which is the shape every add-on store ships. This one
-     uses the pane's width: a masthead, a narrow setup margin, and the catalog
-     beside it. Space and alignment carry the structure, so there are no rules,
-     cards, icons or artwork. The icon left with the hero; the artwork is out of
-     date, and the add-ons themselves are the content. */
-  // One line per add-on for the catalog. `description` is the detail page's
-  // paragraph and reads too long in a list; these keep the entry scannable and
-  // stay factual, because this is the line someone chooses from.
-  const MK_BLURB = {
-    [APPLE_THEME_ID]: "A frosted player bar, a wider lyrics column and glass chrome.",
-    "ytmod-dynamic": "The playing artwork becomes a full-page backdrop.",
-    "ytmod-smooth-motion": "The page eases between states instead of snapping.",
-    "ytmod-spicy-lyrics": "Word-by-word lyrics in the panel and in fullscreen.",
-    "ytmod-sleep-timer": "Fades the music out and pauses it, on a timer or at the end of the track.",
-    "ytmod-pip-lyrics": "The current lyric line in a small always-on-top window.",
-    "ytmod-next-up": "What plays next, in the player bar.",
-    "ytmod-song-notes": "Private notes on a song, saved in the browser.",
-    "snippet-track-toast": "A notification with the artwork whenever the track changes.",
-    "snippet-centered-home": "Centers the home page headers and filter chips.",
-    "snippet-npv-panel": "A side panel with the artwork, the song and live lyrics.",
-    "snippet-arrow-seek": "Left and right arrows scrub the song, five seconds a press.",
-  };
-
-  // A label and its count, set together at the left. No rule between or after
-  // them: the space and the shared alignment carry the spread, not a line.
-  function mkHomeHead(label, count) {
-    return h("h2", { class: "ym-mk-sechead" },
-      h("span", { class: "ym-mk-sechead-label", text: label }),
-      h("span", { class: "ym-mk-sechead-n", text: String(count) }));
+  /* Home is a LANDING screen now, not a catalog spread (AJ, 2026-10-30).
+     The rail already lists every add-on, and repeating that inventory here made
+     the first screen read as a store. This page answers three questions instead:
+     what is playing, what changed, and what can I do from here. The full catalog
+     remains one rail click away. There are no fake stats or placeholder rows: a
+     missing track or a failed changelog read simply removes that block. */
+  let homeReleasePromise = null;
+  function homeRelease() {
+    if (!homeReleasePromise) {
+      homeReleasePromise = readBundledChangelog()
+        .then((changelog) => findRelease(changelog, runningVersion()) || newestRelease(changelog))
+        .catch(() => null);
+    }
+    return homeReleasePromise;
   }
 
-  function mkHomeEntry(ext, installed) {
-    const blurb = MK_BLURB[ext.id] || "";
-    const row = h("button", {
-      class: "ym-mk-entry" + (installed ? " is-on" : ""),
-      type: "button",
-      "data-id": ext.id,
+  function mountHomeNews(news) {
+    homeRelease().then((release) => {
+      if (!news.isConnected) return;
+      if (!release) { news.remove(); return; }
+      news.replaceChildren();
+
+      const head = h("div", { class: "ym-home-news-head" });
+      head.appendChild(h("h2", { class: "ym-home-news-title", text: "What's new" }));
+      head.appendChild(h("span", {
+        class: "ym-home-news-version",
+        text: "v" + (release.version || ""),
+      }));
+      news.appendChild(head);
+      if (release.title) {
+        news.appendChild(h("p", { class: "ym-home-news-lead", text: release.title }));
+      }
+
+      const groups = [
+        ["New", Array.isArray(release.features) ? release.features : []],
+        ["Fixed", Array.isArray(release.fixes) ? release.fixes : []],
+      ];
+      for (const [label, items] of groups) {
+        if (!items.length) continue;
+        const group = h("div", { class: "ym-home-news-group" });
+        group.appendChild(h("h3", { class: "ym-home-news-label", text: label }));
+        const list = h("ul", { class: "ym-home-news-list" });
+        // A release can grow without bound; the home page stays a summary.
+        for (const item of items.slice(0, 2)) list.appendChild(h("li", { text: item }));
+        group.appendChild(list);
+        news.appendChild(group);
+      }
+      news.hidden = false;
     });
-    // The check is aria-hidden, so the state lives in the row's name instead.
-    row.setAttribute("aria-label", ext.name + (installed ? ", installed. " : ". ") + blurb);
-    const body = h("span", { class: "ym-mk-entry-body" });
-    body.appendChild(h("span", { class: "ym-mk-entry-name", text: ext.name }));
-    body.appendChild(h("span", { class: "ym-mk-entry-desc", text: blurb }));
-    row.appendChild(body);
-    // One mark per row, and it carries state: a check means the add-on is on,
-    // a chevron means the row opens something. Two marks on the right would
-    // turn a quiet list into a toolbar.
-    const mark = svgIcon(installed ? MK_CHECK : ICON_CHEVRON);
-    mark.classList.add(installed ? "ym-mk-entry-check" : "ym-mk-entry-go");
-    mark.setAttribute("aria-hidden", "true");
-    row.appendChild(mark);
-    row.addEventListener("click", () => mkSelect(ext.id));
-    return row;
+  }
+
+  function homeTrackHref() {
+    const link =
+      document.querySelector("ytmusic-miniplayer a[href*='watch?v=']") ||
+      document.querySelector("ytmusic-player-bar a[href*='watch?v=']");
+    const href = link && link.getAttribute("href");
+    if (href) return href;
+    try {
+      const videoId = new URL(location.href).searchParams.get("v");
+      if (videoId) return "/watch?v=" + encodeURIComponent(videoId);
+    } catch (_) {}
+    return "";
+  }
+
+  function openLyricsFromHome() {
+    // On a watch page the Lyrics tab is already mounted, so switch it under the
+    // closing panel and let the overlay fade away over the result. Elsewhere,
+    // close first and then go to the current track's watch page.
+    const found = watchTabs();
+    const lyricsTab = found && found.tabs.find((tab) => /lyric/.test(tabLabel(tab)));
+    if (lyricsTab) {
+      try { lyricsTab.click(); } catch (_) {}
+      closeMarketplace();
+      return;
+    }
+    const href = homeTrackHref();
+    if (!href) { toast("Start a song in YouTube Music first."); return; }
+    closeMarketplace();
+    window.setTimeout(() => {
+      try { location.assign(href); } catch (_) {}
+    }, 260);
+  }
+
+  let homeTrackPoll = 0;
+  let homeTrackKey = "";
+  let homePaint = null;
+  function homeTrackKeyOf(track) {
+    return JSON.stringify([
+      track && track.title || "",
+      track && track.artist || "",
+      track && track.art || "",
+    ]);
+  }
+  function startHomeTrackWatch() {
+    if (homeTrackPoll) return;
+    homeTrackPoll = window.setInterval(checkHomeTrack, 500);
+  }
+  function stopHomeTrackWatch() {
+    if (homeTrackPoll) {
+      window.clearInterval(homeTrackPoll);
+      homeTrackPoll = 0;
+    }
+  }
+  function checkHomeTrack() {
+    if (!overlay || overlay.classList.contains("hidden") || overlay.classList.contains("ym-leaving")) return;
+    if (mkSel !== "home" || !mkDetail || !mkDetail.querySelector(".ym-home-now")) return;
+    const track = readPlayerBarTrack();
+    // The bar is briefly empty while YouTube Music swaps tracks. Hold the last
+    // good track instead of flashing the no-track state through that gap.
+    if (!track.title) return;
+    const key = homeTrackKeyOf(track);
+    if (key === homeTrackKey) return;
+    homeTrackKey = key;
+    if (homePaint) homePaint(track);
+  }
+
+  // The player bar hands out 60-120px thumbs. Google's image CDN accepts a
+  // larger width/height pair in the same URL, and ytimg's named posters have
+  // larger variants, so the hero gets a source that survives a 2x display.
+  function homeArtUrl(url) {
+    if (!url) return "";
+    return String(url)
+      .replace(/([=/-])w\d+-h\d+/g, "$1w720-h720")
+      .replace(/([=])s\d+(-c)?/g, "$1s720$2")
+      .replace(/\/(hq|mq|sd|maxres)?default\.(jpg|jpeg|webp|png)(\?|$)/i, "/maxresdefault.$2$3");
   }
 
   function mkHome(reg) {
-    // Count what the page can actually list: an id left in storage after the
-    // catalog dropped it has no row to open, so counting it would inflate the
-    // figure next to an empty space.
-    const installed = AVAILABLE.filter((e) => !!reg[e.id]).length;
-    // With nothing in the margin, the catalog takes the whole page: an empty
-    // 184px column would frame the absence instead of the add-ons.
-    const wrap = h("div", { class: "ym-mk-home" + (installed ? "" : " is-empty") });
+    const track = readPlayerBarTrack();
+    const enabled = AVAILABLE.filter((e) => reg[e.id] && reg[e.id].enabled).length;
+    const wrap = h("div", { class: "ym-mk-home" });
 
-    const mast = h("header", { class: "ym-mk-mast" });
-    mast.appendChild(h("h1", { class: "ym-mk-mast-title", text: "Add-ons" }));
-    const meta = h("div", { class: "ym-mk-mast-meta" });
-    meta.appendChild(h("span", { text: AVAILABLE.length + " add-ons" }));
-    meta.appendChild(h("span", { class: "ym-mk-mast-on", text: installed + " in use" }));
-    mast.appendChild(meta);
-    wrap.appendChild(mast);
+    const hero = h("section", {
+      class: "ym-home-now",
+      "aria-labelledby": "ym-home-track",
+    });
+    const art = h("div", { class: "ym-home-art", "aria-hidden": "true" });
+    const titleEl = h("h1", { class: "ym-home-track", id: "ym-home-track" });
+    const artistEl = h("p", { class: "ym-home-artist" });
+    let openButton = null;
 
-    const grid = h("div", { class: "ym-mk-home-grid" });
-
-    // Setup first in the tree so its position matches the tab order: a left
-    // margin beside the catalog when there is room, the first block above it
-    // when there is not.
-    const live = AVAILABLE
-      .filter((e) => !!reg[e.id])
-      .slice()
-      .sort((a, b) => (MK_CAT_ORDER[a.category] ?? 9) - (MK_CAT_ORDER[b.category] ?? 9));
-    const side = h("aside", { class: "ym-mk-side", "aria-labelledby": "ym-mk-setup-h" });
-    const sideHead = mkHomeHead("Your setup", live.length);
-    sideHead.id = "ym-mk-setup-h";
-    side.appendChild(sideHead);
-    if (live.length) {
-      const sideList = h("div", { class: "ym-mk-side-list" });
-      for (const ext of live) {
-        const b = h("button", { class: "ym-mk-side-item", type: "button", "data-id": ext.id });
-        b.appendChild(h("span", { class: "ym-mk-side-name", text: ext.name }));
-        b.addEventListener("click", () => mkSelect(ext.id));
-        sideList.appendChild(b);
+    function paintArt(url) {
+      art.replaceChildren();
+      art.style.backgroundImage = "";
+      art.classList.toggle("is-fallback", !url);
+      if (!url) {
+        const logo = mkLogoUrl();
+        if (logo) art.style.backgroundImage = 'url("' + logo + '")';
+        return;
       }
-      side.appendChild(sideList);
-    } else {
-      // First run: name the state and the way out of it, not "No data".
-      side.appendChild(h("p", {
-        class: "ym-mk-side-empty",
-        text: "Nothing added yet. Your page is stock YouTube Music until you add one from the catalog.",
-      }));
+      const img = h("img", {
+        class: "ym-home-art-img",
+        alt: "",
+        decoding: "async",
+        loading: "eager",
+      });
+      let fellBack = false;
+      img.addEventListener("error", () => {
+        // A wider CDN URL can 404; the bar's own source is the safety net.
+        if (!fellBack && homeArtUrl(url) !== url) {
+          fellBack = true;
+          img.src = url;
+          return;
+        }
+        img.remove();
+        art.classList.add("is-fallback");
+        const logo = mkLogoUrl();
+        if (logo) art.style.backgroundImage = 'url("' + logo + '")';
+      });
+      img.src = homeArtUrl(url);
+      art.appendChild(img);
     }
-    grid.appendChild(side);
 
-    const catalog = h("section", { class: "ym-mk-catalog", "aria-label": "Add-on catalog" });
-    for (const cat of ["Themes", "Extensions", "Snippets"]) {
-      const items = AVAILABLE.filter((e) => e.category === cat);
-      if (!items.length) continue;
-      const group = h("section", { class: "ym-mk-group" });
-      group.appendChild(mkHomeHead(cat, items.length));
-      const list = h("div", { class: "ym-mk-list" });
-      for (const ext of items) list.appendChild(mkHomeEntry(ext, !!reg[ext.id]));
-      group.appendChild(list);
-      catalog.appendChild(group);
+    function paint(next) {
+      homeTrackKey = homeTrackKeyOf(next);
+      paintArt(next.art);
+      titleEl.textContent = next.title || "Nothing playing";
+      artistEl.textContent = next.title
+        ? (next.artist || "Playing in YouTube Music")
+        : "Start a song in YouTube Music to see it here.";
+      if (openButton) {
+        openButton.disabled = !next.title;
+        openButton.title = next.title ? "" : "Start a song in YouTube Music first";
+        openButton.onclick = next.title ? openLyricsFromHome : null;
+      }
     }
-    grid.appendChild(catalog);
 
-    wrap.appendChild(grid);
+    hero.appendChild(art);
+
+    const copy = h("div", { class: "ym-home-copy" });
+    copy.appendChild(h("div", { class: "ym-home-kicker", text: "Now playing" }));
+    copy.appendChild(titleEl);
+    copy.appendChild(artistEl);
+
+    const actions = h("div", { class: "ym-home-actions" });
+    const lyricsInstalled = !!reg["ytmod-spicy-lyrics"];
+    const lyricsOn = !!(lyricsInstalled && reg["ytmod-spicy-lyrics"].enabled);
+    const lyricsExt = findAvail("ytmod-spicy-lyrics");
+    if (lyricsOn) {
+      openButton = h("button", { class: "ym-home-btn primary", type: "button", text: "Open lyrics" });
+      actions.appendChild(openButton);
+    } else if (lyricsInstalled) {
+      const enable = h("button", { class: "ym-home-btn primary", type: "button", text: "Turn on lyrics" });
+      enable.addEventListener("click", async () => {
+        await setEnabled("ytmod-spicy-lyrics", true);
+        renderSection(true);
+      });
+      actions.appendChild(enable);
+    } else if (lyricsExt) {
+      const setup = h("button", { class: "ym-home-btn primary", type: "button", text: "Set up lyrics" });
+      setup.addEventListener("click", () => mkSelect(lyricsExt.id));
+      actions.appendChild(setup);
+    }
+    const settings = h("button", { class: "ym-home-btn quiet", type: "button", text: "Settings" });
+    settings.addEventListener("click", () => {
+      if (mkSel !== "settings") mkSelect("settings");
+    });
+    actions.appendChild(settings);
+    copy.appendChild(actions);
+    hero.appendChild(copy);
+    wrap.appendChild(hero);
+
+    const news = h("section", {
+      class: "ym-home-news",
+      hidden: "",
+      "aria-label": "What's new",
+    });
+    wrap.appendChild(news);
+    mountHomeNews(news);
+
+    // A quiet summary, not a dashboard of stat cards. The counts are derived
+    // from the registry, so they stay honest after an install or a mode change.
+    const foot = h("footer", { class: "ym-home-foot" });
+    const active = h("span", { class: "ym-home-foot-item" });
+    active.appendChild(h("b", { text: String(enabled) }));
+    active.appendChild(document.createTextNode(enabled === 1 ? " add-on on" : " add-ons on"));
+    foot.appendChild(active);
+    foot.appendChild(h("span", { class: "ym-home-foot-sep", "aria-hidden": "true", text: "\u00b7" }));
+    foot.appendChild(h("span", {
+      class: "ym-home-foot-item",
+      text: "Performance: " + performanceLabel(performanceMode),
+    }));
+    foot.appendChild(h("span", { class: "ym-home-foot-sep", "aria-hidden": "true", text: "\u00b7" }));
+    foot.appendChild(h("span", {
+      class: "ym-home-foot-item",
+      text: "Aurora Lyrics v" + (runningVersion() || "?"),
+    }));
+    wrap.appendChild(foot);
+
+    paint(track);
+    homePaint = paint;
     return wrap;
   }
 
@@ -6599,7 +6733,7 @@
       const src = img && (img.currentSrc || img.getAttribute("src"));
       return {
         title: clean(mini.querySelector(".ytmusicTrackInfoTitle")),
-        artist: links.length ? links.join(", ") : clean(byline).split("•")[0].trim(),
+        artist: links.length ? links[0] : clean(byline).split("•")[0].trim(),
         art: src && /^https?:/.test(src) ? src : "",
       };
     }
@@ -6608,7 +6742,7 @@
     let artist = "";
     if (byline) {
       const links = Array.from(byline.querySelectorAll("a")).map(clean).filter(Boolean);
-      artist = links.length ? links.join(", ") : clean(byline);
+      artist = links.length ? links[0] : clean(byline);
     }
     const img = (bar && (bar.querySelector("img.image") || bar.querySelector("img"))) ||
       document.querySelector("#song-image img");

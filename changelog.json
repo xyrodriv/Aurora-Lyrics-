@@ -3,12 +3,15 @@
     {
       "version": "1.0.3",
       "date": "2026-10-30",
-      "title": "More control in fullscreen.",
+      "title": "A new home for your add-ons.",
       "features": [
+        "The add-ons panel now opens on a proper home screen: the song you're playing, sharp cover art, a one-click path to the lyrics, panel settings, and what changed in this update. The full catalogue still lives in the sidebar.",
         "Use the arrow keys in fullscreen: left and right seek, and up and down change the volume. Hold Shift for bigger steps.",
         "Hover over the cover art in fullscreen to like the song without leaving the view."
       ],
       "fixes": [
+        "The home screen now follows track changes, so the cover art, title and artist stay current while the panel is open.",
+        "Long track titles no longer clip at the bottom, and the artist line now shows only the artist instead of the album name too.",
         "The Jump to current button now appears after you scroll in both lyrics styles, and clicking it returns to the playing line right away.",
         "Spicy lyrics now stay where you scroll instead of jumping back to the current line after a few seconds."
       ]
