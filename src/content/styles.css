@@ -973,10 +973,9 @@
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: rgba(255,235,190,.92);
-  background: rgba(212,168,0,.14);
-  border: 1px solid rgba(255,208,0,.16);
-  border-left: 3px solid #d4a800;
+  color: rgba(255,255,255,.72);
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.1);
   border-radius: 10px;
   padding: 12px 14px;
 }

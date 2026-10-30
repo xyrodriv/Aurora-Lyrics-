@@ -6812,7 +6812,7 @@
   const UPDATE_STORAGE_KEY = "ytmod_update_state";
   const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
   const UPDATE_REMOTE_URL = "https://raw.githubusercontent.com/xyrodriv/Aurora-Lyrics-/main/changelog.json";
-  const UPDATE_RELEASES_URL = "https://github.com/xyrodriv/Aurora-Lyrics-/releases";
+  const UPDATE_REPO_URL = "https://github.com/xyrodriv/Aurora-Lyrics-";
   const UPDATE_FETCH_TIMEOUT_MS = 6000;
 
   // Persistent top-bar banner (the "waiting for update" notice). Separate from
@@ -6976,17 +6976,18 @@
     }
     if (!isUpdated) {
       body.appendChild(h("p", { class: "ym-upd-hint", text:
-        "Chrome installs the update on its own, usually within a few hours. Restarting Chrome, " +
-        "or pressing Update on the chrome://extensions page, fetches it right away." }));
+        "Chrome will install this update for you, usually within a few hours. " +
+        "There's nothing to install yourself — just keep using Aurora Lyrics and it'll arrive. " +
+        "Restart Chrome if you'd like it sooner." }));
     }
 
     const foot = h("div", { class: "ym-upd-foot" });
     if (!isUpdated) {
-      foot.appendChild(h("a", { class: "ym-upd-btn", href: UPDATE_RELEASES_URL,
-        target: "_blank", rel: "noopener noreferrer", text: "View release" }));
+      foot.appendChild(h("a", { class: "ym-upd-btn", href: UPDATE_REPO_URL,
+        target: "_blank", rel: "noopener noreferrer", text: "View on GitHub" }));
     }
     const ok = h("button", { class: "ym-upd-btn primary", type: "button",
-      text: isUpdated ? "Got it" : "Remind me later" });
+      text: isUpdated ? "Got it" : "OK" });
     ok.addEventListener("click", dismissAndClose);
     foot.appendChild(ok);
 
