@@ -5,10 +5,11 @@
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
 
-The short version: **there is no account and no analytics.** Aurora Lyrics
-reads a small public announcement feed, looks up community lyrics by YouTube
-video ID, and sends one view report when a community sync starts. Neither
-service receives an account or a persistent identifier.
+The short version: **the extension has no account and there is no analytics.**
+Aurora Lyrics reads a small public announcement feed, looks up community lyrics
+by YouTube video ID, and sends one view report when a community sync starts.
+Makers may optionally sign in on the website with Discord to customise their
+public profile; that sign-in is described under [This website](#this-website).
 
 ## What we collect
 
@@ -26,9 +27,10 @@ Using `/upload-ttml` in the Aurora Lyrics Discord server is optional. The bot
 sends your Discord user ID, display name, and avatar URL to the Aurora Community
 API along with the TTML file and track link. Approved uploads display your
 display name and avatar publicly in the lyrics panel, and may appear on a public
-maker profile with the aggregate views for each synced track. Staff can remove
-an upload; ask in Discord if you want one taken down. Do not upload lyrics or a
-sync you do not have permission to share.
+maker profile with the aggregate views for each synced track. A maker may also
+sign in to add optional social links and choose a profile background; those
+details are public. Staff can remove an upload; ask in Discord if you want one
+taken down. Do not upload lyrics or a sync you do not have permission to share.
 
 ## What is stored on your device
 
@@ -66,7 +68,8 @@ The services contacted are:
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
 | `site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page` | Aurora Community TTML, profiles, uploads and view counts |
-| `cdn.discordapp.com` | Community uploader avatars |
+| `discord.com` | Optional Discord sign-in for maker profiles |
+| `cdn.discordapp.com` | Community uploader and maker avatars |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
 | `itunes.apple.com` | Artwork and metadata search |
 | `api.deezer.com` | Artwork and metadata search |
@@ -101,6 +104,16 @@ analytics, and serves its fonts and images from its own origin. A community
 profile page fetches the public maker profile from the Aurora Community API;
 that request carries no account or persistent identifier. Profile avatars load
 from `cdn.discordapp.com`, which carries your IP address like any image request.
+
+If you are a maker with an approved community upload, you may optionally sign in
+with Discord to edit your profile. During sign-in, the Aurora Community API
+receives your Discord user id, display name, and avatar. It stores that id,
+name, and avatar, plus the social links and background you choose, so it can
+render your public profile. The sign-in session is stored as a token in this
+browser's `localStorage`; it is not a cookie and is sent only to the Aurora
+Community API for profile requests, not to Discord or other services. You can
+clear it by signing out or clearing site data. Signing in is not required to
+read any profile.
 
 One panel on the home page lists who is online in the community Discord. When
 that panel comes close to the viewport, the page asks `discord.com` for the

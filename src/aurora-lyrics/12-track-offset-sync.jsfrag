@@ -510,12 +510,13 @@
     const key = currentTrackKey || getTrackKey(track);
     if (!track || !key) return;
     pendingSongCacheClear = { trackKey: key, track };
-    // LRCLIB entries (including a saved search pick) can go now: the lyrics on
-    // screen are already parsed, and nothing reads the entry again until this
-    // song restarts or is replayed. Only the Spicy entry has to wait for the
-    // song to end, because its resolve happens through the id-mapped keys.
+    // LRCLIB and Aurora Community entries can go now: the lyrics on screen are
+    // already parsed, and nothing reads them again until this song restarts or
+    // is replayed. Only the Spicy entry has to wait for the song to end, because
+    // its resolve happens through the id-mapped keys.
     lrclibCache.delete(key);
     removeLyricsPersistent(key);
+    clearCommunityCacheForTrack(track).catch(() => {});
     refreshSongCacheRow();
     deferSpicyCacheForTrack(track, songRemainingMs(track)).catch(() => {});
   }
@@ -565,20 +566,27 @@
     } catch (error) {
       status = null;
     }
-    // The panel may have been rebuilt while that read was in flight.
+    let communityCached = false;
+    try {
+      const entry = await getCommunityCacheEntry(track.videoId);
+      communityCached = !!(entry && entry.hit !== false && entry.ttml);
+    } catch (error) {
+      communityCached = false;
+    }
+    // The panel may have been rebuilt while those reads were in flight.
     if (!songCacheStatus.isConnected) return;
     const spicyCached = !!(status && status.cached);
-    // LRCLIB keeps its own layer. Counting only Spicy made a track whose lyrics
-    // came from LRCLIB read "Not cached" while its result (or a search pick)
-    // was sitting in the persistent cache, and hid the only way to clear it
-    // (AJ, 2026-10-22).
+    // LRCLIB and Aurora Community keep their own layers. Counting only Spicy
+    // hid the clear control for tracks whose lyrics came from them.
     const lrclibCached = lrclibCache.has(key) || hasLyricsPersistent(key);
-    const cached = spicyCached || lrclibCached;
+    const cached = spicyCached || communityCached || lrclibCached;
     songCacheStatus.textContent = spicyCached
       ? `Cached for this song · ${status.daysLeft} ${status.daysLeft === 1 ? "day" : "days"} left.`
-      : lrclibCached
-        ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
-        : "Not cached for this song.";
+      : communityCached
+        ? "Aurora Community lyrics cached for this song."
+        : lrclibCached
+          ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
+          : "Not cached for this song.";
     songCacheClearButton.classList.toggle("hidden", !cached);
   }
 

@@ -320,19 +320,18 @@
        left in place but dormant — nothing calls enterPausePickMode() now, and
        every pauseUi/pauseBanner consumer is null-safe. */
 
-    // (H) Cache section. Spicy Lyrics (API) results are cached for 30 days (the
-    // Terms of Service s7 ceiling — see SPICY_CACHE_TTL_MS in 14-lyrics-sources);
-    // this exposes an explicit purge so a stale or wrong match can be cleared
-    // without nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored
-    // Lyrics Cache" row.
+    // (H) Cache section. Spicy Lyrics and Aurora Community results are cached
+    // for up to 30 days; this exposes an explicit purge so a stale or wrong
+    // match can be cleared without nuking unrelated LRCLIB data. The community
+    // store is separate, so both purge funcs must run here.
     const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
     const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
-    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 30 days." });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics and Aurora Community results are cached for up to 30 days." });
     const cacheClear = h("button", {
       class: "ym-sl-import ym-sl-cache-clear",
       type: "button",
-      "aria-label": "Clear Spicy Lyrics cache",
+      "aria-label": "Clear cached lyrics",
       text: "Clear cache",
     });
     // The button wipes the cache instantly and irreversibly, so gate it behind an
@@ -392,10 +391,17 @@
       cacheCancel.disabled = true;
       cacheStatus.textContent = "Clearing…";
       try {
-        const count = await spicyCacheEntryCount();
-        await clearSpicyLyricsCache();
+        const [spicyCount, communityCount] = await Promise.all([
+          spicyCacheEntryCount(),
+          communityCacheEntryCount(),
+        ]);
+        await Promise.all([
+          clearSpicyLyricsCache(),
+          clearCommunityLyricsCache(),
+        ]);
+        const count = spicyCount + communityCount;
         cacheStatus.textContent = count
-          ? `Cleared ${count} cached ${count === 1 ? "song" : "songs"}.`
+          ? `Cleared ${count} cached ${count === 1 ? "entry" : "entries"}.`
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";

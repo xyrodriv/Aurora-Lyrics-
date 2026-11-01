@@ -942,9 +942,10 @@
   // live for 30 days; a test row's server-supplied cacheTtlSeconds is shorter.
   const COMMUNITY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Bump this whenever the cache shape or a matching rule changes. Older entries
-  // are dropped on load; v6 refreshes cached maker links to the website profile
-  // route, and v5 entries additionally lack the upload id used for play views.
-  const COMMUNITY_CACHE_VERSION = 6;
+  // are dropped on load; v8 drops stale community entries from before the cache
+  // controls covered this store. v7 carries maker profile URLs into self-upload
+  // credits, and v5 lacks the upload id used for views.
+  const COMMUNITY_CACHE_VERSION = 8;
   // Negative entries are short: a newly approved upload should reach someone
   // who previously missed the track without making them wait long.
   const COMMUNITY_CACHE_NEGATIVE_TTL_MS = 2 * 60 * 1000;
@@ -953,6 +954,8 @@
 
   let communityCache = null;
   let communityCacheLoad = null;
+  // In-flight fetches must not repopulate a cache the reader just cleared.
+  let communityCacheEpoch = 0;
 
   async function loadCommunityCache() {
     if (communityCache) return communityCache;
@@ -1008,7 +1011,9 @@
 
   function setCommunityCacheEntry(videoId, entry, ttlMs) {
     if (!videoId) return;
+    const epoch = communityCacheEpoch;
     loadCommunityCache().then((cache) => {
+      if (epoch !== communityCacheEpoch) return;
       const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : COMMUNITY_CACHE_TTL_MS;
       cache[videoId] = Object.assign({}, entry, {
         v: COMMUNITY_CACHE_VERSION,
@@ -1016,6 +1021,47 @@
       });
       persistCommunityCache();
     }).catch(() => {});
+  }
+
+  // The settings cache controls used to clear only Spicy Lyrics. Community
+  // entries are a separate storage key, so they survived a purge for 30 days.
+  async function communityCacheEntryCount() {
+    const cache = await loadCommunityCache();
+    const now = Date.now();
+    return Object.keys(cache).filter((videoId) => {
+      const entry = cache[videoId];
+      return entry && entry.v === COMMUNITY_CACHE_VERSION
+        && Number.isFinite(entry.exp) && entry.exp > now;
+    }).length;
+  }
+
+  async function clearCommunityLyricsCache() {
+    const cache = await loadCommunityCache();
+    const count = Object.keys(cache).length;
+    communityCacheEpoch += 1;
+    for (const videoId of Object.keys(cache)) delete cache[videoId];
+    communityCache = cache;
+    if (!window.YTMod || typeof window.YTMod.setCommunityCache !== "function") return count;
+    try {
+      await window.YTMod.setCommunityCache({});
+    } catch (error) {
+      console.warn("[AuroraLyrics] could not clear Aurora Community cache:", error);
+    }
+    return count;
+  }
+
+  async function clearCommunityCacheForTrack(track) {
+    const videoId = track && track.videoId ? String(track.videoId) : "";
+    if (!videoId) return 0;
+    const cache = await loadCommunityCache();
+    const hadEntry = !!cache[videoId];
+    // Even a miss can be re-cached by a fetch already in flight.
+    communityCacheEpoch += 1;
+    if (hadEntry) {
+      delete cache[videoId];
+      persistCommunityCache();
+    }
+    return hadEntry ? 1 : 0;
   }
 
   function communityPerson(raw) {

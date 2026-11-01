@@ -285,7 +285,16 @@
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
     if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
-    if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
+    if (currentUploader) {
+      // A self-upload collapses the uploader and maker rows. Carry the maker's
+      // profile URL into the surviving row so the credit is still clickable.
+      const uploader = isSameCreditPerson(currentMaker, currentUploader)
+        ? Object.assign({}, currentUploader, {
+            url: currentUploader.url || currentMaker.url,
+          })
+        : currentUploader;
+      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    }
     if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
       footer.appendChild(buildPersonRow("Made by", currentMaker));
     }
@@ -363,9 +372,9 @@
     );
   }
 
-  // "<label> <avatar> <username>" — links only when the source supplied a
-  // profile URL. Aurora Community currently supplies none, so its credits render
-  // as plain text until website profiles exist.
+  // "<label> <avatar> <username>" — the whole pill links when the source
+  // supplied a profile URL; otherwise it stays plain text so it never looks like
+  // a dead link.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
@@ -379,7 +388,7 @@
       // validated as http(s) at parse time (parseSpicyLyrics attribution).
       target: "_blank",
       rel: "noopener noreferrer",
-      title: uploader.url || "",
+      title: uploader.url ? `Open ${uploader.username || "maker"}'s Aurora profile` : "",
     });
     if (uploader.url) link.href = uploader.url;
 

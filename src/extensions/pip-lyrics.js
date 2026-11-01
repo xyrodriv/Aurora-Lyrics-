@@ -2001,7 +2001,10 @@
     const link = makeEl(pipDoc, "a", "ym-sl-uploader-link");
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    if (person && person.url) link.href = person.url;
+    if (person && person.url) {
+      link.href = person.url;
+      link.title = `Open ${person.username || "maker"}'s Aurora profile`;
+    }
     if (person && person.avatar) {
       const img = makeEl(pipDoc, "img", "ym-sl-uploader-avatar");
       img.alt = "";
@@ -2036,7 +2039,16 @@
       footer.appendChild(names);
     }
     if (attribution && attribution.provider) footer.appendChild(buildProviderRow(attribution.provider));
-    if (attribution && attribution.uploader) footer.appendChild(buildPersonRow("Uploaded by", attribution.uploader));
+    if (attribution && attribution.uploader) {
+      // Self-uploads suppress the maker row; preserve its profile URL on the
+      // one credit that remains.
+      const uploader = isSameCreditPerson(attribution.maker, attribution.uploader)
+        ? Object.assign({}, attribution.uploader, {
+            url: attribution.uploader.url || attribution.maker.url,
+          })
+        : attribution.uploader;
+      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    }
     if (attribution && attribution.maker && !isSameCreditPerson(attribution.maker, attribution.uploader)) {
       footer.appendChild(buildPersonRow("Made by", attribution.maker));
     }

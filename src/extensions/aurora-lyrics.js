@@ -8082,19 +8082,18 @@
        left in place but dormant — nothing calls enterPausePickMode() now, and
        every pauseUi/pauseBanner consumer is null-safe. */
 
-    // (H) Cache section. Spicy Lyrics (API) results are cached for 30 days (the
-    // Terms of Service s7 ceiling — see SPICY_CACHE_TTL_MS in 14-lyrics-sources);
-    // this exposes an explicit purge so a stale or wrong match can be cleared
-    // without nuking unrelated LRCLIB data. Mirrors upstream's "Clear Stored
-    // Lyrics Cache" row.
+    // (H) Cache section. Spicy Lyrics and Aurora Community results are cached
+    // for up to 30 days; this exposes an explicit purge so a stale or wrong
+    // match can be cleared without nuking unrelated LRCLIB data. The community
+    // store is separate, so both purge funcs must run here.
     const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
     const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
-    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics results are cached for 30 days." });
+    const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics and Aurora Community results are cached for up to 30 days." });
     const cacheClear = h("button", {
       class: "ym-sl-import ym-sl-cache-clear",
       type: "button",
-      "aria-label": "Clear Spicy Lyrics cache",
+      "aria-label": "Clear cached lyrics",
       text: "Clear cache",
     });
     // The button wipes the cache instantly and irreversibly, so gate it behind an
@@ -8154,10 +8153,17 @@
       cacheCancel.disabled = true;
       cacheStatus.textContent = "Clearing…";
       try {
-        const count = await spicyCacheEntryCount();
-        await clearSpicyLyricsCache();
+        const [spicyCount, communityCount] = await Promise.all([
+          spicyCacheEntryCount(),
+          communityCacheEntryCount(),
+        ]);
+        await Promise.all([
+          clearSpicyLyricsCache(),
+          clearCommunityLyricsCache(),
+        ]);
+        const count = spicyCount + communityCount;
         cacheStatus.textContent = count
-          ? `Cleared ${count} cached ${count === 1 ? "song" : "songs"}.`
+          ? `Cleared ${count} cached ${count === 1 ? "entry" : "entries"}.`
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";
@@ -13344,12 +13350,13 @@
     const key = currentTrackKey || getTrackKey(track);
     if (!track || !key) return;
     pendingSongCacheClear = { trackKey: key, track };
-    // LRCLIB entries (including a saved search pick) can go now: the lyrics on
-    // screen are already parsed, and nothing reads the entry again until this
-    // song restarts or is replayed. Only the Spicy entry has to wait for the
-    // song to end, because its resolve happens through the id-mapped keys.
+    // LRCLIB and Aurora Community entries can go now: the lyrics on screen are
+    // already parsed, and nothing reads them again until this song restarts or
+    // is replayed. Only the Spicy entry has to wait for the song to end, because
+    // its resolve happens through the id-mapped keys.
     lrclibCache.delete(key);
     removeLyricsPersistent(key);
+    clearCommunityCacheForTrack(track).catch(() => {});
     refreshSongCacheRow();
     deferSpicyCacheForTrack(track, songRemainingMs(track)).catch(() => {});
   }
@@ -13399,20 +13406,27 @@
     } catch (error) {
       status = null;
     }
-    // The panel may have been rebuilt while that read was in flight.
+    let communityCached = false;
+    try {
+      const entry = await getCommunityCacheEntry(track.videoId);
+      communityCached = !!(entry && entry.hit !== false && entry.ttml);
+    } catch (error) {
+      communityCached = false;
+    }
+    // The panel may have been rebuilt while those reads were in flight.
     if (!songCacheStatus.isConnected) return;
     const spicyCached = !!(status && status.cached);
-    // LRCLIB keeps its own layer. Counting only Spicy made a track whose lyrics
-    // came from LRCLIB read "Not cached" while its result (or a search pick)
-    // was sitting in the persistent cache, and hid the only way to clear it
-    // (AJ, 2026-10-22).
+    // LRCLIB and Aurora Community keep their own layers. Counting only Spicy
+    // hid the clear control for tracks whose lyrics came from them.
     const lrclibCached = lrclibCache.has(key) || hasLyricsPersistent(key);
-    const cached = spicyCached || lrclibCached;
+    const cached = spicyCached || communityCached || lrclibCached;
     songCacheStatus.textContent = spicyCached
       ? `Cached for this song · ${status.daysLeft} ${status.daysLeft === 1 ? "day" : "days"} left.`
-      : lrclibCached
-        ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
-        : "Not cached for this song.";
+      : communityCached
+        ? "Aurora Community lyrics cached for this song."
+        : lrclibCached
+          ? (isManualLyricsPersistent(key) ? "Saved search pick for this song." : "Cached for this song.")
+          : "Not cached for this song.";
     songCacheClearButton.classList.toggle("hidden", !cached);
   }
 
@@ -15465,9 +15479,10 @@
   // live for 30 days; a test row's server-supplied cacheTtlSeconds is shorter.
   const COMMUNITY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Bump this whenever the cache shape or a matching rule changes. Older entries
-  // are dropped on load; v6 refreshes cached maker links to the website profile
-  // route, and v5 entries additionally lack the upload id used for play views.
-  const COMMUNITY_CACHE_VERSION = 6;
+  // are dropped on load; v8 drops stale community entries from before the cache
+  // controls covered this store. v7 carries maker profile URLs into self-upload
+  // credits, and v5 lacks the upload id used for views.
+  const COMMUNITY_CACHE_VERSION = 8;
   // Negative entries are short: a newly approved upload should reach someone
   // who previously missed the track without making them wait long.
   const COMMUNITY_CACHE_NEGATIVE_TTL_MS = 2 * 60 * 1000;
@@ -15476,6 +15491,8 @@
 
   let communityCache = null;
   let communityCacheLoad = null;
+  // In-flight fetches must not repopulate a cache the reader just cleared.
+  let communityCacheEpoch = 0;
 
   async function loadCommunityCache() {
     if (communityCache) return communityCache;
@@ -15531,7 +15548,9 @@
 
   function setCommunityCacheEntry(videoId, entry, ttlMs) {
     if (!videoId) return;
+    const epoch = communityCacheEpoch;
     loadCommunityCache().then((cache) => {
+      if (epoch !== communityCacheEpoch) return;
       const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : COMMUNITY_CACHE_TTL_MS;
       cache[videoId] = Object.assign({}, entry, {
         v: COMMUNITY_CACHE_VERSION,
@@ -15539,6 +15558,47 @@
       });
       persistCommunityCache();
     }).catch(() => {});
+  }
+
+  // The settings cache controls used to clear only Spicy Lyrics. Community
+  // entries are a separate storage key, so they survived a purge for 30 days.
+  async function communityCacheEntryCount() {
+    const cache = await loadCommunityCache();
+    const now = Date.now();
+    return Object.keys(cache).filter((videoId) => {
+      const entry = cache[videoId];
+      return entry && entry.v === COMMUNITY_CACHE_VERSION
+        && Number.isFinite(entry.exp) && entry.exp > now;
+    }).length;
+  }
+
+  async function clearCommunityLyricsCache() {
+    const cache = await loadCommunityCache();
+    const count = Object.keys(cache).length;
+    communityCacheEpoch += 1;
+    for (const videoId of Object.keys(cache)) delete cache[videoId];
+    communityCache = cache;
+    if (!window.YTMod || typeof window.YTMod.setCommunityCache !== "function") return count;
+    try {
+      await window.YTMod.setCommunityCache({});
+    } catch (error) {
+      console.warn("[AuroraLyrics] could not clear Aurora Community cache:", error);
+    }
+    return count;
+  }
+
+  async function clearCommunityCacheForTrack(track) {
+    const videoId = track && track.videoId ? String(track.videoId) : "";
+    if (!videoId) return 0;
+    const cache = await loadCommunityCache();
+    const hadEntry = !!cache[videoId];
+    // Even a miss can be re-cached by a fetch already in flight.
+    communityCacheEpoch += 1;
+    if (hadEntry) {
+      delete cache[videoId];
+      persistCommunityCache();
+    }
+    return hadEntry ? 1 : 0;
   }
 
   function communityPerson(raw) {
@@ -16720,7 +16780,16 @@
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
     if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
-    if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
+    if (currentUploader) {
+      // A self-upload collapses the uploader and maker rows. Carry the maker's
+      // profile URL into the surviving row so the credit is still clickable.
+      const uploader = isSameCreditPerson(currentMaker, currentUploader)
+        ? Object.assign({}, currentUploader, {
+            url: currentUploader.url || currentMaker.url,
+          })
+        : currentUploader;
+      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    }
     if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
       footer.appendChild(buildPersonRow("Made by", currentMaker));
     }
@@ -16798,9 +16867,9 @@
     );
   }
 
-  // "<label> <avatar> <username>" — links only when the source supplied a
-  // profile URL. Aurora Community currently supplies none, so its credits render
-  // as plain text until website profiles exist.
+  // "<label> <avatar> <username>" — the whole pill links when the source
+  // supplied a profile URL; otherwise it stays plain text so it never looks like
+  // a dead link.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
@@ -16814,7 +16883,7 @@
       // validated as http(s) at parse time (parseSpicyLyrics attribution).
       target: "_blank",
       rel: "noopener noreferrer",
-      title: uploader.url || "",
+      title: uploader.url ? `Open ${uploader.username || "maker"}'s Aurora profile` : "",
     });
     if (uploader.url) link.href = uploader.url;
 
