@@ -1,15 +1,24 @@
 {
   "releases": [
     {
-      "version": "1.0.4",
-      "date": "2026-10-31",
-      "title": "A note from Aurora, in the top bar.",
+      "version": "1.0.5",
+      "date": "2026-11-01",
+      "title": "Announcements, community lyrics, and your profile.",
       "features": [
-        "Occasional announcements from the developer now appear beside the Aurora button in the YouTube Music top bar. Click the note for the full message, or dismiss it.",
-        "The announcement feed is read-only, with no account or notification permission needed.",
-        "Approved community lyrics now load alongside Spicy Lyrics and LRCLIB, with the maker and uploader credited in the panel."
+        "Occasional announcements from the developer now appear beside the Aurora button in the top bar. Click the note for the full message, or dismiss it.",
+        "Approved community lyrics now load alongside Spicy Lyrics and LRCLIB, with the maker and uploader credited in the panel.",
+        "Clicking a maker or uploader credit opens their Aurora profile in a new tab, including self-uploads where one person did both.",
+        "Self-uploaders can publish a TTML straight from the Aurora Discord server, with the sync credited to them."
       ],
       "fixes": []
+    },
+    {
+      "version": "1.0.4",
+      "date": "2026-10-31",
+      "title": "Skipped.",
+      "features": [],
+      "fixes": [],
+      "skipped": true
     },
     {
       "version": "1.0.3",
