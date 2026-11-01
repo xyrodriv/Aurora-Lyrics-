@@ -760,14 +760,18 @@
     currentLyricsIsTTML = true;
     staticLyricsActive = false;
     currentSongwriters = extractSongwriters(rawXml);
-    // Consume any credits the caller staged for this load (Spicy Lyrics API
-    // results only). Clearing here means imports and cached TTML never inherit
+    // Consume any credits the caller staged for this load (Spicy Lyrics or
+    // Aurora Community results). Clearing here means imports and cached TTML never inherit
     // a stale uploader from a previous track.
     if (pendingSpicyCredits) {
       const attr = pendingSpicyCredits.attribution || null;
       currentProvider = (attr && attr.provider) || "";
       currentUploader = (attr && attr.uploader) || null;
       currentMaker = (attr && attr.maker) || null;
+      currentCommunityUploadId = typeof pendingSpicyCredits.uploadId === "string"
+        ? pendingSpicyCredits.uploadId
+        : "";
+      currentCommunityUploadTest = pendingSpicyCredits.test === true;
       if (!currentSongwriters.length && pendingSpicyCredits.songwriters.length) {
         currentSongwriters = pendingSpicyCredits.songwriters;
       }
@@ -781,16 +785,21 @@
       currentProvider = "";
       currentMaker = null;
       currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
     } else {
       // A TTML load with no staged credits and no local file: show no provider
       // rather than inheriting one from the previous track.
       currentProvider = "";
       currentMaker = null;
       currentUploader = null;
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
     }
     currentTTMLSource = source === "imported" ? "imported" : "external";
     importedTTMLXml = currentTTMLSource === "imported" ? rawXml : "";
     const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
     setTTMLExportVisibility();
     return applied;
   }
@@ -802,6 +811,8 @@
     currentSongwriters = [];
     currentUploader = null;
     currentMaker = null;
+    currentCommunityUploadId = "";
+    currentCommunityUploadTest = false;
     currentProvider = typeof provider === "string" ? provider : "LRCLIB";
     autoScrollUserPaused = false;
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
@@ -811,6 +822,7 @@
       staticLyricsActive = false;
       const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
       const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
       setTTMLExportVisibility();
       return applied;
     }
@@ -818,10 +830,12 @@
       staticLyricsActive = true;
       const parsed = parsePlain(data.plainLyrics);
       const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
       setTTMLExportVisibility();
       return applied;
     }
     staticLyricsActive = false;
+    adBreakNoteResult("none", "");
     showLyricsMessage(NO_LYRICS_MESSAGE);
     setTTMLExportVisibility();
     return false;

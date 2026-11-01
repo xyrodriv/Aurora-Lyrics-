@@ -3302,6 +3302,68 @@
       border-color: rgba(96,165,250,.6);
       color: #eaf2ff;
     }
+    /* ---- ad break -----------------------------------------------------------
+       The notice borrows the "No lyrics found" empty state's exact type metrics
+       and sits on the panel's own background — no scrim, no blur. The lyric
+       layers keep their layout but are not painted, so the panel reads like any
+       other empty state. NO BACKTICKS in this block: it lives inside a JS
+       template literal. */
+    .ym-sl-ad {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 0;
+      /* The empty state's own base is 14px and its title lands about a fifth
+         of the way down the panel; this puts the ad notice on the same line,
+         one step larger so it leads the panel. */
+      padding: calc(20% + 20px) 8% 0;
+      box-sizing: border-box;
+      text-align: center;
+      color: #fff;
+      font-size: 16px;
+      pointer-events: none;
+      animation: ym-sl-ad-in .32s cubic-bezier(.22,1,.36,1) both;
+    }
+    #ym-sl-panel.ym-sl-ad-active .LyricsContainer,
+    #ym-sl-panel.ym-sl-ad-active #ym-sl-amll-host {
+      visibility: hidden !important;
+    }
+    #ym-sl-panel.ym-sl-ad-active .ym-sl-jump { display: none !important; }
+    .ym-sl-ad.hidden { display: none; }
+    .ym-sl-ad-title {
+      max-width: 34em;
+      font-size: 1.35em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+      text-wrap: balance;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-ad-sub {
+      margin-top: .85em;
+      max-width: 34em;
+      font-size: .95em;
+      font-weight: 400;
+      line-height: 1.55;
+      color: rgba(255,255,255,.62);
+      text-wrap: pretty;
+    }
+    .ym-sl-ad-source {
+      margin-top: 1.5em;
+      max-width: 34em;
+      font-size: .9em;
+      font-weight: 500;
+      letter-spacing: .01em;
+      color: rgba(255,255,255,.44);
+    }
+    @keyframes ym-sl-ad-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
     /* Empty / failed state, styled after Spicy Lyrics' .LyricsNotice
        (default.scss): a centred notice with a title-weight message and a pill
        action, rather than the old small grey line. */

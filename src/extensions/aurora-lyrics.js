@@ -7,9 +7,9 @@
  * or by Spikerko, and is not affiliated with either. Preserve the upstream
  * license and attribution when distributing adapted builds.
  *
- * Community syncs come from the Spicy Lyrics API and are credited ON SCREEN
- * wherever lyrics appear (see buildCreditsFooter / buildProviderRow), as the
- * API terms require; API responses are cached for at most 30 days.
+ * Community syncs come from the Spicy Lyrics API and Aurora Community and are
+ * credited ON SCREEN wherever lyrics appear (see buildCreditsFooter /
+ * buildProviderRow); API responses are cached for at most 30 days.
  *
  * YTMod-specific boundaries:
  *   - playback position and seeking come from window.YTMod.player,
@@ -33,6 +33,9 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  // Aurora Community — community TTML, keyed by the exact YouTube video id.
+  // The extension is read-only; uploads are handled by the Discord bot.
+  const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
   // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
@@ -1632,12 +1635,35 @@
   // Attribution for the currently loaded lyrics. `currentProvider` is a display
   // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
   // `currentUploader` / `currentMaker` are the credited people and are only ever
-  // non-null for a community sync (source === "spicy_lyrics"). Shape mirrors the
-  // API's Body.UploadAttribution.{Uploader,Maker}:
+  // non-null for a community sync (Spicy Lyrics or Aurora Community). Shape
+  // mirrors the API's Body.UploadAttribution.{Uploader,Maker}:
   //   { id, username, avatar, hasProfileBanner, url }
   let currentUploader = null;
   let currentMaker = null;
   let currentProvider = "";
+  // Community sync identity for play-view reporting. Only Aurora Community
+  // results carry an upload id; Spicy/LRCLIB loads leave this empty and never
+  // report a view. Test rows are excluded as well.
+  let currentCommunityUploadId = "";
+  let currentCommunityUploadTest = false;
+  // One play view per loaded community sync on this page. Pause/resume and the
+  // 500ms housekeeping loop must not inflate the count, so the key is held
+  // until the track or synced upload changes.
+  let communityViewSentFor = "";
+  // Ad break. YouTube Music plays ads through the SAME #movie_player element as
+  // the song, so during an ad the lyric clock is reading the ad's position. The
+  // panel covers itself with a notice instead of showing out-of-sync lyrics.
+  // The real track's lookup keeps running behind that notice, so the source
+  // line stays live and can report what answered (or that nothing did).
+  let adBreakActive = false;
+  let adBreakOverlayEl = null;
+  let adBreakTitleEl = null;
+  let adBreakSubEl = null;
+  let adBreakSourceEl = null;
+  // idle | loading | found | none, for the track identified by adBreakLyricsKey.
+  let adBreakLyricsState = "idle";
+  let adBreakLyricsProvider = "";
+  let adBreakLyricsKey = "";
   // Credits carried by the *next* loadTTML call. Set immediately before an
   // external load so loadTTML (which is also used for imports and cached TTML)
   // can attach them without changing its signature for every caller.
@@ -5422,6 +5448,68 @@
       border-color: rgba(96,165,250,.6);
       color: #eaf2ff;
     }
+    /* ---- ad break -----------------------------------------------------------
+       The notice borrows the "No lyrics found" empty state's exact type metrics
+       and sits on the panel's own background — no scrim, no blur. The lyric
+       layers keep their layout but are not painted, so the panel reads like any
+       other empty state. NO BACKTICKS in this block: it lives inside a JS
+       template literal. */
+    .ym-sl-ad {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 0;
+      /* The empty state's own base is 14px and its title lands about a fifth
+         of the way down the panel; this puts the ad notice on the same line,
+         one step larger so it leads the panel. */
+      padding: calc(20% + 20px) 8% 0;
+      box-sizing: border-box;
+      text-align: center;
+      color: #fff;
+      font-size: 16px;
+      pointer-events: none;
+      animation: ym-sl-ad-in .32s cubic-bezier(.22,1,.36,1) both;
+    }
+    #ym-sl-panel.ym-sl-ad-active .LyricsContainer,
+    #ym-sl-panel.ym-sl-ad-active #ym-sl-amll-host {
+      visibility: hidden !important;
+    }
+    #ym-sl-panel.ym-sl-ad-active .ym-sl-jump { display: none !important; }
+    .ym-sl-ad.hidden { display: none; }
+    .ym-sl-ad-title {
+      max-width: 34em;
+      font-size: 1.35em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+      text-wrap: balance;
+      color: rgba(255,255,255,.92);
+    }
+    .ym-sl-ad-sub {
+      margin-top: .85em;
+      max-width: 34em;
+      font-size: .95em;
+      font-weight: 400;
+      line-height: 1.55;
+      color: rgba(255,255,255,.62);
+      text-wrap: pretty;
+    }
+    .ym-sl-ad-source {
+      margin-top: 1.5em;
+      max-width: 34em;
+      font-size: .9em;
+      font-weight: 500;
+      letter-spacing: .01em;
+      color: rgba(255,255,255,.44);
+    }
+    @keyframes ym-sl-ad-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
     /* Empty / failed state, styled after Spicy Lyrics' .LyricsNotice
        (default.scss): a centred notice with a title-weight message and a pill
        action, rather than the old small grey line. */
@@ -8273,6 +8361,19 @@
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
     panelEl.append(fileInput, lyricsContainer, jumpButton);
+    // Ad notice. A child of the panel (not the lyrics container) so it covers
+    // whichever renderer is mounted — Spicy lines or the AMLL host — without
+    // touching either one's DOM. Hidden until an ad actually starts.
+    adBreakOverlayEl = h("div", {
+      class: "ym-sl-ad hidden",
+      role: "status",
+      "aria-live": "polite",
+    });
+    adBreakTitleEl = h("div", { class: "ym-sl-ad-title", text: "An ad is playing" });
+    adBreakSubEl = h("div", { class: "ym-sl-ad-sub", text: "Lyrics will resume after this ad" });
+    adBreakSourceEl = h("div", { class: "ym-sl-ad-source", text: "" });
+    adBreakOverlayEl.append(adBreakTitleEl, adBreakSubEl, adBreakSourceEl);
+    panelEl.appendChild(adBreakOverlayEl);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -13367,6 +13468,11 @@
 
   const NO_LYRICS_MESSAGE = "No lyrics found.";
   const LOAD_FAILED_MESSAGE = "Lyrics didn't load.";
+  // LRCLIB being unreachable is not the same dead end as "this track has no
+  // lyrics": searching it again cannot help, so the empty state drops the
+  // Search button and asks the listener to come back later.
+  const LRCLIB_OUTAGE_MESSAGE = "LRCLIB is currently experiencing an outage, please try again later.";
+  const NO_LYRICS_TRACK_MESSAGE = "No lyrics were found for this track.";
   // Why the last lookup ended in an error, shown in the search panel footer.
   // "no lyrics" is self-explanatory; a failed fetch is almost always rate
   // limiting, so it gets an explicit ERR line instead.
@@ -13383,7 +13489,7 @@
     // to hand the panel back to the built-in renderer, because the AMLL host is
     // still showing the previous track's lines and would cover this empty state.
     amllHideSkeleton();
-    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE || message === LRCLIB_OUTAGE_MESSAGE) {
       amllHide();
       // The cached content still belongs to the PREVIOUS track. Without this a
       // later re-activation (toggling Apple Music style off and on) would hand it
@@ -13403,31 +13509,46 @@
     // side "no lyrics" and "couldn't load them" are the same dead end.
     // Checked BEFORE the panel guard below, because the notice does not depend on
     // the panel existing.
-    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE || message === LRCLIB_OUTAGE_MESSAGE) {
       showFsNoLyricsNotice(message);
     }
     if (!lineScrollEl || !linesRoot) return;
     resetLyricsPanelState();
     // Centred box, the way an empty state should read.
     if (lineScrollEl) lineScrollEl.classList.add("offline");
+    const outage = message === LRCLIB_OUTAGE_MESSAGE;
     const empty = h("div", { class: "ym-sl-empty" });
-    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
-    // Spicy-style body line: tells the user the Search button looks on LRCLIB,
-    // which is the actual escape hatch when auto-sync finds nothing.
+    // An outage still means no lyrics for this track; the reason belongs on the
+    // smaller body line so the two facts read together, not as alternatives.
     empty.appendChild(h("div", {
-      class: "ym-sl-empty-body",
-      text: "Search LRCLIB to pull in synced lyrics for this track.",
+      class: "ym-sl-empty-msg",
+      text: outage ? NO_LYRICS_TRACK_MESSAGE : message,
     }));
-    // Surface a Search button under the empty-state message — that's the
-    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
-    const emptySearch = h("button", {
-      class: "ym-sl-import ym-sl-empty-search",
-      type: "button",
-      "aria-label": "Search lyrics",
-      text: "Search",
-    });
-    emptySearch.addEventListener("click", () => toggleSearchPanel());
-    empty.appendChild(emptySearch);
+    if (outage) {
+      // LRCLIB is the thing that is down, so a Search button would only send
+      // the listener back to the same failing service.
+      empty.appendChild(h("div", {
+        class: "ym-sl-empty-body",
+        text: message,
+      }));
+    } else {
+      // Spicy-style body line: tells the user the Search button looks on LRCLIB,
+      // which is the actual escape hatch when auto-sync finds nothing.
+      empty.appendChild(h("div", {
+        class: "ym-sl-empty-body",
+        text: "Search LRCLIB to pull in synced lyrics for this track.",
+      }));
+      // Surface a Search button under the empty-state message — that's the
+      // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
+      const emptySearch = h("button", {
+        class: "ym-sl-import ym-sl-empty-search",
+        type: "button",
+        "aria-label": "Search lyrics",
+        text: "Search",
+      });
+      emptySearch.addEventListener("click", () => toggleSearchPanel());
+      empty.appendChild(emptySearch);
+    }
     linesRoot.replaceChildren(empty);
   }
 
@@ -14258,14 +14379,18 @@
     currentLyricsIsTTML = true;
     staticLyricsActive = false;
     currentSongwriters = extractSongwriters(rawXml);
-    // Consume any credits the caller staged for this load (Spicy Lyrics API
-    // results only). Clearing here means imports and cached TTML never inherit
+    // Consume any credits the caller staged for this load (Spicy Lyrics or
+    // Aurora Community results). Clearing here means imports and cached TTML never inherit
     // a stale uploader from a previous track.
     if (pendingSpicyCredits) {
       const attr = pendingSpicyCredits.attribution || null;
       currentProvider = (attr && attr.provider) || "";
       currentUploader = (attr && attr.uploader) || null;
       currentMaker = (attr && attr.maker) || null;
+      currentCommunityUploadId = typeof pendingSpicyCredits.uploadId === "string"
+        ? pendingSpicyCredits.uploadId
+        : "";
+      currentCommunityUploadTest = pendingSpicyCredits.test === true;
       if (!currentSongwriters.length && pendingSpicyCredits.songwriters.length) {
         currentSongwriters = pendingSpicyCredits.songwriters;
       }
@@ -14279,16 +14404,21 @@
       currentProvider = "";
       currentMaker = null;
       currentUploader = { id: "local", username: "Local Database", url: "", avatar: "", local: true };
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
     } else {
       // A TTML load with no staged credits and no local file: show no provider
       // rather than inheriting one from the previous track.
       currentProvider = "";
       currentMaker = null;
       currentUploader = null;
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
     }
     currentTTMLSource = source === "imported" ? "imported" : "external";
     importedTTMLXml = currentTTMLSource === "imported" ? rawXml : "";
     const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
     setTTMLExportVisibility();
     return applied;
   }
@@ -14300,6 +14430,8 @@
     currentSongwriters = [];
     currentUploader = null;
     currentMaker = null;
+    currentCommunityUploadId = "";
+    currentCommunityUploadTest = false;
     currentProvider = typeof provider === "string" ? provider : "LRCLIB";
     autoScrollUserPaused = false;
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
@@ -14309,6 +14441,7 @@
       staticLyricsActive = false;
       const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
       const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
       setTTMLExportVisibility();
       return applied;
     }
@@ -14316,10 +14449,12 @@
       staticLyricsActive = true;
       const parsed = parsePlain(data.plainLyrics);
       const applied = applyParsedLyrics(parsed);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
       setTTMLExportVisibility();
       return applied;
     }
     staticLyricsActive = false;
+    adBreakNoteResult("none", "");
     showLyricsMessage(NO_LYRICS_MESSAGE);
     setTTMLExportVisibility();
     return false;
@@ -14448,8 +14583,24 @@
       return { ok: res.ok, status: res.status, data: res.ok ? await res.json().catch(() => null) : null };
     } catch (error) {
       if (signal && signal.aborted) return { ok: false, status: 0, data: null, aborted: true };
+      // A blocked CORS response / dropped connection arrives as a TypeError
+      // with no status. Tag it so a down LRCLIB is not mistaken for a track
+      // that simply has no lyrics.
+      if (error && typeof error === "object") error.lrclibUnreachable = true;
       throw error;
     }
+  }
+
+  // True when the current lookup failed because LRCLIB itself was unreachable
+  // (5xx or a CORS/network rejection), rather than because the track has no
+  // lyrics. Reset at the start of every fetchLRCLyrics.
+  let lrclibOutage = false;
+
+  function isLrclibOutage(error) {
+    if (!error) return false;
+    const status = Number(error.status) || 0;
+    if (status >= 500 && status <= 599) return true;
+    return !status && error.lrclibUnreachable === true;
   }
 
   // ---- Spicy Lyrics API cache (in-memory mirror) ----------------------------
@@ -15309,6 +15460,195 @@
     return { ttml, attribution: parseUploadAttribution(body) };
   }
 
+  // ---- Aurora Community (read-only client) ---------------------------------
+  // Community rows are keyed by the exact YouTube video id. Positive results
+  // live for 30 days; a test row's server-supplied cacheTtlSeconds is shorter.
+  const COMMUNITY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  // Bump this whenever the cache shape or a matching rule changes. Older entries
+  // are dropped on load; v6 refreshes cached maker links to the website profile
+  // route, and v5 entries additionally lack the upload id used for play views.
+  const COMMUNITY_CACHE_VERSION = 6;
+  // Negative entries are short: a newly approved upload should reach someone
+  // who previously missed the track without making them wait long.
+  const COMMUNITY_CACHE_NEGATIVE_TTL_MS = 2 * 60 * 1000;
+  const COMMUNITY_CACHE_LIMIT = 80;
+  const COMMUNITY_REQUEST_TIMEOUT_MS = 2500;
+
+  let communityCache = null;
+  let communityCacheLoad = null;
+
+  async function loadCommunityCache() {
+    if (communityCache) return communityCache;
+    if (communityCacheLoad) return communityCacheLoad;
+    if (!window.YTMod || typeof window.YTMod.getCommunityCache !== "function") {
+      console.warn("[AuroraLyrics] community cache bridge unavailable; nothing will be cached this session.");
+      communityCache = {};
+      return communityCache;
+    }
+    communityCacheLoad = window.YTMod.getCommunityCache().then((stored) => {
+      communityCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
+      const now = Date.now();
+      for (const [videoId, entry] of Object.entries(communityCache)) {
+        if (!entry || !Number.isFinite(entry.exp) || entry.exp <= now
+          || entry.v !== COMMUNITY_CACHE_VERSION) {
+          delete communityCache[videoId];
+        }
+      }
+      return communityCache;
+    }).catch((error) => {
+      console.warn("[AuroraLyrics] community cache read failed; starting empty:", error && error.message);
+      communityCache = {};
+      return communityCache;
+    });
+    return communityCacheLoad;
+  }
+
+  function persistCommunityCache() {
+    if (!communityCache || !window.YTMod || typeof window.YTMod.setCommunityCache !== "function") return;
+    const entries = Object.entries(communityCache)
+      .filter(([, entry]) => entry && Number.isFinite(entry.exp) && entry.exp > Date.now())
+      .sort((a, b) => b[1].exp - a[1].exp)
+      .slice(0, COMMUNITY_CACHE_LIMIT);
+    communityCache = Object.fromEntries(entries);
+    window.YTMod.setCommunityCache(communityCache).catch((error) => {
+      console.warn("[AuroraLyrics] could not persist community cache:", error && error.message);
+    });
+  }
+
+  async function getCommunityCacheEntry(videoId) {
+    if (!videoId) return null;
+    const cache = await loadCommunityCache();
+    const entry = cache[videoId];
+    if (!entry) return null;
+    if (!Number.isFinite(entry.exp) || entry.exp <= Date.now()
+      || entry.v !== COMMUNITY_CACHE_VERSION) {
+      delete cache[videoId];
+      persistCommunityCache();
+      return null;
+    }
+    return entry;
+  }
+
+  function setCommunityCacheEntry(videoId, entry, ttlMs) {
+    if (!videoId) return;
+    loadCommunityCache().then((cache) => {
+      const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : COMMUNITY_CACHE_TTL_MS;
+      cache[videoId] = Object.assign({}, entry, {
+        v: COMMUNITY_CACHE_VERSION,
+        exp: Date.now() + Math.min(ttl, COMMUNITY_CACHE_TTL_MS),
+      });
+      persistCommunityCache();
+    }).catch(() => {});
+  }
+
+  function communityPerson(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const person = {
+      id: raw.id != null ? String(raw.id) : "",
+      username: typeof raw.username === "string" ? raw.username.trim() : "",
+      avatar: typeof raw.avatar === "string" ? raw.avatar : "",
+      // Aurora profiles are public at /community?maker=<id>; the API fills this
+      // for makers. Uploader profile links are still deliberately empty.
+      url: typeof raw.url === "string"
+        && (raw.url.startsWith("http://") || raw.url.startsWith("https://"))
+        ? raw.url
+        : "",
+    };
+    return person.username || person.id ? person : null;
+  }
+
+  function normalizeCommunityAttribution(raw) {
+    const attr = raw && typeof raw === "object" ? raw : {};
+    return {
+      source: typeof attr.source === "string" && attr.source.trim() ? attr.source.trim() : "aurora_community",
+      provider: typeof attr.provider === "string" && attr.provider.trim() ? attr.provider.trim() : "Aurora Community",
+      uploader: communityPerson(attr.uploader),
+      maker: communityPerson(attr.maker),
+      songwriters: [],
+    };
+  }
+
+  async function fetchCommunityLyrics(track, key, controller) {
+    if (!track || !track.videoId) return null;
+    const videoId = String(track.videoId);
+    const cached = await getCommunityCacheEntry(videoId);
+    if (cached) {
+      if (cached.hit === false) {
+        console.log(`[AuroraLyrics] cached Aurora Community miss for ${videoId}; skipping API.`);
+        return null;
+      }
+      if (cached.ttml) {
+        console.log(`[AuroraLyrics] served TTML from Aurora Community cache (${videoId}).`);
+        return {
+          ttml: cached.ttml,
+          attribution: cached.attribution || null,
+          uploadId: cached.uploadId || "",
+          test: cached.test === true,
+          fromCache: true,
+        };
+      }
+    }
+
+    const requestUrl = `${AURORA_COMMUNITY_API}/v1/ttml?v=${encodeURIComponent(videoId)}`;
+    let response;
+    try {
+      let signal = controller.signal;
+      try {
+        if (typeof AbortSignal !== "undefined"
+          && typeof AbortSignal.any === "function"
+          && typeof AbortSignal.timeout === "function") {
+          signal = AbortSignal.any([controller.signal, AbortSignal.timeout(COMMUNITY_REQUEST_TIMEOUT_MS)]);
+        }
+      } catch (_) {}
+      response = await fetch(requestUrl, {
+        headers: { Accept: "application/json" },
+        credentials: "omit",
+        signal,
+        cache: "no-store",
+      });
+    } catch (error) {
+      if (controller.signal.aborted || (error && error.name === "AbortError")) return null;
+      console.warn("[AuroraLyrics] Aurora Community request failed:", error);
+      return null;
+    }
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (response.status === 404) {
+      setCommunityCacheEntry(videoId, { hit: false }, COMMUNITY_CACHE_NEGATIVE_TTL_MS);
+      return null;
+    }
+    if (!response.ok) {
+      console.warn(`[AuroraLyrics] Aurora Community returned HTTP ${response.status}.`);
+      return null;
+    }
+    const json = await response.json().catch(() => null);
+    const data = json && json.data ? json.data : null;
+    if (!data || typeof data.ttml !== "string" || !data.ttml.trim()) {
+      console.warn("[AuroraLyrics] Aurora Community returned no usable TTML.");
+      return null;
+    }
+    const attribution = normalizeCommunityAttribution(data.attribution);
+    const ttlSeconds = Number(data.cacheTtlSeconds);
+    const ttlMs = Number.isFinite(ttlSeconds) && ttlSeconds > 0
+      ? ttlSeconds * 1000
+      : COMMUNITY_CACHE_TTL_MS;
+    setCommunityCacheEntry(videoId, {
+      hit: true,
+      ttml: data.ttml,
+      attribution,
+      uploadId: typeof data.uploadId === "string" ? data.uploadId : "",
+      test: data.test === true,
+      updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : "",
+    }, ttlMs);
+    console.log(`[AuroraLyrics] fetched Aurora Community TTML for ${videoId}.`);
+    return {
+      ttml: data.ttml,
+      attribution,
+      uploadId: typeof data.uploadId === "string" ? data.uploadId : "",
+      test: data.test === true,
+      fromCache: false,
+    };
+  }
+
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
     if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
@@ -15435,6 +15775,7 @@
 
   async function fetchLRCLyrics(track, key) {
     const requestId = ++trackRequestSeq;
+    lrclibOutage = false;
     if (activeTrackAbort) activeTrackAbort.abort();
     const controller = new AbortController();
     activeTrackAbort = controller;
@@ -15489,7 +15830,9 @@
       const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
       if (response.aborted) return null;
       if (!response.ok && response.status !== 404) {
-        throw new Error("LRCLIB returned HTTP " + response.status);
+        const error = new Error("LRCLIB returned HTTP " + response.status);
+        error.status = response.status;
+        throw error;
       }
       let data = response.ok ? response.data : null;
       if (!data || !data.syncedLyrics) {
@@ -15503,7 +15846,9 @@
         );
         if (searchResponse.aborted) return null;
         if (!searchResponse.ok) {
-          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+          const error = new Error("LRCLIB search returned HTTP " + searchResponse.status);
+          error.status = searchResponse.status;
+          throw error;
         }
         // Prefer a synced match; fall back to a plain (unsynced) match so the
         // panel shows lyrics automatically instead of "No lyrics found"
@@ -15526,6 +15871,33 @@
        source that misses early cannot flash a message before the next one
        has had its turn. */
     const runners = {
+      community: async () => {
+        try {
+          const communityResult = await fetchCommunityLyrics(track, key, controller);
+          if (stale()) return true;
+          if (communityResult && communityResult.ttml) {
+            pendingSpicyCredits = {
+              attribution: communityResult.attribution || null,
+              songwriters: [],
+              uploadId: communityResult.uploadId || "",
+              test: communityResult.test === true,
+            };
+            if (loadTTML(communityResult.ttml, "external")) {
+              console.log("[AuroraLyrics] TTML rendered from Aurora Community.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            console.warn("[AuroraLyrics] Aurora Community returned TTML we could not parse; trying the next source.");
+          } else {
+            console.log("[AuroraLyrics] no Aurora Community TTML for this track; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[AuroraLyrics] Aurora Community lookup failed; trying the next source:", error);
+        }
+        return false;
+      },
+
       spicy: async () => {
         try {
           const spicyResult = await fetchSpicyLyrics(track, key, controller);
@@ -15571,23 +15943,27 @@
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
           console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
+          lrclibOutage = isLrclibOutage(error);
           return false;
         }
       },
     };
 
-    // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
-    // was removed. Spicy Lyrics wins when it has the track; LRCLIB is the
-    // fallback. lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25:
-    // both are unmoderated, so a wrong sync was more common than a useful one.
-    const order = ["spicy", "lrclib"];
+    // Fixed source priority: Aurora Community is curated per exact video id and
+    // wins when it has the track; Spicy is the broad fallback, then LRCLIB.
+    // lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25: both are
+    // unmoderated, so a wrong sync was more common than a useful one.
+    const order = ["community", "spicy", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;
       if (await runner()) return;
       if (stale()) return;
     }
-    showLyricsMessage(NO_LYRICS_MESSAGE);
+    // Every runner missed (or failed) for this track, so there is nothing for
+    // the panel to resume with after an ad. Recorded for the ad notice's retry.
+    adBreakNoteResult("none", "");
+    showLyricsMessage(lrclibOutage ? LRCLIB_OUTAGE_MESSAGE : NO_LYRICS_MESSAGE);
   }
 
   /* ===================== next-track prefetch ===================== */
@@ -15954,6 +16330,13 @@
     const key = getTrackKey(track);
     if (!key) return;
 
+    // A new track cannot report a view for the previous track's community sync.
+    if (lastObservedTrackKey && lastObservedTrackKey !== key) {
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
+      communityViewSentFor = "";
+    }
+
     const positionMs = window.YTMod && window.YTMod.player
       ? window.YTMod.player.getPositionMs()
       : null;
@@ -15997,6 +16380,9 @@
     if (key === currentTrackKey) return;
 
     currentTrackKey = key;
+    // A new track starts a fresh lookup; the ad notice reports "Looking…"
+    // until one of the sources answers.
+    adBreakNoteLookup(key);
     prefetchNextTrackLyrics();
     // Also warm the next track's cover so an MV -> audio skip is instant.
     prefetchNextTrackArt();
@@ -16401,9 +16787,9 @@
     );
   }
 
-  // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
-  // profile. Used for both the uploader and the maker; only community syncs
-  // (source === "spicy_lyrics") have either.
+  // "<label> <avatar> <username>" — links only when the source supplied a
+  // profile URL. Aurora Community currently supplies none, so its credits render
+  // as plain text until website profiles exist.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
@@ -18028,6 +18414,32 @@
     }, MV_SYNC_NOTICE_MS);
   }
 
+  function recordCommunitySyncView() {
+    if (!currentCommunityUploadId || currentCommunityUploadTest) return;
+    if (!currentTrackKey) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.isPlaying !== "function" || !player.isPlaying()) return;
+
+    const viewKey = `${currentTrackKey}|${currentCommunityUploadId}`;
+    if (communityViewSentFor === viewKey) return;
+    // Set before the request so overlapping housekeeping passes cannot double-count.
+    communityViewSentFor = viewKey;
+
+    const viewUrl = `${AURORA_COMMUNITY_API}/v1/ttml/${encodeURIComponent(currentCommunityUploadId)}/view`;
+    fetch(viewUrl, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      credentials: "omit",
+      cache: "no-store",
+    }).then((response) => {
+      if (!response.ok) {
+        console.warn(`[AuroraLyrics] community view not recorded (HTTP ${response.status}).`);
+      }
+    }).catch((error) => {
+      console.warn("[AuroraLyrics] community view failed:", error && error.message);
+    });
+  }
+
   function housekeeping() {
     if (!window.YTMod || !window.YTMod.player) return;
     // The media element is cached for the 60fps position read; re-resolve it here
@@ -18039,6 +18451,8 @@
     refreshVideoOffsetControl();
     refreshPausePickButtonState();
     syncMvSyncNotice();
+    adBreakSync();
+    recordCommunitySyncView();
     syncTrackLyrics();
   }
   function startHousekeeping() {
@@ -18140,6 +18554,92 @@
   }
   attachMessageListener();
 
+  /* ===================== ad break ===================== */
+  // YouTube Music does not swap elements for an ad: the SAME #movie_player
+  // gets `ad-showing` while one runs, and the media element's clock is the
+  // ad's. That class is the signal — playerAds is also present on tracks that
+  // simply HAVE ads available, so it cannot answer "is one playing now".
+  function adBreakIsPlaying() {
+    const movie = document.querySelector("#movie_player");
+    if (!movie) return false;
+    return movie.classList.contains("ad-showing") ||
+      movie.classList.contains("ad-interrupting");
+  }
+
+  function adBreakNoteLookup(key) {
+    adBreakLyricsState = "loading";
+    adBreakLyricsProvider = "";
+    adBreakLyricsKey = key || currentTrackKey;
+    if (adBreakActive) adBreakRender();
+  }
+
+  function adBreakNoteResult(state, provider) {
+    adBreakLyricsState = state;
+    adBreakLyricsProvider = state === "found" ? (provider || "") : "";
+    if (currentTrackKey) adBreakLyricsKey = currentTrackKey;
+    if (adBreakActive) adBreakRender();
+  }
+
+  function adBreakSourceText() {
+    // A lookup recorded for a different track is stale — report the new one as
+    // still loading rather than naming the previous song's source.
+    const state = adBreakLyricsKey && adBreakLyricsKey !== currentTrackKey
+      ? "loading"
+      : adBreakLyricsState;
+    if (state === "none") return "No lyrics found for the next track.";
+    if (state === "found") {
+      return adBreakLyricsProvider
+        ? "The next track's lyrics came from " + adBreakLyricsProvider + "."
+        : "The next track's lyrics are ready.";
+    }
+    if (state === "idle" && currentProvider) {
+      return "The next track's lyrics came from " + currentProvider + ".";
+    }
+    return "Looking up the next track's lyrics…";
+  }
+
+  function adBreakRender() {
+    if (!adBreakSourceEl) return;
+    const text = adBreakSourceText();
+    if (adBreakSourceEl.textContent !== text) adBreakSourceEl.textContent = text;
+  }
+
+  function adBreakSync() {
+    const playing = adBreakIsPlaying();
+    if (playing === adBreakActive) {
+      // While an ad runs the lookup can finish, so the source line needs to keep
+      // up; outside one there is nothing to repaint.
+      if (playing) adBreakRender();
+      return;
+    }
+    adBreakActive = playing;
+    if (panelEl) panelEl.classList.toggle("ym-sl-ad-active", playing);
+    if (adBreakOverlayEl) adBreakOverlayEl.classList.toggle("hidden", !playing);
+    try {
+      if (playing) document.documentElement.dataset.ymAdPlaying = "1";
+      else delete document.documentElement.dataset.ymAdPlaying;
+    } catch (e) {}
+    if (playing) {
+      adBreakRender();
+      return;
+    }
+    // The ad is over. If the track's lookup ended with nothing while it played,
+    // ask again now: ads often occupy the window in which the first lookup ran,
+    // and a transient miss should not leave the panel empty for the whole song.
+    if (adBreakLyricsState === "none" &&
+      adBreakLyricsKey &&
+      adBreakLyricsKey === currentTrackKey) {
+      adBreakLyricsState = "loading";
+      adBreakLyricsProvider = "";
+      currentTrackKey = "";
+      try {
+        syncTrackLyrics(true);
+      } catch (error) {
+        console.warn("[AuroraLyrics] ad-end lyric retry failed:", error);
+      }
+    }
+  }
+
   function teardown() {
     // Immediate: teardown is removing this script's UI, so a 220ms fade could
     // leave the overlay behind if the context goes away first.
@@ -18202,6 +18702,15 @@
     }
     currentSongwriters = [];
     panelVisible = false;
+    adBreakActive = false;
+    adBreakLyricsState = "idle";
+    adBreakLyricsProvider = "";
+    adBreakLyricsKey = "";
+    adBreakOverlayEl = null;
+    adBreakTitleEl = null;
+    adBreakSubEl = null;
+    adBreakSourceEl = null;
+    try { delete document.documentElement.dataset.ymAdPlaying; } catch (e) {}
     panelHost = null;
     tabBar = null;
     pauseSync = null;

@@ -915,6 +915,32 @@
     }, MV_SYNC_NOTICE_MS);
   }
 
+  function recordCommunitySyncView() {
+    if (!currentCommunityUploadId || currentCommunityUploadTest) return;
+    if (!currentTrackKey) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.isPlaying !== "function" || !player.isPlaying()) return;
+
+    const viewKey = `${currentTrackKey}|${currentCommunityUploadId}`;
+    if (communityViewSentFor === viewKey) return;
+    // Set before the request so overlapping housekeeping passes cannot double-count.
+    communityViewSentFor = viewKey;
+
+    const viewUrl = `${AURORA_COMMUNITY_API}/v1/ttml/${encodeURIComponent(currentCommunityUploadId)}/view`;
+    fetch(viewUrl, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      credentials: "omit",
+      cache: "no-store",
+    }).then((response) => {
+      if (!response.ok) {
+        console.warn(`[AuroraLyrics] community view not recorded (HTTP ${response.status}).`);
+      }
+    }).catch((error) => {
+      console.warn("[AuroraLyrics] community view failed:", error && error.message);
+    });
+  }
+
   function housekeeping() {
     if (!window.YTMod || !window.YTMod.player) return;
     // The media element is cached for the 60fps position read; re-resolve it here
@@ -926,6 +952,8 @@
     refreshVideoOffsetControl();
     refreshPausePickButtonState();
     syncMvSyncNotice();
+    adBreakSync();
+    recordCommunitySyncView();
     syncTrackLyrics();
   }
   function startHousekeeping() {

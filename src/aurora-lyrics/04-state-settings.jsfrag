@@ -335,12 +335,35 @@
   // Attribution for the currently loaded lyrics. `currentProvider` is a display
   // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
   // `currentUploader` / `currentMaker` are the credited people and are only ever
-  // non-null for a community sync (source === "spicy_lyrics"). Shape mirrors the
-  // API's Body.UploadAttribution.{Uploader,Maker}:
+  // non-null for a community sync (Spicy Lyrics or Aurora Community). Shape
+  // mirrors the API's Body.UploadAttribution.{Uploader,Maker}:
   //   { id, username, avatar, hasProfileBanner, url }
   let currentUploader = null;
   let currentMaker = null;
   let currentProvider = "";
+  // Community sync identity for play-view reporting. Only Aurora Community
+  // results carry an upload id; Spicy/LRCLIB loads leave this empty and never
+  // report a view. Test rows are excluded as well.
+  let currentCommunityUploadId = "";
+  let currentCommunityUploadTest = false;
+  // One play view per loaded community sync on this page. Pause/resume and the
+  // 500ms housekeeping loop must not inflate the count, so the key is held
+  // until the track or synced upload changes.
+  let communityViewSentFor = "";
+  // Ad break. YouTube Music plays ads through the SAME #movie_player element as
+  // the song, so during an ad the lyric clock is reading the ad's position. The
+  // panel covers itself with a notice instead of showing out-of-sync lyrics.
+  // The real track's lookup keeps running behind that notice, so the source
+  // line stays live and can report what answered (or that nothing did).
+  let adBreakActive = false;
+  let adBreakOverlayEl = null;
+  let adBreakTitleEl = null;
+  let adBreakSubEl = null;
+  let adBreakSourceEl = null;
+  // idle | loading | found | none, for the track identified by adBreakLyricsKey.
+  let adBreakLyricsState = "idle";
+  let adBreakLyricsProvider = "";
+  let adBreakLyricsKey = "";
   // Credits carried by the *next* loadTTML call. Set immediately before an
   // external load so loadTTML (which is also used for imports and cached TTML)
   // can attach them without changing its signature for every caller.

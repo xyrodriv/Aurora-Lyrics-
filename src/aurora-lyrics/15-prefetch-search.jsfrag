@@ -362,6 +362,13 @@
     const key = getTrackKey(track);
     if (!key) return;
 
+    // A new track cannot report a view for the previous track's community sync.
+    if (lastObservedTrackKey && lastObservedTrackKey !== key) {
+      currentCommunityUploadId = "";
+      currentCommunityUploadTest = false;
+      communityViewSentFor = "";
+    }
+
     const positionMs = window.YTMod && window.YTMod.player
       ? window.YTMod.player.getPositionMs()
       : null;
@@ -405,6 +412,9 @@
     if (key === currentTrackKey) return;
 
     currentTrackKey = key;
+    // A new track starts a fresh lookup; the ad notice reports "Looking…"
+    // until one of the sources answers.
+    adBreakNoteLookup(key);
     prefetchNextTrackLyrics();
     // Also warm the next track's cover so an MV -> audio skip is instant.
     prefetchNextTrackArt();

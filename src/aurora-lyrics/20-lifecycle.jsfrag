@@ -77,6 +77,92 @@
   }
   attachMessageListener();
 
+  /* ===================== ad break ===================== */
+  // YouTube Music does not swap elements for an ad: the SAME #movie_player
+  // gets `ad-showing` while one runs, and the media element's clock is the
+  // ad's. That class is the signal — playerAds is also present on tracks that
+  // simply HAVE ads available, so it cannot answer "is one playing now".
+  function adBreakIsPlaying() {
+    const movie = document.querySelector("#movie_player");
+    if (!movie) return false;
+    return movie.classList.contains("ad-showing") ||
+      movie.classList.contains("ad-interrupting");
+  }
+
+  function adBreakNoteLookup(key) {
+    adBreakLyricsState = "loading";
+    adBreakLyricsProvider = "";
+    adBreakLyricsKey = key || currentTrackKey;
+    if (adBreakActive) adBreakRender();
+  }
+
+  function adBreakNoteResult(state, provider) {
+    adBreakLyricsState = state;
+    adBreakLyricsProvider = state === "found" ? (provider || "") : "";
+    if (currentTrackKey) adBreakLyricsKey = currentTrackKey;
+    if (adBreakActive) adBreakRender();
+  }
+
+  function adBreakSourceText() {
+    // A lookup recorded for a different track is stale — report the new one as
+    // still loading rather than naming the previous song's source.
+    const state = adBreakLyricsKey && adBreakLyricsKey !== currentTrackKey
+      ? "loading"
+      : adBreakLyricsState;
+    if (state === "none") return "No lyrics found for the next track.";
+    if (state === "found") {
+      return adBreakLyricsProvider
+        ? "The next track's lyrics came from " + adBreakLyricsProvider + "."
+        : "The next track's lyrics are ready.";
+    }
+    if (state === "idle" && currentProvider) {
+      return "The next track's lyrics came from " + currentProvider + ".";
+    }
+    return "Looking up the next track's lyrics…";
+  }
+
+  function adBreakRender() {
+    if (!adBreakSourceEl) return;
+    const text = adBreakSourceText();
+    if (adBreakSourceEl.textContent !== text) adBreakSourceEl.textContent = text;
+  }
+
+  function adBreakSync() {
+    const playing = adBreakIsPlaying();
+    if (playing === adBreakActive) {
+      // While an ad runs the lookup can finish, so the source line needs to keep
+      // up; outside one there is nothing to repaint.
+      if (playing) adBreakRender();
+      return;
+    }
+    adBreakActive = playing;
+    if (panelEl) panelEl.classList.toggle("ym-sl-ad-active", playing);
+    if (adBreakOverlayEl) adBreakOverlayEl.classList.toggle("hidden", !playing);
+    try {
+      if (playing) document.documentElement.dataset.ymAdPlaying = "1";
+      else delete document.documentElement.dataset.ymAdPlaying;
+    } catch (e) {}
+    if (playing) {
+      adBreakRender();
+      return;
+    }
+    // The ad is over. If the track's lookup ended with nothing while it played,
+    // ask again now: ads often occupy the window in which the first lookup ran,
+    // and a transient miss should not leave the panel empty for the whole song.
+    if (adBreakLyricsState === "none" &&
+      adBreakLyricsKey &&
+      adBreakLyricsKey === currentTrackKey) {
+      adBreakLyricsState = "loading";
+      adBreakLyricsProvider = "";
+      currentTrackKey = "";
+      try {
+        syncTrackLyrics(true);
+      } catch (error) {
+        console.warn("[AuroraLyrics] ad-end lyric retry failed:", error);
+      }
+    }
+  }
+
   function teardown() {
     // Immediate: teardown is removing this script's UI, so a 220ms fade could
     // leave the overlay behind if the context goes away first.
@@ -139,6 +225,15 @@
     }
     currentSongwriters = [];
     panelVisible = false;
+    adBreakActive = false;
+    adBreakLyricsState = "idle";
+    adBreakLyricsProvider = "";
+    adBreakLyricsKey = "";
+    adBreakOverlayEl = null;
+    adBreakTitleEl = null;
+    adBreakSubEl = null;
+    adBreakSourceEl = null;
+    try { delete document.documentElement.dataset.ymAdPlaying; } catch (e) {}
     panelHost = null;
     tabBar = null;
     pauseSync = null;

@@ -634,6 +634,11 @@
 
   const NO_LYRICS_MESSAGE = "No lyrics found.";
   const LOAD_FAILED_MESSAGE = "Lyrics didn't load.";
+  // LRCLIB being unreachable is not the same dead end as "this track has no
+  // lyrics": searching it again cannot help, so the empty state drops the
+  // Search button and asks the listener to come back later.
+  const LRCLIB_OUTAGE_MESSAGE = "LRCLIB is currently experiencing an outage, please try again later.";
+  const NO_LYRICS_TRACK_MESSAGE = "No lyrics were found for this track.";
   // Why the last lookup ended in an error, shown in the search panel footer.
   // "no lyrics" is self-explanatory; a failed fetch is almost always rate
   // limiting, so it gets an explicit ERR line instead.
@@ -650,7 +655,7 @@
     // to hand the panel back to the built-in renderer, because the AMLL host is
     // still showing the previous track's lines and would cover this empty state.
     amllHideSkeleton();
-    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE || message === LRCLIB_OUTAGE_MESSAGE) {
       amllHide();
       // The cached content still belongs to the PREVIOUS track. Without this a
       // later re-activation (toggling Apple Music style off and on) would hand it
@@ -670,31 +675,46 @@
     // side "no lyrics" and "couldn't load them" are the same dead end.
     // Checked BEFORE the panel guard below, because the notice does not depend on
     // the panel existing.
-    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE) {
+    if (message === NO_LYRICS_MESSAGE || message === LOAD_FAILED_MESSAGE || message === LRCLIB_OUTAGE_MESSAGE) {
       showFsNoLyricsNotice(message);
     }
     if (!lineScrollEl || !linesRoot) return;
     resetLyricsPanelState();
     // Centred box, the way an empty state should read.
     if (lineScrollEl) lineScrollEl.classList.add("offline");
+    const outage = message === LRCLIB_OUTAGE_MESSAGE;
     const empty = h("div", { class: "ym-sl-empty" });
-    empty.appendChild(h("div", { class: "ym-sl-empty-msg", text: message }));
-    // Spicy-style body line: tells the user the Search button looks on LRCLIB,
-    // which is the actual escape hatch when auto-sync finds nothing.
+    // An outage still means no lyrics for this track; the reason belongs on the
+    // smaller body line so the two facts read together, not as alternatives.
     empty.appendChild(h("div", {
-      class: "ym-sl-empty-body",
-      text: "Search LRCLIB to pull in synced lyrics for this track.",
+      class: "ym-sl-empty-msg",
+      text: outage ? NO_LYRICS_TRACK_MESSAGE : message,
     }));
-    // Surface a Search button under the empty-state message — that's the
-    // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
-    const emptySearch = h("button", {
-      class: "ym-sl-import ym-sl-empty-search",
-      type: "button",
-      "aria-label": "Search lyrics",
-      text: "Search",
-    });
-    emptySearch.addEventListener("click", () => toggleSearchPanel());
-    empty.appendChild(emptySearch);
+    if (outage) {
+      // LRCLIB is the thing that is down, so a Search button would only send
+      // the listener back to the same failing service.
+      empty.appendChild(h("div", {
+        class: "ym-sl-empty-body",
+        text: message,
+      }));
+    } else {
+      // Spicy-style body line: tells the user the Search button looks on LRCLIB,
+      // which is the actual escape hatch when auto-sync finds nothing.
+      empty.appendChild(h("div", {
+        class: "ym-sl-empty-body",
+        text: "Search LRCLIB to pull in synced lyrics for this track.",
+      }));
+      // Surface a Search button under the empty-state message — that's the
+      // manual-escape hatch when LRCLIB auto-sync couldn't find lyrics.
+      const emptySearch = h("button", {
+        class: "ym-sl-import ym-sl-empty-search",
+        type: "button",
+        "aria-label": "Search lyrics",
+        text: "Search",
+      });
+      emptySearch.addEventListener("click", () => toggleSearchPanel());
+      empty.appendChild(emptySearch);
+    }
     linesRoot.replaceChildren(empty);
   }
 

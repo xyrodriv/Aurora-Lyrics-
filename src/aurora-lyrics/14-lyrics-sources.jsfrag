@@ -60,8 +60,24 @@
       return { ok: res.ok, status: res.status, data: res.ok ? await res.json().catch(() => null) : null };
     } catch (error) {
       if (signal && signal.aborted) return { ok: false, status: 0, data: null, aborted: true };
+      // A blocked CORS response / dropped connection arrives as a TypeError
+      // with no status. Tag it so a down LRCLIB is not mistaken for a track
+      // that simply has no lyrics.
+      if (error && typeof error === "object") error.lrclibUnreachable = true;
       throw error;
     }
+  }
+
+  // True when the current lookup failed because LRCLIB itself was unreachable
+  // (5xx or a CORS/network rejection), rather than because the track has no
+  // lyrics. Reset at the start of every fetchLRCLyrics.
+  let lrclibOutage = false;
+
+  function isLrclibOutage(error) {
+    if (!error) return false;
+    const status = Number(error.status) || 0;
+    if (status >= 500 && status <= 599) return true;
+    return !status && error.lrclibUnreachable === true;
   }
 
   // ---- Spicy Lyrics API cache (in-memory mirror) ----------------------------
@@ -921,6 +937,195 @@
     return { ttml, attribution: parseUploadAttribution(body) };
   }
 
+  // ---- Aurora Community (read-only client) ---------------------------------
+  // Community rows are keyed by the exact YouTube video id. Positive results
+  // live for 30 days; a test row's server-supplied cacheTtlSeconds is shorter.
+  const COMMUNITY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  // Bump this whenever the cache shape or a matching rule changes. Older entries
+  // are dropped on load; v6 refreshes cached maker links to the website profile
+  // route, and v5 entries additionally lack the upload id used for play views.
+  const COMMUNITY_CACHE_VERSION = 6;
+  // Negative entries are short: a newly approved upload should reach someone
+  // who previously missed the track without making them wait long.
+  const COMMUNITY_CACHE_NEGATIVE_TTL_MS = 2 * 60 * 1000;
+  const COMMUNITY_CACHE_LIMIT = 80;
+  const COMMUNITY_REQUEST_TIMEOUT_MS = 2500;
+
+  let communityCache = null;
+  let communityCacheLoad = null;
+
+  async function loadCommunityCache() {
+    if (communityCache) return communityCache;
+    if (communityCacheLoad) return communityCacheLoad;
+    if (!window.YTMod || typeof window.YTMod.getCommunityCache !== "function") {
+      console.warn("[AuroraLyrics] community cache bridge unavailable; nothing will be cached this session.");
+      communityCache = {};
+      return communityCache;
+    }
+    communityCacheLoad = window.YTMod.getCommunityCache().then((stored) => {
+      communityCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
+      const now = Date.now();
+      for (const [videoId, entry] of Object.entries(communityCache)) {
+        if (!entry || !Number.isFinite(entry.exp) || entry.exp <= now
+          || entry.v !== COMMUNITY_CACHE_VERSION) {
+          delete communityCache[videoId];
+        }
+      }
+      return communityCache;
+    }).catch((error) => {
+      console.warn("[AuroraLyrics] community cache read failed; starting empty:", error && error.message);
+      communityCache = {};
+      return communityCache;
+    });
+    return communityCacheLoad;
+  }
+
+  function persistCommunityCache() {
+    if (!communityCache || !window.YTMod || typeof window.YTMod.setCommunityCache !== "function") return;
+    const entries = Object.entries(communityCache)
+      .filter(([, entry]) => entry && Number.isFinite(entry.exp) && entry.exp > Date.now())
+      .sort((a, b) => b[1].exp - a[1].exp)
+      .slice(0, COMMUNITY_CACHE_LIMIT);
+    communityCache = Object.fromEntries(entries);
+    window.YTMod.setCommunityCache(communityCache).catch((error) => {
+      console.warn("[AuroraLyrics] could not persist community cache:", error && error.message);
+    });
+  }
+
+  async function getCommunityCacheEntry(videoId) {
+    if (!videoId) return null;
+    const cache = await loadCommunityCache();
+    const entry = cache[videoId];
+    if (!entry) return null;
+    if (!Number.isFinite(entry.exp) || entry.exp <= Date.now()
+      || entry.v !== COMMUNITY_CACHE_VERSION) {
+      delete cache[videoId];
+      persistCommunityCache();
+      return null;
+    }
+    return entry;
+  }
+
+  function setCommunityCacheEntry(videoId, entry, ttlMs) {
+    if (!videoId) return;
+    loadCommunityCache().then((cache) => {
+      const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : COMMUNITY_CACHE_TTL_MS;
+      cache[videoId] = Object.assign({}, entry, {
+        v: COMMUNITY_CACHE_VERSION,
+        exp: Date.now() + Math.min(ttl, COMMUNITY_CACHE_TTL_MS),
+      });
+      persistCommunityCache();
+    }).catch(() => {});
+  }
+
+  function communityPerson(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const person = {
+      id: raw.id != null ? String(raw.id) : "",
+      username: typeof raw.username === "string" ? raw.username.trim() : "",
+      avatar: typeof raw.avatar === "string" ? raw.avatar : "",
+      // Aurora profiles are public at /community?maker=<id>; the API fills this
+      // for makers. Uploader profile links are still deliberately empty.
+      url: typeof raw.url === "string"
+        && (raw.url.startsWith("http://") || raw.url.startsWith("https://"))
+        ? raw.url
+        : "",
+    };
+    return person.username || person.id ? person : null;
+  }
+
+  function normalizeCommunityAttribution(raw) {
+    const attr = raw && typeof raw === "object" ? raw : {};
+    return {
+      source: typeof attr.source === "string" && attr.source.trim() ? attr.source.trim() : "aurora_community",
+      provider: typeof attr.provider === "string" && attr.provider.trim() ? attr.provider.trim() : "Aurora Community",
+      uploader: communityPerson(attr.uploader),
+      maker: communityPerson(attr.maker),
+      songwriters: [],
+    };
+  }
+
+  async function fetchCommunityLyrics(track, key, controller) {
+    if (!track || !track.videoId) return null;
+    const videoId = String(track.videoId);
+    const cached = await getCommunityCacheEntry(videoId);
+    if (cached) {
+      if (cached.hit === false) {
+        console.log(`[AuroraLyrics] cached Aurora Community miss for ${videoId}; skipping API.`);
+        return null;
+      }
+      if (cached.ttml) {
+        console.log(`[AuroraLyrics] served TTML from Aurora Community cache (${videoId}).`);
+        return {
+          ttml: cached.ttml,
+          attribution: cached.attribution || null,
+          uploadId: cached.uploadId || "",
+          test: cached.test === true,
+          fromCache: true,
+        };
+      }
+    }
+
+    const requestUrl = `${AURORA_COMMUNITY_API}/v1/ttml?v=${encodeURIComponent(videoId)}`;
+    let response;
+    try {
+      let signal = controller.signal;
+      try {
+        if (typeof AbortSignal !== "undefined"
+          && typeof AbortSignal.any === "function"
+          && typeof AbortSignal.timeout === "function") {
+          signal = AbortSignal.any([controller.signal, AbortSignal.timeout(COMMUNITY_REQUEST_TIMEOUT_MS)]);
+        }
+      } catch (_) {}
+      response = await fetch(requestUrl, {
+        headers: { Accept: "application/json" },
+        credentials: "omit",
+        signal,
+        cache: "no-store",
+      });
+    } catch (error) {
+      if (controller.signal.aborted || (error && error.name === "AbortError")) return null;
+      console.warn("[AuroraLyrics] Aurora Community request failed:", error);
+      return null;
+    }
+    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (response.status === 404) {
+      setCommunityCacheEntry(videoId, { hit: false }, COMMUNITY_CACHE_NEGATIVE_TTL_MS);
+      return null;
+    }
+    if (!response.ok) {
+      console.warn(`[AuroraLyrics] Aurora Community returned HTTP ${response.status}.`);
+      return null;
+    }
+    const json = await response.json().catch(() => null);
+    const data = json && json.data ? json.data : null;
+    if (!data || typeof data.ttml !== "string" || !data.ttml.trim()) {
+      console.warn("[AuroraLyrics] Aurora Community returned no usable TTML.");
+      return null;
+    }
+    const attribution = normalizeCommunityAttribution(data.attribution);
+    const ttlSeconds = Number(data.cacheTtlSeconds);
+    const ttlMs = Number.isFinite(ttlSeconds) && ttlSeconds > 0
+      ? ttlSeconds * 1000
+      : COMMUNITY_CACHE_TTL_MS;
+    setCommunityCacheEntry(videoId, {
+      hit: true,
+      ttml: data.ttml,
+      attribution,
+      uploadId: typeof data.uploadId === "string" ? data.uploadId : "",
+      test: data.test === true,
+      updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : "",
+    }, ttlMs);
+    console.log(`[AuroraLyrics] fetched Aurora Community TTML for ${videoId}.`);
+    return {
+      ttml: data.ttml,
+      attribution,
+      uploadId: typeof data.uploadId === "string" ? data.uploadId : "",
+      test: data.test === true,
+      fromCache: false,
+    };
+  }
+
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
     if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
@@ -1047,6 +1252,7 @@
 
   async function fetchLRCLyrics(track, key) {
     const requestId = ++trackRequestSeq;
+    lrclibOutage = false;
     if (activeTrackAbort) activeTrackAbort.abort();
     const controller = new AbortController();
     activeTrackAbort = controller;
@@ -1101,7 +1307,9 @@
       const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
       if (response.aborted) return null;
       if (!response.ok && response.status !== 404) {
-        throw new Error("LRCLIB returned HTTP " + response.status);
+        const error = new Error("LRCLIB returned HTTP " + response.status);
+        error.status = response.status;
+        throw error;
       }
       let data = response.ok ? response.data : null;
       if (!data || !data.syncedLyrics) {
@@ -1115,7 +1323,9 @@
         );
         if (searchResponse.aborted) return null;
         if (!searchResponse.ok) {
-          throw new Error("LRCLIB search returned HTTP " + searchResponse.status);
+          const error = new Error("LRCLIB search returned HTTP " + searchResponse.status);
+          error.status = searchResponse.status;
+          throw error;
         }
         // Prefer a synced match; fall back to a plain (unsynced) match so the
         // panel shows lyrics automatically instead of "No lyrics found"
@@ -1138,6 +1348,33 @@
        source that misses early cannot flash a message before the next one
        has had its turn. */
     const runners = {
+      community: async () => {
+        try {
+          const communityResult = await fetchCommunityLyrics(track, key, controller);
+          if (stale()) return true;
+          if (communityResult && communityResult.ttml) {
+            pendingSpicyCredits = {
+              attribution: communityResult.attribution || null,
+              songwriters: [],
+              uploadId: communityResult.uploadId || "",
+              test: communityResult.test === true,
+            };
+            if (loadTTML(communityResult.ttml, "external")) {
+              console.log("[AuroraLyrics] TTML rendered from Aurora Community.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            console.warn("[AuroraLyrics] Aurora Community returned TTML we could not parse; trying the next source.");
+          } else {
+            console.log("[AuroraLyrics] no Aurora Community TTML for this track; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          console.warn("[AuroraLyrics] Aurora Community lookup failed; trying the next source:", error);
+        }
+        return false;
+      },
+
       spicy: async () => {
         try {
           const spicyResult = await fetchSpicyLyrics(track, key, controller);
@@ -1183,22 +1420,26 @@
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
           console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
+          lrclibOutage = isLrclibOutage(error);
           return false;
         }
       },
     };
 
-    // Fixed source priority (AJ, 2026-10-19): the user-facing source reordering
-    // was removed. Spicy Lyrics wins when it has the track; LRCLIB is the
-    // fallback. lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25:
-    // both are unmoderated, so a wrong sync was more common than a useful one.
-    const order = ["spicy", "lrclib"];
+    // Fixed source priority: Aurora Community is curated per exact video id and
+    // wins when it has the track; Spicy is the broad fallback, then LRCLIB.
+    // lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25: both are
+    // unmoderated, so a wrong sync was more common than a useful one.
+    const order = ["community", "spicy", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;
       if (await runner()) return;
       if (stale()) return;
     }
-    showLyricsMessage(NO_LYRICS_MESSAGE);
+    // Every runner missed (or failed) for this track, so there is nothing for
+    // the panel to resume with after an ad. Recorded for the ad notice's retry.
+    adBreakNoteResult("none", "");
+    showLyricsMessage(lrclibOutage ? LRCLIB_OUTAGE_MESSAGE : NO_LYRICS_MESSAGE);
   }
 

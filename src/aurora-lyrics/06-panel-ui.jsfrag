@@ -599,6 +599,19 @@
     content.appendChild(scrollContainer);
     lyricsContainer.appendChild(content);
     panelEl.append(fileInput, lyricsContainer, jumpButton);
+    // Ad notice. A child of the panel (not the lyrics container) so it covers
+    // whichever renderer is mounted — Spicy lines or the AMLL host — without
+    // touching either one's DOM. Hidden until an ad actually starts.
+    adBreakOverlayEl = h("div", {
+      class: "ym-sl-ad hidden",
+      role: "status",
+      "aria-live": "polite",
+    });
+    adBreakTitleEl = h("div", { class: "ym-sl-ad-title", text: "An ad is playing" });
+    adBreakSubEl = h("div", { class: "ym-sl-ad-sub", text: "Lyrics will resume after this ad" });
+    adBreakSourceEl = h("div", { class: "ym-sl-ad-source", text: "" });
+    adBreakOverlayEl.append(adBreakTitleEl, adBreakSubEl, adBreakSourceEl);
+    panelEl.appendChild(adBreakOverlayEl);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");

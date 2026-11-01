@@ -352,9 +352,9 @@
     );
   }
 
-  // "<label> <avatar> <username>" — links to that person's Spicy Lyrics
-  // profile. Used for both the uploader and the maker; only community syncs
-  // (source === "spicy_lyrics") have either.
+  // "<label> <avatar> <username>" — links only when the source supplied a
+  // profile URL. Aurora Community currently supplies none, so its credits render
+  // as plain text until website profiles exist.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));

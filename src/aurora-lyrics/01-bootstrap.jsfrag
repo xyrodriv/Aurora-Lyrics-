@@ -7,9 +7,9 @@
  * or by Spikerko, and is not affiliated with either. Preserve the upstream
  * license and attribution when distributing adapted builds.
  *
- * Community syncs come from the Spicy Lyrics API and are credited ON SCREEN
- * wherever lyrics appear (see buildCreditsFooter / buildProviderRow), as the
- * API terms require; API responses are cached for at most 30 days.
+ * Community syncs come from the Spicy Lyrics API and Aurora Community and are
+ * credited ON SCREEN wherever lyrics appear (see buildCreditsFooter /
+ * buildProviderRow); API responses are cached for at most 30 days.
  *
  * YTMod-specific boundaries:
  *   - playback position and seeking come from window.YTMod.player,
@@ -33,6 +33,9 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  // Aurora Community — community TTML, keyed by the exact YouTube video id.
+  // The extension is read-only; uploads are handled by the Discord bot.
+  const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
   // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording

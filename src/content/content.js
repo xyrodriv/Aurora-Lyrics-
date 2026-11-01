@@ -480,6 +480,25 @@
       res();
     });
   });
+  // ---- Aurora Community TTML cache -----------------------------------------
+  // Kept separate from the Spicy cache: community rows are keyed by YouTube
+  // video id and must not be swept by the Spicy cache version. The page script
+  // owns the 30-day expiry; this side only stores the object.
+  const COMMUNITY_CACHE_KEY = "ytmod_aurora_community_cache";
+  const getCommunityCache = () => new Promise((res) => {
+    chrome.storage.local.get(COMMUNITY_CACHE_KEY, (r) => {
+      const saved = r[COMMUNITY_CACHE_KEY];
+      res(saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {});
+    });
+  });
+  const setCommunityCache = (cache) => new Promise((res) => {
+    chrome.storage.local.set({ [COMMUNITY_CACHE_KEY]: cache }, () => {
+      if (chrome.runtime.lastError) {
+        console.warn("[YTMod] Aurora Community cache write failed:", chrome.runtime.lastError.message);
+      }
+      res();
+    });
+  });
   const LRCLIB_ORIGIN = "https://lrclib.net";
   const LRCLIB_PATHS = new Set(["/api/get", "/api/search"]);
   const MUSICBRAINZ_ORIGIN = "https://musicbrainz.org";
@@ -3389,6 +3408,8 @@
           case "getSpicyCache": r = await getSpicyCache(); break;
           case "setSpicyCache": await setSpicyCache(args[0]); r = true; break;
           case "clearSpicyCache": await clearSpicyCache(); r = true; break;
+          case "getCommunityCache": r = await getCommunityCache(); break;
+          case "setCommunityCache": await setCommunityCache(args[0]); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);

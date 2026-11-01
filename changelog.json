@@ -1,6 +1,17 @@
 {
   "releases": [
     {
+      "version": "1.0.4",
+      "date": "2026-10-31",
+      "title": "A note from Aurora, in the top bar.",
+      "features": [
+        "Occasional announcements from the developer now appear beside the Aurora button in the YouTube Music top bar. Click the note for the full message, or dismiss it.",
+        "The announcement feed is read-only, with no account or notification permission needed.",
+        "Approved community lyrics now load alongside Spicy Lyrics and LRCLIB, with the maker and uploader credited in the panel."
+      ],
+      "fixes": []
+    },
+    {
       "version": "1.0.3",
       "date": "2026-10-30",
       "title": "A new home for your add-ons.",

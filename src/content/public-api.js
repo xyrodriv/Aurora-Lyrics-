@@ -958,6 +958,8 @@
     getSpicyCache: () => cmd("getSpicyCache"),
     setSpicyCache: (cache) => cmd("setSpicyCache", [cache]),
     clearSpicyCache: () => cmd("clearSpicyCache"),
+    getCommunityCache: () => cmd("getCommunityCache"),
+    setCommunityCache: (cache) => cmd("setCommunityCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),

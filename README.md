@@ -10,9 +10,12 @@ add-ons.
 
 - **Synced lyrics** — word-level (syllable), line-level, and plain/static
   rendering driven by live playback position.
-- **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API** and
-  **LRCLIB**; TTML files can be dropped or picked in, re-exported with your
-  sync, and saved per track so they survive a reload.
+- **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API**,
+  **LRCLIB**, and the **Aurora Community API**; the Discord bot accepts community
+  TTML uploads, with staff review before Contributor submissions go live. The
+  test seeds remain until real uploads replace them. TTML files can be dropped
+  or picked in, re-exported with your sync, and saved per track so they survive
+  a reload.
 - **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
   the Spicy Lyrics API is keyed by one. Aurora resolves it through
   **ListenBrainz** (free, keyless, no backend) using a variant ladder over
@@ -85,6 +88,7 @@ Aurora Lyrics/
     │   └── NN-*.jsfrag        #   01 … 23, concatenated in the order the build lists
     ├── content/               # Isolated-world injector + marketplace UI
     │   ├── content.js         # Content script: registry, marketplace, settings, panel
+    │   ├── announcements.js   # Top-bar announcement pill and detail card
     │   ├── public-api.js      # Page-world window.YTMod bridge (player, bus, lyrics)
     │   └── styles.css         # Injected panel and marketplace styles
     ├── background/

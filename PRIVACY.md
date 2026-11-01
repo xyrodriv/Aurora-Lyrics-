@@ -1,18 +1,34 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 27 October 2026
+**Last updated:** 1 November 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
 
-The short version: **there is no account, no analytics, and no Aurora Lyrics
-server.** Nothing about you is sent to us, because there is no "us" to send it
-to.
+The short version: **there is no account and no analytics.** Aurora Lyrics
+reads a small public announcement feed, looks up community lyrics by YouTube
+video ID, and sends one view report when a community sync starts. Neither
+service receives an account or a persistent identifier.
 
 ## What we collect
 
-**Nothing.** Aurora Lyrics has no backend, no telemetry, no crash reporting, and
-no user accounts. We do not collect, store, or transmit personal information.
+**Nothing personal.** Aurora Lyrics has no telemetry, no crash reporting, and no
+user accounts. The announcement relay stores only the announcement text you see
+in the app; it does not receive anything about you. Community lyric lookups send
+the current YouTube video ID and nothing else about you. When a community-synced
+track starts playing, the extension sends one report containing that upload's
+id so its public profile can count the view. There is no account, install id, or
+other track metadata in that report.
+
+## Community uploads
+
+Using `/upload-ttml` in the Aurora Lyrics Discord server is optional. The bot
+sends your Discord user ID, display name, and avatar URL to the Aurora Community
+API along with the TTML file and track link. Approved uploads display your
+display name and avatar publicly in the lyrics panel, and may appear on a public
+maker profile with the aggregate views for each synced track. Staff can remove
+an upload; ask in Discord if you want one taken down. Do not upload lyrics or a
+sync you do not have permission to share.
 
 ## What is stored on your device
 
@@ -20,6 +36,7 @@ Aurora Lyrics uses Chrome's `storage` permission to save the following **locally
 on your machine**:
 
 - Your add-on settings and preferences.
+- Which announcements you have seen or dismissed.
 - A cache of fetched lyrics, so tracks you have already played do not need to be
   looked up again.
 - Any TTML lyric files you import, saved per track.
@@ -38,31 +55,52 @@ history. The requests contain only what is needed to identify the song. They do
 come from your browser, so the service answering one sees your IP address, the
 same way it would for any page you opened.
 
+Aurora Lyrics also reads a small public announcement feed. That is a plain GET
+for a JSON file: no track metadata, no account, and no identifier. The feed
+server sees your IP address, like any other request.
+
 The services contacted are:
 
 | Service | Purpose |
 |---|---|
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
+| `site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page` | Aurora Community TTML, profiles, uploads and view counts |
+| `cdn.discordapp.com` | Community uploader avatars |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
 | `itunes.apple.com` | Artwork and metadata search |
 | `api.deezer.com` | Artwork and metadata search |
 | `musicbrainz.org` | Release lookup, for matching a track |
 | `open.spotify.com` | Artwork and artist lookup (oEmbed) |
 | `raw.githubusercontent.com` | Update check (release notes only) |
+| `site-ecb11ddf30644a24b5d9f12c57480dbd.freebuff.page` | Announcements (read-only) |
 | `fonts.spikerko.org` | Lyrics typeface stylesheet |
 
-Each of these is an independent third party with its own privacy policy. Aurora
-Lyrics does not control them and is not responsible for their practices.
+The lyrics and metadata services are independent third parties with their own
+privacy policies. Aurora Lyrics does not control them and is not responsible
+for their practices. The announcement relay is operated for Aurora Lyrics and
+stores only the announcement text; it receives nothing about you. The Aurora
+Community API is also operated for Aurora Lyrics; it serves community syncs
+keyed by YouTube video ID, builds public maker profiles, and records aggregate
+view counts. The view report contains the upload id and no account, install
+identifier, or other track metadata; like any request it carries an IP address.
+The count is an aggregate view total, not a unique-listener or profile-visit
+metric. Community credits may load an uploader's Discord avatar from
+`cdn.discordapp.com`; that image request goes to Discord and carries your IP
+address, like any other image request.
 
 The update check requests a release-notes file and nothing else; it carries no
-track metadata. The typeface stylesheet is requested only when the bundled copy
+track metadata. The announcement feed is also read-only and carries nothing
+about you. The typeface stylesheet is requested only when the bundled copy
 cannot be resolved, and is the same face the lyrics are drawn in.
 
 ## This website
 
 The site you are reading is a static page. It sets no cookies, runs no
-analytics, and serves its fonts and images from its own origin.
+analytics, and serves its fonts and images from its own origin. A community
+profile page fetches the public maker profile from the Aurora Community API;
+that request carries no account or persistent identifier. Profile avatars load
+from `cdn.discordapp.com`, which carries your IP address like any image request.
 
 One panel on the home page lists who is online in the community Discord. When
 that panel comes close to the viewport, the page asks `discord.com` for the
@@ -83,8 +121,8 @@ request is never made.
 
 ## Permissions, and why each is needed
 
-- **`storage`**: saves your settings, lyric cache, and imported TTML locally on
-  your device.
+- **`storage`**: saves your settings, lyric cache, imported TTML, and which
+  announcements you have seen or dismissed locally on your device.
 - **Host permissions**: allow the extension to request lyrics and track metadata
   from the services listed above, and to run on YouTube Music.
 
