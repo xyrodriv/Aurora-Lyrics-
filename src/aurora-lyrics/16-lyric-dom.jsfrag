@@ -258,6 +258,15 @@
     return false;
   }
 
+  // A self-upload already names one person. Showing "Made by" under "Uploaded
+  // by" reads as two different credits, so keep only the uploader row when the
+  // two identities match. IDs are authoritative; names cover older cached rows.
+  function isSameCreditPerson(a, b) {
+    if (!a || !b) return false;
+    if (a.id && b.id) return a.id === b.id;
+    return !!a.username && a.username === b.username;
+  }
+
   function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
     // A track that ends on a duet line leaves the reader on the right-hand side.
@@ -277,7 +286,9 @@
     // people who made the sync (community syncs only).
     if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
     if (currentUploader) footer.appendChild(buildPersonRow("Uploaded by", currentUploader));
-    if (currentMaker) footer.appendChild(buildPersonRow("Made by", currentMaker));
+    if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
+      footer.appendChild(buildPersonRow("Made by", currentMaker));
+    }
     return footer;
   }
 

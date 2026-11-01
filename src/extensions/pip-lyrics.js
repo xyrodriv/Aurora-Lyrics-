@@ -2017,6 +2017,12 @@
     return row;
   }
 
+  function isSameCreditPerson(a, b) {
+    if (!a || !b) return false;
+    if (a.id && b.id) return a.id === b.id;
+    return !!a.username && a.username === b.username;
+  }
+
   function buildCreditsFooter() {
     if (!songwriters.length && !(attribution && (attribution.provider || attribution.uploader || attribution.maker))) return null;
     const footer = makeEl(pipDoc, "div", "ym-sl-credits");
@@ -2031,7 +2037,9 @@
     }
     if (attribution && attribution.provider) footer.appendChild(buildProviderRow(attribution.provider));
     if (attribution && attribution.uploader) footer.appendChild(buildPersonRow("Uploaded by", attribution.uploader));
-    if (attribution && attribution.maker) footer.appendChild(buildPersonRow("Made by", attribution.maker));
+    if (attribution && attribution.maker && !isSameCreditPerson(attribution.maker, attribution.uploader)) {
+      footer.appendChild(buildPersonRow("Made by", attribution.maker));
+    }
     return footer;
   }
 
