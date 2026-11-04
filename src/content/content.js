@@ -172,7 +172,6 @@
       floating: ui.floating,
       floatX: ui.floatX,
       floatY: ui.floatY,
-      dev: ui.dev,
     }, patch),
   });
   // Performance mode (AJ, 2026-10-26). GLOBAL, not per add-on: one governor over
@@ -874,7 +873,7 @@
       category: "Themes",
       stars: 5,
       tags: ["theme", "apple", "player bar", "glass", "type", "lyrics column"],
-      description: "An Apple Music–style look, gathered on one card: a dark frosted player bar with the song info on the left and the transport centred, the wider lyrics column with its quiet tab strip, the Spicy Lyrics typeface and glass chrome. Nothing to install — every switch changes YouTube Music the moment you touch it.",
+      description: "A look inspired by Apple Music, gathered on one card: a dark frosted player bar with the song info on the left and the transport centred, the wider lyrics column with its quiet tab strip, the Spicy Lyrics typeface and glass chrome. Nothing to install — every switch changes YouTube Music the moment you touch it.",
       version: "1.0.0",
       lastUpdated: "2026-10-23",
       settings: [],
@@ -1314,16 +1313,10 @@
     return Number(value).toFixed(2);
   }
 
-  /* Which settings this user is allowed to see. A setting carrying `dev: true` is
-     hidden until the 6-tap gesture turns developer mode on (see onTitleTap).
-
-     Headers are structural, so they are filtered against what SURVIVES rather than
-     carrying a flag of their own: a heading whose whole block is hidden would
-     otherwise be left stranded above nothing. That is exactly the case for
-     "TTML settings" with developer mode off. */
+  /* Which settings this user is allowed to see. A setting carrying `dev: true`
+     is a tuning surface with no user-facing meaning, so it is never shown. */
   function visibleSettings(ext) {
     const all = (ext && ext.settings) || [];
-    if (ui.dev) return all;
     const out = [];
     for (let i = 0; i < all.length; i++) {
       const setting = all[i];
@@ -2189,13 +2182,24 @@
     // idempotent, and clearing a stale inline card height on show means a
     // previous collapse can never clip the box.
     let otherVisible = false;
+    // Held by reference, never by inline style: a finished forwards-fill animation
+    // outranks `card.style.height`, so clearing the style does not end it.
+    let cardHAnim = null;
     const syncOther = () => {
       const otherRow = rows.find((r) => r.getAttribute("data-value") === "Other");
       const want = !!(otherRow && otherRow.classList.contains("selected"));
       if (want === otherVisible) return;
       otherVisible = want;
       if (want) {
+        if (cardHAnim) { try { cardHAnim.cancel(); } catch (e) {} cardHAnim = null; }
         card.style.height = ""; // a pinned height from a past collapse would clip it
+        card.style.overflow = ""; // an interrupted shrink may still be clipping
+        // The collapse ended with fill:"forwards", and a finished forwards
+        // animation keeps applying its last frame — opacity 0, height 0 — even
+        // after `hidden` is gone. That is why picking Other a second time left an
+        // empty gap where the textarea used to be.
+        if (otherWrap.getAnimations) otherWrap.getAnimations().forEach((a) => a.cancel());
+        otherWrap.style.height = "";
         otherWrap.classList.remove("hidden");
         if (!reducedMotion() && otherWrap.animate) {
           otherWrap.animate(
@@ -2208,6 +2212,10 @@
       }
       // Smooth OUT: collapse the wrapper AND animate the card's height down in
       // step, so the surface shrinks together instead of the border snapping.
+      if (cardHAnim) { try { cardHAnim.cancel(); } catch (e) {} cardHAnim = null; }
+      if (otherWrap.getAnimations) otherWrap.getAnimations().forEach((a) => a.cancel());
+      card.style.height = "";
+      otherWrap.style.height = "";
       const cardH = card.offsetHeight;
       const wrapH = otherWrap.offsetHeight;
       if (!reducedMotion() && otherWrap.animate) {
@@ -2217,13 +2225,28 @@
         )).onfinish = () => {
           otherWrap.classList.add("hidden");
           otherWrap.style.height = "";
+          // The wrapper is gone, so the card's natural height is the pinned one.
+          // Clearing here (not from the card animation's own finish) keeps the two
+          // from disagreeing for a frame.
+          card.style.height = "";
+          card.style.overflow = "";
+          cardHAnim = null;
         };
         if (card.animate && wrapH > 0 && cardH > wrapH) {
-          card.style.height = cardH + "px";
-          track(card.animate(
-            [{ height: cardH + "px" }, { height: (cardH - wrapH) + "px" }],
-            { duration: 260, easing: "cubic-bezier(.22,1,.36,1)", fill: "forwards" }
-          )).onfinish = () => { card.style.height = ""; };
+          // Hiding the wrapper drops its height AND the pick column's gap.
+          const gap = parseFloat(getComputedStyle(pick).rowGap) || 0;
+          const targetH = cardH - wrapH - gap;
+          // Pin the END height and animate into it with no fill: WAAPI outranks the
+          // inline style only while it plays, so finishing leaves the pin in charge.
+          // A pin that trails the content for a frame raises the card's scrollbar,
+          // which steals width and shifts the whole form left as it appears. Clip
+          // for the 260ms shrink; the real overflow comes back with the pin.
+          card.style.height = targetH + "px";
+          card.style.overflow = "hidden";
+          cardHAnim = track(card.animate(
+            [{ height: cardH + "px" }, { height: targetH + "px" }],
+            { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" }
+          ));
         }
       } else {
         otherWrap.classList.add("hidden");
@@ -2332,6 +2355,7 @@
       done.style.opacity = ""; done.style.transform = ""; done.style.filter = "";
       blocked.style.opacity = ""; blocked.style.transform = ""; blocked.style.filter = "";
       card.style.height = ""; card.style.opacity = ""; card.style.transform = ""; card.style.filter = "";
+      card.style.overflow = ""; // a resize cut short by a reopen may still be clipping
     };
     const markReported = () => {
       reportSendCount++;
@@ -2378,13 +2402,17 @@
         thanks.classList.remove("hidden");
         markReported();
         const toH = card.offsetHeight;
-        // Smoothly shrink the card to the smaller thanks layout (AJ, 2026-10-19).
+        // Smoothly resize the card to the thanks layout (AJ, 2026-10-19). The end
+        // height is pinned and the animation runs without `fill`: a forwards frame
+        // keeps outranking the inline style, and a pin that trails the content
+        // raises the card's scrollbar for a frame, shifting everything sideways.
         if (card.animate && toH > 0 && fromH !== toH) {
-          card.style.height = fromH + "px";
+          card.style.height = toH + "px";
+          card.style.overflow = "hidden";
           const shrink = track(card.animate(
             [{ height: fromH + "px" }, { height: toH + "px" }],
-            { duration: 380, easing: "cubic-bezier(.34,1.2,.5,1)", fill: "forwards" }));
-          shrink.onfinish = () => { card.style.height = ""; };
+            { duration: 380, easing: "cubic-bezier(.34,1.2,.5,1)" }));
+          shrink.onfinish = () => { card.style.height = ""; card.style.overflow = ""; };
         }
         track(thanks.animate(
           [{ opacity: 0, transform: "translateY(12px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }],
@@ -2748,17 +2776,41 @@
       h("div", { class: "ym-detail-settings-subtitle", text: "Changes apply immediately and are saved automatically." })
     ));
     if (info) section.appendChild(infoPanel);
+    // Settings are grouped into cards, one per heading in the schema, instead of
+    // one long flat list: the flat list read as a single undifferentiated column
+    // whatever the headings said. Rows that arrive before any heading get an
+    // untitled card, created only if such a row actually exists.
+    const groups = h("div", { class: "ym-mk-secs" });
+    section.appendChild(groups);
     const controls = new Map();
+    let groupRows = null;
+    const ensureGroup = () => {
+      if (groupRows) return groupRows;
+      const box = h("div", { class: "ym-mk-sec" });
+      groupRows = h("div", { class: "ym-mk-sec-rows" });
+      box.appendChild(groupRows);
+      groups.appendChild(box);
+      return groupRows;
+    };
+    const startGroup = (label) => {
+      const box = h("div", { class: "ym-mk-sec" });
+      box.appendChild(h("div", { class: "ym-mk-sec-title", text: label }));
+      groupRows = h("div", { class: "ym-mk-sec-rows" });
+      box.appendChild(groupRows);
+      groups.appendChild(box);
+      return groupRows;
+    };
     for (const setting of list) {
       if (setting.type === "header") {
         // Visual-only section heading. No key, no input, no entry in `controls`
         // (so the Reset button ignores it) and no entry in `values` (so
         // postExtensionSettings does not post a junk key to the extension).
-        section.appendChild(h("div", { class: "ym-detail-setting-section", text: setting.label }));
+        // It opens a new card for the rows that follow it.
+        startGroup(setting.label);
         continue;
       }
       if (setting.type === "file") {
-        section.appendChild(buildFileControl(ext, setting, (patch) => {
+        ensureGroup().appendChild(buildFileControl(ext, setting, (patch) => {
           values = Object.assign({}, values, patch);
           postExtensionSettings(ext.id, patch);
           saveExtensionSettings(ext.id, values);
@@ -2771,7 +2823,7 @@
         // current track each time. We persist the choice now (so a reload keeps it)
         // and stash it in pendingOrderPost; finishCloseDetail() flushes it once,
         // after the panel is closed (AJ, 2026-10-19).
-        section.appendChild(buildOrderControl(setting, () => values, (next) => {
+        ensureGroup().appendChild(buildOrderControl(setting, () => values, (next) => {
           values = Object.assign({}, values, { [setting.key]: next });
           saveExtensionSettings(ext.id, values);
           pendingOrderPost = { id: ext.id, values };
@@ -2856,7 +2908,7 @@
       };
       syncDisabled();
       controls.set(setting.key, { input, valueEl, setting, syncRangeFill, syncDisabled, syncVisible });
-      section.appendChild(row);
+      ensureGroup().appendChild(row);
     }
 
     let fontCtl = null; // assigned below once the font block is built
@@ -2942,53 +2994,11 @@
     floating: true,
     floatX: null,
     floatY: null,
-    dev: false,
   };
 
-  /* ---- secret developer mode -----------------------------------------------
-     Tap the "Aurora Lyrics" title in the marketplace header 6 times in a row to
-     reveal the per-add-on settings; 6 more to hide them again.
-
-     Hidden by DEFAULT rather than moved to a separate page: those sliders are a
-     tuning surface, and a normal user has no reason to meet 14 of them on the
-     Synced Lyrics detail page. Nothing on screen hints that the title is
-     interactive — that is the whole point, so do NOT add an affordance, a title
-     attribute, or an aria hint.
-
-     Persisted in the same `ytmod_ui` store as the view preferences, so it
-     survives a reload without needing its own key. */
-  const DEV_TAP_COUNT = 6;
-  // "6 times in a row" needs a run-breaker, or any 6 taps across a whole session
-  // would eventually trip it. Generous for a slow tapper, short enough that two
-  // stray clicks a minute apart do not accumulate.
-  const DEV_TAP_WINDOW_MS = 900;
-  let devTaps = 0;
-  let devTapTimer = 0;
   let detailExt = null; // the ext currently rendered by renderDetail, for re-render
 
-  function setDevMode(on) {
-    ui.dev = !!on;
-    setUI({ dev: ui.dev });
-    toast(ui.dev ? "Developer mode on" : "Developer mode off");
-    // Settings only exist inside a detail view, so re-render whatever is on
-    // screen to apply the change now instead of on the next navigation.
-    if (mkDetail && mkSel !== "home") renderSection();
-  }
 
-  function onTitleTap() {
-    if (devTapTimer) clearTimeout(devTapTimer);
-    devTaps += 1;
-    if (devTaps >= DEV_TAP_COUNT) {
-      devTaps = 0;
-      devTapTimer = 0;
-      setDevMode(!ui.dev);
-      return;
-    }
-    devTapTimer = window.setTimeout(() => {
-      devTaps = 0;
-      devTapTimer = 0;
-    }, DEV_TAP_WINDOW_MS);
-  }
 
   let overlay;
   let floatBtn = null;
@@ -3078,77 +3088,88 @@
     floatBtn.classList.toggle("active", ui.floating);
   }
 
+  // The overlay is a full-screen, transparent centring grid; the CARD inside it
+  // (the shell) is what moves. Moving the overlay had no visible effect at all,
+  // which is why floating mode could not be dragged.
+  function mkSurface() {
+    return (overlay && overlay.querySelector(".ym-mk-shell")) || overlay;
+  }
+
   function applyMarketplaceMode(persist) {
     if (!overlay) return;
     overlay.classList.toggle("ym-floating", ui.floating);
-    if (ui.floating) {
+    const surface = mkSurface();
+    if (ui.floating && surface) {
       if (Number.isFinite(ui.floatX) && Number.isFinite(ui.floatY)) {
         const place = () => {
           if (!overlay || !ui.floating) return;
-          overlay.style.left = ui.floatX + "px";
-          overlay.style.top = ui.floatY + "px";
-          overlay.style.transform = "none";
-          const rect = overlay.getBoundingClientRect();
-          overlay.style.left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left)) + "px";
-          overlay.style.top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top)) + "px";
+          // fixed, so the saved coordinates are viewport coordinates
+          surface.style.position = "fixed";
+          surface.style.margin = "0";
+          surface.style.left = ui.floatX + "px";
+          surface.style.top = ui.floatY + "px";
+          const rect = surface.getBoundingClientRect();
+          surface.style.left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left)) + "px";
+          surface.style.top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top)) + "px";
         };
-        if (persist) {
-          overlay.style.removeProperty("left");
-          overlay.style.removeProperty("top");
-          overlay.style.removeProperty("transform");
-          requestAnimationFrame(place);
-        } else {
-          place();
-        }
+        if (persist) requestAnimationFrame(place);
+        else place();
       }
-    } else {
+    } else if (surface) {
       overlay.classList.remove("ym-dragging");
-      overlay.style.removeProperty("left");
-      overlay.style.removeProperty("top");
-      overlay.style.removeProperty("transform");
+      surface.style.removeProperty("position");
+      surface.style.removeProperty("left");
+      surface.style.removeProperty("top");
+      surface.style.removeProperty("margin");
     }
     syncFloatButton();
     if (persist) setUI({ floating: ui.floating, floatX: ui.floatX, floatY: ui.floatY });
   }
 
-  function enableMarketplaceDrag(header) {
+  function enableMarketplaceDrag(handle) {
     let drag = null;
-    header.addEventListener("pointerdown", (event) => {
+    handle.addEventListener("pointerdown", (event) => {
       if (!ui.floating || event.button !== 0) return;
+      // A button, field or link keeps its own press; everything else on the bar
+      // is a grip.
       if (event.target.closest("button, input, select, textarea, a")) return;
-      const rect = overlay.getBoundingClientRect();
-      overlay.style.left = rect.left + "px";
-      overlay.style.top = rect.top + "px";
-      overlay.style.transform = "none";
+      const surface = mkSurface();
+      if (!surface) return;
+      const rect = surface.getBoundingClientRect();
+      surface.style.position = "fixed";
+      surface.style.margin = "0";
+      surface.style.left = rect.left + "px";
+      surface.style.top = rect.top + "px";
       drag = {
         pointerId: event.pointerId,
         offsetX: event.clientX - rect.left,
         offsetY: event.clientY - rect.top,
+        surface: surface,
       };
-      header.setPointerCapture(event.pointerId);
+      handle.setPointerCapture(event.pointerId);
       overlay.classList.add("ym-dragging");
       event.preventDefault();
     });
-    header.addEventListener("pointermove", (event) => {
+    handle.addEventListener("pointermove", (event) => {
       if (!drag || event.pointerId !== drag.pointerId) return;
-      const rect = overlay.getBoundingClientRect();
+      const rect = drag.surface.getBoundingClientRect();
       const x = Math.max(8, Math.min(window.innerWidth - rect.width - 8, event.clientX - drag.offsetX));
       const y = Math.max(8, Math.min(window.innerHeight - rect.height - 8, event.clientY - drag.offsetY));
-      overlay.style.left = x + "px";
-      overlay.style.top = y + "px";
+      drag.surface.style.left = x + "px";
+      drag.surface.style.top = y + "px";
     });
     const finishDrag = (event) => {
       if (!drag || event.pointerId !== drag.pointerId) return;
-      try { header.releasePointerCapture(event.pointerId); } catch (_) {}
-      const rect = overlay.getBoundingClientRect();
+      try { handle.releasePointerCapture(event.pointerId); } catch (_) {}
+      const rect = drag.surface.getBoundingClientRect();
       ui.floatX = Math.round(rect.left);
       ui.floatY = Math.round(rect.top);
       overlay.classList.remove("ym-dragging");
       setUI({ floatX: ui.floatX, floatY: ui.floatY });
       drag = null;
     };
-    header.addEventListener("pointerup", finishDrag);
-    header.addEventListener("pointercancel", finishDrag);
+    handle.addEventListener("pointerup", finishDrag);
+    handle.addEventListener("pointercancel", finishDrag);
   }
 
   async function install(id) {
@@ -3442,7 +3463,10 @@
      uninstall, settings engine, floating drag and dev gesture are unchanged;
      this block only owns how the catalog is presented. */
   let mkRows = null, mkInd = null, mkDetail = null, mkSegPill = null;
-  let mkSel = "home", mkFilter = "All";
+  // The rail opens on Extensions, like the panel design: three tabs, no "All",
+  // no Home row — Discord and YouTube moved into the header.
+  let mkRegCache = null;
+  let mkSel = "", mkFilter = "Extensions";
   let mkAutoCollapsed = false;
   let mkNarrowState = null;
 
@@ -3576,11 +3600,34 @@
   // Extensions), so a naive "category changed" check emits the same heading
   // twice. Sort by the rail order first — Array#sort is stable, so the catalog
   // order inside each group is preserved.
+  // Live value of the search box. Read from the DOM so the filter needs no state
+  // of its own and a closed panel is never holding a stale query.
+  function mkSearchQuery() {
+    const el = overlay && overlay.querySelector(".ym-mk-search");
+    return el ? String(el.value || "").trim().toLowerCase() : "";
+  }
+
+  const MK_YT_PATH =
+    "M23 12s0-3.8-.48-5.6a2.9 2.9 0 0 0-2.05-2.06C18.7 3.86 12 3.86 12 3.86s-6.7 0-8.47.48A2.9 2.9 0 0 0 1.48 6.4C1 8.2 1 12 1 12s0 3.8.48 5.6a2.9 2.9 0 0 0 2.05 2.06c1.77.48 8.47.48 8.47.48s6.7 0 8.47-.48a2.9 2.9 0 0 0 2.05-2.06C23 15.8 23 12 23 12zM9.9 15.4V8.6l5.9 3.4-5.9 3.4z";
+
   function mkFilteredList() {
+    const q = mkSearchQuery();
     return AVAILABLE
       .filter((e) => mkFilter === "All" || e.category === mkFilter)
+      .filter((e) => !q || ((e.name || "") + " " + (e.description || "") + " " + (e.category || "")).toLowerCase().indexOf(q) !== -1)
       .slice()
       .sort((a, b) => (MK_CAT_ORDER[a.category] ?? 9) - (MK_CAT_ORDER[b.category] ?? 9));
+  }
+
+  // What the row says at its right edge: On / Off once installed, Install before.
+  function mkRowState(id, installed) {
+    const entry = mkRegCache && mkRegCache[id];
+    const on = !!(installed && entry && entry.enabled);
+    const avail = findAvail(id);
+    // The design labels the three states plainly: built in, not installed, on
+    // or off. "Installed" was the old panel's word for two different things.
+    if (avail && avail.builtin) return { on: on, text: "Built in" };
+    return { on: on, text: installed ? (on ? "On" : "Off") : "Install" };
   }
 
   function mkLogoUrl() {
@@ -3638,29 +3685,22 @@
     return svg;
   }
 
-  function mkCard(id, label, monoText, installed, isHome) {
+  // A row of the ledger: name, one line of description, state at the right. No
+  // glyph tile — the red marker down the left edge is the only colour here.
+  function mkCard(id, label, monoText, installed, isHome, ext) {
     const card = h("div", {
       class: "ym-mk-card" + (installed ? " installed" : "") + (String(mkSel) === String(id) ? " sel" : ""),
       "data-id": id,
       role: "button",
       tabindex: "0",
     });
-    const mono = h("div", { class: "ym-mk-mono" });
-    const glyph = !isHome && MK_GLYPH[id];
-    if (isHome) mono.appendChild(svgIcon(MK_HOME));
-    else if (glyph) {
-      mono.appendChild(svgIcon(glyph.d));
-      mono.style.color = glyph.c;
-      mono.style.background = mkTint(glyph.c, "1f");
-      mono.style.borderColor = mkTint(glyph.c, "3d");
-    } else mono.textContent = monoText;
-    card.appendChild(mono);
-    card.appendChild(h("div", { class: "ym-mk-name", text: label }));
-    if (installed) {
-      const chk = svgIcon(MK_CHECK);
-      chk.classList.add("ym-mk-check");
-      card.appendChild(chk);
-    }
+    const line = ext ? String(ext.description || "").split("\n")[0].split(/\. /)[0] : "";
+    card.appendChild(h("div", { class: "ym-mk-main" },
+      h("div", { class: "ym-mk-name", text: label }),
+      line ? h("div", { class: "ym-mk-line", text: line }) : null
+    ));
+    const entry = mkRowState(id, installed);
+    card.appendChild(h("div", { class: "ym-mk-state" + (entry.on ? " on" : ""), text: entry.text }));
     // Low performance mode greys the add-ons it will not run and says why on
     // click, instead of opening a page whose Install button cannot work. Low also
     // uninstalls them (see applyPerformanceRestrictions), so the row reads as an
@@ -3705,40 +3745,77 @@
 
   function mkBuildRows(list, reg) {
     if (!mkRows || !mkInd) return;
+    mkRegCache = reg;
     mkRows.replaceChildren(mkInd);
-    // Home leads the rail: it is the landing view, so the external link and the
-    // site's own settings sit under it rather than above it (AJ, 2026-10-22).
-    mkRows.appendChild(mkCard("home", "Home", "", false, true));
-    mkRows.appendChild(mkDiscordCard());
-    // Its own page rather than an add-on card: it is YouTube's settings, not
-    // Aurora's, so it must not appear as something to install (AJ, 2026-10-22).
-    // It wears the Discord row's "this is not an add-on" treatment in YouTube
-    // red, so the two rail entries above the add-on list read as one pair
-    // (AJ, 2026-10-22).
-    const ytCard = mkCard("youtube", "YouTube Modifications", "YT", false, false);
-    ytCard.classList.add("ym-mk-card-yt");
-    mkRows.appendChild(ytCard);
-    let last = null;
     for (const ext of list) {
-      if (ext.category !== last) {
-        last = ext.category;
-        mkRows.appendChild(h("div", { class: "ym-mk-cat", text: ext.category || "Add-ons" }));
-      }
-      const card = mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false);
-      mkRows.appendChild(card);
+      mkRows.appendChild(mkCard(ext.id, ext.name, (ext.name || "?").charAt(0).toUpperCase(), !!reg[ext.id], false, ext));
     }
-    mkPositionInd(true);
+    if (!list.length) {
+      mkRows.appendChild(h("p", { class: "ym-mk-rows-empty", text: "Nothing in " + mkFilter + " matches that search. Clear it to see the rest." }));
+    }
+    // A tab change has already started its fade; respect it instead of snapping
+    // the line back on for one frame.
+    mkPositionInd(true, mkIndHidden);
+    syncMkEdges();
   }
 
-  function mkPositionInd(instant) {
+  // The marker SLIDES between rows and only fades when the list itself is
+  // rebuilt (a tab change). The transition is always written inline: an inline
+  // transition replaces the sheet's whole list, so leaving `opacity …` behind
+  // silently removed the transform transition and the line jumped.
+  // True while a tab change owns the marker. The rows are rebuilt mid-move, and
+  // the rebuild used to snap the line back on for a frame before hiding it again.
+  let mkIndHidden = false;
+
+  const MK_IND_MOVE =
+    "transform .34s cubic-bezier(.25,.8,.35,1), height .34s cubic-bezier(.25,.8,.35,1)";
+
+  function mkMarkerFade(ms) {
+    if (!mkInd) return;
+    mkInd.style.transition = "opacity " + (ms || 120) + "ms linear";
+    mkInd.style.opacity = "0";
+  }
+
+  function mkMarkerReturn(ms) {
+    if (!mkInd) return;
+    const show = () => {
+      mkIndHidden = false;
+      mkInd.style.transition = MK_IND_MOVE + ", opacity " + (ms || 160) + "ms linear";
+      mkInd.style.opacity = "1";
+    };
+    // rAF drives the fade, and a timer backs it up: requestAnimationFrame never
+    // fires while the tab is not painting, which left the line at opacity 0 for
+    // good after a tab change in a background window.
+    requestAnimationFrame(show);
+    window.setTimeout(show, 80);
+  }
+
+  // The list fades at an edge only when there is more of it past that edge.
+  // Fading both edges unconditionally dimmed the first row on a list that was
+  // not scrolled at all — the row was fully visible, just washed out at the top.
+  function syncMkEdges() {
+    if (!mkRows) return;
+    const max = mkRows.scrollHeight - mkRows.clientHeight;
+    mkRows.classList.toggle("mk-edge-top", mkRows.scrollTop > 2);
+    mkRows.classList.toggle("mk-edge-bot", max > 2 && mkRows.scrollTop < max - 2);
+  }
+
+  function mkPositionInd(instant, keepHidden) {
     if (!mkInd || !mkRows) return;
     const el = mkRows.querySelector(".ym-mk-card.sel");
     if (!el) { mkInd.style.opacity = "0"; return; }
-    mkInd.style.opacity = "1";
-    if (instant) mkInd.style.transition = "none";
+    if (!keepHidden && !mkIndHidden) mkInd.style.opacity = "1";
+    // While a tab change owns the line its transition is left ALONE: writing
+    // `none` here (followed by the rAF that clears it) ended the fade-out one
+    // frame after it began, which is why the line only ever faded IN.
+    if (instant) {
+      if (!mkIndHidden) mkInd.style.transition = "none";
+    } else {
+      mkInd.style.transition = MK_IND_MOVE + ", opacity .18s linear";
+    }
     mkInd.style.height = el.offsetHeight + "px";
     mkInd.style.transform = "translateY(" + el.offsetTop + "px)";
-    if (instant) requestAnimationFrame(() => { mkInd.style.transition = ""; });
+    if (instant && !mkIndHidden) requestAnimationFrame(() => { mkInd.style.transition = ""; });
   }
 
   function mkPositionSegPill(instant) {
@@ -3751,50 +3828,214 @@
     if (instant) requestAnimationFrame(() => { mkSegPill.style.transition = ""; });
   }
 
-  // Filter switch: the rail cascades out in the direction of travel, then the
-  // new list cascades in from the opposite side.
+  /* The design moves each pane as ONE reel — the outgoing content leaves in the
+     direction of travel and the incoming content arrives from the opposite edge.
+     No per-row cascade, no cross-fade. Each half is 190ms on the design's curve,
+     so a swap lasts the mockup's 380ms in total. */
+  let mkDir = 1;
+  let mkReeling = false;
+  // A switch in flight. Each pane keeps its own, because the list and the detail
+  // travel together on a tab change and must not settle each other.
+  let mkDetailJob = null;
+  let mkDetailSeq = 0;
+  let mkListJob = null;
+  let mkListSeq = 0;
+  // Settings and YouTube modifications open as a sheet OVER the whole card, the
+  // way the design draws them, instead of replacing the detail column.
+  let mkSheet = null;
+  let mkPrevSel = "";
+
+  function mkShift(el, axis, from, to, ms) {
+    if (!el || !el.animate) return Promise.resolve();
+    const t = (v) => "translate" + (axis === "x" ? "X" : "Y") + "(" + v + "px)";
+    const a = el.animate([{ transform: t(from) }, { transform: t(to) }],
+      { duration: ms, easing: "cubic-bezier(.32,.72,0,1)", fill: "forwards" });
+    return new Promise((resolve) => {
+      a.onfinish = resolve;
+      setTimeout(resolve, ms + 80);
+    });
+  }
+
   function mkListOut(dir) {
     if (!mkRows) return Promise.resolve();
-    const items = Array.from(mkRows.querySelectorAll(".ym-mk-card, .ym-mk-cat"));
-    if (!items.length) return Promise.resolve();
-    items.forEach((el, i) => {
-      if (!el.animate) return;
-      el.animate([
-        { opacity: 1, transform: "none" },
-        { opacity: 0, transform: "translateX(" + dir * 10 + "px)" },
-      ], { duration: 140, delay: i * 12, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" });
-    });
-    return new Promise((resolve) => setTimeout(resolve, items.length * 12 + 160));
+    return mkShift(mkRows, "x", 0, -dir * (mkRows.offsetWidth || 360), 190);
   }
 
   function mkListIn(dir) {
     if (!mkRows) return;
-    const items = Array.from(mkRows.querySelectorAll(".ym-mk-card, .ym-mk-cat"));
-    items.forEach((el, i) => {
-      if (!el.animate) return;
-      el.animate([
-        { opacity: 0, transform: "translateX(" + -dir * 12 + "px)" },
-        { opacity: 1, transform: "none" },
-      ], { duration: 340, delay: i * 20, easing: "cubic-bezier(.34,1.3,.5,1)", fill: "both" });
+    mkRows.getAnimations().forEach((a) => a.cancel());
+    mkShift(mkRows, "x", dir * (mkRows.offsetWidth || 360), 0, 190);
+  }
+
+  /* ---- the reel ---------------------------------------------------------
+     Both blocks travel in the SAME animation: the outgoing one leaves and the
+     incoming one follows it, edge to edge. Two half-slides left the pane empty
+     between them, which is the "stops in the middle" the half-slides caused.
+     One 380ms move, the mockup's curve. */
+  const MK_REEL_MS = 380;
+  const MK_REEL_EASE = "cubic-bezier(.32,.72,0,1)";
+  // A move between two views: the strip travels and the views cross-fade over
+  // the same beat, so the old one fades out as it leaves and the new one fades
+  // in as it arrives.
+  const MK_TURN_MS = 340;
+
+  // A second click can land while a switch is still travelling. Left alone, the
+  // new strip would swallow the whole old reel — both boxes, mid-travel, with
+  // its transform — and the pane would jump. So an in-flight switch is settled:
+  // its animations are dropped and its incoming view becomes the live content.
+  function mkSettleDetailReel() {
+    mkDetailSeq += 1;
+    if (!mkDetailJob) return;
+    const job = mkDetailJob;
+    mkDetailJob = null;
+    job.done = true;
+    [job.strip, job.oldBox, job.newBox].forEach((el) => {
+      if (el && el.getAnimations) el.getAnimations().forEach((a) => a.cancel());
+    });
+    job.newBox.style.opacity = "";
+    job.newBox.style.visibility = "";
+    if (job.strip.parentNode) {
+      job.strip.parentNode.replaceChildren(...Array.from(job.newBox.children));
+    }
+  }
+
+  function mkSettleListReel() {
+    mkListSeq += 1;
+    const job = mkListJob;
+    mkListJob = null;
+    if (job) {
+      job.done = true;
+      if (job.reel && job.reel.getAnimations) job.reel.getAnimations().forEach((a) => a.cancel());
+    }
+    if (!mkRows) return;
+    const reel = mkRows.querySelector(".ym-mk-reel");
+    if (!reel) return;
+    const boxes = reel.querySelectorAll(".ym-mk-reelbox");
+    const keep = boxes.length ? boxes[boxes.length - 1] : null;
+    if (reel.getAnimations) reel.getAnimations().forEach((a) => a.cancel());
+    if (keep) mkRows.replaceChildren(mkInd, ...Array.from(keep.children));
+    // NOT `opacity = ""` while a tab change owns the line: the inline value is
+    // what makes it visible at all (both sheets declare `opacity: 0` on
+    // .ym-mk-ind), so clearing it snapped the line to invisible on the first
+    // frame of the change — which is why it never appeared to fade out.
+    if (mkInd && !mkIndHidden) mkInd.style.opacity = "1";
+  }
+
+  function mkReelRun(host, axis, dir, oldBox, newBox) {
+    if (!host || !oldBox || !newBox || !oldBox.animate) return Promise.resolve();
+    const size = axis === "x" ? host.clientWidth : host.clientHeight;
+    const t = (v) => "translate" + (axis === "x" ? "X" : "Y") + "(" + v + "px)";
+    const a1 = oldBox.animate([{ transform: t(0) }, { transform: t(-dir * size) }],
+      { duration: MK_REEL_MS, easing: MK_REEL_EASE, fill: "forwards" });
+    const a2 = newBox.animate([{ transform: t(dir * size) }, { transform: t(0) }],
+      { duration: MK_REEL_MS, easing: MK_REEL_EASE, fill: "forwards" });
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; resolve(); };
+      a1.onfinish = finish;
+      a2.onfinish = finish;
+      setTimeout(finish, MK_REEL_MS + 90);
     });
   }
 
-  function mkAnimateIn() {
-    if (!mkDetail) return;
-    const w = mkDetail.firstElementChild;
-    if (!w || !w.animate) return;
-    Array.from(w.children).forEach((el, i) => {
-      if (!el.animate) return;
-      el.animate(
-        [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
-        { duration: 540, delay: 40 + i * 54, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "both" }
-      );
-    });
-    const m = w.querySelector(".ym-mk-dmono");
-    if (m && m.animate) {
-      m.animate([{ transform: "scale(.84)" }, { transform: "scale(1)" }],
-        { duration: 640, easing: "cubic-bezier(.34,1.5,.5,1)", fill: "both" });
+  async function mkDetailReel(dir, paint) {
+    const host = mkDetail;
+    if (!host || mkReducedMotion()) { await paint(); return; }
+    // Whatever is still travelling goes to its finished state first, so this
+    // switch starts from what is actually on screen.
+    mkSettleDetailReel();
+    // The two views are laid out as ONE strip and the strip travels by exactly
+    // the height of the view that is leaving, so the incoming view follows it
+    // edge to edge: the column scrolls in the direction of the list. Over that
+    // travel the outgoing view fades out and the incoming one fades in.
+    const oldBox = h("div", { class: "ym-mk-reelbox" });
+    const newBox = h("div", { class: "ym-mk-reelbox" });
+    while (host.firstChild) oldBox.appendChild(host.firstChild);
+    // Down the list the new view comes from below; up the list from above.
+    const strip = dir > 0
+      ? h("div", { class: "ym-mk-reel ym-mk-reelstrip" }, oldBox, newBox)
+      : h("div", { class: "ym-mk-reel ym-mk-reelstrip" }, newBox, oldBox);
+    // Coming from above, the strip starts pre-translated so the old view fills
+    // the pane from the first frame; the new view stays hidden until the travel
+    // and its fade actually begin.
+    if (dir < 0) newBox.style.visibility = "hidden";
+    host.appendChild(strip);
+    const job = { strip: strip, oldBox: oldBox, newBox: newBox, seq: ++mkDetailSeq, done: false };
+    mkDetailJob = job;
+    const realDetail = mkDetail;
+    mkDetail = newBox;
+    mkReeling = true;
+    try {
+      await paint();
+    } finally {
+      mkDetail = realDetail;
+      mkReeling = false;
     }
+    if (job.done || job.seq !== mkDetailSeq) return;
+    host.scrollTop = 0;
+    const oldH = oldBox.offsetHeight;
+    const newH = newBox.offsetHeight;
+    if (dir < 0) newBox.style.visibility = "";
+    if (strip.animate && oldH > 0) {
+      const from = dir > 0 ? 0 : -newH;
+      const to = dir > 0 ? -oldH : 0;
+      const travel = strip.animate(
+        [{ transform: "translateY(" + from + "px)" }, { transform: "translateY(" + to + "px)" }],
+        { duration: MK_TURN_MS, easing: "cubic-bezier(.32,.72,0,1)", fill: "forwards" }
+      );
+      // fill backwards on the fade in, so nothing is left applied afterwards
+      oldBox.animate([{ opacity: 1 }, { opacity: 0 }],
+        { duration: MK_TURN_MS - 40, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" });
+      newBox.animate([{ opacity: 0 }, { opacity: 1 }],
+        { duration: MK_TURN_MS - 20, delay: 40, easing: "cubic-bezier(.22,1,.36,1)", fill: "backwards" });
+      await new Promise((resolve) => {
+        travel.onfinish = resolve;
+        setTimeout(resolve, MK_TURN_MS + 70);
+      });
+    }
+    if (job.done || job.seq !== mkDetailSeq) return;
+    job.done = true;
+    if (mkDetailJob === job) mkDetailJob = null;
+    host.replaceChildren(...Array.from(newBox.children));
+  }
+
+  async function mkListReel(dir, rebuild) {
+    if (!mkRows || !mkInd) { rebuild(); return; }
+    mkSettleListReel();
+    // A tab change fades the line out HERE, once the settle has finished with it.
+    if (mkIndHidden) mkMarkerFade(150);
+    // Snapshot the list that is leaving, then rebuild the live one underneath.
+    const snapshot = mkRows.cloneNode(true);
+    const snapInd = snapshot.querySelector(".ym-mk-ind");
+    if (snapInd) snapInd.remove();
+    rebuild();
+    if (mkReducedMotion()) { mkPositionInd(true); return; }
+    const seq = ++mkListSeq;
+    const oldBox = h("div", { class: "ym-mk-reelbox" });
+    while (snapshot.firstChild) oldBox.appendChild(snapshot.firstChild);
+    const newBox = h("div", { class: "ym-mk-reelbox" });
+    Array.from(mkRows.children).forEach((child) => {
+      if (child !== mkInd) newBox.appendChild(child);
+    });
+    const reel = h("div", { class: "ym-mk-reel" }, oldBox, newBox);
+    mkListJob = { reel: reel, newBox: newBox, seq: seq, done: false };
+    mkRows.appendChild(reel);
+    mkInd.style.opacity = "0";
+    await mkReelRun(mkRows, "x", dir, oldBox, newBox);
+    // A newer tab change already rebuilt the list; this one must not undo it.
+    if (seq !== mkListSeq) return;
+    mkListJob = null;
+    mkRows.replaceChildren(mkInd, ...Array.from(newBox.children));
+    mkPositionInd(true, true);
+    syncMkEdges();
+    mkInd.style.opacity = "0";
+    mkMarkerReturn(180);
+  }
+
+  // Nothing arrives with motion: a switch is the outgoing view dissolving away
+  // while the new one is already in place. Kept as the hook the call sites use.
+  function mkAnimateIn() {
+    return;
   }
 
   // Grow a freshly inserted block from 0 to its natural height so everything
@@ -3816,21 +4057,10 @@
 
   async function mkOut(dir) {
     const w = mkDetail && mkDetail.firstElementChild;
-    if (!w || !w.animate) return;
-    const shift = dir < 0 ? -14 : 14;
-    const out = w.animate([
-      { opacity: 1, transform: "none", filter: "blur(0px)" },
-      { opacity: 0, transform: "translateY(" + shift + "px)", filter: "blur(6px)" },
-    ], { duration: 180, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" });
-    await new Promise((resolve) => {
-      let done = false;
-      // Do NOT cancel here: cancelling drops fill:forwards and the old view
-      // snaps back to full opacity for a frame before the render swaps it,
-      // which reads as a flash. The node is replaced by replaceChildren().
-      const finish = () => { if (done) return; done = true; resolve(); };
-      out.onfinish = finish;
-      setTimeout(finish, 280);
-    });
+    if (!w) return;
+    // Leaves as one block; the wrapper is replaced by replaceChildren() right
+    // after, so its fill can stay put without ever being seen again.
+    await mkShift(w, "y", 0, -dir * (mkDetail.offsetHeight || 620), 190);
   }
 
   async function mkSelect(id) {
@@ -3839,34 +4069,56 @@
     const from = mkSel === "home" ? -1 : list.findIndex((e) => e.id === mkSel);
     const to = id === "home" ? -1 : list.findIndex((e) => e.id === id);
     const dir = to > from ? 1 : -1;
+    mkDir = dir;
+    // Remember where a sheet was opened from, so its back button has a target.
+    const sheetPage = id === "youtube" || id === "settings" || id === "changelogs";
+    if (sheetPage && mkSel !== "youtube" && mkSel !== "settings" && mkSel !== "changelogs") {
+      mkPrevSel = mkSel;
+    }
     mkSel = id;
+    // Selecting another row SLIDES the line: the list itself does not move, so
+    // fading it out and back in was motion for its own sake. Only a tab change
+    // fades it, because there the rows are travelling too (setMkFilter).
     if (mkRows) {
       mkRows.querySelectorAll(".ym-mk-card").forEach((c) => c.classList.toggle("sel", c.dataset.id === String(id)));
     }
     mkPositionInd(false);
-    await mkOut(dir);
+    // Read the registry BEFORE the pane moves: the read is the slow part, and
+    // doing it mid-swap left the pane empty long enough to read as a stall.
     const reg = await getReg();
-    await mkRenderDetail(reg);
+    // A sheet page never animates the detail column — the panel behind it stays
+    // exactly where it was.
+    if (sheetPage) { await mkRenderDetail(reg, false); return; }
+    await mkDetailReel(dir, () => mkRenderDetail(reg, false));
   }
 
   async function setMkFilter(c) {
     if (c === mkFilter) return;
-    const order = ["All", "Themes", "Extensions", "Snippets"];
-    const dir = order.indexOf(c) > order.indexOf(mkFilter) ? -1 : 1;
+    const order = ["Themes", "Extensions", "Snippets"];
+    const dir = order.indexOf(c) > order.indexOf(mkFilter) ? 1 : -1;
+    mkDir = dir;
     mkFilter = c;
     if (overlay) {
-      overlay.querySelectorAll(".ym-mk-segbtn").forEach((b) => b.classList.toggle("on", b.dataset.c === c));
+      overlay.querySelectorAll(".ym-mk-tab").forEach((b) => b.classList.toggle("on", b.dataset.c === c));
     }
-    mkPositionSegPill(false);
+    // Fade OUT first, then in when the new list lands: on a tab change the rows
+    // themselves travel, so the line has nowhere to be in between. It used to
+    // blink on at opacity 1 and only ever fade in.
+    mkIndHidden = true;
     const reg = await getReg();
     const list = mkFilteredList();
-    // Land on the first add-on of the chosen filter. Keeping Home selected meant
-    // its entrance animation replayed on every tab switch, which read as spam.
-    mkSel = list.length ? list[0].id : "home";
-    await Promise.all([mkListOut(dir), mkOut(dir)]);
-    mkBuildRows(list, reg);
-    mkListIn(dir);
-    await mkRenderDetail(reg);
+    // Land on the first add-on of the chosen filter, so the pane is never stale.
+    mkSel = list.length ? list[0].id : "";
+    // Both panes travel in one motion, the way the design moves them: the list
+    // sideways, the detail vertically, with no empty beat between them.
+    await Promise.all([
+      mkListReel(dir, () => mkBuildRows(list, reg)),
+      mkDetailReel(dir, () => mkRenderDetail(reg, false)),
+    ]);
+    // Unconditional: when a second tab change supersedes the first, the first
+    // reel returns early and its marker-return never runs, which is how the line
+    // ended up invisible with no way back.
+    mkMarkerReturn(180);
   }
 
   function mkSources(src) {
@@ -3910,9 +4162,29 @@
   function mkActions(ext, installed) {
     const acts = h("div", { class: "ym-mk-acts" });
     if (installed) {
+      // The switch is the add-on's whole state, so it leads the row; Remove is
+      // pushed to the far edge and stays quiet until hovered.
+      const on = !!(mkRegCache && mkRegCache[ext.id] && mkRegCache[ext.id].enabled);
+      const enableLabel = h("span", { class: "ym-mk-enable", text: on ? "On" : "Off" });
+      const sw = h("button", {
+        class: "ym-mk-sw", type: "button", role: "switch",
+        "aria-checked": on ? "true" : "false",
+        "aria-label": (on ? "Turn off " : "Turn on ") + ext.name,
+      });
+      sw.addEventListener("click", async () => {
+        if (sw.dataset.busy) return;
+        sw.dataset.busy = "1";
+        const next = sw.getAttribute("aria-checked") !== "true";
+        sw.setAttribute("aria-checked", next ? "true" : "false");
+        enableLabel.textContent = next ? "On" : "Off";
+        try { await setEnabled(ext.id, next); } catch (_) {}
+        delete sw.dataset.busy;
+      });
+      acts.appendChild(h("span", { class: "ym-mk-enrow" }, sw, enableLabel));
+      acts.appendChild(h("span", { class: "ym-mk-grow" }));
       const b = h("button", { class: "ym-mk-btn-un", type: "button" });
       b.appendChild(mkTrashIcon());
-      b.appendChild(h("span", { text: "Uninstall" }));
+      b.appendChild(h("span", { text: "Remove" }));
       b.addEventListener("click", async () => {
         if (b.dataset.busy) return;
         b.dataset.busy = "1";
@@ -3964,6 +4236,8 @@
         await install(ext.id);
       });
       acts.appendChild(b);
+      acts.appendChild(h("span", { class: "ym-mk-grow" }));
+      acts.appendChild(h("span", { class: "ym-mk-enable", text: "Free, and off until you turn it on." }));
     }
     for (const g of githubLinks(ext)) {
       const a = h("a", { class: "ym-mk-ghlink", href: g.url, target: "_blank", rel: "noopener noreferrer" });
@@ -5564,18 +5838,51 @@
   /* The theme's type block. The font, the interface size and the glass chrome
      were Global's rows on the YouTube page; they moved here with the rest of the
      Apple Music look (AJ, 2026-10-23). */
+  /* The theme's own switches differ from the YouTube page's in two ways: no
+     On/Off readout (the switch already says it, and a theme is a look rather than
+     a device with states), and a pair of bulk buttons per section, because
+     comparing the whole look on and off should not mean flipping eight switches
+     by hand. */
+  function appleToggleRow(key, label, value, onChange) {
+    const row = ytToggleRow(key, label, value, onChange);
+    const out = row.querySelector(".ym-detail-setting-value");
+    if (out) out.remove();
+    return row;
+  }
+
+  function appleBulkRow(sec) {
+    const titleRow = sec.querySelector(".ym-detail-settings-titlerow");
+    if (!titleRow) return;
+    const setAll = (on) => {
+      Array.prototype.forEach.call(sec.querySelectorAll('input[type="checkbox"]'), (input) => {
+        // A locked row belongs to the new player bar; forcing it would claim a
+        // change that the page cannot honour.
+        if (input.disabled || input.checked === on) return;
+        input.checked = on;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    };
+    const bar = h("div", { class: "ym-mk-bulk" });
+    const all = h("button", { class: "ym-mk-bulkbtn", type: "button", text: "Activate all" });
+    const none = h("button", { class: "ym-mk-bulkbtn", type: "button", text: "Deactivate all" });
+    all.addEventListener("click", () => setAll(true));
+    none.addEventListener("click", () => setAll(false));
+    bar.append(all, none);
+    titleRow.appendChild(bar);
+  }
+
   function appleTypePanel() {
     const sec = ytPanel("Type and chrome");
 
     // ---- interface font
-    sec.appendChild(ytToggleRow("ytFont", "Spicy Lyrics font", ytPrefs.font, (on) => {
+    sec.appendChild(appleToggleRow("ytFont", "Spicy Lyrics font", ytPrefs.font, (on) => {
       ytPrefs.font = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
 
     // ---- glass top bar and side nav
-    sec.appendChild(ytToggleRow("ytGlassChrome", "Glass top bar and side nav", ytPrefs.glassChrome, (on) => {
+    sec.appendChild(appleToggleRow("ytGlassChrome", "Glass top bar and side nav", ytPrefs.glassChrome, (on) => {
       ytPrefs.glassChrome = on;
       applyYtPrefs();
       saveYtPrefs();
@@ -5609,6 +5916,7 @@
     });
     syncFill();
     sec.appendChild(ytRow("ytScale", "Interface text size", scaleInput, scaleValue));
+    appleBulkRow(sec);
     return sec;
   }
 
@@ -5726,14 +6034,14 @@
     // The bar's own look and arrangement. Independent of the compact lever
     // below: one changes the bar's HEIGHT, these change its surface and where
     // its three zones sit.
-    sec.appendChild(ytToggleRow("ytDarkBar", "Dark frosted player bar", ytPrefs.darkBar, (on) => {
+    sec.appendChild(appleToggleRow("ytDarkBar", "Dark frosted player bar", ytPrefs.darkBar, (on) => {
       ytPrefs.darkBar = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
     // Off restores YouTube's own glyphs and the stock spacing around them, so
     // the bar reads exactly as it did before the theme (AJ, 2026-10-23).
-    sec.appendChild(ytToggleRow("ytIcons", "Custom player-bar icons", ytPrefs.customIcons, (on) => {
+    sec.appendChild(appleToggleRow("ytIcons", "Custom player-bar icons", ytPrefs.customIcons, (on) => {
       ytPrefs.customIcons = on;
       applyYtPrefs();
       saveYtPrefs();
@@ -5742,7 +6050,7 @@
     // the left, transport centred — so there is nothing left for the switch to
     // change there. Dim it instead of letting it look broken, and keep it live
     // on the old bar, which still needs the re-layout.
-    const dockRow = ytToggleRow("ytDock", "Song info left, controls centred", ytPrefs.dock, (on) => {
+    const dockRow = appleToggleRow("ytDock", "Song info left, controls centred", ytPrefs.dock, (on) => {
       ytPrefs.dock = on;
       applyYtPrefs();
       saveYtPrefs();
@@ -5751,12 +6059,12 @@
       ytLockRow(dockRow, "YouTube Music's new player bar already lays the bar out this way");
     }
     sec.appendChild(dockRow);
-    sec.appendChild(ytToggleRow("ytCompact", "Compact header and player bar", ytPrefs.compact, (on) => {
+    sec.appendChild(appleToggleRow("ytCompact", "Compact header and player bar", ytPrefs.compact, (on) => {
       ytPrefs.compact = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
-    sec.appendChild(ytToggleRow("ytVolume", "Always show the volume slider", ytPrefs.volume, (on) => {
+    sec.appendChild(appleToggleRow("ytVolume", "Always show the volume slider", ytPrefs.volume, (on) => {
       ytPrefs.volume = on;
       applyYtPrefs();
       saveYtPrefs();
@@ -5771,16 +6079,17 @@
     // The column beside the cover. Independent levers: the width one is about
     // how much lyric fits on a line, the tab one about how the four labels
     // share that width.
-    sec.appendChild(ytToggleRow("ytSongWide", "Wider lyrics column", ytPrefs.songWide, (on) => {
+    sec.appendChild(appleToggleRow("ytSongWide", "Wider lyrics column", ytPrefs.songWide, (on) => {
       ytPrefs.songWide = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
-    sec.appendChild(ytToggleRow("ytSongTabs", "Quiet tab strip with a sliding capsule", ytPrefs.songTabs, (on) => {
+    sec.appendChild(appleToggleRow("ytSongTabs", "Quiet tab strip with a sliding capsule", ytPrefs.songTabs, (on) => {
       ytPrefs.songTabs = on;
       applyYtPrefs();
       saveYtPrefs();
     }));
+    appleBulkRow(sec);
     return sec;
   }
 
@@ -5983,14 +6292,14 @@
     titles.appendChild(h("h1", { text: APPLE_THEME_NAME }));
     titles.appendChild(h("div", {
       class: "ym-mk-disclaimer",
-      text: "Built into the extension · not affiliated with Apple",
+      text: "Not affiliated with Apple",
     }));
     head.appendChild(titles);
     wrap.appendChild(head);
 
     wrap.appendChild(h("p", {
       class: "ym-mk-lead",
-      text: "The player bar, the lyrics column, the type and the chrome. Every switch changes YouTube Music itself, so they keep working with every add-on uninstalled — and with all of them off you get the stock site back.",
+      text: "The player bar, the lyrics column, the type and the chrome. Every switch changes YouTube Music itself, so they keep working with every add-on uninstalled, and with all of them off you get the stock site back.",
     }));
 
     wrap.appendChild(applePlayerPanel());
@@ -6061,8 +6370,74 @@
     return wrap;
   }
 
+  function mkReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  // Leaving a sheet reveals the panel exactly as it was: the column never moved
+  // while the sheet was over it, so returning must not re-render or animate it
+  // either. Only the selection marks are put back.
+  function mkReturnFromSheet() {
+    const target = mkPrevSel || (mkFilteredList()[0] || {}).id || "";
+    mkPrevSel = "";
+    if (!target) { mkCloseSheet(); return; }
+    mkSel = target;
+    const cards = mkRows ? Array.from(mkRows.querySelectorAll(".ym-mk-card")) : [];
+    const row = cards.find((c) => c.dataset.id === String(target));
+    mkCloseSheet();
+    if (!row) {
+      getReg().then((reg) => { if (mkDetail) mkRenderDetail(reg, true); });
+      return;
+    }
+    cards.forEach((c) => c.classList.toggle("sel", c === row));
+    mkPositionInd(true);
+    mkMarkerReturn(120);
+  }
+
+  // Slide a page up over the card. The sheet owns the whole surface, so it needs
+  // its own back control: the panel's top bar is underneath it.
+  function mkOpenSheet(page) {
+    if (!mkSheet) return;
+    const back = h("button", {
+      class: "ym-mk-sheetback", type: "button",
+      title: "Back to add-ons", "aria-label": "Back to add-ons",
+    });
+    back.appendChild(svgIcon("M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"));
+    back.addEventListener("click", mkReturnFromSheet);
+    mkSheet.replaceChildren(
+      h("div", { class: "ym-mk-sheetbar" }, back),
+      h("div", { class: "ym-mk-sheetbody" }, page)
+    );
+    const first = mkSheet.hidden;
+    mkSheet.getAnimations().forEach((a) => a.cancel());
+    mkSheet.hidden = false;
+    if (first && !mkReducedMotion() && mkSheet.animate) {
+      mkSheet.animate(
+        [{ transform: "translateY(100%)" }, { transform: "translateY(0)" }],
+        { duration: 560, easing: "cubic-bezier(.22,1,.36,1)", fill: "both" }
+      );
+    }
+  }
+
+  // Out is an ease-IN, 470ms — the design's exit. Nothing blocks on it: the
+  // panel behind is already correct and simply becomes visible as it leaves.
+  function mkCloseSheet() {
+    if (!mkSheet || mkSheet.hidden) return;
+    const sheet = mkSheet;
+    const done = () => { sheet.hidden = true; sheet.replaceChildren(); };
+    if (mkReducedMotion() || !sheet.animate) { done(); return; }
+    const a = sheet.animate(
+      [{ transform: "translateY(0)" }, { transform: "translateY(100%)" }],
+      { duration: 470, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }
+    );
+    a.onfinish = done;
+    setTimeout(done, 560);
+  }
+
   async function mkRenderDetail(reg, quiet) {
     if (!mkDetail) return;
+    // Anything that is not a sheet page closes the sheet.
+    if (mkSel !== "youtube" && mkSel !== "settings" && mkSel !== "changelogs") mkCloseSheet();
     const keepScroll = quiet ? mkDetail.scrollTop : 0;
     // Snapshot the bits that should morph instead of snapping on a quiet
     // re-render (install / uninstall).
@@ -6079,21 +6454,26 @@
     // plays" AJ reported (2026-10-21). The hold is dropped in the same tick the
     // animations are created, so the delay frames are covered by their backwards
     // fill and nothing ever paints un-animated.
-    mkDetail.classList.add("ym-mk-anim-hold");
-    mkDetail.replaceChildren();
-    mkDetail.scrollTop = 0;
-    // The YouTube page is not an add-on, so it has to be matched BEFORE the
-    // findAvail() fallback below — that check would otherwise bounce it to Home.
+    // Sheet pages never touch the detail column: the panel behind them stays
+    // exactly as it was and the sheet slides over it.
     if (mkSel === "youtube") {
       // A fresh visit opens on the picker; only a QUIET re-render keeps the
       // section that is already open.
       if (!quiet) ytSection = null;
-      mkDetail.appendChild(mkYoutubePage());
-      if (!quiet) mkAnimateIn();
-      mkDetail.classList.remove("ym-mk-anim-hold");
-      mkDetail.scrollTop = keepScroll;
+      mkOpenSheet(h("div", { class: "ym-mk-ytpage" }, mkYoutubePage()));
       return;
     }
+    if (mkSel === "settings") {
+      mkOpenSheet(mkSettingsPage());
+      return;
+    }
+    if (mkSel === "changelogs") {
+      mkOpenSheet(mkChangelogPage());
+      return;
+    }
+    mkDetail.classList.add("ym-mk-anim-hold");
+    mkDetail.replaceChildren();
+    mkDetail.scrollTop = 0;
     // Apple Music Style is a page like the YouTube one, not a catalog entry with
     // an Install button, so it is matched before the findAvail fallback.
     if (mkSel === APPLE_THEME_ID) {
@@ -6103,17 +6483,11 @@
       mkDetail.scrollTop = keepScroll;
       return;
     }
-    // Not an add-on, so it has to be matched before the findAvail() fallback.
-    if (mkSel === "settings") {
-      mkDetail.appendChild(mkSettingsPage());
-      if (!quiet) mkAnimateIn();
-      mkDetail.classList.remove("ym-mk-anim-hold");
-      mkDetail.scrollTop = keepScroll;
-      return;
-    }
-    if (mkSel === "home" || !findAvail(mkSel)) {
-      mkSel = "home";
-      mkDetail.appendChild(mkHome(reg));
+    if (!findAvail(mkSel)) {
+      mkDetail.appendChild(h("div", {
+        class: "ym-mk-empty",
+        text: "Nothing in " + mkFilter + " matches that search. Clear it to see the rest.",
+      }));
       if (!quiet) mkAnimateIn();
       mkDetail.classList.remove("ym-mk-anim-hold");
       mkDetail.scrollTop = keepScroll;
@@ -6141,41 +6515,49 @@
     if (ext.disclaimer) {
       titles.appendChild(h("div", { class: "ym-mk-disclaimer", text: ext.disclaimer }));
     }
+    // The meta line is category · Version, as in the design. The pill element
+    // stays in the DOM but hidden, because mkQuietPolish() measures it during a
+    // quiet re-render and would otherwise throw on a missing node.
     const status = h("div", { class: "ym-mk-status" });
-    status.appendChild(h("span", { class: "ym-mk-pill" + (installed ? "" : " avail"), text: installed ? "Installed" : "Available" }));
-    status.appendChild(h("span", { class: "ym-mk-ver", text: "v" + (ext.version || "?") }));
+    const statusPill = h("span", { class: "ym-mk-pill" + (installed ? "" : " avail"), text: installed ? "Installed" : "Available" });
+    statusPill.style.display = "none";
+    status.appendChild(statusPill);
+    status.appendChild(h("span", { text: ext.category || "Add-on" }));
+    status.appendChild(h("span", { class: "ym-mk-vr" }));
+    status.appendChild(h("span", { class: "ym-mk-ver", text: "Version " + (ext.version || "?") }));
     titles.appendChild(status);
     head.appendChild(titles);
     wrap.appendChild(head);
 
-    wrap.appendChild(h("div", { class: "ym-mk-sweep" }));
+    // Order matches the panel design: name and meta, the actions row, then the
+    // description, then the settings. The data-source list and the mono tile are
+    // gone — the design has neither.
+    wrap.appendChild(mkActions(ext, installed));
     wrap.appendChild(h("p", { class: "ym-mk-lead", text: ext.description || "" }));
+    // Attach what is already built BEFORE awaiting the settings. The settings
+    // builder is async; while it ran, the pane sat empty — that is the stall in
+    // the middle of a swap. The settings row simply appears below when ready.
+    mkDetail.appendChild(wrap);
+    mkDetail.classList.remove("ym-mk-anim-hold");
+    if (!quiet) mkAnimateIn();
 
-    const src = MK_SOURCES[ext.id];
-    if (src) wrap.appendChild(mkSources(src));
-
-    const cols = h("div", { class: "ym-mk-dcols solo" });
-    const left = h("div", { class: "ym-mk-left" });
     if (installed && ext.settings && ext.settings.length) {
       const settings = await buildSettingsSection(ext);
       if (settings) {
         settings.classList.add("ym-mk-settings");
-        // Aurora Lyrics gets the grouped sub-rail; every other add-on keeps the
-        // plain column (AJ, 2026-10-21).
-        left.appendChild(ext.id === "ytmod-spicy-lyrics"
-          ? groupLyricsSettings(settings)
-          : settings);
+        // buildSettingsSection() already renders its own "Settings" head, so the
+        // block only needs wrapping — a second heading read as a duplicate.
+        // One flat list, as in the design — the grouped sub-rail was the old
+        // panel's answer to 19 settings and it is not part of this layout.
+        wrap.appendChild(h("div", { class: "ym-mk-setblock" }, settings));
       }
-    } else if (!installed && ext.settings && ext.settings.length) {
-      left.appendChild(h("div", { class: "ym-mk-hint", text: "Install this add-on to change its settings." }));
+    } else if (ext.settings && ext.settings.length) {
+      wrap.appendChild(h("div", { class: "ym-mk-hint", text: "Its settings appear here once it is installed." }));
+    } else if (installed) {
+      wrap.appendChild(h("div", { class: "ym-mk-hint", text: "No settings of its own. Its controls sit where it works, in the player bar." }));
     }
-    left.appendChild(mkActions(ext, installed));
-    cols.appendChild(left);
-    wrap.appendChild(cols);
     mountReportButton(wrap, ext);
-    mkDetail.appendChild(wrap);
-    if (!quiet) mkAnimateIn();
-    else {
+    if (quiet) {
       // Settings just appeared (install): grow the block so the actions row
       // slides down instead of snapping (AJ, 2026-10-19).
       if (!prevHadSettings) {
@@ -6184,7 +6566,6 @@
       }
       mkQuietPolish(prevBtnW, prevPillBg);
     }
-    mkDetail.classList.remove("ym-mk-anim-hold");
     mkDetail.scrollTop = keepScroll;
   }
 
@@ -6194,14 +6575,85 @@
   // can appear before the panel has ever been opened, and without the sheet the
   // family silently falls back to system-ui.
   function ensurePanelFont() {
-    if (document.getElementById("ym-font")) return;
     try {
-      const fontLink = document.createElement("link");
-      fontLink.id = "ym-font";
-      fontLink.rel = "stylesheet";
-      fontLink.href = chrome.runtime.getURL("src/extensions/fonts/spicy-lyrics.css");
-      document.head.appendChild(fontLink);
+      if (!document.getElementById("ym-font")) {
+        const fontLink = document.createElement("link");
+        fontLink.id = "ym-font";
+        fontLink.rel = "stylesheet";
+        fontLink.href = chrome.runtime.getURL("src/extensions/fonts/spicy-lyrics.css");
+        document.head.appendChild(fontLink);
+      }
+      // The add-ons panel keeps its own face — Satoshi, the one the design was
+      // drawn in. Lyrics stay on SpicyLyrics; this face is only ever referenced
+      // by the #ym-market.ym-mk2 rules.
+      if (!document.getElementById("ym-panel-font")) {
+        const style = document.createElement("style");
+        style.id = "ym-panel-font";
+        style.textContent = '@font-face{font-family:"Satoshi";src:url("' +
+          chrome.runtime.getURL("src/extensions/fonts/Satoshi-Variable.woff2") +
+          '") format("woff2");font-weight:300 900;font-style:normal;font-display:swap}';
+        document.head.appendChild(style);
+      }
     } catch (_) {}
+  }
+
+  /* ---- changelogs ---------------------------------------------------------
+     The notes the extension already ships: changelog.json, the same file the
+     website and the update notice read. Bundled first so it works offline, the
+     raw GitHub copy second so a tab running an older build still sees what has
+     shipped since. Skipped releases stay out — they have nothing to say. */
+  function mkChangelogPage() {
+    const wrap = h("div", { class: "ym-mk-dwrap ym-mk-cl" });
+
+    const head = h("div", { class: "ym-mk-dhead" });
+    head.appendChild(h("div", { class: "ym-mk-dtitles" },
+      h("h1", { text: "Changelogs" }),
+      h("div", { class: "ym-mk-disclaimer", text: "Every release, newest first" })
+    ));
+    wrap.appendChild(head);
+
+    wrap.appendChild(h("p", {
+      class: "ym-mk-lead",
+      text: "What changed in each version, taken from the release notes themselves. The version you are running may not be the newest one here.",
+    }));
+
+    const list = h("div", { class: "ym-mk-clist" });
+    wrap.appendChild(list);
+
+    (async () => {
+      const changelog = (await readBundledChangelog()) || (await readRemoteChangelog());
+      const releases = releaseList(changelog).filter((r) => r && r.version && !r.skipped);
+      list.replaceChildren();
+      if (!releases.length) {
+        list.appendChild(h("p", {
+          class: "ym-mk-hint",
+          text: "Release notes could not be read right now. Check the changelog on GitHub.",
+        }));
+        return;
+      }
+      for (const release of releases) {
+        const card = h("section", { class: "ym-mk-clcard" });
+        const meta = h("div", { class: "ym-mk-clmeta" });
+        meta.appendChild(h("span", { class: "ym-mk-clver", text: "v" + release.version }));
+        if (release.date) meta.appendChild(h("span", { class: "ym-mk-cldate", text: String(release.date) }));
+        card.appendChild(meta);
+        if (release.title) {
+          card.appendChild(h("h2", { class: "ym-mk-cltitle", text: String(release.title) }));
+        }
+        const items = []
+          .concat(Array.isArray(release.features) ? release.features : [])
+          .concat(Array.isArray(release.fixes) ? release.fixes : [])
+          .filter((line) => typeof line === "string" && line.trim());
+        if (items.length) {
+          const ul = h("ul", { class: "ym-mk-clitems" });
+          for (const line of items) ul.appendChild(h("li", { text: line }));
+          card.appendChild(ul);
+        }
+        list.appendChild(card);
+      }
+    })();
+
+    return wrap;
   }
 
   function buildMarketplace() {
@@ -6211,23 +6663,39 @@
     }, "Close");
     close.id = "ym-close";
 
-    const collapse = h("button", {
-      class: "ym-mk-cbtn", type: "button",
-      "aria-label": "Toggle sidebar", title: "Toggle sidebar",
-    });
-    collapse.appendChild(mkSidebarIcon());
-    collapse.addEventListener("click", () => {
-      overlay.classList.toggle("ym-mk-collapsed");
-      mkAutoCollapsed = false; // manual choice wins over the media query
-      mkPositionInd(true);
-    });
+    // The two places that leave the panel sit on the left in their own colours.
+    const DISCORD_LABEL = "Join the discord server!";
+    const discord = h("a", {
+      class: "ym-mk-brand ym-mk-brand-discord",
+      href: REPORT_DISCORD_URL,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: DISCORD_LABEL,
+      "aria-label": DISCORD_LABEL,
+    }, svgIcon(MK_DISCORD_PATH), h("span", { class: "ym-mk-brand-label", text: DISCORD_LABEL }));
 
-    const logo = h("div", { class: "ym-mk-logo" });
-    const logoUrl = mkLogoUrl();
-    if (logoUrl) logo.style.backgroundImage = 'url("' + logoUrl + '")';
+    const ytBtn = h("button", {
+      class: "ym-mk-brand ym-mk-brand-yt", type: "button",
+      title: "YouTube modifications", "aria-label": "YouTube modifications",
+    }, svgIcon(MK_YT_PATH), h("span", { class: "ym-mk-brand-label", text: "YouTube modifications" }));
+    ytBtn.addEventListener("click", () => { if (mkSel !== "youtube") mkSelect("youtube"); });
 
     // Settings is a BUTTON, not a rail row (AJ, 2026-10-26): it is an app-wide page,
     // so it must not read as another add-on to install.
+    // Changelogs is a page like Settings: it slides over the whole card, and it
+    // toggles — the same button brings it back out.
+    const changelogBtn = h("button", {
+      class: "ym-mk-chbtn",
+      type: "button",
+      title: "Changelogs",
+      "aria-label": "Changelogs",
+    }, svgIcon("M4 5h2v2H4zM8 5h12v2H8zM4 11h2v2H4zM8 11h12v2H8zM4 17h2v2H4zM8 17h12v2H8z"),
+      h("span", { text: "Changelogs" }));
+    changelogBtn.addEventListener("click", () => {
+      if (mkSel === "changelogs") { mkReturnFromSheet(); return; }
+      mkSelect("changelogs");
+    });
+
     const settingsBtn = h("button", {
       class: "ym-mk-setbtn",
       type: "button",
@@ -6237,33 +6705,51 @@
     settingsBtn.appendChild(svgIcon(ICON_SETTINGS));
     settingsBtn.addEventListener("click", () => { if (mkSel !== "settings") mkSelect("settings"); });
 
-    const title = h("h1", { text: "Add-ons" });
-    // Secret entry point for developer mode — see onTitleTap(). Bound to
-    // pointerdown rather than click on purpose: in floating mode
-    // enableMarketplaceDrag() calls preventDefault() on the header's pointerdown,
-    // which suppresses the derived mouse events.
-    title.addEventListener("pointerdown", onTitleTap);
-    const header = h("div", { class: "ym-head ym-mk-head" }, collapse, logo, title, settingsBtn, close);
+    const header = h("div", { class: "ym-head ym-mk-head" },
+      h("div", { class: "ym-mk-hleft" }, discord, ytBtn),
+      h("div", { class: "ym-mk-hright" }, changelogBtn, settingsBtn, h("span", { class: "ym-mk-seam" }), close)
+    );
 
-    const seg = h("div", { class: "ym-mk-seg" });
-    mkSegPill = h("span", { class: "ym-mk-segpill" });
-    seg.appendChild(mkSegPill);
-    for (const c of ["All", "Themes", "Extensions", "Snippets"]) {
+    const tabs = h("div", { class: "ym-mk-tabs" });
+    for (const c of ["Themes", "Extensions", "Snippets"]) {
+      const count = AVAILABLE.filter((e) => e.category === c).length;
       const b = h("button", {
-        class: "ym-mk-segbtn" + (c === mkFilter ? " on" : ""),
+        class: "ym-mk-tab" + (c === mkFilter ? " on" : ""),
         type: "button",
         "data-c": c,
-        text: c,
-      });
+      }, h("span", { text: c }), h("i", { class: "n", text: String(count) }));
       b.addEventListener("click", () => setMkFilter(c));
-      seg.appendChild(b);
+      tabs.appendChild(b);
     }
 
-    const railTop = h("div", { class: "ym-mk-railtop" }, header, seg);
+    const searchInput = h("input", {
+      class: "ym-mk-search",
+      type: "search",
+      placeholder: "Search",
+      "aria-label": "Search add-ons",
+      autocomplete: "off",
+    });
+    // Searching does not animate: the rows just change under the cursor.
+    searchInput.addEventListener("input", async () => {
+      const reg = await getReg();
+      mkBuildRows(mkFilteredList(), reg);
+      if (!mkDetail) return;
+      const list = mkFilteredList();
+      if (list.length && !list.some((e) => e.id === mkSel)) mkSel = list[0].id;
+      await mkRenderDetail(reg, true);
+    });
+
+    // The header is a bar across the WHOLE card, as in the design: the two brand
+    // buttons on the left, settings and close on the right, a hairline under it,
+    // and only then the two columns.
+    const railTop = h("div", { class: "ym-mk-railtop" }, tabs,
+      h("div", { class: "ym-mk-searchwrap" }, searchInput));
     mkInd = h("div", { class: "ym-mk-ind" });
     mkRows = h("div", { class: "ym-mk-rows" }, mkInd);
+    mkRows.addEventListener("scroll", syncMkEdges, { passive: true });
     const rail = h("aside", { class: "ym-mk-rail" }, railTop, mkRows);
     mkDetail = h("div", { class: "ym-mk-detail" });
+    mkSheet = h("div", { class: "ym-mk-sheet", hidden: "" });
     const paneHandle = h("div", { class: "ym-mk-draghandle", "aria-hidden": "true" });
     const pane = h("main", { class: "ym-mk-pane" }, paneHandle, mkDetail);
 
@@ -6272,14 +6758,28 @@
       bg.style.backgroundImage = 'url("' + chrome.runtime.getURL("assets/ambient-gradient.png") + '")';
     } catch (_) {}
 
-    overlay = h("div", { id: "ym-market", class: "hidden ym-mk2" }, bg, rail, pane);
+    // The rail and the detail pane share one card, so they need a shell to clip
+    // to the panel's rounded corners.
+    overlay = h("div", { id: "ym-market", class: "hidden ym-mk2" }, bg,
+      // Build marker: lets the panel's age be read from the page while debugging.
+      // (Set on the node, not a data attribute, so it never lands in the DOM dump.)
+      h("div", { class: "ym-mk-shell" },
+        mkSheet,
+        header,
+        h("div", { class: "ym-mk-body" }, rail, pane)));
     document.body.appendChild(overlay);
-    // Drag from the whole rail header block and from the detail pane's top strip.
+    // Readable from the page while debugging, and cheap: tells you which build a
+    // tab is actually running after an extension reload.
+    overlay.dataset.build = "panel-v2";
+    // Drag from the rail's top block and the detail pane's top strip. The header
+    // itself stays free for the 6-tap developer gesture.
+    enableMarketplaceDrag(header);
     enableMarketplaceDrag(railTop);
     enableMarketplaceDrag(paneHandle);
     applyMarketplaceMode(false);
     document.addEventListener("keydown", marketKey);
     window.addEventListener("resize", syncMkCollapse);
+    window.addEventListener("resize", syncMkEdges);
     window.addEventListener("resize", () => mkPositionSegPill(true));
     // Quiet: the panel is hidden at build, so an entrance stagger here is never
     // seen - and a slow storage read would let it replay AFTER openMarketplace()
@@ -6300,7 +6800,9 @@
       return;
     }
     const list = mkFilteredList();
-    if (mkSel !== "home" && mkSel !== "settings" && !list.some((e) => e.id === mkSel)) mkSel = "home";
+    if (mkSel !== "settings" && mkSel !== "youtube" && mkSel !== "changelogs" && !list.some((e) => e.id === mkSel)) {
+      mkSel = list.length ? list[0].id : "";
+    }
     mkBuildRows(list, reg);
     if (quiet && mkRows) {
       const chk = mkRows.querySelector(".ym-mk-card.sel .ym-mk-check");
@@ -6340,7 +6842,7 @@
       console.warn("[YTMod] renderDetail called with no extension", ext);
       return;
     }
-    detailExt = ext; // remembered so setDevMode() can re-render this view in place
+    detailExt = ext; // remembered so a settings change can re-render this view
     const reg = await getReg();
     const installed = !!reg[ext.id];
     const enabled = reg[ext.id] && reg[ext.id].enabled;
@@ -6805,7 +7307,37 @@
     if (!msg) return;
     if (msg.type === "ytmod-open") openMarketplace();
     else if (msg.type === "ytmod-hint-nav") highlightNavButton();
-    else if (msg.type === "ytmod-setEnabled") setEnabled(msg.id, msg.on).then(renderSection);
+    else if (msg.type === "ytmod-setEnabled") {
+      // The popup lists the whole catalogue, so "on" for something that was never
+      // installed has to install it: setEnabled() returns early for an id with no
+      // registry entry, and the switch would flip back with nothing to show for it.
+      getReg()
+        .then((reg) => (reg && reg[msg.id] ? setEnabled(msg.id, msg.on) : (msg.on ? install(msg.id) : null)))
+        .then(renderSection)
+        .catch(() => {});
+    }
+    else if (msg.type === "ytmod-addons") {
+      // The popup's Add-ons tab: the WHOLE catalogue, not only what is installed,
+      // so the list is the same set the marketplace shows. "installed" is what
+      // separates a row that would install from one that would just switch on.
+      getReg()
+        .then((reg) => {
+          // Apple Music Style is a page with no on/off switch of its own (it is on
+          // by default), so listing it here would offer a switch that does not
+          // correspond to anything the marketplace shows.
+          const items = AVAILABLE.filter((ext) => ext.id !== APPLE_THEME_ID).map((ext) => ({
+            id: ext.id,
+            name: ext.name || ext.id,
+            category: ext.category || "Extensions",
+            installed: !!(reg && reg[ext.id]),
+            enabled: !!(reg && reg[ext.id] && reg[ext.id].enabled),
+            soon: !!ext.comingSoon,
+          }));
+          sendResponse({ items });
+        })
+        .catch(() => sendResponse(null));
+      return true;
+    }
     else if (msg.type === "ytmod-diagnostics") {
       // Async reply: keep the channel open, and never leave the popup hanging
       // on a rejected promise (it would show "checking" forever).
@@ -7990,14 +8522,10 @@
     for (const id in bootReg) if (bootReg[id].enabled) applyExtension(id, true);
     // view / density / floating are PINNED (toolbar removed, AJ 2026-09-28) and
     // the card is CENTRED: the old dragged position is deliberately NOT restored,
-    // so an accidental header drag (e.g. tapping the title 6× for dev mode) can't
-    // leave the panel stranded in a corner across reloads.
+    // so an accidental header drag cannot leave the panel stranded in a corner.
     const savedUI = await getUI();
     // Before buildMarketplace(), so the Settings page never paints a stale mode.
     await loadPerformanceMode();
-    // Deliberately an explicit `=== true`: an absent or junk key means off, and
-    // nothing but the 6-tap gesture is allowed to turn this on.
-    if (savedUI.dev === true) ui.dev = true;
     // Applied to <html> before the panel exists, because the YouTube page's two
     // settings are page-wide and must be right on the FIRST paint (the panel can
     // stay closed for the whole session).

@@ -598,6 +598,38 @@
 #ym-sl-amll-host .amll-lyric-player { pointer-events: auto; height: 100%; }
 /* Make the lyrics area the positioning context so the host fills it. */
 .LyricsContainer { position: relative; }
+/* Singer names above the first line of their part, matching the built-in
+   renderer's label exactly (.4em / 700 / .78). The engine stacks main,
+   translation and roman as block children, so the line becomes a column and the
+   label is ordered to the top instead of being inserted at children[0] - the
+   engine indexes those slots and would lose its main line. */
+#ym-sl-amll-host .FmKaba_lyricLine {
+  display: flex;
+  flex-direction: column;
+}
+#ym-sl-amll-host .FmKaba_lyricLine > .line-singer {
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: .1em;
+  font-size: .4em;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: .78;
+  pointer-events: none;
+}
+/* A duet line's part starts on the right, so its name does too. */
+#ym-sl-amll-host .FmKaba_lyricDuetLine > .line-singer {
+  align-items: flex-end;
+}
+#ym-sl-amll-host .FmKaba_lyricLine > .line-singer > .line-singer-real {
+  font-size: .72em;
+  font-weight: 600;
+  opacity: .8;
+}
 /* When AMLL owns the panel, hide Aurora's own (glow-free) Simple lines. */
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
@@ -1066,6 +1098,15 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
       // bails on a missing player, so seeding first was a silent no-op.
       amllPlayer = player;
+      // A view rebuild (engine config changes) discards every line element and
+      // makes new ones, which would silently drop the names until the next track.
+      // Wrap it once, so the labels come back with the lines.
+      const engineRebuildView = player.rebuildLyricView.bind(player);
+      player.rebuildLyricView = (initialTime) => {
+        const out = engineRebuildView(initialTime);
+        amllInjectSingerLabels();
+        return out;
+      };
       amllGuardEngineSize();
       amllSeedEngineSize();
 
@@ -1213,6 +1254,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         endTime: (lead.EndTime || 0) * 1000,
         isBG: false,
         isDuet: !!line.OppositeAligned,
+        // Aurora: the singer whose part this line starts, if any. AMLL ignores
+        // fields it does not know, and amllInjectSingerLabels reads this one
+        // back off the line the engine built, so nothing else has to line up
+        // by index once the engine has re-ordered or windowed the lines.
+        __ymSinger: line.Singer || null,
       });
       const bgs = line.Background || [];
       bgs.forEach((bg, bgIndex) => {
@@ -1230,6 +1276,50 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       });
     }
     return out;
+  }
+
+  // Singer names for the engine's own lines. AMLL only ever builds three
+  // children per line (main, translation, roman) and its rebuildElement() clears
+  // exactly those three, so a fourth child appended to the line element survives
+  // the engine rebuilding a line's words - which happens on every set and on
+  // style rebuilds. CSS orders that child above the words (see AMLL_HOST_CSS).
+  function amllSingerLabel(line) {
+    const singer = line && line.__ymSinger;
+    if (!singer || !singer.name) return null;
+    const label = document.createElement("div");
+    label.className = "line-singer";
+    const name = document.createElement("span");
+    name.className = "line-singer-name";
+    name.textContent = String(singer.name);
+    label.appendChild(name);
+    if (singer.realName) {
+      const real = document.createElement("span");
+      real.className = "line-singer-real";
+      real.textContent = String(singer.realName);
+      label.appendChild(real);
+    }
+    return label;
+  }
+
+  // Idempotent: a line that already carries its label is left alone, so calling
+  // this after every setLyricLines() costs one class lookup per visible line.
+  function amllInjectSingerLabels() {
+    if (!amllPlayer) return;
+    const groups = amllPlayer.currentLyricGroups || [];
+    for (const group of groups) {
+      const mainLine = group && group.mainLine;
+      if (!mainLine) continue;
+      let el = null;
+      let line = null;
+      try { el = mainLine.getElement(); line = mainLine.getLine(); } catch (e) {}
+      if (!el || !line) continue;
+      // Direct children only: a background line is a separate element and never
+      // carries a label, and nothing else in the tree is a lyric name.
+      const existing = el.querySelector(":scope > .line-singer");
+      if (existing) continue;
+      const label = amllSingerLabel(line);
+      if (label) el.appendChild(label);
+    }
   }
 
   function amllContentIsTimed(content) {
@@ -1309,6 +1399,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         return;
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
+      // After the set: buildLyricGroups() has created a fresh line element per
+      // line by now, and those are the ones that need the name hung on them.
+      amllInjectSingerLabels();
       // Cached translations were already in the line objects; this fills the
       // sub-line of any line the engine built before the translation landed.
       autoTranslateRefreshAmll();

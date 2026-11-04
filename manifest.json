@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aurora Lyrics (For YouTube Music)",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "description": "Aurora Lyrics brings word by word lyrics, add-ons, and themes to YouTube Music.",
   "permissions": [
     "storage"
@@ -41,7 +41,8 @@
         "src/content/announcements.js"
       ],
       "css": [
-        "src/content/styles.css"
+        "src/content/styles.css",
+        "src/content/panel.css"
       ],
       "run_at": "document_idle"
     }

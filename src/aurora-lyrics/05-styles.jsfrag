@@ -4220,6 +4220,33 @@
       position: relative;
       z-index: 1;
     }
+    /* A singer's name above the first line of their part. Smaller and quieter
+       than the lyric so it reads as a heading rather than as something sung,
+       and it never takes clicks: seeking belongs to the line under it. */
+    #ym-sl-panel.SpicyRenderer .line .line-singer {
+      flex-basis: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      order: -1;
+      margin-bottom: .1em;
+      font-size: .4em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: 0;
+      text-transform: none;
+      opacity: .78;
+      pointer-events: none;
+    }
+    /* A duet line's part starts on the right, so its name does too. */
+    #ym-sl-panel.SpicyRenderer .line.OppositeAligned .line-singer {
+      align-items: flex-end;
+    }
+    #ym-sl-panel.SpicyRenderer .line .line-singer .line-singer-real {
+      font-size: .72em;
+      font-weight: 600;
+      opacity: .8;
+    }
     /* On-device English translation of a foreign line (23-auto-translate).
        Deliberately a smaller, quieter line than the lyric it explains: it is
        meaning, not pronunciation, so it must never compete with the sung

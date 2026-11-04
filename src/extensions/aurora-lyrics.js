@@ -207,11 +207,28 @@
   function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd) {
     const words = nodes
       .map((node) => {
-        const start = tsToSec(node.attrs.begin || node.attrs["ttm:begin"]) || fallbackStart;
-        const duration = tsToSec(node.attrs.dur || node.attrs["ttm:dur"]);
-        const end =
-          tsToSec(node.attrs.end || node.attrs["ttm:end"]) ||
-          (duration ? start + duration : fallbackEnd);
+        const beginAttr = node.attrs.begin || node.attrs["ttm:begin"] || "";
+        const endAttr = node.attrs.end || node.attrs["ttm:end"] || "";
+        const durAttr = node.attrs.dur || node.attrs["ttm:dur"] || "";
+        const beginValue = tsToSec(beginAttr);
+        const endValue = tsToSec(endAttr);
+        const durValue = tsToSec(durAttr);
+        // A line written with begin="00:00.000" end="00:00.000" is unsynced,
+        // not a real timestamp at t=0. Treat all-zero timing as absent,
+        // otherwise every such line pins to the top and renders karaoke at
+        // once for the length of the fallback window (AJ, 2026-11-01).
+        const hasRealTiming =
+          (!!beginAttr && beginValue > 0) ||
+          (!!endAttr && endValue > 0) ||
+          (!!durAttr && durValue > 0) ||
+          (!!beginAttr && !!endAttr && endValue > beginValue);
+        const start = hasRealTiming && beginAttr ? beginValue : fallbackStart;
+        const duration = hasRealTiming && durAttr ? durValue : 0;
+        const end = hasRealTiming
+          ? (endAttr && endValue > start
+              ? endValue
+              : (duration ? start + duration : fallbackEnd))
+          : fallbackEnd;
         return {
           text: node.text || textOf(node.inner),
           start,
@@ -219,14 +236,7 @@
           // True only when this span carried real timing. Drives the
           // no-karaoke decision so partially-synced TTML lines that lack
           // genuine timing are rendered as a static block (AJ, 2026-09-17).
-          timed: !!(
-            node.attrs.begin ||
-            node.attrs["ttm:begin"] ||
-            node.attrs.end ||
-            node.attrs["ttm:end"] ||
-            node.attrs.dur ||
-            node.attrs["ttm:dur"]
-          ),
+          timed: hasRealTiming,
           node,
           hasSpaceBefore: false,
           explicitPartOfWord:
@@ -353,6 +363,75 @@
     }));
   }
 
+  // Each singer is named once, in the head, and the timed lines point at them
+  // with ttm:agent. Apple exports put the stage name in <ttm:name type="full">
+  // and the real name in <ttm:name type="alias">; AMLL files usually carry only
+  // the stage name, and files with no names at all yield nothing here. Returns
+  // xml:id -> { name, realName }.
+  function parseAgents(xml) {
+    const agents = new Map();
+    // Read the OPENING tags, then take each one's own body. A file may name an
+    // agent with a self-closing tag (`<ttm:agent type="person" xml:id="v2"/>`)
+    // right before one that carries names, and a lazy body match would swallow
+    // the next agent's names whole, naming the wrong singer.
+    const agentRe = /<ttm:agent\b([^>]*?)(\/?)>/gi;
+    let agentMatch;
+    while ((agentMatch = agentRe.exec(xml))) {
+      const agentAttrs = attrsOf(agentMatch[1]);
+      const id = agentAttrs["xml:id"] || agentAttrs.id || "";
+      if (!id) continue;
+      // A self-closing agent is a lane with no name of its own.
+      if (agentMatch[2]) continue;
+      const rest = xml.slice(agentRe.lastIndex);
+      const closeAt = rest.search(/<\/ttm:agent>/i);
+      if (closeAt === -1) continue;
+      const nextOpenAt = rest.search(/<ttm:agent\b/i);
+      const body = rest.slice(
+        0,
+        nextOpenAt !== -1 && nextOpenAt < closeAt ? nextOpenAt : closeAt
+      );
+      let name = "";
+      let realName = "";
+      const nameRe = /<ttm:name\b([^>]*)>([\s\S]*?)<\/ttm:name>/gi;
+      let nameMatch;
+      while ((nameMatch = nameRe.exec(body))) {
+        const type = (attrsOf(nameMatch[1]).type || "").toLowerCase();
+        const value = textOf(nameMatch[2]);
+        if (!value) continue;
+        if (type === "alias") {
+          if (!realName) realName = value;
+        } else if (!name) {
+          name = value;
+        }
+      }
+      if (!name && !realName) continue;
+      // A singer with only an alias is still a named singer; it is not a real
+      // name under a stage name, so it fills the name slot instead.
+      agents.set(id, { name: name || realName, realName: name ? realName : "" });
+    }
+    return agents;
+  }
+
+  // A singer's name belongs above the FIRST line they sing, not on every line of
+  // their part, so each run of lines gets one label. The lead is labelled the
+  // same way, so a song that opens on its artist shows that artist above the
+  // first line. The side decides the part: a line that is not a duet line always
+  // belongs to the lead, whichever agent the file happens to name it with.
+  function attachSingerLabels(lines, agents, primaryAgent) {
+    if (!agents || !agents.size) return;
+    let previousPart = null;
+    for (const line of lines) {
+      const part = line.oppositeAligned
+        ? line.agent || "v2"
+        : primaryAgent || "lead";
+      const startsRun = part !== previousPart;
+      previousPart = part;
+      if (!startsRun) continue;
+      const agent = agents.get(part);
+      if (agent) line.singer = agent;
+    }
+  }
+
   // Returns the compact TTML form used by the YTMod adapter.
   function parseTTML(xml) {
     const parsed = [];
@@ -388,10 +467,22 @@
     }
 
     for (const { lineAttrs, body, agent } of rawLines) {
-      let start = tsToSec(lineAttrs.begin || lineAttrs["ttm:begin"]);
-      const lineDuration = tsToSec(lineAttrs.dur || lineAttrs["ttm:dur"]);
-      let end = tsToSec(lineAttrs.end || lineAttrs["ttm:end"]);
+      const lineBeginAttr = lineAttrs.begin || lineAttrs["ttm:begin"] || "";
+      const lineEndAttr = lineAttrs.end || lineAttrs["ttm:end"] || "";
+      const lineDurAttr = lineAttrs.dur || lineAttrs["ttm:dur"] || "";
+      let start = tsToSec(lineBeginAttr);
+      const lineDuration = tsToSec(lineDurAttr);
+      let end = tsToSec(lineEndAttr);
       if (!end && lineDuration) end = start + lineDuration;
+      // Real line timing needs at least one positive timestamp. An all-zero
+      // <p begin="00:00.000" end="00:00.000"> is an unsynced line, and the
+      // gap-fill below must be allowed to place it (AJ, 2026-11-01).
+      const lineHasTiming = !!(
+        (lineBeginAttr && start > 0) ||
+        (lineEndAttr && end > 0) ||
+        (lineDurAttr && lineDuration > 0) ||
+        (lineBeginAttr && lineEndAttr && end > start)
+      );
       const topLevelSpans = parseSpanTree(body);
       const leadNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] !== "x-bg");
       const backgroundNodes = topLevelSpans.filter((node) => node.attrs["ttm:role"] === "x-bg");
@@ -481,14 +572,7 @@
             .replace(/\s+/g, " ")
             .trim();
       if (!plainText && !words.length && !background.length) continue;
-      const pTiming = !!(
-        lineAttrs.begin ||
-        lineAttrs["ttm:begin"] ||
-        lineAttrs.end ||
-        lineAttrs["ttm:end"] ||
-        lineAttrs.dur ||
-        lineAttrs["ttm:dur"]
-      );
+      const pTiming = lineHasTiming;
       const hasSpanTiming = words.some((w) => w.timed);
       parsed.push({
         start,
@@ -496,13 +580,17 @@
         words,
         background,
         text: plainText,
+        // Which singer the line points at. The names live in the head, so this
+        // id is resolved into a label by attachSingerLabels below.
+        agent,
         oppositeAligned: !!agent && !!primaryAgent && agent !== primaryAgent,
         // True when the line carried at least one genuinely-timed span. Lines
         // without it are rendered as a static block, not karaoke (AJ, 2026-09-17).
         timed: hasSpanTiming,
-        // True when the line had any real timing (a <p> begin/end/dur or a timed
-        // span). Lines without it get a synthesized t=0 and would pile at the top
-        // of the panel, burying the synced lines — see the gap-fill pass below.
+        // True when the line had any real, positive timing (a <p> begin/end/dur
+        // or a timed span). All-zero timing counts as absent: those lines get a
+        // synthesized t=0 and would pile at the top of the panel, burying the
+        // synced lines - see the gap-fill pass below (AJ, 2026-11-01).
         positioned: !!(pTiming || hasSpanTiming),
       });
     }
@@ -546,7 +634,8 @@
       }
     }
 
-    // Untimed lines (no <p> begin/end and no span timing) were pinned to t=0 by
+    // Untimed lines (no <p> begin/end and no span timing, including the
+    // all-zero begin="00:00.000" end="00:00.000" form) were pinned to t=0 by
     // the fallback above, so they all pile at the top of the panel and bury the
     // synced lines underneath. Slide each one into the gap between the nearest
     // timed line before and after it so it sits roughly where it belongs in the
@@ -561,24 +650,32 @@
           const prevTimedIdx = t === 0 ? -1 : timedIdx[t - 1];
           const nextTimedIdx = t === timedIdx.length ? parsed.length : timedIdx[t];
           const prevEnd = prevTimedIdx >= 0 ? parsed[prevTimedIdx].end : 0;
-          const nextStart = nextTimedIdx < parsed.length ? parsed[nextTimedIdx].start : prevEnd + 4000;
+          const nextStart = nextTimedIdx < parsed.length ? parsed[nextTimedIdx].start : prevEnd + 4;
           const untimed = [];
           for (let i = (prevTimedIdx >= 0 ? prevTimedIdx + 1 : 0); i < nextTimedIdx; i++) {
             if (!parsed[i].positioned) untimed.push(i);
           }
           if (!untimed.length) continue;
-          const gap = Math.max(1, nextStart - prevEnd);
+          // Trailing unsynced lines have no following timed line, so the old
+          // fixed 4s window packed a whole unsynced verse into four seconds
+          // (and into overlapping 1s windows). Give each line its own 1.5s
+          // slot instead, and never overlap two unsynced lines (AJ, 2026-11-01).
+          const trailing = nextTimedIdx >= parsed.length;
+          const gap = trailing
+            ? Math.max(4, untimed.length * 1.5)
+            : Math.max(1, nextStart - prevEnd);
+          const slot = gap / (untimed.length + 1);
+          const slotDuration = Math.min(1, slot);
           untimed.forEach((lineIdx, k) => {
-            const frac = (k + 1) / (untimed.length + 1);
-            const at = prevEnd + gap * frac;
+            const at = prevEnd + slot * (k + 1);
             const line = parsed[lineIdx];
             line.start = at;
-            line.end = at + 1;
-            line.words.forEach((w) => { w.start = at; w.end = at + 1; });
+            line.end = at + slotDuration;
+            line.words.forEach((w) => { w.start = at; w.end = at + slotDuration; });
             if (line.background) line.background.forEach((bg) => {
               bg.start = at;
-              bg.end = at + 1;
-              bg.words.forEach((w) => { w.start = at; w.end = at + 1; });
+              bg.end = at + slotDuration;
+              bg.words.forEach((w) => { w.start = at; w.end = at + slotDuration; });
             });
           });
         }
@@ -592,6 +689,10 @@
     // position in the song instead of piling on top and burying the synced
     // words (AJ, 2026-09-17).
     parsed.sort((a, b) => a.start - b.start);
+
+    // Labels go on after the sort, so "the first line of a part" means the first
+    // one SUNG, not the first one written down in the file.
+    attachSingerLabels(parsed, parseAgents(xml), primaryAgent);
 
     return parsed.filter((line) => line.text || line.words.length);
   }
@@ -670,6 +771,7 @@
           LineTimed: true,
           Timed: true,
           OppositeAligned: !!line.oppositeAligned,
+          Singer: line.singer || null,
           Lead: {
             StartTime: line.start,
             EndTime: line.end,
@@ -683,6 +785,7 @@
         LineTimed: !hasWordTiming,
         Timed: !!(line.timed || line.positioned),
         OppositeAligned: !!line.oppositeAligned,
+        Singer: line.singer || null,
         Lead: {
           StartTime: line.start,
           EndTime: line.end,
@@ -6365,6 +6468,33 @@
     #ym-sl-panel.SpicyRenderer .line > * {
       position: relative;
       z-index: 1;
+    }
+    /* A singer's name above the first line of their part. Smaller and quieter
+       than the lyric so it reads as a heading rather than as something sung,
+       and it never takes clicks: seeking belongs to the line under it. */
+    #ym-sl-panel.SpicyRenderer .line .line-singer {
+      flex-basis: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      order: -1;
+      margin-bottom: .1em;
+      font-size: .4em;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: 0;
+      text-transform: none;
+      opacity: .78;
+      pointer-events: none;
+    }
+    /* A duet line's part starts on the right, so its name does too. */
+    #ym-sl-panel.SpicyRenderer .line.OppositeAligned .line-singer {
+      align-items: flex-end;
+    }
+    #ym-sl-panel.SpicyRenderer .line .line-singer .line-singer-real {
+      font-size: .72em;
+      font-weight: 600;
+      opacity: .8;
     }
     /* On-device English translation of a foreign line (23-auto-translate).
        Deliberately a smaller, quieter line than the lyric it explains: it is
@@ -17203,6 +17333,22 @@
         lineElement.classList.add("rtl");
       }
 
+      // A singer's name sits above the first line of their part, in the same
+      // column as the words: the line is a wrapping flex row, so a full-basis
+      // child takes its own row and the translation below wraps to the next one.
+      if (contentLine.Singer && contentLine.Singer.name) {
+        const singerElement = h("div", { class: "line-singer" });
+        singerElement.appendChild(
+          h("span", { class: "line-singer-name", text: contentLine.Singer.name })
+        );
+        if (contentLine.Singer.realName) {
+          singerElement.appendChild(
+            h("span", { class: "line-singer-real", text: contentLine.Singer.realName })
+          );
+        }
+        lineElement.appendChild(singerElement);
+      }
+
       // A line with neither line-level sync nor real span timing is unsynced:
       // render it as a static block (no syllable/letter karaoke).
       const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
@@ -19405,6 +19551,38 @@
 #ym-sl-amll-host .amll-lyric-player { pointer-events: auto; height: 100%; }
 /* Make the lyrics area the positioning context so the host fills it. */
 .LyricsContainer { position: relative; }
+/* Singer names above the first line of their part, matching the built-in
+   renderer's label exactly (.4em / 700 / .78). The engine stacks main,
+   translation and roman as block children, so the line becomes a column and the
+   label is ordered to the top instead of being inserted at children[0] - the
+   engine indexes those slots and would lose its main line. */
+#ym-sl-amll-host .FmKaba_lyricLine {
+  display: flex;
+  flex-direction: column;
+}
+#ym-sl-amll-host .FmKaba_lyricLine > .line-singer {
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: .1em;
+  font-size: .4em;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: .78;
+  pointer-events: none;
+}
+/* A duet line's part starts on the right, so its name does too. */
+#ym-sl-amll-host .FmKaba_lyricDuetLine > .line-singer {
+  align-items: flex-end;
+}
+#ym-sl-amll-host .FmKaba_lyricLine > .line-singer > .line-singer-real {
+  font-size: .72em;
+  font-weight: 600;
+  opacity: .8;
+}
 /* When AMLL owns the panel, hide Aurora's own (glow-free) Simple lines. */
 body.amll-active #ym-sl-panel.SpicyRenderer .VirtualLyricsContainer { display: none !important; }
 #ym-sl-amll-host { visibility: hidden; pointer-events: none; }
@@ -19873,6 +20051,15 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       // amllPlayer must be assigned BEFORE the size seed: amllSeedEngineSize()
       // bails on a missing player, so seeding first was a silent no-op.
       amllPlayer = player;
+      // A view rebuild (engine config changes) discards every line element and
+      // makes new ones, which would silently drop the names until the next track.
+      // Wrap it once, so the labels come back with the lines.
+      const engineRebuildView = player.rebuildLyricView.bind(player);
+      player.rebuildLyricView = (initialTime) => {
+        const out = engineRebuildView(initialTime);
+        amllInjectSingerLabels();
+        return out;
+      };
       amllGuardEngineSize();
       amllSeedEngineSize();
 
@@ -20020,6 +20207,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         endTime: (lead.EndTime || 0) * 1000,
         isBG: false,
         isDuet: !!line.OppositeAligned,
+        // Aurora: the singer whose part this line starts, if any. AMLL ignores
+        // fields it does not know, and amllInjectSingerLabels reads this one
+        // back off the line the engine built, so nothing else has to line up
+        // by index once the engine has re-ordered or windowed the lines.
+        __ymSinger: line.Singer || null,
       });
       const bgs = line.Background || [];
       bgs.forEach((bg, bgIndex) => {
@@ -20037,6 +20229,50 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       });
     }
     return out;
+  }
+
+  // Singer names for the engine's own lines. AMLL only ever builds three
+  // children per line (main, translation, roman) and its rebuildElement() clears
+  // exactly those three, so a fourth child appended to the line element survives
+  // the engine rebuilding a line's words - which happens on every set and on
+  // style rebuilds. CSS orders that child above the words (see AMLL_HOST_CSS).
+  function amllSingerLabel(line) {
+    const singer = line && line.__ymSinger;
+    if (!singer || !singer.name) return null;
+    const label = document.createElement("div");
+    label.className = "line-singer";
+    const name = document.createElement("span");
+    name.className = "line-singer-name";
+    name.textContent = String(singer.name);
+    label.appendChild(name);
+    if (singer.realName) {
+      const real = document.createElement("span");
+      real.className = "line-singer-real";
+      real.textContent = String(singer.realName);
+      label.appendChild(real);
+    }
+    return label;
+  }
+
+  // Idempotent: a line that already carries its label is left alone, so calling
+  // this after every setLyricLines() costs one class lookup per visible line.
+  function amllInjectSingerLabels() {
+    if (!amllPlayer) return;
+    const groups = amllPlayer.currentLyricGroups || [];
+    for (const group of groups) {
+      const mainLine = group && group.mainLine;
+      if (!mainLine) continue;
+      let el = null;
+      let line = null;
+      try { el = mainLine.getElement(); line = mainLine.getLine(); } catch (e) {}
+      if (!el || !line) continue;
+      // Direct children only: a background line is a separate element and never
+      // carries a label, and nothing else in the tree is a lyric name.
+      const existing = el.querySelector(":scope > .line-singer");
+      if (existing) continue;
+      const label = amllSingerLabel(line);
+      if (label) el.appendChild(label);
+    }
   }
 
   function amllContentIsTimed(content) {
@@ -20116,6 +20352,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         return;
       }
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
+      // After the set: buildLyricGroups() has created a fresh line element per
+      // line by now, and those are the ones that need the name hung on them.
+      amllInjectSingerLabels();
       // Cached translations were already in the line objects; this fills the
       // sub-line of any line the engine built before the translation landed.
       autoTranslateRefreshAmll();

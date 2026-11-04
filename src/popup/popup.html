@@ -2,7 +2,6 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="stylesheet" href="../extensions/fonts/spicy-lyrics.css" />
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -13,35 +12,51 @@
         <span class="ver" id="ver"></span>
       </header>
 
-      <p class="status" id="status" data-state="checking" aria-live="polite">
-        <span class="dot" aria-hidden="true"></span>
-        <span class="status-text" id="statusText">Checking this tab&hellip;</span>
-      </p>
+      <div class="tabs" role="tablist" aria-label="Popup sections">
+        <button class="tab" id="tabWhatsNew" type="button" role="tab" data-page="whatsnew" aria-selected="true" aria-controls="pageWhatsNew">What's new</button>
+        <button class="tab" id="tabAddons" type="button" role="tab" data-page="addons" aria-selected="false" aria-controls="pageAddons" tabindex="-1">Add-ons</button>
+        <button class="tab" id="tabDiagnostics" type="button" role="tab" data-page="diagnostics" aria-selected="false" aria-controls="pageDiagnostics" tabindex="-1">Diagnostics</button>
+      </div>
 
-      <section class="now" id="now" hidden>
-        <img class="art" id="art" alt="" hidden />
-        <span class="art-fallback" id="artFallback" aria-hidden="true"></span>
-        <div class="meta">
-          <p class="track" id="trackTitle"></p>
-          <p class="artist" id="trackArtist"></p>
+      <div class="pages" id="pages">
+        <div class="pages-track" id="pagesTrack">
+          <section class="page current" id="pageWhatsNew" role="tabpanel" data-page="whatsnew" aria-labelledby="tabWhatsNew">
+            <div class="wn-scroll" id="whatsNew"></div>
+          </section>
+
+          <section class="page" id="pageAddons" role="tabpanel" data-page="addons" aria-labelledby="tabAddons" aria-hidden="true">
+            <div class="addons-scroll" id="addonsScroll"></div>
+            <p class="addons-empty" id="addonsEmpty">Open YouTube Music to change add-ons.</p>
+          </section>
+
+          <section class="page" id="pageDiagnostics" role="tabpanel" data-page="diagnostics" aria-labelledby="tabDiagnostics" aria-hidden="true">
+            <section class="now" id="now" hidden>
+              <img class="art" id="art" alt="" hidden />
+              <span class="art-fallback" id="artFallback" aria-hidden="true"></span>
+              <div class="meta">
+                <p class="track" id="trackTitle"></p>
+                <p class="artist" id="trackArtist"></p>
+              </div>
+            </section>
+
+            <dl class="facts" id="facts" hidden>
+              <div class="fact"><dt>Renderer</dt><dd id="fRenderer">&mdash;</dd></div>
+              <div class="fact"><dt>Lyric panel</dt><dd id="fPanel">&mdash;</dd></div>
+              <div class="fact"><dt>Add-ons</dt><dd id="fAddons">&mdash;</dd></div>
+              <div class="fact error-row" id="errorRow" hidden><dt>Last error</dt><dd id="fError">&mdash;</dd></div>
+            </dl>
+
+            <div class="actions">
+              <button class="btn primary" id="openBtn" type="button">Open marketplace</button>
+              <button class="btn ghost copy" id="copyBtn" type="button" aria-label="Copy diagnostics">
+                <span class="swap">
+                  <span class="swap-face swap-idle">Copy diagnostics</span>
+                  <span class="swap-face swap-done">Copied</span>
+                </span>
+              </button>
+            </div>
+          </section>
         </div>
-      </section>
-
-      <dl class="facts" id="facts" hidden>
-        <div class="fact"><dt>Renderer</dt><dd id="fRenderer">&mdash;</dd></div>
-        <div class="fact"><dt>Lyric panel</dt><dd id="fPanel">&mdash;</dd></div>
-        <div class="fact"><dt>Add-ons</dt><dd id="fAddons">&mdash;</dd></div>
-        <div class="fact error-row" id="errorRow" hidden><dt>Last error</dt><dd id="fError">&mdash;</dd></div>
-      </dl>
-
-      <div class="actions">
-        <button class="btn primary" id="openBtn" type="button">Open marketplace</button>
-        <button class="btn ghost copy" id="copyBtn" type="button" aria-label="Copy diagnostics">
-          <span class="swap">
-            <span class="swap-face swap-idle">Copy diagnostics</span>
-            <span class="swap-face swap-done">Copied</span>
-          </span>
-        </button>
       </div>
     </div>
 

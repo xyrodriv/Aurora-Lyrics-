@@ -12,10 +12,9 @@ add-ons.
   rendering driven by live playback position.
 - **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API**,
   **LRCLIB**, and the **Aurora Community API**; the Discord bot accepts community
-  TTML uploads, with staff review before Contributor submissions go live. The
-  test seeds remain until real uploads replace them. TTML files can be dropped
-  or picked in, re-exported with your sync, and saved per track so they survive
-  a reload.
+  TTML uploads, with staff review before Contributor submissions go live. TTML
+  files can be dropped or picked in, re-exported with your sync, and saved per
+  track so they survive a reload.
 - **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
   the Spicy Lyrics API is keyed by one. Aurora resolves it through
   **ListenBrainz** (free, keyless, no backend) using a variant ladder over

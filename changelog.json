@@ -1,6 +1,20 @@
 {
   "releases": [
     {
+      "version": "1.1.0",
+      "date": "2026-11-04",
+      "title": "A rebuilt add-ons panel, and singers on the line.",
+      "features": [
+        "The add-ons panel is rebuilt from the ground up: a rail of cards, a detail view that slides in over it, search that settles into place, and switches you can read at a glance.",
+        "Lyrics now show who sings each line. When a TTML credits singers, their name sits above the first line of their part, with their real name underneath when the file has one.",
+        "The pop-up is now three tabs: What's new, Add-ons and Diagnostics, instead of one long column.",
+        "The panel is set in Satoshi, bundled with the extension so it renders the same everywhere."
+      ],
+      "fixes": [
+        "TTML files that time lines with begin, dur or end attributes instead of absolute timestamps now land in the right place."
+      ]
+    },
+    {
       "version": "1.0.5",
       "date": "2026-11-01",
       "title": "Announcements, community lyrics, and your profile.",

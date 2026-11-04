@@ -1,0 +1,1120 @@
+/* ==========================================================================
+   Add-ons panel — the design from mockups/addons-panel/three/panel.html.
+
+   This is the panel's whole look, lifted from the mockup (base.css + the
+   <style> block in panel.html) and re-pointed at the class names the extension
+   renders. It loads AFTER styles.css, so `#ym-market.ym-mk2 …` (one id, two
+   classes) outranks the legacy `#ym-market .…` rules without !important — the
+   old sheet can no longer win a property it happens to declare.
+
+   Mockup names in brackets: .panel [.ym-mk-shell], .pane [.ym-mk-rail],
+   .row [.ym-mk-card], .dt-* [.ym-mk-detail …], .sw [.ym-mk-sw].
+   ========================================================================== */
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("../extensions/fonts/Satoshi-Variable.woff2") format("woff2");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+#ym-market.ym-mk2 {
+  /* tokens, straight from base.css */
+  --red: #e01040;
+  --red-soft: #ff4d6a;
+  --ink: #0e0e10;
+  --panel: #17171a;
+  --surface: rgba(255,255,255,.05);
+  --surface-hover: rgba(255,255,255,.08);
+  --surface-edge: inset 0 0 0 1px rgba(255,255,255,.09);
+  --surface-edge-hover: inset 0 0 0 1px rgba(255,255,255,.18);
+  --raised: rgba(255,255,255,.06);
+  --raised-hover: rgba(255,255,255,.1);
+  --text-strong: #fff;
+  --text: rgba(255,255,255,.85);
+  --muted: rgba(255,255,255,.55);
+  --dim: rgba(255,255,255,.4);
+  --line: rgba(255,255,255,.06);
+  --line-strong: rgba(255,255,255,.1);
+  --radius-card: 1.25rem;
+  --radius-control: .625rem;
+  --control-height: 38px;
+  --ease-quick: .15s ease-out;
+
+  /* the overlay is the dimmed backdrop and one centring cell */
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+  padding: 40px;
+  /* The mockup's overlay has no fill of its own: the page stays visible behind
+     the card. A dark wash here made the whole window read as black. */
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  /* Satoshi, the face the design was drawn in */
+  font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  /* NOT `antialiased`. On Windows that switches glyph rendering off ClearType to
+     grayscale smoothing, which is why the panel's small type reads as a slightly
+     blurry image of text rather than as text. `auto` keeps the platform renderer. */
+  -webkit-font-smoothing: auto;
+}
+/* controls do not inherit a font, and the legacy sheet still points the panel at
+   SpicyLyrics — this is the one place a universal selector is the right tool. */
+#ym-market.ym-mk2 * {
+  font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+#ym-market.ym-mk2 .ym-mk-bg { display: none; }
+
+/* Legacy shell states may not reshape the card. */
+#ym-market.ym-mk2.ym-floating,
+#ym-market.ym-mk2.ym-mk-collapsed {
+  inset: 0;
+  transform: none;
+  width: 100%; height: 100%;
+  max-width: none; max-height: none;
+  border-radius: 0;
+  padding: 40px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+}
+#ym-market.ym-mk2.ym-floating::before { display: none; }
+
+/* ---- the card: .panel --------------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-shell {
+  position: relative;
+  /* Rows, not flex: the top bar is row 1 spanning both columns, the rail and the
+     pane are row 2. This cannot be knocked out of position by a leftover
+     `grid-template-columns` on the shell — the header simply spans them. */
+  display: grid;
+  /* A fixed, narrow rail: the detail pane is the surface that needs the room, so
+     it keeps everything the rail does not use. The seam still reads as centred
+     because both columns inset their content 30px from it (see the rail gutter
+     below), which an equal split did not — the list ran to the line while the
+     pane was padded. The !important matches the copy in styles.css, which is also
+     declared with it. */
+  grid-template-columns: minmax(280px, 364px) minmax(0, 1fr) !important;
+  grid-template-rows: 64px minmax(0, 1fr);
+  width: min(1120px, 100%);
+  height: min(730px, 100%);
+  min-height: 0;
+  background: var(--panel);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), 0 40px 90px -40px rgba(0,0,0,.9);
+}
+/* The wrapper is only there so the JS can group the two columns: with
+   `display:contents` its children ARE the shell's grid items. */
+#ym-market.ym-mk2 .ym-mk-body { display: contents; }
+#ym-market.ym-mk2 .ym-mk-head { grid-column: 1 / -1; grid-row: 1; }
+#ym-market.ym-mk2 .ym-mk-rail { grid-column: 1; grid-row: 2; }
+#ym-market.ym-mk2 .ym-mk-pane { grid-column: 2; grid-row: 2; }
+
+/* ---- rail: .pane + .head ------------------------------------------------ */
+#ym-market.ym-mk2 .ym-mk-rail {
+  display: flex; flex-direction: column; min-height: 0;
+  width: auto; max-width: none;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: transparent;
+}
+#ym-market.ym-mk2 .ym-mk-railtop { flex: 0 0 auto; background: transparent; }
+
+#ym-market.ym-mk2 .ym-mk-head {
+  height: 64px;
+  flex: 0 0 64px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px;
+  padding: 0 14px 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  cursor: default;
+}
+#ym-market.ym-mk2 .ym-mk-hleft { display: flex; align-items: center; gap: 7px; }
+#ym-market.ym-mk2 .ym-mk-hright { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+#ym-market.ym-mk2 .ym-mk-seam {
+  width: 1px; height: 18px; background: var(--line-strong); margin: 0 6px;
+}
+/* the two brand buttons carry their own colour and a white glyph */
+#ym-market.ym-mk2 .ym-mk-brand {
+  display: grid; place-items: center;
+  width: 30px; height: 30px;
+  margin: 0; padding: 0; border: 0;
+  border-radius: .5rem;
+  color: #fff; text-decoration: none;
+  box-shadow: none;
+  transition: filter var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-brand svg {
+  display: block; width: 16px; height: 16px; margin: 0;
+  fill: currentColor;
+}
+#ym-market.ym-mk2 .ym-mk-brand:hover { filter: brightness(1.15); }
+#ym-market.ym-mk2 .ym-mk-brand:active { scale: .96; }
+#ym-market.ym-mk2 .ym-mk-brand-discord { background: #5865f2; }
+#ym-market.ym-mk2 .ym-mk-brand-yt { background: #ff0000; }
+/* everything else in the header is monochrome and quiet */
+#ym-market.ym-mk2 .ym-mk-setbtn,
+#ym-market.ym-mk2 .ym-mk-head #ym-close {
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  margin-left: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: none; color: var(--muted);
+  transition: background var(--ease-quick), color var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-setbtn svg,
+#ym-market.ym-mk2 .ym-mk-head #ym-close svg { width: 16px; height: 16px; fill: currentColor; }
+#ym-market.ym-mk2 .ym-mk-setbtn:hover,
+#ym-market.ym-mk2 .ym-mk-head #ym-close:hover { background: var(--raised); color: var(--text-strong); }
+#ym-market.ym-mk2 .ym-mk-setbtn:active,
+#ym-market.ym-mk2 .ym-mk-head #ym-close:active { scale: .96; }
+
+/* ---- tabs --------------------------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-tabs {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 2px;
+  padding: 14px 12px 10px;
+  border: 0; background: none; margin: 0;
+}
+#ym-market.ym-mk2 .ym-mk-tab {
+  display: flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 11px; margin: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: none; box-shadow: none;
+  font-size: 13px; font-weight: 500;
+  color: var(--muted);
+  transition: background var(--ease-quick), color var(--ease-quick), box-shadow var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-tab .n {
+  font-style: normal; font-size: 12px; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+#ym-market.ym-mk2 .ym-mk-tab:hover { color: var(--text); background: var(--surface); }
+#ym-market.ym-mk2 .ym-mk-tab.on {
+  color: var(--text-strong);
+  background: var(--surface);
+  box-shadow: var(--surface-edge);
+}
+#ym-market.ym-mk2 .ym-mk-tab.on .n { color: var(--muted); }
+
+/* ---- search ------------------------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-searchwrap { flex: 0 0 auto; padding: 0 12px 10px; }
+#ym-market.ym-mk2 .ym-mk-search {
+  display: block; width: 100%; height: var(--control-height);
+  padding: 0 12px; margin: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: rgba(255,255,255,.024);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.1);
+  color: var(--text); font-size: 13px;
+  outline: none;
+  transition: background var(--ease-quick), box-shadow var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-search::placeholder { color: var(--dim); }
+#ym-market.ym-mk2 .ym-mk-search:focus {
+  background: rgba(255,255,255,.05);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.2);
+}
+
+/* ---- the ledger -------------------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-rows {
+  position: relative; flex: 1; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 0 4px 16px;
+  background: transparent;
+  /* No scrollbar: during a swap the list is momentarily taller than the pane and
+     the bar flashed in and out. Wheel and keyboard scrolling are untouched. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+#ym-market.ym-mk2 .ym-mk-rows::-webkit-scrollbar { width: 0; height: 0; }
+#ym-market.ym-mk2 .ym-mk-ind {
+  /* Above the cards' own contexts: the highlight starts at the same x, so the
+     line has to draw over it rather than under a translucent layer. */
+  position: absolute; top: 0; left: 0; z-index: 1; width: 2px; border-radius: 2px;
+  background: var(--red); opacity: 0; pointer-events: none;
+  transition: transform .32s cubic-bezier(.25,.8,.35,1),
+              height .32s cubic-bezier(.25,.8,.35,1),
+              opacity .18s linear;
+}
+#ym-market.ym-mk2 .ym-mk-card {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 12px;
+  width: 100%; padding: 13px 12px; margin: 0;
+  border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+  background: none; box-shadow: none;
+  text-align: left;
+  /* The press scale needs its own transition: this rule outranks the legacy one,
+     so without it the card snapped smaller on press and snapped back. */
+  transition: background var(--ease-quick),
+              transform .18s cubic-bezier(.34,1.2,.5,1);
+}
+#ym-market.ym-mk2 .ym-mk-card:active { transform: scale(.985); }
+#ym-market.ym-mk2 .ym-mk-card:last-child { border-bottom: 0; }
+/* The highlight is a layer UNDER the row, not a background ON it: painted on the
+   card itself it was a square band that ran off both edges of the column. As an
+   inset ::before it spans the row edge to edge and the row's text still sits on
+   top. `isolation` gives the card its own stacking context so the negative z-index
+   layer stays above the sheet and below the label. */
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord) {
+  position: relative;
+  isolation: isolate;
+}
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord)::before {
+  /* Both edges overhang the rows' 4px padding: the left one meets the marker's
+     line, the right one runs out to the divider. Square corners, no rounding, and
+     no vertical inset either — the layer runs from the separator above to the one
+     below instead of leaving a sliver on each. */
+  content: ""; position: absolute; inset: 0 -4px; z-index: -1;
+  border-radius: 0; background: transparent;
+  pointer-events: none;
+  transition: background-color var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord):hover { background: none; }
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord).sel { background: none; }
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord):hover::before { background: rgba(255,255,255,.03); }
+#ym-market.ym-mk2 .ym-mk-card:not(.ym-mk-card-yt):not(.ym-mk-card-discord).sel::before { background: rgba(255,255,255,.045); }
+#ym-market.ym-mk2 .ym-mk-main { min-width: 0; }
+#ym-market.ym-mk2 .ym-mk-name {
+  display: block; font-size: 16px; font-weight: 700;
+  line-height: 1.3; letter-spacing: -.01em;
+  color: var(--text);
+}
+#ym-market.ym-mk2 .ym-mk-card.sel .ym-mk-name { color: var(--text-strong); }
+#ym-market.ym-mk2 .ym-mk-line {
+  display: block; margin-top: 2px;
+  font-size: 13px; line-height: 1.45; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#ym-market.ym-mk2 .ym-mk-state { font-size: 12px; color: var(--dim); white-space: nowrap; }
+#ym-market.ym-mk2 .ym-mk-state.on { color: var(--text); }
+#ym-market.ym-mk2 .ym-mk-rows-empty {
+  margin: 0; padding: 18px 12px; font-size: 13px; line-height: 1.55; color: var(--dim);
+}
+/* the design has no monograms, checks, category headings or source chips */
+#ym-market.ym-mk2 .ym-mk-mono,
+#ym-market.ym-mk2 .ym-mk-check,
+#ym-market.ym-mk2 .ym-mk-cat,
+#ym-market.ym-mk2 .ym-mk-sources,
+#ym-market.ym-mk2 .ym-mk-sweep,
+#ym-market.ym-mk2 .ym-mk-dmono { display: none; }
+
+/* ---- detail ------------------------------------------------------------ */
+#ym-market.ym-mk2 .ym-mk-pane {
+  display: flex; flex-direction: column; min-height: 0;
+  border-left: 0; background: transparent;
+}
+#ym-market.ym-mk2 .ym-mk-detail {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 26px 30px 30px;
+  background: transparent;
+}
+#ym-market.ym-mk2 .ym-mk-dwrap {
+  display: grid; gap: 18px;
+  max-width: 640px;
+}
+#ym-market.ym-mk2 .ym-mk-dhead { display: block; }
+#ym-market.ym-mk2 .ym-mk-dtitles { display: block; }
+#ym-market.ym-mk2 .ym-mk-dtitles h1 {
+  margin: 0; font-size: 28px; font-weight: 700;
+  line-height: 1.1; letter-spacing: -.02em; color: var(--text-strong);
+}
+#ym-market.ym-mk2 .ym-mk-disclaimer { margin-top: 5px; font-size: 11px; color: rgba(255,255,255,.36); }
+/* meta: category, hairline, version */
+#ym-market.ym-mk2 .ym-mk-status {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 7px; font-size: 12px; color: var(--dim);
+}
+#ym-market.ym-mk2 .ym-mk-vr { width: 1px; height: 11px; background: var(--line-strong); }
+#ym-market.ym-mk2 .ym-mk-ver { margin-left: 0; font-size: 12px; color: var(--dim); }
+#ym-market.ym-mk2 .ym-mk-pill { display: none; }
+
+/* actions: switch + label, a growing gap, then a quiet Remove */
+#ym-market.ym-mk2 .ym-mk-acts {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0; padding: 0 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+#ym-market.ym-mk2 .ym-mk-enrow { display: flex; align-items: center; gap: 10px; }
+#ym-market.ym-mk2 .ym-mk-enable { font-size: 13px; color: var(--muted); }
+#ym-market.ym-mk2 .ym-mk-grow { flex: 1; }
+
+#ym-market.ym-mk2 .ym-mk-sw {
+  position: relative; width: 38px; height: 22px; flex: 0 0 auto;
+  padding: 0; border: 0; border-radius: .375rem;
+  background: rgba(255,255,255,.12);
+  cursor: pointer;
+  transition: background .18s linear, scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-sw::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: .25rem; background: #fff;
+  box-shadow: 0 0 10px 0 rgba(0,0,0,.25);
+  transform: translateX(0);
+  transition: transform .24s cubic-bezier(.25,.8,.35,1);
+}
+#ym-market.ym-mk2 .ym-mk-sw[aria-checked="true"] { background: var(--red); }
+#ym-market.ym-mk2 .ym-mk-sw[aria-checked="true"]::after { transform: translateX(16px); }
+#ym-market.ym-mk2 .ym-mk-sw:active { scale: .96; }
+
+#ym-market.ym-mk2 .ym-mk-acts button:not(.ym-mk-sw) {
+  height: var(--control-height); padding: 0 16px; margin: 0;
+  border: 0; border-radius: var(--radius-control);
+  font-size: 13px; font-weight: 600;
+  transition: background var(--ease-quick), color var(--ease-quick),
+              box-shadow var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-acts button:not(.ym-mk-sw):active { scale: .96; }
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-btn-in {
+  background: var(--red); color: #fff; box-shadow: none;
+}
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-btn-in:hover { background: #c40b35; }
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-btn-un {
+  background: var(--raised); color: var(--text);
+  box-shadow: var(--surface-edge);
+}
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-btn-un:hover {
+  background: rgba(224,16,64,.14); color: var(--red-soft);
+  box-shadow: inset 0 0 0 1px rgba(224,16,64,.4);
+}
+#ym-market.ym-mk2 .ym-mk-acts svg { width: 14px; height: 14px; }
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-ghlink {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 4px;
+  font-size: 12px; color: var(--dim); text-decoration: none;
+}
+#ym-market.ym-mk2 .ym-mk-acts .ym-mk-ghlink:hover { color: var(--text); }
+
+#ym-market.ym-mk2 .ym-mk-lead {
+  margin: 0; font-size: 14px; line-height: 1.65; color: var(--text);
+}
+/* the note card that stands in for an empty settings list */
+#ym-market.ym-mk2 .ym-mk-hint {
+  padding: 12px 14px; border-radius: var(--radius-control);
+  background: rgba(255,255,255,.03);
+  box-shadow: var(--surface-edge);
+  font-size: 13px; line-height: 1.55; color: var(--muted);
+}
+
+/* ---- settings: one flat list ------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-setblock { display: grid; gap: 0; background: none; box-shadow: none; }
+#ym-market.ym-mk2 .ym-detail-settings,
+#ym-market.ym-mk2 .ym-detail-settings-head,
+#ym-market.ym-mk2 .ym-mk-settings {
+  margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; box-shadow: none;
+}
+#ym-market.ym-mk2 .ym-detail-settings-head { margin: 0 0 4px; }
+#ym-market.ym-mk2 .ym-detail-settings-titlerow { align-items: baseline; }
+#ym-market.ym-mk2 .ym-detail-settings-title {
+  font-size: 12px; font-weight: 600; letter-spacing: .01em;
+  text-transform: none; color: var(--dim);
+}
+#ym-market.ym-mk2 .ym-detail-settings-subtitle { display: none; }
+#ym-market.ym-mk2 .ym-detail-setting-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 188px;
+  align-items: center; gap: 24px;
+  min-height: 0;
+  margin: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line); border-radius: 0;
+  background: none; box-shadow: none;
+}
+#ym-market.ym-mk2 .ym-detail-setting-row:last-child { border-bottom: 0; }
+#ym-market.ym-mk2 .ym-detail-setting-label {
+  min-width: 0; font-size: 13px; color: var(--text);
+  overflow-wrap: anywhere;
+}
+#ym-market.ym-mk2 .ym-detail-setting-note {
+  display: block; margin-top: 2px;
+  font-size: 11px; line-height: 1.45; color: var(--dim);
+}
+#ym-market.ym-mk2 .ym-detail-setting-control {
+  display: flex; align-items: center; justify-self: start;
+  gap: 10px; min-width: 188px;
+}
+#ym-market.ym-mk2 .ym-detail-setting-value {
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#ym-market.ym-mk2 .ym-detail-setting-section {
+  margin: 18px 0 2px; padding-top: 0; border-top: 0;
+  font-size: 12px; font-weight: 600; letter-spacing: 0;
+  text-transform: none; color: var(--dim);
+}
+#ym-market.ym-mk2 .ym-detail-setting-section:first-of-type { margin-top: 0; }
+
+/* the sliders and toggles inside those rows take the design's controls */
+#ym-market.ym-mk2 .ym-detail-setting-input[type="range"],
+#ym-market.ym-mk2 .ym-detail-setting-control input[type="range"] {
+  width: 132px; max-width: 100%;
+  accent-color: var(--red);
+  cursor: pointer;
+}
+/* The design's toggle, on the extension's checkbox rows: a 38x22 track with a
+   square knob, red when on. The legacy sheet drew a round-knob lozenge. */
+#ym-market.ym-mk2 .ym-detail-setting-input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 38px; height: 22px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 0; border-radius: 6px;
+  background: rgba(255,255,255,.12);
+  cursor: pointer;
+  transition: background .18s linear;
+}
+#ym-market.ym-mk2 .ym-detail-setting-input[type="checkbox"]::after {
+  content: "";
+  position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 0 10px 0 rgba(0,0,0,.25);
+  transform: translateX(0);
+  transition: transform .24s cubic-bezier(.25,.8,.35,1);
+}
+#ym-market.ym-mk2 .ym-detail-setting-input[type="checkbox"]:checked {
+  background: var(--red);
+}
+#ym-market.ym-mk2 .ym-detail-setting-input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+
+#ym-market.ym-mk2 tp-yt-paper-toggle-button {
+  --paper-toggle-button-checked-bar-color: #e01040;
+  --paper-toggle-button-checked-button-color: #ffffff;
+  --paper-toggle-button-checked-ink-color: rgba(224,16,64,.3);
+  --paper-toggle-button-unchecked-bar-color: rgba(255,255,255,.12);
+  --paper-toggle-button-unchecked-button-color: #ffffff;
+  margin: 0;
+}
+
+/* ---- scrollbars -------------------------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-rows::-webkit-scrollbar,
+#ym-market.ym-mk2 .ym-mk-detail::-webkit-scrollbar { width: 12px; }
+#ym-market.ym-mk2 .ym-mk-rows::-webkit-scrollbar-track,
+#ym-market.ym-mk2 .ym-mk-detail::-webkit-scrollbar-track { background: transparent; }
+#ym-market.ym-mk2 .ym-mk-rows::-webkit-scrollbar-thumb,
+#ym-market.ym-mk2 .ym-mk-detail::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.15);
+  border: 4px solid transparent;
+  background-clip: content-box;
+  border-radius: 1000px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #ym-market.ym-mk2 .ym-mk-ind { transition: none; }
+  #ym-market.ym-mk2 .ym-mk-sw::after { transition: none; }
+  #ym-market.ym-mk2 .ym-mk-sw,
+  #ym-market.ym-mk2 .ym-mk-brand { scale: 1; }
+}
+/* ---- sheets ------------------------------------------------------------- */
+/* Settings and YouTube modifications are pages of their own: they slide up over
+   the WHOLE card, top bar included — not into the detail column. */
+#ym-market.ym-mk2 .ym-mk-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-radius: inherit;
+  overflow: hidden;
+}
+#ym-market.ym-mk2 .ym-mk-sheet[hidden] { display: none; }
+#ym-market.ym-mk2 .ym-mk-sheetbar {
+  flex: 0 0 64px;
+  display: flex; align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+#ym-market.ym-mk2 .ym-mk-sheetback {
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  padding: 0; border: 0; border-radius: var(--radius-control);
+  background: none; color: var(--muted);
+  cursor: pointer;
+  transition: background var(--ease-quick), color var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-sheetback svg { width: 16px; height: 16px; fill: currentColor; }
+#ym-market.ym-mk2 .ym-mk-sheetback:hover { background: var(--raised); color: var(--text-strong); }
+#ym-market.ym-mk2 .ym-mk-sheetback:active { scale: .96; }
+#ym-market.ym-mk2 .ym-mk-sheetbody {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 26px 30px 30px;
+}
+/* YouTube modifications is a page of its own, so its content is centred in the
+   card instead of hugging the detail column's width. */
+#ym-market.ym-mk2 .ym-mk-sheetbody > .ym-mk-ytpage {
+  max-width: 760px;
+  margin: 0 auto;
+  display: grid;
+  gap: 18px;
+}
+/* The page's own wrapper caps itself at 640px and sits at the start of whatever
+   holds it, which is why the text still hugged the left: lift the cap so the
+   column fills the centred page, and centre the heading and lead copy. */
+#ym-market.ym-mk2 .ym-mk-ytpage > .ym-mk-dwrap {
+  width: 100%;
+  max-width: none;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-mk-dtitles {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-mk-dhead { justify-items: center; text-align: center; }
+#ym-market.ym-mk2 .ym-mk-ytpage > .ym-mk-dwrap > .ym-mk-lead { text-align: center; }
+/* Sheet pages are plain text on the panel surface. The legacy rules put
+   backdrop-filters and soft shadows on the cards they reuse, and a filtered
+   layer resamples its text — at the 90% page zoom this tab runs at, that reads
+   as an image rather than type. */
+#ym-market.ym-mk2 .ym-mk-sheet,
+#ym-market.ym-mk2 .ym-mk-sheet * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  text-shadow: none !important;
+  image-rendering: auto !important;
+}
+
+/* ---- YouTube modifications: a centred page ------------------------------ */
+/* The page's blocks were each capped at 620px and aligned to the start of the
+   760px column, so the type sat left of centre even though the column itself was
+   centred. Let the blocks fill the column, then centre the copy inside them. */
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-mk-dwrap > *,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-views,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-view {
+  width: 100%;
+  max-width: none;
+  margin-inline: auto;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-view > *:not(.ym-yt-back) {
+  width: 100%;
+  max-width: none;
+  margin-left: auto;
+  margin-right: auto;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage { text-align: center; }
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-mk-lead,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-mk-disclaimer,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-sec-title,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-sec-blurb,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-settings-title,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-settings-subtitle,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-tile-name,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-tile-desc {
+  text-align: center;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-settings-titlerow {
+  justify-content: center;
+}
+/* Inside a section a row is a ROW again: the label on the left, its switch on
+   the right, both the width of the page, with the hairline under it running the
+   same width. Only the tile picker is a centred surface. */
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 24px;
+  text-align: left;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-setting-label { text-align: left; }
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-setting-control {
+  justify-content: flex-end;
+  justify-self: end;
+  min-width: 0;
+  gap: 12px;
+  text-align: right;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-detail-settings-head { text-align: center; }
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-tiles,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-tile-row {
+  justify-content: center;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-tile { text-align: center; }
+
+/* ---- report a problem: a quiet link, not a red block -------------------- */
+#ym-market.ym-mk2 .ym-report-foot {
+  margin: 0; padding: 0;
+  display: flex; justify-content: flex-end;
+}
+#ym-market.ym-mk2 .ym-report-btn {
+  height: 32px; padding: 0 12px;
+  border: 0; border-radius: var(--radius-control);
+  background: none;
+  box-shadow: none;
+  color: var(--dim);
+  font-size: 12px; font-weight: 500;
+  cursor: pointer;
+  transition: background var(--ease-quick), color var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-report-btn:hover { color: var(--text); background: var(--surface); }
+/* ---- reel --------------------------------------------------------------- */
+/* The two blocks share one stacking cell, so they travel edge to edge as a
+   single strip: no gap, no empty beat between them. */
+#ym-market.ym-mk2 .ym-mk-reel {
+  display: grid;
+  width: 100%;
+}
+#ym-market.ym-mk2 .ym-mk-reelbox {
+  grid-area: 1 / 1;
+  align-self: start;
+  min-width: 0;
+}
+
+/* ---- settings: one card per section ------------------------------------- */
+#ym-market.ym-mk2 .ym-mk-secs {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+#ym-market.ym-mk2 .ym-mk-sec {
+  padding: 2px 14px 6px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.028);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+}
+#ym-market.ym-mk2 .ym-mk-sec-title {
+  padding: 12px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+#ym-market.ym-mk2 .ym-mk-sec-rows { display: grid; }
+
+/* ---- no scrollbar on the detail pane either ----------------------------- */
+#ym-market.ym-mk2 .ym-mk-detail {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+#ym-market.ym-mk2 .ym-mk-detail::-webkit-scrollbar { width: 0; height: 0; }
+
+/* ---- header icons: fixed, centred, left-aligned as a pair --------------- */
+#ym-market.ym-mk2 .ym-mk-hleft {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  gap: 7px !important;
+}
+#ym-market.ym-mk2 .ym-mk-brand {
+  line-height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  box-shadow: none;
+  flex: 0 0 auto;
+}
+#ym-market.ym-mk2 .ym-mk-brand svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+/* ---- sheet: no shadow, and it is a surface, not a card ------------------ */
+#ym-market.ym-mk2 .ym-mk-sheet {
+  box-shadow: none !important;
+}
+/* The list fades at its top and bottom edge, so a row leaving or arriving at the
+   boundary dissolves instead of being cut off by the container. */
+/* Each edge fades only while the list is scrolled away from it (syncMkEdges()
+   in content.js toggles the classes). Both edges were always faded, which dimmed
+   the first row on a list that was not scrolled at all. */
+#ym-market.ym-mk2 .ym-mk-rows.mk-edge-top {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+}
+#ym-market.ym-mk2 .ym-mk-rows.mk-edge-bot {
+  -webkit-mask-image: linear-gradient(to top, transparent 0, #000 16px);
+  mask-image: linear-gradient(to top, transparent 0, #000 16px);
+}
+#ym-market.ym-mk2 .ym-mk-rows.mk-edge-top.mk-edge-bot {
+  -webkit-mask-image: linear-gradient(to bottom,
+    transparent 0, #000 14px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to bottom,
+    transparent 0, #000 14px, #000 calc(100% - 16px), transparent 100%);
+}
+
+/* Brand glyphs: exact mockup paths, centred on their own box whatever the
+   legacy sheet says about svg sizing. */
+#ym-market.ym-mk2 .ym-mk-brand {
+  display: grid;
+  place-items: center;
+  place-content: center;
+}
+#ym-market.ym-mk2 .ym-mk-brand svg {
+  place-self: center;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+}
+
+/* The YouTube control carries its own name to the right of the glyph, so it
+   reads as a destination instead of a channel avatar. Discord stays a tile. */
+#ym-market.ym-mk2 .ym-mk-brand-yt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: auto;
+  height: 30px;
+  padding: 0 12px 0 9px;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+#ym-market.ym-mk2 .ym-mk-brand-yt svg { flex: 0 0 auto; }
+#ym-market.ym-mk2 .ym-mk-brand-label {
+  /* align-self, not a stretch: as a stretched flex/grid item the span was 30px
+     tall with its one line box baseline-placed, which put the ink ~4.5px above
+     the middle of the pill. Centred as an item, it sits on the optical middle. */
+  display: block;
+  align-self: center;
+  height: 12.5px;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 12.5px;
+  letter-spacing: .005em;
+  white-space: nowrap;
+}
+
+/* The detail switch: the two views sit one after the other in a single strip
+   and the strip travels by the outgoing view's height, so they pass edge to
+   edge instead of overlapping. */
+#ym-market.ym-mk2 .ym-mk-reelstrip {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+#ym-market.ym-mk2 .ym-mk-reelstrip > .ym-mk-reelbox {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+/* No entrance animation anywhere in the panel body: the legacy sheet still
+   animates its own cards and settings headings, and a reused class brought the
+   old fade-and-spring back into the new layout. */
+#ym-market.ym-mk2 .ym-mk-detail *,
+#ym-market.ym-mk2 .ym-mk-detail *::before,
+#ym-market.ym-mk2 .ym-mk-detail *::after,
+#ym-market.ym-mk2 .ym-mk-sheet *,
+#ym-market.ym-mk2 .ym-mk-sheet *::before,
+#ym-market.ym-mk2 .ym-mk-sheet *::after { animation: none !important; }
+
+/* Floating: the overlay stays the full-screen centring grid and the CARD is the
+   box that moves, so the saved position is a viewport position. */
+#ym-market.ym-mk2.ym-floating {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  padding: 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+/* The floating rule above sets `display: grid` on the same element, and it ties
+   on specificity with the legacy `#ym-market.ym-mk2.hidden` rule while loading
+   later — so closing the panel set `hidden`, changed nothing on screen, and the
+   close button looked dead. Three classes beat two. */
+#ym-market.ym-mk2.hidden,
+#ym-market.ym-mk2.ym-floating.hidden { display: none; }
+
+#ym-market.ym-mk2 .ym-mk-shell { cursor: default; }
+#ym-market.ym-mk2 .ym-mk-head { cursor: grab; }
+#ym-market.ym-mk2.ym-dragging .ym-mk-head { cursor: grabbing; }#ym-market.ym-mk2 .ym-dragging { user-select: none; }
+
+/* The legacy root told the compositor that inset/size/transform/opacity were
+   always about to change (styles.css:57). A promoted layer gets a raster scale
+   of its own, so at this page's 0.9 device ratio the card was drawn once and then
+   resampled: every glyph read as a slightly soft image of text, and no zoom
+   level, reload or font-smoothing setting could bring it back. Promote only
+   while a transition is actually running. */
+#ym-market.ym-mk2 { will-change: auto !important; }
+
+/* ---- rail: the list runs out to the seam --------------------------------- */
+/* The 30px seam gutter is gone. It made the divider equidistant from both text
+   columns, but it bought that by pulling the whole rail in from the right, which
+   read as a column shoved left of its own centre. The rail keeps its left padding
+   and now extends to the divider, so each block is centred in the column it
+   actually lives in. */
+
+/* ---- nothing above the card may scale it -------------------------------- */
+/* Any zoom anywhere above the card makes the browser rasterise the panel at
+   that size and resample it, so small type reads as a soft image of text and
+   no amount of font-smoothing can bring it back. Pin it to 1. */
+#ym-market.ym-mk2,
+#ym-market.ym-mk2 .ym-mk-shell,
+#ym-market.ym-mk2 .ym-mk-sheet { zoom: 1 !important; }
+
+/* ---- file picker: one full-width row ------------------------------------ */
+/* The panel's settings row is `1fr 188px`, so the image control landed in the
+   188px column: the card was squeezed and its "Choose image" button spilled out
+   past the panel's edge. This row is a single column, like the legacy one. */
+#ym-market.ym-mk2 .ym-file-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+#ym-market.ym-mk2 .ym-file-control {
+  width: 100%; min-width: 0;
+  justify-self: stretch; justify-content: stretch;
+}
+#ym-market.ym-mk2 .ym-file-card {
+  width: 100%; box-sizing: border-box; min-width: 0;
+}
+#ym-market.ym-mk2 .ym-file-info { min-width: 0; }
+#ym-market.ym-mk2 .ym-file-name { min-width: 0; }
+#ym-market.ym-mk2 .ym-file-actions { flex: 0 0 auto; }
+#ym-market.ym-mk2 .ym-file-btn { white-space: nowrap; }
+
+/* ---- report a problem: the panel's surface, not the old white card ------- */
+/* Same tokens as everything else: dark card, hairline rows, red for the one
+   action. The legacy modal was a white box with black pills. */
+.ym-report-scrim { background: rgba(8, 8, 10, .62); }
+.ym-report-card {
+  border: 0;
+  border-radius: 20px;
+  background: #17171a;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), 0 40px 110px -40px rgba(0,0,0,.9);
+  color: rgba(255,255,255,.85);
+  font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  gap: 14px;
+  padding: 28px 26px 22px;
+}
+.ym-report-title {
+  font-size: 19px; font-weight: 700; letter-spacing: -.01em; color: #fff;
+}
+.ym-report-x { color: rgba(255,255,255,.5); }
+.ym-report-x:hover { color: #fff; }
+.ym-report-sub { font-size: 12.5px; color: rgba(255,255,255,.45); }
+.ym-report-option {
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255,255,255,.045);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+  color: rgba(255,255,255,.85);
+  font-size: 13.5px;
+}
+.ym-report-option:hover {
+  background: rgba(255,255,255,.08);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.16);
+}
+.ym-report-option.selected {
+  background: rgba(224,16,64,.14);
+  box-shadow: inset 0 0 0 1px rgba(224,16,64,.55);
+}
+.ym-report-radio { border-color: rgba(255,255,255,.32); }
+.ym-report-option.selected .ym-report-radio { border-color: #e01040; background: #e01040; }
+.ym-report-other-input {
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255,255,255,.04);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.1);
+  color: #fff;
+}
+.ym-report-other-input::placeholder { color: rgba(255,255,255,.35); }
+.ym-report-other-input:focus { border: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
+.ym-report-send {
+  padding: 10px 24px;
+  border-radius: 10px;
+  background: #e01040;
+  box-shadow: none;
+  font-size: 13.5px;
+}
+.ym-report-send:hover { background: #c40b35; }
+.ym-report-thanks-title,
+.ym-report-done-title { font-size: 21px; color: #fff; }
+.ym-report-thanks-sub,
+.ym-report-done-sub { font-size: 13.5px; color: rgba(255,255,255,.55); }
+.ym-report-close {
+  border: 0;
+  background: rgba(255,255,255,.06);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.1);
+  color: #fff;
+  font-size: 13.5px;
+}
+.ym-report-close:hover { background: rgba(255,255,255,.1); transform: none; }
+.ym-report-discord,
+.ym-report-discord:hover { color: #ff4d6a; }
+
+/* ---- discord: the tile grows into its invitation on hover --------------- */
+#ym-market.ym-mk2 .ym-mk-brand-discord {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  place-items: initial;
+  place-content: initial;
+  width: auto;
+  height: 30px;
+  padding: 0 9px;
+  gap: 0;
+  flex: 0 0 auto;
+  overflow: hidden;
+  transition: gap var(--ease-quick), filter var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-brand-discord svg { flex: 0 0 auto; }
+#ym-market.ym-mk2 .ym-mk-brand-discord .ym-mk-brand-label {
+  display: block;
+  max-width: 0;
+  margin-left: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width .28s cubic-bezier(.32,.72,0,1),
+              margin-left .28s cubic-bezier(.32,.72,0,1),
+              opacity .16s linear;
+}
+#ym-market.ym-mk2 .ym-mk-brand-discord:hover .ym-mk-brand-label,
+#ym-market.ym-mk2 .ym-mk-brand-discord:focus-visible .ym-mk-brand-label {
+  max-width: 220px;
+  margin-left: 8px;
+  opacity: 1;
+}
+
+/* ---- changelogs: a header button and the page it opens ------------------ */
+#ym-market.ym-mk2 .ym-mk-chbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px; margin: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: none; color: var(--muted);
+  font-size: 12.5px; font-weight: 500;
+  cursor: pointer;
+  transition: background var(--ease-quick), color var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-chbtn svg { width: 14px; height: 14px; fill: currentColor; }
+#ym-market.ym-mk2 .ym-mk-chbtn:hover { background: var(--raised); color: var(--text-strong); }
+#ym-market.ym-mk2 .ym-mk-chbtn:active { scale: .96; }
+#ym-market.ym-mk2 .ym-mk-sheetbody > .ym-mk-cl { max-width: 760px; margin: 0 auto; }
+#ym-market.ym-mk2 .ym-mk-clist { display: grid; gap: 12px; }
+#ym-market.ym-mk2 .ym-mk-clcard {
+  padding: 14px 16px 16px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.028);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+}
+#ym-market.ym-mk2 .ym-mk-clmeta { display: flex; align-items: baseline; gap: 8px; }
+#ym-market.ym-mk2 .ym-mk-clver {
+  font-size: 12px; font-weight: 700; color: var(--red-soft);
+  font-variant-numeric: tabular-nums;
+}
+#ym-market.ym-mk2 .ym-mk-cldate { font-size: 11px; color: var(--dim); }
+#ym-market.ym-mk2 .ym-mk-cltitle {
+  margin: 4px 0 0;
+  font-size: 15px; font-weight: 700; letter-spacing: -.01em;
+  color: var(--text-strong);
+}
+#ym-market.ym-mk2 .ym-mk-clitems {
+  margin: 10px 0 0; padding: 0 0 0 16px;
+  display: grid; gap: 7px;
+}
+#ym-market.ym-mk2 .ym-mk-clitems li { font-size: 13px; line-height: 1.55; color: var(--text); }
+#ym-market.ym-mk2 .ym-mk-clitems li::marker { color: var(--dim); }
+
+/* ---- section header: title and description on the page's centre --------- */
+/* The blurb was a capped block with its own margins inside the 620px legacy
+   header, so the two centred lines sat left of everything under them. The header
+   centres its children now and each block centres on the page itself. */
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-sec-head {
+  display: grid;
+  justify-items: center;
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+  text-align: center;
+}
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-sec-title,
+#ym-market.ym-mk2 .ym-mk-ytpage .ym-yt-sec-blurb {
+  width: 100%;
+  max-width: 620px;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+
+/* ---- brand pills: an icon until you hover, then the name ---------------- */
+/* Both header destinations behave the same way: the glyph alone at rest, the
+   label sliding out on hover or keyboard focus. The YouTube pill used to carry
+   its name permanently, which made the header read as text rather than icons. */
+#ym-market.ym-mk2 .ym-mk-brand-yt,
+#ym-market.ym-mk2 .ym-mk-brand-discord {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: auto;
+  height: 30px;
+  padding: 0 9px;
+  gap: 0;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+#ym-market.ym-mk2 .ym-mk-brand-yt .ym-mk-brand-label,
+#ym-market.ym-mk2 .ym-mk-brand-discord .ym-mk-brand-label {
+  display: block;
+  max-width: 0;
+  margin-left: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width .28s cubic-bezier(.32,.72,0,1),
+              margin-left .28s cubic-bezier(.32,.72,0,1),
+              opacity .16s linear;
+}
+#ym-market.ym-mk2 .ym-mk-brand-yt:hover .ym-mk-brand-label,
+#ym-market.ym-mk2 .ym-mk-brand-yt:focus-visible .ym-mk-brand-label,
+#ym-market.ym-mk2 .ym-mk-brand-discord:hover .ym-mk-brand-label,
+#ym-market.ym-mk2 .ym-mk-brand-discord:focus-visible .ym-mk-brand-label {
+  max-width: 220px;
+  margin-left: 8px;
+  opacity: 1;
+}
+
+/* ---- Apple Music Style: bulk switches ------------------------------------ */
+/* The theme's sections are all-or-nothing for most people, so each head carries
+   Activate all / Deactivate all at its right edge. The title row becomes the flex
+   line that holds the label and the pair. */
+#ym-market.ym-mk2 .ym-mk-yt .ym-detail-settings-titlerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+#ym-market.ym-mk2 .ym-mk-bulk { display: flex; flex: none; gap: 6px; }
+#ym-market.ym-mk2 .ym-mk-bulkbtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, .05);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -.005em;
+  cursor: pointer;
+  transition: background var(--ease-quick), box-shadow var(--ease-quick),
+              color var(--ease-quick), scale var(--ease-quick);
+}
+#ym-market.ym-mk2 .ym-mk-bulkbtn:hover {
+  background: rgba(255, 255, 255, .09);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--text-strong);
+}
+#ym-market.ym-mk2 .ym-mk-bulkbtn:active { scale: .96; }

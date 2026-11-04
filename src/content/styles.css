@@ -4230,3 +4230,34 @@ ytmusic-player-page .content > #side-panel.ym-song-panel-swap {
 @media (prefers-reduced-motion: reduce) {
   #ym-market .ym-perf-mode { transition: none; }
 }
+
+
+/* ==========================================================================
+   Panel structure — duplicated in panel.css on purpose.
+
+   styles.css is always applied; panel.css is the design. If the two ever
+   disagree about the shell, the panel lands in the wrong grid cell (header
+   squeezed into the 364px column, pane stacked underneath). These rules are the
+   same in both files so the layout is identical whichever sheet wins:
+
+     row 1  the top bar, spanning both columns
+     row 2  the rail (364px) and the detail pane
+   ========================================================================== */
+#ym-market.ym-mk2 .ym-mk-shell {
+  display: grid !important;
+  grid-template-columns: minmax(280px, 364px) minmax(0, 1fr) !important;
+  grid-template-rows: 64px minmax(0, 1fr) !important;
+}
+#ym-market.ym-mk2 .ym-mk-body { display: contents !important; }
+#ym-market.ym-mk2 .ym-mk-head {
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+}
+#ym-market.ym-mk2 .ym-mk-rail {
+  grid-column: 1 !important;
+  grid-row: 2 !important;
+}
+#ym-market.ym-mk2 .ym-mk-pane {
+  grid-column: 2 !important;
+  grid-row: 2 !important;
+}

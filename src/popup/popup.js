@@ -24,7 +24,18 @@ const ui = {
   error: $("fError"),
   openBtn: $("openBtn"),
   copyBtn: $("copyBtn"),
+  tabBar: document.querySelector(".tabs"),
+  pages: $("pages"),
+  pagesTrack: $("pagesTrack"),
+  addonsScroll: $("addonsScroll"),
+  addonsEmpty: $("addonsEmpty"),
+  whatsNew: $("whatsNew"),
 };
+
+// The status pill is gone from the markup: the popup is a snapshot, not a
+// dashboard. Stubs keep every caller in this file valid.
+ui.status = ui.status || { dataset: {}, classList: { add() {}, remove() {}, toggle() {} } };
+ui.statusText = ui.statusText || { textContent: "" };
 
 const SITE = "https://music.youtube.com/";
 const COPY_RESET_MS = 1500;
@@ -217,6 +228,9 @@ if (!extensionContext) {
     }
 
     tabId = tab.id;
+    // The first page is What's new, but a reload can land on Add-ons; that list
+    // only exists once the tab id does.
+    if (activeTab === "addons") loadAddons();
     setStatus("checking", "Reading this tab\u2026");
 
     if (tabId == null) {
@@ -243,3 +257,315 @@ if (!extensionContext) {
     }
   });
 }
+/* ---- tabs --------------------------------------------------------------- */
+// Three pages in one horizontal track. Switching SLIDES the track: the pages are
+// laid side by side and only the frame moves, so nothing fades or re-enters.
+const TABS = {};
+const PAGES = {};
+Array.prototype.forEach.call(ui.tabBar.querySelectorAll(".tab"), (btn) => {
+  TABS[btn.getAttribute("data-page")] = btn;
+});
+Array.prototype.forEach.call(ui.pagesTrack.children, (page) => {
+  PAGES[page.getAttribute("data-page")] = page;
+});
+const ORDER = Object.keys(TABS);
+let activeTab = ORDER[0] || "whatsnew";
+
+// The track is as tall as its TALLEST page, so the frame is pinned to the page
+// that is showing and animated between the heights; otherwise the popup would be
+// permanently as tall as the longest list.
+function resizePages() {
+  const page = PAGES[activeTab];
+  if (!page) return;
+  ui.pages.style.height = page.offsetHeight + "px";
+}
+
+function selectTab(name, focus) {
+  if (!PAGES[name]) return;
+  activeTab = name;
+  ORDER.forEach((key) => {
+    const on = key === name;
+    TABS[key].setAttribute("aria-selected", on ? "true" : "false");
+    TABS[key].tabIndex = on ? 0 : -1;
+    PAGES[key].classList.toggle("current", on);
+    PAGES[key].setAttribute("aria-hidden", on ? "false" : "true");
+  });
+  ui.pagesTrack.style.transform = "translateX(-" + ORDER.indexOf(name) * 100 + "%)";
+  resizePages();
+  if (focus) TABS[name].focus();
+  // Each page re-reads itself on the way in, so a switch flipped on another tab is
+  // reflected everywhere without a poll.
+  if (name === "addons") loadAddons();
+  else if (name === "diagnostics") refreshDiagnostics();
+  else if (name === "whatsnew") loadWhatsNew();
+}
+
+ORDER.forEach((key) => {
+  TABS[key].addEventListener("click", () => selectTab(key));
+});
+
+// A tablist is one tab stop; arrows move within it, as on any real tab strip.
+if (ui.tabBar) {
+  ui.tabBar.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const step = e.key === "ArrowRight" ? 1 : ORDER.length - 1;
+    const next = ORDER[(ORDER.indexOf(activeTab) + step) % ORDER.length];
+    selectTab(next, true);
+    e.preventDefault();
+  });
+}
+
+/* ---- diagnostics refresh ------------------------------------------------ */
+// The bootstrap below runs once on open; this is the same request again, so
+// coming back to Diagnostics never shows a stale count.
+function refreshDiagnostics() {
+  if (tabId == null) return;
+  try {
+    chrome.tabs.sendMessage(tabId, { type: "ytmod-diagnostics" }, (reply) => {
+      if (chrome.runtime.lastError || !reply) return;
+      snapshot = reply;
+      paintStatusLine(reply);
+      paintTrack(reply.track);
+      paintFacts(reply);
+      setActionsEnabled(true);
+      if (activeTab === "diagnostics") resizePages();
+    });
+  } catch (_) {}
+}
+
+/* ---- what's new --------------------------------------------------------- */
+// Read straight from the bundled changelog.json. It is an extension resource, so
+// the popup can fetch it from its own origin with no host permission and no
+// message to the page.
+let whatsNewState = "idle";
+
+function bulletList(label, entries) {
+  const items = (entries || [])
+    .map((e) => (typeof e === "string" ? e : (e && (e.text || e.title)) || ""))
+    .filter(Boolean);
+  if (!items.length) return [];
+  const sub = document.createElement("h3");
+  sub.className = "wn-sub";
+  sub.textContent = label;
+  const list = document.createElement("ul");
+  list.className = "wn-list";
+  items.forEach((text) => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    list.appendChild(li);
+  });
+  return [sub, list];
+}
+
+function paintWhatsNew(data) {
+  const releases = data && Array.isArray(data.releases) ? data.releases : [];
+  const release = releases.filter((r) => r && !r.skipped)[0] || null;
+  ui.whatsNew.replaceChildren();
+
+  if (!release) {
+    const empty = document.createElement("p");
+    empty.className = "wn-empty";
+    empty.textContent = "No release notes available.";
+    ui.whatsNew.appendChild(empty);
+    if (activeTab === "whatsnew") resizePages();
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "wn-head";
+  const ver = document.createElement("span");
+  ver.className = "wn-ver";
+  ver.textContent = "v" + (release.version || "?");
+  const date = document.createElement("span");
+  date.className = "wn-date";
+  date.textContent = release.date || "";
+  head.append(ver, date);
+
+  const title = document.createElement("h2");
+  title.className = "wn-title";
+  title.textContent = release.title || "What's new";
+  ui.whatsNew.append(head, title);
+
+  bulletList("New", release.features).forEach((n) => ui.whatsNew.appendChild(n));
+  bulletList("Fixes", release.fixes).forEach((n) => ui.whatsNew.appendChild(n));
+
+  // The five before the newest, one collapsed line each: the release itself in
+  // full, the recent history behind it.
+  const older = releases.filter((r) => r && !r.skipped && r !== release).slice(0, 5);
+  if (older.length) {
+    const earlier = document.createElement("h3");
+    earlier.className = "wn-sub";
+    earlier.textContent = "Earlier";
+    ui.whatsNew.appendChild(earlier);
+    older.forEach((r) => ui.whatsNew.appendChild(olderRelease(r)));
+  }
+
+  if (activeTab === "whatsnew") resizePages();
+}
+
+// One earlier release: a closed line that opens into the same New/Fixes block the
+// newest one gets. Deliberately instant. The height animation could not be kept in
+// step with the popup's own frame height, so the list jittered as it opened.
+function olderRelease(release) {
+  const box = document.createElement("details");
+  box.className = "wn-item";
+  const sum = document.createElement("summary");
+  sum.className = "wn-sum";
+  const ver = document.createElement("span");
+  ver.className = "wn-item-ver";
+  ver.textContent = "v" + (release.version || "?");
+  const title = document.createElement("span");
+  title.className = "wn-item-title";
+  title.textContent = release.title || "";
+  sum.append(ver, title);
+  box.appendChild(sum);
+  bulletList("New", release.features).forEach((n) => box.appendChild(n));
+  bulletList("Fixes", release.fixes).forEach((n) => box.appendChild(n));
+  // The frame is pinned to the page's height, so an opened block needs the frame
+  // to follow it; without this the extra lines are clipped.
+  box.addEventListener("toggle", () => {
+    if (activeTab === "whatsnew") resizePages();
+  });
+  return box;
+}
+
+function loadWhatsNew() {
+  if (whatsNewState !== "idle") return;
+  whatsNewState = "loading";
+  // A placeholder, so the frame is not 0px tall for the one frame before the
+  // bundled JSON arrives — otherwise the popup visibly grows on open.
+  const reading = document.createElement("p");
+  reading.className = "wn-empty";
+  reading.textContent = "Reading release notes…";
+  ui.whatsNew.replaceChildren(reading);
+  if (activeTab === "whatsnew") resizePages();
+  let url = "";
+  try {
+    url = chrome.runtime.getURL("changelog.json");
+  } catch (_) {}
+  if (!url || typeof fetch !== "function") {
+    whatsNewState = "done";
+    paintWhatsNew(null);
+    return;
+  }
+  fetch(url)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => {
+      whatsNewState = "done";
+      paintWhatsNew(data);
+    })
+    .catch(() => {
+      whatsNewState = "done";
+      paintWhatsNew(null);
+    });
+}
+
+/* ---- add-ons ------------------------------------------------------------ */
+const SECTION_ORDER = ["Themes", "Extensions", "Snippets"];
+
+function switchEl(item) {
+  const sw = document.createElement("button");
+  sw.type = "button";
+  sw.className = "switch";
+  sw.setAttribute("role", "switch");
+  sw.setAttribute("aria-checked", item.enabled ? "true" : "false");
+  sw.setAttribute("aria-label", item.name);
+  if (item.soon) {
+    // Listed so the catalogue reads complete, but a switch that cannot install
+    // anything would be a lie.
+    sw.disabled = true;
+    sw.title = "Coming soon";
+    return sw;
+  }
+  sw.addEventListener("click", () => toggleAddon(item, sw));
+  return sw;
+}
+
+function toggleAddon(item, sw) {
+  if (tabId == null) return;
+  const on = sw.getAttribute("aria-checked") !== "true";
+  // Optimistic: the switch answers the click now and the page applies it. A theme
+  // is exclusive, so its siblings are re-read instead of guessed.
+  sw.setAttribute("aria-checked", on ? "true" : "false");
+  item.enabled = on;
+  try {
+    chrome.tabs.sendMessage(tabId, { type: "ytmod-setEnabled", id: item.id, on }, () => {
+      void chrome.runtime.lastError;
+    });
+  } catch (_) {
+    return;
+  }
+  // Re-read the list: the id may have just been installed, and a theme switches
+  // its siblings off. Cheap, and it keeps every row honest.
+  window.setTimeout(loadAddons, 340);
+  window.setTimeout(refreshDiagnostics, 340);
+}
+
+function addonRow(item) {
+  const row = document.createElement("div");
+  row.className = "addon";
+  // Not installed yet: switched on, it installs. The dim label is the only cue
+  // that this row is a catalogue entry rather than something already here.
+  if (!item.installed) row.classList.add("not-installed");
+  const name = document.createElement("span");
+  name.className = "addon-name";
+  name.textContent = item.name;
+  row.appendChild(name);
+  row.appendChild(switchEl(item));
+  return row;
+}
+
+function renderAddons(items) {
+  Array.prototype.forEach.call(ui.addonsScroll.querySelectorAll(".addon-section"), (n) => n.remove());
+  const categories = SECTION_ORDER.concat(
+    items.map((i) => i.category).filter((c) => SECTION_ORDER.indexOf(c) < 0)
+  );
+  let shown = 0;
+  categories.forEach((category) => {
+    const group = items.filter((i) => i.category === category);
+    if (!group.length) return;
+    shown += group.length;
+    const section = document.createElement("section");
+    section.className = "addon-section";
+    const heading = document.createElement("h2");
+    heading.className = "addon-head";
+    heading.textContent = category;
+    section.appendChild(heading);
+    group
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((item) => section.appendChild(addonRow(item)));
+    ui.addonsScroll.appendChild(section);
+  });
+  ui.addonsEmpty.hidden = shown > 0;
+  if (!shown) ui.addonsEmpty.textContent = "No add-ons installed yet.";
+  if (activeTab === "addons") resizePages();
+}
+
+function loadAddons() {
+  Array.prototype.forEach.call(ui.addonsScroll.querySelectorAll(".addon-section"), (n) => n.remove());
+  const failed = (text) => {
+    ui.addonsEmpty.textContent = text;
+    ui.addonsEmpty.hidden = false;
+    if (activeTab === "addons") resizePages();
+  };
+  if (tabId == null) {
+    failed("Open YouTube Music to change add-ons.");
+    return;
+  }
+  try {
+    chrome.tabs.sendMessage(tabId, { type: "ytmod-addons" }, (reply) => {
+      if (chrome.runtime.lastError || !reply || !reply.items) {
+        failed("Reload YouTube Music to refresh.");
+        return;
+      }
+      renderAddons(reply.items);
+    });
+  } catch (_) {
+    failed("Reload YouTube Music to refresh.");
+  }
+}
+
+/* ---- first paint -------------------------------------------------------- */
+selectTab(activeTab);
+window.addEventListener("resize", resizePages);

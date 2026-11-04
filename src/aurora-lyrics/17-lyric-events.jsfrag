@@ -293,6 +293,22 @@
         lineElement.classList.add("rtl");
       }
 
+      // A singer's name sits above the first line of their part, in the same
+      // column as the words: the line is a wrapping flex row, so a full-basis
+      // child takes its own row and the translation below wraps to the next one.
+      if (contentLine.Singer && contentLine.Singer.name) {
+        const singerElement = h("div", { class: "line-singer" });
+        singerElement.appendChild(
+          h("span", { class: "line-singer-name", text: contentLine.Singer.name })
+        );
+        if (contentLine.Singer.realName) {
+          singerElement.appendChild(
+            h("span", { class: "line-singer-real", text: contentLine.Singer.realName })
+          );
+        }
+        lineElement.appendChild(singerElement);
+      }
+
       // A line with neither line-level sync nor real span timing is unsynced:
       // render it as a static block (no syllable/letter karaoke).
       const noKaraoke = !!(contentLine.LineTimed || !contentLine.Timed);
