@@ -396,6 +396,32 @@
 #ym-market.ym-mk2 .ym-mk-lead {
   margin: 0; font-size: 14px; line-height: 1.65; color: var(--text);
 }
+/* The add-on's own home, inline with its name: Kawarp | kawarp.vercel.app ↗.
+   No pill and no surface — the title already carries the hierarchy. */
+#ym-market.ym-mk2 .ym-mk-dtitle-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+#ym-market.ym-mk2 .ym-mk-dtitle-sep {
+  color: var(--dim); font-size: 22px; font-weight: 300;
+  line-height: 1; opacity: .55; align-self: center;
+}
+#ym-market.ym-mk2 .ym-mk-site {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-width: 0; margin: 0; padding: 2px 0;
+  color: var(--dim); font-size: 12px; font-weight: 600;
+  text-decoration: none; align-self: center;
+  transition: color .18s ease;
+}
+#ym-market.ym-mk2 .ym-mk-site:hover { color: var(--text); }
+#ym-market.ym-mk2 .ym-mk-site .ym-kawarp-logo { width: 16px; height: 16px; flex: 0 0 auto; }
+#ym-market.ym-mk2 .ym-mk-site-arrow {
+  width: 11px; height: 11px; flex: 0 0 auto;
+  fill: currentColor; opacity: .6;
+  transition: transform .18s ease, opacity .18s ease;
+}
+#ym-market.ym-mk2 .ym-mk-site:hover .ym-mk-site-arrow {
+  transform: translate(1px, -1px); opacity: 1;
+}
 /* the note card that stands in for an empty settings list */
 #ym-market.ym-mk2 .ym-mk-hint {
   padding: 12px 14px; border-radius: var(--radius-control);
@@ -436,6 +462,11 @@
 #ym-market.ym-mk2 .ym-detail-setting-note {
   display: block; margin-top: 2px;
   font-size: 11px; line-height: 1.45; color: var(--dim);
+}
+#ym-market .ym-detail-setting-note-inline {
+  display: inline; margin-left: 6px;
+  font-size: 11px; font-weight: 400; letter-spacing: 0;
+  line-height: 1.45; color: var(--dim);
 }
 #ym-market.ym-mk2 .ym-detail-setting-control {
   display: flex; align-items: center; justify-self: start;
@@ -647,9 +678,10 @@
 /* ---- report a problem: a quiet link, not a red block -------------------- */
 #ym-market.ym-mk2 .ym-report-foot {
   margin: 0; padding: 0;
-  display: flex; justify-content: flex-end;
+  display: flex; gap: 4px; justify-content: flex-end;
 }
-#ym-market.ym-mk2 .ym-report-btn {
+#ym-market.ym-mk2 .ym-report-btn,
+#ym-market.ym-mk2 .ym-feedback-btn {
   height: 32px; padding: 0 12px;
   border: 0; border-radius: var(--radius-control);
   background: none;
@@ -659,7 +691,8 @@
   cursor: pointer;
   transition: background var(--ease-quick), color var(--ease-quick);
 }
-#ym-market.ym-mk2 .ym-report-btn:hover { color: var(--text); background: var(--surface); }
+#ym-market.ym-mk2 .ym-report-btn:hover,
+#ym-market.ym-mk2 .ym-feedback-btn:hover { color: var(--text); background: var(--surface); }
 /* ---- reel --------------------------------------------------------------- */
 /* The two blocks share one stacking cell, so they travel edge to edge as a
    single strip: no gap, no empty beat between them. */
@@ -694,6 +727,45 @@
   color: var(--dim);
 }
 #ym-market.ym-mk2 .ym-mk-sec-rows { display: grid; }
+/* A section heading can be a disclosure. The grid-rows transition gives the
+   body a real measured height in both directions; display:none would snap. */
+#ym-market.ym-mk2 .ym-mk-sec-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; margin: 0; border: 0; background: none;
+  font-family: inherit; text-align: left; cursor: pointer;
+}
+#ym-market.ym-mk2 .ym-mk-sec-toggle:focus-visible {
+  outline: 2px solid rgba(255,255,255,.32); outline-offset: -2px;
+}
+#ym-market.ym-mk2 .ym-mk-sec-chev {
+  width: 16px; height: 16px; flex: 0 0 auto;
+  fill: currentColor; opacity: .72;
+  transition: transform .28s cubic-bezier(.22,.61,.36,1), opacity .18s ease;
+}
+#ym-market.ym-mk2 .ym-mk-sec-toggle:hover .ym-mk-sec-chev { opacity: 1; }
+#ym-market.ym-mk2 .ym-mk-sec-toggle.is-open .ym-mk-sec-chev { transform: rotate(90deg); }
+#ym-market.ym-mk2 .ym-mk-sec-collapse {
+  display: grid; grid-template-rows: 0fr;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition:
+    grid-template-rows .34s cubic-bezier(.22,.61,.36,1),
+    opacity .26s ease,
+    visibility 0s linear .34s;
+}
+#ym-market.ym-mk2 .ym-mk-sec-collapse.open {
+  grid-template-rows: 1fr;
+  opacity: 1; visibility: visible; pointer-events: auto;
+  transition:
+    grid-template-rows .34s cubic-bezier(.22,.61,.36,1),
+    opacity .3s ease,
+    visibility 0s linear 0s;
+}
+#ym-market.ym-mk2 .ym-mk-sec-collapse > .ym-mk-sec-rows { min-height: 0; overflow: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  #ym-market.ym-mk2 .ym-mk-sec-collapse,
+  #ym-market.ym-mk2 .ym-mk-sec-chev,
+  #ym-market.ym-mk2 .ym-mk-site { transition: none; }
+}
 
 /* ---- no scrollbar on the detail pane either ----------------------------- */
 #ym-market.ym-mk2 .ym-mk-detail {
@@ -904,6 +976,7 @@
 .ym-report-x { color: rgba(255,255,255,.5); }
 .ym-report-x:hover { color: #fff; }
 .ym-report-sub { font-size: 12.5px; color: rgba(255,255,255,.45); }
+.ym-report-error { font-size: 12px; line-height: 1.45; color: #ff8fa3; }
 .ym-report-option {
   padding: 11px 14px;
   border: 0;

@@ -18,12 +18,13 @@
  */
 (function () {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alLog = console.log.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+  const alWarn = console.warn.bind(console, "%cAurora Lyrics", AURORA_BADGE);
 
-  // LOAD MARKER — confirms the updated Spicy Lyrics script actually executed in
-  // the page. If this line does NOT appear in the DevTools console after a full
-  // extension + tab reload, the new code is not being loaded (stale cache /
-  // wrong reload procedure), and any lyric-rendering change will have no effect.
-  console.log("[AuroraLyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
 
   // Keep the original internal ID so existing installs and saved lyrics remain active.
   const EXT_ID = "ytmod-spicy-lyrics";
@@ -33,8 +34,9 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
-  // Aurora Community — community TTML, keyed by the exact YouTube video id.
-  // The extension is read-only; uploads are handled by the Discord bot.
+  // Aurora Community — community TTML and shared offsets, keyed by the exact
+  // YouTube video id. TTML uploads are handled by the Discord bot; offsets can
+  // be posted from the Sync tab and are reported to the same API.
   const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
@@ -84,8 +86,8 @@
     warpIntensity: 1,
     blurPasses: 6,
     animationSpeed: 0.1,
-    saturation: 1.5,
-    dithering: 0.008,
+    saturation: 1.2,
+    // Dithering is the fixed kawarp-core default, not a user setting.
     transitionDuration: 1000,
     tintIntensity: 0,
     scale: 1,
@@ -1492,6 +1494,12 @@
   let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
+  // True once applyFullscreenLayout has painted a mode on this overlay. The
+  // side layout has no mode class of its own, so this lets the reverse handoff
+  // tell a real side composition apart from the very first paint on entry.
+  let fsLayoutApplied = false;
+  // Media host geometry transition used only while leaving Video Background.
+  let fsMediaLayoutAnimTimer = 0;
   // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
   // cover-art side layout. "right" is the composition the overlay shipped
   // with (art left, words right); "left" mirrors it. Cover art only — the
@@ -1499,6 +1507,21 @@
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
   let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
+  // ---- Hits fullscreen layout (AJ, 2026-11-09) ---------------------------
+  // Built once per entry in 08. fsHits is the header model (root plus the
+  // nodes that change); the header's measured height is what positions the
+  // lyrics column beneath it.
+  let fsHits = null;
+  let fsHitsRO = null;
+  let fsHitsTrackKey = "";
+  let fsHitsMetaKey = "";
+  // Layout handoff (cover art): the artwork is carried between the Hits
+  // thumbnail and the side cover by a fixed flying card. Null when idle.
+  let fsHitsArtFly = null;
+  let fsHitsArtFlyTimer = 0;
+  // The Spicy lyrics column gets a transform-only handoff (see 07), so its
+  // geometry snaps once and this animation carries the visual move.
+  let fsLyricsFlipAnim = null;
   let fsCoverFlipTimer = 0; // drops the flip transition helper class
   let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
   let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
@@ -1613,6 +1636,10 @@
   const FS_LYRICS_GAP_DIM_MS = 3000; // only dim genuinely long lyric gaps
   const FS_LYRICS_RESTORE_LEAD_MS = 850; // restore shortly before the next line
   const FS_FINAL_LYRICS_HIDE_MS = 6000; // stale final lyric -> hide after 6s
+  // Fullscreen Hits lifts the Spicy active lyric line above the true centre so
+  // the eye does not have to drop to read along. AMLL has its own higher Hits
+  // anchor in 22-amll-integration because it reads lower in the column.
+  const FS_HITS_ALIGN_POSITION = 0.38;
   let fsIdleTimer = 0; // setTimeout id for the idle countdown
   let fsIdleHidden = false; // is the overlay currently in the idle state?
   let fsPointerDown = false; // is a button held (i.e. actively dragging)?
@@ -1697,6 +1724,28 @@
   let activeOffsetMode = "video";   // which slot is applied to playback (auto by hasMusicVideo)
   let editingOffsetMode = "video";  // which slot the on-screen control edits / displays
   let lastOffsetModeCheckAt = 0;
+
+  /* ---- Community-shared offsets ---------------------------------------------
+     `communityOffsetData` holds the active public offset for BOTH slots, keyed
+     by the track's video id. A fetch happens once per track. The shared value is
+     applied on load; any slider edit after that is a local, session-only
+     override. The owner token is kept in localStorage by 12-track-offset-sync,
+     never in this object, and is only used for the Undo request. */
+  let communityOffsetStatus = null;
+  let communityOffsetName = null;
+  let communityOffsetPostButton = null;
+  let communityOffsetUndoButton = null;
+  let communityOffsetReportButton = null;
+  let communityOffsetTrackKey = "";
+  let communityOffsetData = { video: null, song: null };
+  let communityOffsetManual = false;
+  let communityOffsetLoading = false;
+  let communityOffsetLoadError = false;
+  let communityOffsetBusy = false;
+  let communityOffsetRequestSeq = 0;
+  let communityOffsetNotice = "";
+  let communityOffsetNoticeError = false;
+  const communityOffsetReported = new Set();
 
   /* ---- MV pause re-sync state ------------------------------------------------
      A music video can stop the MUSIC while the video keeps playing, so after the
@@ -2652,13 +2701,13 @@
       pointer-events: none;
       transform: translateY(-8px) scale(.97);
     }
-    /* ⭐ A closed overlay was still INTERACTIVE (AJ, 2026-10-20). visibility:hidden
-       on a parent does NOT beat a child that sets visibility:visible, and
-       pointer-events:none does not block a child that sets pointer-events:auto —
-       and .ym-sl-options-panel.active sets BOTH. So the
-       active tab's slider and toggles stayed clickable while invisible, swallowing
-       hover over the lyrics underneath and changing the offset at random.
-       These selectors carry the extra class specifically to out-rank .active. */
+    /* ⭐ A closed overlay was still INTERACTIVE (AJ, 2026-10-20). pointer-events:none
+       on a parent does NOT block a child that sets pointer-events:auto — and
+       .ym-sl-options-panel.active does. So the active tab's slider and toggles
+       stayed clickable while invisible, swallowing hover over the lyrics underneath
+       and changing the offset at random. These selectors carry the extra class
+       specifically to out-rank .active. Panel visibility now comes from the
+       overlay (panels no longer set it), so only pointer-events needs forcing. */
     .ym-sl-options-overlay.hidden .ym-sl-options-panel,
     .ym-sl-fs-options-overlay.hidden .ym-sl-options-panel,
     .ym-sl-options-overlay.hidden .ym-sl-options-panel.active,
@@ -2738,6 +2787,100 @@
       padding-top: 4px;
       border-top: 1px solid rgba(255,255,255,.07);
     }
+    /* Community offset: a compact share card under the timing rail. The status
+       line carries the poster name and the short offset id; the buttons change
+       with ownership, so a non-owner sees Report and never Undo. */
+    .ym-sl-community-offset {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,.07);
+    }
+    .ym-sl-community-offset-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ym-sl-community-offset-badge {
+      flex: 0 0 auto;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(63,224,197,.12);
+      color: rgba(63,224,197,.9);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .ym-sl-community-offset-status {
+      color: rgba(255,255,255,.62);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .ym-sl-community-offset-status[data-state="shared"],
+    .ym-sl-community-offset-status[data-state="owned"] {
+      color: rgba(255,255,255,.82);
+    }
+    .ym-sl-community-offset-status[data-state="error"] {
+      color: rgba(255,164,150,.92);
+    }
+    .ym-sl-community-offset-name {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 9px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      background: rgba(255,255,255,.08);
+      color: #fff;
+      font: inherit;
+      font-size: 12px;
+      outline: none;
+    }
+    .ym-sl-community-offset-name::placeholder { color: rgba(255,255,255,.4); }
+    .ym-sl-community-offset-name:focus-visible {
+      border-color: rgba(255,255,255,.45);
+      box-shadow: 0 0 0 2px rgba(255,255,255,.1);
+    }
+    .ym-sl-community-offset-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .ym-sl-community-offset-btn {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 7px 11px;
+      background: rgba(255,255,255,.1);
+      color: #fff;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s ease, opacity .15s ease;
+    }
+    .ym-sl-community-offset-btn:hover { background: rgba(255,255,255,.18); }
+    .ym-sl-community-offset-post {
+      background: rgba(255,255,255,.16);
+    }
+    .ym-sl-community-offset-undo {
+      background: rgba(255,255,255,.1);
+    }
+    .ym-sl-community-offset-report {
+      background: rgba(255,120,105,.14);
+      color: rgba(255,190,180,.95);
+    }
+    .ym-sl-community-offset-report:hover { background: rgba(255,120,105,.22); }
+    .ym-sl-community-offset-btn:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+    .ym-sl-community-offset-name.hidden,
+    .ym-sl-community-offset-btn.hidden { display: none; }
     /* Divider + section title separate the lyrics controls (track, offset)
        from the TTML import controls (mode, upload). */
     .ym-sl-options-divider {
@@ -2841,18 +2984,17 @@
       gap: 12px;
       padding: 6px 18px 18px;
       opacity: 0;
-      visibility: hidden;
       pointer-events: none;
       transform: translateY(10px);
-      transition: opacity .24s ease, transform .24s ease, visibility 0s linear .24s;
+      transition: opacity .24s ease, transform .24s ease;
     }
     /* Incoming panel is opaque instantly — its children do the spring (staggerIn);
        the panel being left fades out via the base transition above. */
     .ym-sl-options-panel.active {
       opacity: 1;
-      visibility: visible;
       pointer-events: auto;
-      transition: opacity 0s, visibility 0s;
+      transform: none;
+      transition: opacity 0s, transform 0s;
     }
     .ym-sl-options-panel-title {
       font-size: 15px;
@@ -3190,7 +3332,7 @@
     /* Music videos only: the words start just past the video's own edge instead
        of the standard 4vw inset, which is what put the old 176px void there.
        Scoped to has-video so cover art keeps its 4vw text inset. */
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
       padding-left: clamp(18px, 2vw, 36px);
     }
     /* "Background" layout: media fills the overlay (3% padding = card inset
@@ -3273,12 +3415,12 @@
        blur, sized to each variant's own column: cover art starts at 44%, MVs at
        52.5%. Portrait hides it further down, where both compositions drop the
        column and the words no longer sit beside the picture. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade {
       display: block;
       left: 44%;
       opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0);
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade {
       left: 52.5%;
     }
     /* Low performance mode: the shade keeps its darkening and loses its blur.
@@ -3341,67 +3483,6 @@
       opacity: 0;
       pointer-events: none;
       transform: translateX(18px);
-    }
-    /* "Lyrics only" layout: media fades out (kept in the tree so the
-       transition has a source geometry), lyrics center and widen. */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-media {
-      left: 0;
-      width: 100%;
-      padding: 0;
-      opacity: 0;
-      pointer-events: none;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics {
-      left: 50%;
-      width: min(980px, calc(100% - 2 * 120px));
-      transform: translateX(-50%);
-      /* Bigger top padding reserves a band for the top caption title (see the
-         lyrics-only .ym-sl-fs-title rule) so the two never overlap (AJ 2026-09-28). */
-      padding: clamp(84px, 12vh, 140px) clamp(28px, 7vw, 120px);
-      box-sizing: border-box;
-      background: transparent;
-      backdrop-filter: none;
-      -webkit-backdrop-filter: none;
-    }
-    /* Reserve a bottom-safe band for the centered playback row and the
-       fullscreen bar. On compact screens the lyric viewport becomes slightly
-       shorter instead of allowing the controls to sit over the active line. */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
-      padding-bottom: clamp(148px, 18vh, 220px);
-      box-sizing: border-box;
-    }
-    /* Backdrop layers (full-overlay absolutes). Visibility unchanged. */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-img {
-      display: none !important;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-canvas {
-      display: block !important;
-      z-index: 0;
-      /* The sharp video is the focus; this canvas is a very low-res duplicate
-         of it, scaled up to fill the entire overlay as an ambient backdrop.
-         The blur, saturation and brightness are baked into the canvas with
-         ctx.filter in drawBgFrame() — a CSS filter here was being silently
-         dropped on <canvas>, so the layer rendered crisp. Keep this set to
-         none so the effect is not applied twice. */
-      filter: none;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-bg-tint {
-      display: block !important;
-      z-index: 1;
-      background: rgba(0,0,0,.18);
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .LyricsContent {
-      --ym-sl-lyrics-scale: 1.16;
-    }
-    /* The fullscreen pane deliberately has NO --DefaultLyricsSize override any
-       more. It used to carry a fixed 3.5rem base, which is the same value the
-       shared .LyricsContent clamp already lands on at that width -- so it was
-       redundant on a big monitor and actively wrong on a small one, where a
-       fixed base refused to shrink. One rule, one source of truth. */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .SpicyLyricsScrollContainer {
-      width: 100%;
-      max-width: 980px;
-      margin: 0 auto;
     }
     /* Fullscreen playback controls use the same chrome as the layout controls,
        but their placement follows the selected layout. */
@@ -4227,10 +4308,14 @@
       opacity: 0;
       visibility: hidden;
       pointer-events: none;
+      /* Collapse the gap before the zero-width button, so the visible row is
+         still Exit · Options · Layout when this sits before Layout. */
+      margin-left: -8px;
       transform: scale(.88) translateY(4px);
       transition:
         max-width .32s cubic-bezier(.22,.61,.36,1),
         width .32s cubic-bezier(.22,.61,.36,1),
+        margin-left .32s cubic-bezier(.22,.61,.36,1),
         padding .32s cubic-bezier(.22,.61,.36,1),
         border-width .32s cubic-bezier(.22,.61,.36,1),
         opacity .22s ease, visibility 0s linear .32s,
@@ -4246,6 +4331,7 @@
       opacity: 1;
       visibility: visible;
       pointer-events: auto;
+      margin-left: 0;
       transform: scale(1) translateY(0);
       transition-delay: 0s;
     }
@@ -4312,8 +4398,9 @@
       visibility: hidden;
       pointer-events: none;
       transform: scale(.88);
-      /* Cancel the flex gap a zero-width child still contributes. */
-      margin-left: -8px;
+      /* Cancel the pill's 2px flex gap; the hidden slot now sits between
+         Options and Layout rather than after Layout. */
+      margin-left: -2px;
       transition:
         width .32s cubic-bezier(.22,.61,.36,1),
         max-width .32s cubic-bezier(.22,.61,.36,1),
@@ -4369,23 +4456,6 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-scrubber:hover input[type="range"] {
       height: 6px;
     }
-    /* Lyrics-only: the playbar has to leave with the transport chip, not
-       linger until the 2s idle timer. It inherited the no-video "always
-       visible" rule above, so un-hover left it on screen while the controls
-       vanished - the mismatch AJ reported (2026-09-28). Reuse the chip's
-       hover/focus reveal and a matching .22s fade so they disappear together.
-       Specificity ties the no-video base rule; this block is later in source
-       so it wins, and the higher-specificity idle rule keeps hiding it once
-       idle actually fires. */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-scrubber {
-      opacity: 0;
-      transition: opacity .22s ease;
-    }
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only:hover .ym-sl-fs-scrubber,
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only:focus-within .ym-sl-fs-scrubber {
-      opacity: 1;
-    }
-
     /* ===== fullscreen overlay title =====
        Both variants get a title, and in both it sits DIRECTLY UNDER the media
        (cover art / video), with the playback chrome under it. The media host
@@ -4423,6 +4493,50 @@
     }
     .ym-sl-fs-title-artist { font-weight: 800; }
     .ym-sl-fs-title-track { font-weight: 400; opacity: .82; }
+    /* Artist + writers share one baseline. The writers have their own viewport
+       so a long list never wraps the credit; CSS hides them for MVs, leaving
+       the compact artist + track line untouched. */
+    .ym-sl-fs-title-byline {
+      display: inline-flex;
+      align-items: baseline;
+      min-width: 0;
+      max-width: 100%;
+      vertical-align: baseline;
+    }
+    .ym-sl-fs-title-sep,
+    .ym-sl-fs-title-writers { display: none; }
+    .ym-sl-fs-title-sep {
+      flex: none;
+      margin: 0 .42em;
+      font-size: .7em;
+      font-weight: 500;
+      opacity: .38;
+    }
+    .ym-sl-fs-title-writers {
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .ym-sl-fs-title-writers-track {
+      display: inline-block;
+      white-space: nowrap;
+      will-change: transform;
+    }
+    .ym-sl-fs-title-writers.is-overflowing {
+      -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px,
+        #000 calc(100% - 16px), transparent 100%);
+      mask-image: linear-gradient(to right, transparent 0, #000 16px,
+        #000 calc(100% - 16px), transparent 100%);
+    }
+    .ym-sl-fs-title-writers-track.is-scrolling {
+      animation: ym-sl-fs-writers-scroll var(--ym-sl-fs-writers-duration, 22s)
+        ease-in-out infinite alternate;
+    }
+    @keyframes ym-sl-fs-writers-scroll {
+      from { transform: translateX(0); }
+      to { transform: translateX(var(--ym-sl-fs-writers-shift, 0px)); }
+    }
     /* Rendered empty when there is no track yet: take up no space at all. */
     .ym-sl-fs-title:empty { display: none; }
     /* Fullscreen "Next up" list, bottom-left. Native queue-row look (rounded
@@ -4581,7 +4695,7 @@
        Title, then progress + time, then transport, then volume — one
        left-aligned column under the artwork, spanning its width. Scoped to
        NO-VIDEO side mode; music videos keep their own layout (AJ, 2026-10-03). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
       /* FLOW ITEM, not an overlay child (AJ, 2026-10-21). stackFsChrome() moves
          the credit INTO .ym-sl-fs-player-controls for this layout, so the block
          is one column: art -> 16px -> title -> 14px -> seek -> transport ->
@@ -4609,13 +4723,13 @@
     }
     /* COVER ART ONLY: pull the lyrics column in beside the artwork. The base rule
        keeps MVs at 57.4% (AJ, 2026-10-03). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
       left: 44%;
       width: 54%;
     }
     /* Stacked credit: track on top (bold), artist under it (dimmer). The inner is
        authored artist-then-track, so column-REVERSE puts the track on top. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-inner {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-inner {
       display: flex;
       flex-direction: column-reverse;
       align-items: flex-start;
@@ -4623,14 +4737,35 @@
       padding-inline: 0;
       gap: 1px;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-track {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-track {
       font-weight: 800;
       opacity: 1;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title-artist {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-artist {
       font-weight: 500;
       opacity: .55;
       font-size: .82em;
+      flex: none;
+    }
+    /* Cover-art credit: artist | writers on the line under the track. The
+       byline fills the title width so the writer viewport has a real right
+       edge to fade against; it never becomes a second row. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline {
+      display: flex;
+      width: 100%;
+      max-width: 100%;
+      align-items: baseline;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-artist.has-writers .ym-sl-fs-title-sep {
+      display: inline-block;
+    }
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      display: inline-block;
+      flex: 1 1 auto;
+      font-size: .66em;
+      font-weight: 500;
+      opacity: .45;
+      letter-spacing: 0;
     }
     /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
        upward and the new one rises up into its place, so the track + artist read
@@ -4648,14 +4783,14 @@
        Ease-IN on the way out: the credit accelerates away, so the new one
        rising from below reads as one continuous roll. Duration matches
        FS_TITLE_SWAP_MS (240ms). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title.ym-sl-fs-title-leaving {
       animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
     }
     @keyframes ym-sl-fs-title-out-l {
       from { opacity: 1; transform: translateY(0); }
       to   { opacity: 0; transform: translateY(-22px); }
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
       display: flex;
       flex-direction: column;
       align-items: stretch;
@@ -4686,7 +4821,7 @@
       height: auto;
     }
     /* order: progress+times, then the transport chip, then the volume. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
       order: 1;
       position: static;
       width: auto;
@@ -4699,24 +4834,24 @@
       gap: 6px 10px;
       padding: 0;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-player-seek {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-player-seek {
       grid-row: 1;
       grid-column: 1 / -1;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time {
       grid-row: 2;
       line-height: 1;
       font-size: clamp(12px, 1.5vh, 18px);
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(1) {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(1) {
       grid-column: 1;
       justify-self: start;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(2) {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(2) {
       grid-column: 2;
       justify-self: end;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
       order: 2;
       position: static;
       width: auto;
@@ -4729,7 +4864,7 @@
          though the time row adds height on the seek side (AJ, 2026-10-18). */
       margin-bottom: 16px;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
       order: 3;
       margin: 0;
       padding-left: 0;
@@ -4743,7 +4878,7 @@
     }
     /* The glyphs ride the bar's own line: quiet speaker on the left, loud one on
        the right, both at the low opacity of unplayed chrome. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-icon {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-icon {
       display: block;
       flex: 0 0 auto;
       width: 22px;
@@ -4752,24 +4887,24 @@
       pointer-events: none;
     }
     /* No hover grow on the volume bar here (AJ, 2026-10-03). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-volume {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume {
       transform: none !important;
     }
     /* Transport spans the row: shuffle hard left, repeat hard right. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-transport {
       width: 100%;
     }
     /* Only SHUFFLE (first) and REPEAT (last) go to the edges; the skip buttons stay
        grouped around play (AJ, 2026-10-03). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport > :first-child {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-transport > :first-child {
       margin-right: auto;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport > :last-child {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-transport > :last-child {
       margin-left: auto;
     }
     /* The volume slider must FILL the row rather than keep its 150px default. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-volume {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume {
       flex: 1 1 auto;
       width: auto;
       min-width: 0;
@@ -4927,7 +5062,7 @@
        The chip is deliberately NOT listed here: it anchors to the pane's own
        left/width further down (.ym-sl-fs-play-chip), which already outranked
        this rule. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
       /* 27% = the midpoint of the fixed 2% / 50% media column (2 + 50/2).
          STATIC (AJ, 2026-10-20) — it used to be derived from the measured pane
          box, so it re-centred itself whenever the pane's reported width moved. */
@@ -4973,25 +5108,14 @@
         font-size: 18px;
       }
     }
-    /* Lyrics-only has no media under the title, so the "hero title at the
-       bottom" rules above (bottom: 160px / 150px) collide with the lyrics and
-       the control band. Float it as a top caption instead. This MUST sit after
-       those rules (and the max-height media query) or they win on source order.
-       The lyrics' bigger top padding (see the lyrics-only .ym-sl-fs-lyrics
-       rule) reserves this band, so the two never overlap (AJ 2026-09-28). */
-    .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-title {
-      bottom: auto;
-      top: clamp(20px, 3.5vh, 44px);
-      font-size: clamp(17px, 2.2vh, 25px);
-      line-height: 1.15;
-    }
     @media (prefers-reduced-motion: reduce) {
       .ym-sl-fs-title { animation: none; opacity: 1; transition: none; }
+      .ym-sl-fs-title-writers-track.is-scrolling { animation: none; transform: none; }
       /* Keep the track-change swap, but make it an instant cut. */
       .ym-sl-fs-title.ym-sl-fs-title-leaving { animation: none; opacity: 0; }
       /* SAME specificity as the cover-art leaving rule (0,6,0) - without this
          that rule beats this whole media block and animates anyway. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title.ym-sl-fs-title-leaving {
         animation: none;
         opacity: 0;
       }
@@ -5131,6 +5255,22 @@
     .ym-sl-fs-media {
       transition: opacity .25s ease;
     }
+    /* Leaving Video Background: restore the media host's geometry transition for
+       the length of the switch, so the full-bleed video shrinks back into the
+       side column instead of cutting there. The class is applied before the
+       mode class is removed and cleared once the transition has run. */
+    .ym-sl-fs-overlay.ym-sl-fs-media-layout-out .ym-sl-fs-media {
+      transition:
+        left .5s cubic-bezier(.22, .61, .36, 1),
+        width .5s cubic-bezier(.22, .61, .36, 1),
+        top .5s cubic-bezier(.22, .61, .36, 1),
+        transform .5s cubic-bezier(.22, .61, .36, 1),
+        padding .5s cubic-bezier(.22, .61, .36, 1),
+        opacity .25s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-media-layout-out .ym-sl-fs-media > video {
+      transition: border-radius .5s cubic-bezier(.22, .61, .36, 1);
+    }
     /* ===== track-change dissolve (AJ, 2026-10-21) ==========================
        ⭐ Fading ONLY .ym-sl-fs-media was invisible for music videos. The ambient
        backdrop behind it (Kawarp / the blurred-video canvas) is a blurred copy of
@@ -5189,12 +5329,12 @@
        stretching it to the full column height. The old height:100% override
        made the square's contain box span the entire screen, creating huge
        black bars above and below the artwork. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       display: flex;
       align-items: center;
       justify-content: center;
     }
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > img {
       /* MORE specific than the base .ym-sl-fs-media > img rule, so in side mode
          THIS is what actually sizes the cover art — keep it in step with the
          base (AJ, 2026-10-03). */
@@ -5211,7 +5351,7 @@
        this inset snaps between layouts rather than animating; that is
        deliberate (animating a host that carries JS-measured media is what
        produced the stale-size black bars noted in the project memory). */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       bottom: 218px;
     }
     /* Music video: size the pane to the video's OWN aspect ratio, and centre it
@@ -5233,7 +5373,7 @@
        screen and the band; it is a no-op for anything wider than ~1.09.
        Nothing else writes transform on this host (only opacity does), so the
        translateY cannot collide with the layout-switch animation. */
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       top: 50%;
       bottom: auto;
       height: auto;
@@ -5243,13 +5383,13 @@
     }
     /* Cover art must shrink into the shortened pane instead of overflowing
        the band. aspect-ratio keeps it square; max-height:100% clamps it. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > img {
       max-height: 100%;
     }
     /* CENTRE the cover inside the shortened pane. The title / controls are at
        fixed offsets from the overlay bottom (AJ, 2026-10-20), so they no longer
        follow the art's bottom edge. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       align-items: center;
     }
     /* Both variants: the scrubber spans the MEDIA COLUMN, not the overlay centre,
@@ -5260,7 +5400,7 @@
        and push the bar 36px past the video's right edge. transform must be reset
        because the no-video pill base centres itself with translateX(-50%), which
        would drag a column-anchored bar off the column. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
       left: 2%;
       right: auto;
       width: 50%;
@@ -5284,7 +5424,7 @@
        made the gap under the video change with its shape.
        LIMIT: max-height clamps very tall videos, so for those the real bottom
        edge is higher than this formula and the gap grows. */
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
       display: flex;
       flex-direction: column;
       /* STRETCH, not center, and the column IS the media column (2% / 50%). A
@@ -5300,7 +5440,7 @@
       width: 50%;
       height: auto;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
       position: static;
       order: 0;
       left: auto;
@@ -5323,10 +5463,10 @@
       animation-name: ym-sl-fs-title-in-l;
     }
     /* Same for the leave animation, which also carries translateX(-50%). */
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-title.ym-sl-fs-title-leaving {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title.ym-sl-fs-title-leaving {
       animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
       position: static;
       order: 1;
       left: auto;
@@ -5340,7 +5480,7 @@
          hit area. */
       padding: 0;
     }
-    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-scrubber {
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
       position: static;
       order: 2;
       left: auto;
@@ -5361,7 +5501,7 @@
        Equal 14px gutters keep it centred IN the gap instead of hugging either side.
        minmax(0, 1fr) not plain 1fr: a plain 1fr keeps an auto minimum, so a wide
        volume would widen its own column and drag the divider off centre. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-play-chip {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
       left: 2%;
       width: 50%;
       max-width: none;
@@ -5382,14 +5522,14 @@
        Every item is pinned to grid-row 1 EXPLICITLY: auto-placement walks items in
        SOURCE order with a cursor that only moves forward, so an item whose column
        sits BEHIND the cursor gets pushed onto the next row. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-transport {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-transport {
       grid-row: 1;
       grid-column: 2;
       justify-self: center;
     }
     /* A plain flex child of .ym-sl-fs-scrubber now, so it needs no grid placement —
        only the divider separating it from the total time beside it. */
-    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
       margin-left: 0;
       padding-left: 14px;
       /* The 1px divider is removed too (AJ 2026-10-03) so the volume sits flush
@@ -5924,6 +6064,11 @@
       pointer-events: none;
       transform: translateY(6px);
     }
+    /* In Video Background the fullscreen volume bar owns the bottom-right
+       corner. Keep the jump pill above it instead of letting the two overlap. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-has-video .ym-sl-jump {
+      bottom: 68px;
+    }
     /* ---- MV pause re-sync ---------------------------------------------------
        Pick mode: hovering a primary line shows the existing .line::before box in a
        stronger form plus a floating "Sync from here" label (.line::after is unused
@@ -6124,6 +6269,11 @@
       .ym-sl-fs-overlay:hover .ym-sl-fs-controls,
       .ym-sl-fs-overlay:focus-within .ym-sl-fs-controls {
         transform: translateY(0) scale(.82);
+      }
+      /* Match the compact 4px row gap so the collapsed Hide lyrics slot does
+         not pull Layout into Options on short screens. */
+      .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-controls button.ym-sl-fs-lyrics-toggle {
+        margin-left: -4px;
       }
     }
     /* Lower-resolution YTM pages can have a short viewport where the native
@@ -7000,47 +7150,109 @@
       padding: 20px 6%;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits {
-      margin: 48px 4px 22px;
-      padding-top: 18px;
-      border-top: 1px solid rgba(255,255,255,.12);
-      opacity: .85;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      gap: 10px 24px;
+      padding: 18px 22px 16px;
+      margin: 48px 0 22px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 14px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.015) 58%),
+        rgba(34,34,40,.55);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.10);
+      -webkit-backdrop-filter: blur(14px) saturate(1.2);
+      backdrop-filter: blur(14px) saturate(1.2);
       pointer-events: none;
       user-select: none;
-      /* Credits are chrome, not lyrics: keep the bundled face even though the
-         footer sits inside .LyricsContent (which carries the custom lyric
-         font). Covers Written By / Uploaded by / Made by (AJ, 2026-10-20). */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
-        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
-        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      text-align: left;
+      /* Credits are chrome, not lyrics: use the add-ons panel face even though
+         the footer sits inside .LyricsContent (which carries the custom lyric
+         font). Covers Written by / Provided by / Uploaded by / Made by
+         (AJ, 2026-10-20). */
+      font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Roboto, sans-serif;
     }
-    #ym-sl-panel.SpicyRenderer .ym-sl-credits-label {
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: .04em;
-      text-transform: uppercase;
-      color: rgba(255,255,255,.5);
-      margin-bottom: 6px;
+    /* Liner notes: writers own the top row; source and people share one
+       metadata line underneath it. No three-column grid. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-box {
+      display: flex;
+      flex-direction: column;
+      flex: 0 1 auto;
+      gap: 5px;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      box-sizing: border-box;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers {
+      flex: 1 0 100%;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,.09);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers:last-child {
+      padding-bottom: 0;
+      border-bottom: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-people {
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 18px;
+      max-width: 100%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-provider-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      line-height: 1.25;
+      color: rgba(255,255,255,.55);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-arrow {
+      display: block;
+      width: 9px;
+      height: 9px;
+      flex: none;
+      margin-left: 1px;
+      color: #ff5a63;
+      opacity: .9;
+      transition: transform .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link:hover .ym-sl-uploader-arrow {
+      transform: translate(1px, -1px);
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits-names {
       font-size: 14px;
-      font-weight: 600;
-      line-height: 1.5;
-      color: rgba(255,255,255,.8);
+      font-weight: 500;
+      letter-spacing: -.005em;
+      line-height: 1.35;
+      color: #fff;
+      overflow-wrap: anywhere;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 18px;
+      line-height: 1.3;
+      letter-spacing: -.015em;
     }
     /* "Uploaded by <avatar> <username>" — only present on Spicy Lyrics API
        results. The parent .ym-sl-credits is pointer-events:none, so the link
        opts itself back in; without that the click never reaches it. */
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader {
       display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 8px;
-      margin-top: 22px;
-      font-size: 13px;
-    }
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
-      color: rgba(255,255,255,.5);
-      font-weight: 600;
-      letter-spacing: .02em;
+      gap: 6px;
+      margin: 0;
+      min-width: 0;
+      font-size: 14px;
     }
     /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
        caused the conic to fill the pill interior; reverting to the direct link). */
@@ -7048,66 +7260,77 @@
       pointer-events: auto;
       display: inline-flex;
       align-items: center;
-      gap: 7px;
-      padding: 3px 9px 3px 4px;
+      gap: 6px;
+      max-width: 100%;
+      min-width: 0;
+      padding: 2px 9px 2px 3px;
+      border: 1px solid rgba(255,255,255,.09);
       border-radius: 999px;
       background: rgba(255,255,255,.07);
-      color: rgba(255,255,255,.9);
+      color: #fff;
       text-decoration: none;
       position: relative;
       isolation: isolate;
-      transition: background-color .18s ease, color .18s ease;
+      transition: background-color .18s ease, border-color .18s ease, color .18s ease;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link:hover {
-      background: rgba(255,255,255,.14);
+      background: rgba(255,255,255,.13);
+      border-color: rgba(255,255,255,.16);
       color: #fff;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link.no-link {
       pointer-events: none;
       background: rgba(255,255,255,.05);
+      border-color: transparent;
       cursor: default;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-avatar {
-      width: 20px;
-      height: 20px;
+      width: 18px;
+      height: 18px;
       border-radius: 50%;
       object-fit: cover;
       flex: none;
       background: rgba(255,255,255,.12);
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-name {
-      font-weight: 600;
-      line-height: 1;
+      font-weight: 500;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
     }
-    /* "Lyrics provided by <provider>" — shown for EVERY API source, because
+    /* "Provided by <provider>" — shown for EVERY API source, because
        developers.spicylyrics.org/md/attribution makes displaying the provider a
        binding condition (ToS section 6), not a nicety. Plain text: the provider
        carries no url of its own. */
-    /* Credits on the same side as the final line, when that line is a duet.
-       text-align covers the label/names; the two flex rows need justify. */
-    .ym-sl-credits.align-right {
+    /* Credits on the same side as the final line, when that line is a duet. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits.align-right {
       text-align: right;
-    }
-    .ym-sl-credits.align-right :is(.ym-sl-provider, .ym-sl-uploader) {
       justify-content: flex-end;
+      margin-left: auto;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-provider {
       display: flex;
+      flex-direction: row;
       align-items: center;
       gap: 6px;
-      margin-top: 22px;
-      font-size: 13px;
-      color: rgba(255,255,255,.5);
-      /* This credit lives INSIDE .LyricsContent, which carries the custom lyric
-         face. Pin it to the bundled font: the custom font is for the lyrics
+      margin: 0;
+      min-width: 0;
+      font-size: 14px;
+      color: rgba(255,255,255,.67);
+      /* Same add-ons face as the rail: the custom lyric font is for the lyrics
          themselves, not attribution (AJ, 2026-10-20). */
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
-        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
-        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Roboto, sans-serif;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-provider-name {
-      color: rgba(255,255,255,.85);
-      font-weight: 600;
+      color: #fff;
+      font-weight: 500;
+    }
+    .ym-sl-provider-icon {
+      display: block;
+      width: 17px;
+      height: 17px;
+      flex: none;
+      object-fit: contain;
     }
     /* Provider name as a link (LRCLIB) — keeps the same
        weight and colour, underlines only on hover. */
@@ -7152,7 +7375,7 @@
       flex-direction: column;
       align-items: flex-start;
       gap: 7px;
-      margin-top: 22px;
+      margin-top: 0;
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-provider-block .ym-sl-provider-warn {
       margin-top: 0;
@@ -7162,13 +7385,6 @@
       line-height: 1.4;
       color: rgba(255, 255, 255, .42);
       max-width: 42ch;
-    }
-    /* Tighter leading when the provider is followed by a person row, and when
-       two person rows stack (uploader then maker) — otherwise the three
-       attribution lines float apart. */
-    #ym-sl-panel.SpicyRenderer .ym-sl-provider + .ym-sl-uploader,
-    #ym-sl-panel.SpicyRenderer .ym-sl-uploader + .ym-sl-uploader {
-      margin-top: 6px;
     }
     tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
     tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
@@ -7253,9 +7469,8 @@
 
     /* Final fullscreen geometry rules. These intentionally come after the
        short-viewport media queries above: the mode selectors carry higher
-       specificity, so switching to Lyrics Only animates the control bars to
-       their new locations instead of the media-query transform winning and
-       making them snap. */
+       specificity, so layout switches win over the media queries instead of
+       snapping. */
     /* The redesigned fullscreen controls are layout-agnostic: the chrome lives
        top-right (see .ym-sl-fs-controls at the top of this block) and the play
        chip + scrubber sit inside the full-size .ym-sl-fs-player-controls layer
@@ -7266,16 +7481,6 @@
        width, which squeezed the play chip into the bottom-left corner on the
        side and video-background layouts. It is removed; only the lyrics scroll
        clearance that genuinely still applies is kept. */
-    @media (max-height: 720px) {
-      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
-        padding-bottom: 142px;
-      }
-    }
-    @media (max-height: 560px) {
-      .ym-sl-fs-overlay.ym-sl-fs-mode-lyrics-only .ym-sl-fs-lyrics .LyricsContent {
-        padding-bottom: 112px;
-      }
-    }
 
     /* ===== STATIC SIDE STACK (AJ, 2026-10-20) =============================
        Every control position is a fixed length. This block used to re-anchor the
@@ -7286,7 +7491,7 @@
        (title 170/150, chip 74/72), so nothing is overridden here — the measured
        system is simply gone. Animations are rebuilt from this base. */
 
-    /* ===== side + lyrics-only: transport chip + scrubber never hide ========
+    /* ===== side: transport chip + scrubber never hide ========
        AJ wants the transport chip and the scrubber permanently visible in the
        video-left / lyrics-right (side) layout instead of fading in on hover
        (2026-09-28), and extended that to Lyrics Only (2026-09-28). The EXIT +
@@ -7324,11 +7529,11 @@
          has real top/bottom edges here (unlike the thin side columns), and a
          clipped line at either one reads as broken, so the words dissolve
          before they reach them. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) {
         --ym-sl-fs-portrait-fade-top: clamp(64px, 10vh, 190px);
         --ym-sl-fs-portrait-fade-bottom: clamp(88px, 14vh, 270px);
       }
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) {
         /* One number drives both the card and the chrome's left inset, so the
            two can never drift apart. */
         --ym-sl-fs-portrait-art: clamp(96px, 14vh, 176px);
@@ -7336,7 +7541,7 @@
       /* Lyrics first: full width, and the pane STOPS above the bottom band so
          no line can be painted under the transport (the other half of the
          overlap). The reserve tracks the chrome, whose title is vh-sized. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
         left: 0;
         width: 100%;
         bottom: clamp(190px, calc(22vh + 18px), 320px);
@@ -7371,7 +7576,7 @@
       /* The artwork, demoted to a small square card. top:auto matters: the base
          pane is stretched top-to-bottom, and leaving that in place would keep
          a full-height flex box behind the card. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
         top: auto;
         bottom: 24px;
         left: 24px;
@@ -7381,7 +7586,7 @@
       }
       /* The card must FILL its new box: the landscape rules still ask for
          min(100%, 54vh), which would crop it to a short strip. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > img {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > img {
         width: 100%;
         height: 100%;
         max-width: 100%;
@@ -7392,7 +7597,7 @@
       }
       /* Chrome: one bottom band, starting to the right of the art. Same 24px
          bottom as the card, so the two sit on one line. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
         top: auto;
         bottom: 24px;
         left: calc(48px + var(--ym-sl-fs-portrait-art));
@@ -7402,7 +7607,7 @@
       }
       /* A full-band volume slider reads as a stray line at this width; cap it
          and keep it with the transport. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-volume-group {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
         max-width: 320px;
         align-self: flex-start;
       }
@@ -7414,14 +7619,14 @@
          ratio decides the height, capped for tall clips), the words fill the
          space under it, and the transport becomes a player overlay that fades
          in when the video is hovered - like every other video player. */
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) {
         --ym-sl-fs-portrait-video-h: min(calc(100vw / var(--ym-sl-fs-video-ratio, 1.7777778)), 46vh);
         /* The seam under the video is a real edge; the bottom fade is shorter
            here because nothing sits below the pane. */
         --ym-sl-fs-portrait-fade-top: clamp(40px, 5vh, 90px);
         --ym-sl-fs-portrait-fade-bottom: clamp(56px, 9vh, 160px);
       }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
         top: 0;
         left: 0;
         width: 100%;
@@ -7431,11 +7636,11 @@
         max-height: none;
         border-radius: 0;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > video {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > video {
         border-radius: 0;
       }
       /* The words own everything below the video. */
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
         left: 0;
         width: 100%;
         top: calc(var(--ym-sl-fs-portrait-video-h) + 28px);
@@ -7466,12 +7671,12 @@
          with the words full-width under it; cover art as a corner card), so the
          half-width band has nothing left to protect. Video Background keeps
          its shade - there the video is still the full-bleed backdrop. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade {
         display: none;
       }
       /* Player-style scrim: only under the controls, only on hover, so the
          video stays untouched at rest. */
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media::after {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media::after {
         content: "";
         position: absolute;
         left: 0;
@@ -7483,14 +7688,14 @@
         transition: opacity .2s ease;
         pointer-events: none;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-media::after {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-media::after {
         opacity: 1;
       }
       /* Transport over the video's bottom edge, hidden until the pointer is on
          the video (or on the controls themselves, which is what keeps them
          alive while moving down to the seek bar). Nothing invisible may eat
          clicks on the video, so the children are inert while hidden too. */
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
         top: auto;
         bottom: calc(100% - var(--ym-sl-fs-portrait-video-h) + 24px);
         left: clamp(24px, 4vw, 64px);
@@ -7500,20 +7705,20 @@
         opacity: 0;
         transition: opacity .2s ease;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls * {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls * {
         pointer-events: none;
       }
       /* The idle class must WIN over hover: the pointer can rest on the video
          while the overlay hides the cursor, and chrome that stays up after the
          cursor has gone is the exact thing the idle state exists to prevent. */
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls,
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover,
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within {
         opacity: 1;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls *,
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover *,
-      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within * {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle):has(.ym-sl-fs-media:hover) .ym-sl-fs-player-controls *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:hover *,
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-player-controls:focus-within * {
         pointer-events: auto;
       }
     }
@@ -7637,7 +7842,7 @@
        button is not rendered there at all. */
     .ym-sl-fs-art-ui { display: none; }
     @media (min-aspect-ratio: 1 / 1) {
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > .ym-sl-fs-art-ui {
         display: flex;
         align-items: flex-start;
         justify-content: center;
@@ -7659,7 +7864,7 @@
       /* Idle is exempt on purpose: the class lands after 2s without input, and
          a pointer resting on the art still reports :hover - without this the
          button would stay up over a hidden cursor forever. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
         background: rgba(0, 0, 0, .42);
       }
       /* A click pins both for the length of the move: the artwork slides out
@@ -7667,10 +7872,10 @@
          on the first frame of the transition. When the helper class drops the
          base transition takes over and fades the button out over .18s instead
          of cutting it. */
-      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > .ym-sl-fs-art-ui {
         background: rgba(0, 0, 0, .42);
       }
-      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+      .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
         opacity: 1;
         visibility: visible;
         transform: none;
@@ -7774,7 +7979,7 @@
         visibility 0s linear .18s;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover .ym-sl-fs-art-like,
-    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
       opacity: 1;
       visibility: visible;
       transform: translate(-50%, -50%) scale(1);
@@ -7816,13 +8021,13 @@
        Landscape only: the portrait composition shrank the art to a corner
        card, where there is no side left to swap. */
     @media (min-aspect-ratio: 1 / 1) {
-      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
         left: 48%;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
         left: 2%;
       }
-      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
         left: calc(73% - min(25%, 27vh));
       }
       /* The readability shade lives on the lyric side and fades towards the
@@ -7832,7 +8037,7 @@
          layout swung the gradient's dark end from the screen edge to 44% - the
          middle of the frame - on the first frame, while the panel was still
          fully visible, and that read as the shadow darting to the centre. */
-      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade.ym-sl-fs-shade-left {
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade.ym-sl-fs-shade-left {
         left: 0;
         right: 44%;
         background: linear-gradient(
@@ -7849,14 +8054,14 @@
     /* The flip helper class only exists for the 480ms the JS holds it. The two
        panes and the cover art already transition left; the transport column
        does not, so without this it would snap while the picture glided. */
-    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-player-controls {
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
       transition: left .45s cubic-bezier(.22, .61, .36, 1);
     }
     /* The media host's own transition is opacity-only (set by the track-change
        dissolve further up, which deliberately overrides the base left/width
        list), so the ARTWORK needs its left handed back for the length of the
        flip or the cover would snap to the other side while the words glided. */
-    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-media {
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       transition:
         opacity .25s ease,
         left .45s cubic-bezier(.22, .61, .36, 1);
@@ -7876,7 +8081,7 @@
        0.45s layout move has landed by then - and runs over ~220ms, which is why
        this lives on its own longer class instead of the flip's: the flip is
        over long before the shadow comes back. */
-    .ym-sl-fs-overlay.ym-sl-fs-shade-swap:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-lyrics-only) .ym-sl-fs-lyrics-shade {
+    .ym-sl-fs-overlay.ym-sl-fs-shade-swap:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade {
       animation: ym-sl-fs-shade-dissolve .8s linear both;
     }
     @keyframes ym-sl-fs-shade-dissolve {
@@ -7886,6 +8091,933 @@
       }
       12%, 58% { opacity: 0; }
       86%, 100% { opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0); }
+    }
+
+    /* ===== HITS (AJ, 2026-11-09) ===========================================
+       The default fullscreen composition: a centred header with the artwork,
+       title, metadata chips and the song actions, then the lyrics in the same
+       centred column beneath it. The header owns the top of the screen; its
+       measured height is published by JS as --ym-sl-fs-hits-head-h, which is
+       what positions the lyrics column. Kawarp is the backdrop and uses the
+       live Aurora Bloom settings; the blurred cover is only the fallback.
+       No backticks in this comment: the sheet is a template literal. */
+
+    /* Kawarp owns the backdrop. It already applies Bloom's saturation, warp,
+       blur, brightness and contrast through startFullscreenKawarp(), so Hits
+       adds no filter of its own. The blurred art shows only when Kawarp could
+       not start (no WebGL / no Dynamic add-on). */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits:not(.ym-sl-fs-has-kawarp) .ym-sl-fs-bg-img {
+      display: block !important;
+      filter: blur(46px) saturate(1.7) brightness(.62) !important;
+      transform: scale(1.18);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-bg-canvas {
+      display: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-bg-tint {
+      background:
+        radial-gradient(120% 90% at 50% 0%, transparent 48%, rgba(0, 0, 0, .2) 100%),
+        linear-gradient(180deg, rgba(8, 8, 10, .08) 0%, rgba(8, 8, 10, .22) 52%, rgba(8, 8, 10, .55) 100%);
+    }
+
+    /* The media stays in the tree (it owns the playing video/audio) but is
+       never part of the composition. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-media {
+      left: 0;
+      width: 100%;
+      opacity: 0;
+      /* visibility, not just opacity: the track-change dissolve writes inline
+         opacity on the media host, and an inline value would beat a plain
+         opacity rule. The video keeps decoding and playing while hidden. */
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    /* Classic top chrome is replaced by the Hits header. The player-controls
+       layer is hidden too: the header owns the track details, while a dedicated
+       dock carries the transport, seek, volume and utility controls. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-controls,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-player-controls,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-title,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-nextup {
+      display: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-lyrics-shade {
+      display: none !important;
+    }
+
+    /* ---- header ---------------------------------------------------------- */
+    .ym-sl-fs-hits {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 19;
+      display: none;
+      pointer-events: none;
+      color: #fff;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      /* No halo behind the title/byline: the Kawarp backdrop already gives the
+         text enough separation, and the soft shadow read as a smudge on bright
+         frames. */
+      text-shadow: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits { display: block; }
+    /* Same width and centring as the lyrics column below, so the meta block's
+       left edge and the artwork's right edge both line up with the lyrics. */
+    .ym-sl-fs-hits-inner {
+      width: min(900px, calc(100% - 2 * clamp(24px, 4.5vw, 64px)));
+      margin: 0 auto;
+      padding-top: clamp(24px, 3.2vh, 38px);
+      box-sizing: border-box;
+    }
+    .ym-sl-fs-hits-head {
+      display: flex;
+      align-items: flex-start;
+      gap: clamp(16px, 2vw, 28px);
+    }
+    .ym-sl-fs-hits-artwrap {
+      flex: 0 0 auto;
+      width: clamp(92px, 10.5vw, 148px);
+      aspect-ratio: 1;
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .48), inset 0 0 0 1px rgba(255, 255, 255, .08);
+      transition: opacity .3s ease, border-radius .25s ease;
+    }
+    .ym-sl-fs-hits-artwrap.is-empty { opacity: 0; }
+    .ym-sl-fs-hits-art {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .ym-sl-fs-hits-meta {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding-top: 2px;
+      text-align: left;
+    }
+    .ym-sl-fs-hits-title {
+      margin: 0;
+      font-size: clamp(28px, 3.5vw, 46px);
+      font-weight: 800;
+      line-height: 1.03;
+      letter-spacing: -.035em;
+      color: #fff;
+      overflow-wrap: anywhere;
+    }
+    .ym-sl-fs-hits-byline-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+      min-width: 0;
+    }
+    .ym-sl-fs-hits-byline {
+      margin-top: 0;
+      min-width: 0;
+      flex: 0 1 auto;
+      font-size: clamp(13px, 1.25vw, 17px);
+      font-weight: 500;
+      color: rgba(255, 255, 255, .72);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ym-sl-fs-hits-byline-divider {
+      display: none;
+      flex: none;
+      width: 1px;
+      height: 13px;
+      background: rgba(255, 255, 255, .2);
+    }
+    .ym-sl-fs-hits-byline-row.has-writers .ym-sl-fs-hits-byline-divider {
+      display: block;
+    }
+    .ym-sl-fs-hits-writers {
+      display: none;
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: clamp(12px, 1.1vw, 15px);
+      font-weight: 500;
+      color: rgba(255, 255, 255, .55);
+    }
+    .ym-sl-fs-hits-writers.has-writers { display: block; }
+    .ym-sl-fs-hits-chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    /* Attribution folded into the header. Same footer markup as the one under
+       the lyrics, but compact and card-free so it reads as part of the track
+       details instead of a second panel. Hits is the one layout where the
+       header is the attribution surface for BOTH renderers, so any copy under
+       the lyrics is suppressed (see the AMLL rule below). */
+    .ym-sl-fs-hits-credits {
+      margin-top: 10px;
+      max-width: 100%;
+      box-sizing: border-box;
+      color: rgba(255, 255, 255, .66);
+      font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Roboto, sans-serif;
+      pointer-events: auto;
+      text-align: left;
+    }
+    .ym-sl-fs-hits-credits:empty { display: none; }
+    /* AMLL draws its own footer inside the lyric engine. Hits keeps attribution
+       in the header for both renderers, so hide that under-lyrics copy in this
+       mode only; every other layout still shows it. */
+    body.amll-active .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-lyrics .ym-sl-credits,
+    body.amll-active .ym-sl-fs-overlay.ym-sl-fs-mode-hits #ym-sl-amll-host .ym-sl-credits {
+      display: none !important;
+    }
+    /* The original footer stays in the scroll content for every other layout.
+       In Hits + Spicy its header copy is the visible one, so the below-lyrics
+       copy is suppressed rather than shown twice. */
+    body:not(.amll-active) .ym-sl-fs-overlay.ym-sl-fs-mode-hits.ym-sl-fs-hits-has-credits #ym-sl-panel.SpicyRenderer .ym-sl-credits {
+      display: none !important;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-credits {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 8px;
+      width: 100%;
+      max-width: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      overflow: visible;
+      pointer-events: none;
+      user-select: none;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-credit-box {
+      display: flex;
+      flex-direction: column;
+      flex: 0 1 auto;
+      gap: 3px;
+      min-width: 0;
+      max-width: 100%;
+      padding: 7px 10px;
+      box-sizing: border-box;
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .04);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-credit-writers {
+      flex: 0 1 auto;
+    }
+    /* Uploaded by / Made by ride in the chip row, immediately after the provider
+       chip. The wrapper and the footer's people box both collapse so the two
+       person pills become siblings of the chips. */
+    .ym-sl-fs-hits-people,
+    .ym-sl-fs-hits-people .ym-sl-credit-people {
+      display: contents;
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader {
+      max-width: 100%;
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-label {
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      line-height: 1.25;
+      color: rgba(255, 255, 255, .5);
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-link {
+      pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      overflow: hidden;
+      color: #fff;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-link.no-link { pointer-events: none; }
+    .ym-sl-fs-hits-people .ym-sl-uploader-avatar {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: none;
+      background: rgba(255, 255, 255, .12);
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      overflow-wrap: anywhere;
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-arrow {
+      display: block;
+      width: 9px;
+      height: 9px;
+      flex: none;
+      margin-left: 1px;
+      color: #ff5a63;
+      opacity: .9;
+      transition: transform .18s ease;
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader-link:hover .ym-sl-uploader-arrow {
+      transform: translate(1px, -1px);
+    }
+    .ym-sl-fs-hits-credits :is(.ym-sl-credits-label, .ym-sl-provider-label, .ym-sl-uploader-label) {
+      margin: 0;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      line-height: 1.25;
+      color: rgba(255, 255, 255, .5);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-credits-names {
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      letter-spacing: -.005em;
+      color: rgba(255, 255, 255, .9);
+      overflow-wrap: anywhere;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 14px;
+      line-height: 1.3;
+      letter-spacing: -.01em;
+    }
+    .ym-sl-fs-hits-credits :is(.ym-sl-uploader, .ym-sl-provider) {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+      margin: 0;
+      min-width: 0;
+      font-size: 12px;
+      color: rgba(255, 255, 255, .66);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-provider-name { color: #fff; font-weight: 500; }
+    .ym-sl-fs-hits-credits .ym-sl-provider-icon {
+      width: 14px;
+      height: 14px;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link {
+      pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      max-width: 100%;
+      min-width: 0;
+      padding: 1px 7px 1px 3px;
+      border: 1px solid rgba(255, 255, 255, .09);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .07);
+      color: #fff;
+      text-decoration: none;
+      transition: background-color .18s ease, border-color .18s ease;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover {
+      background: rgba(255, 255, 255, .13);
+      border-color: rgba(255, 255, 255, .16);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link.no-link {
+      pointer-events: none;
+      background: rgba(255, 255, 255, .05);
+      border-color: transparent;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-avatar {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: none;
+      background: rgba(255, 255, 255, .12);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-name {
+      font-weight: 500;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-arrow {
+      display: block;
+      width: 9px;
+      height: 9px;
+      flex: none;
+      margin-left: 1px;
+      color: #ff5a63;
+      opacity: .9;
+      transition: transform .18s ease;
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover .ym-sl-uploader-arrow {
+      transform: translate(1px, -1px);
+    }
+    /* Profiles in the chip row and the credit block answer the pointer with a
+       brighter border and a small spring scale. Transform-only, so the row's
+       layout never moves. */
+    .ym-sl-fs-hits-people .ym-sl-uploader.ym-sl-fs-hits-chip {
+      transform-origin: left center;
+      transition: background-color .18s ease, border-color .18s ease,
+        transform .2s cubic-bezier(.34, 1.56, .64, 1);
+    }
+    .ym-sl-fs-hits-people .ym-sl-uploader.ym-sl-fs-hits-chip:hover {
+      border-color: rgba(255, 255, 255, .38);
+      background: rgba(255, 255, 255, .13);
+      transform: scale(1.04);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link {
+      transform-origin: left center;
+      transition: background-color .18s ease, border-color .18s ease,
+        transform .2s cubic-bezier(.34, 1.56, .64, 1);
+    }
+    .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover {
+      border-color: rgba(255, 255, 255, .38);
+      background: rgba(255, 255, 255, .13);
+      transform: scale(1.04);
+    }
+    .ym-sl-fs-hits-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 30px;
+      padding: 0 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      background: rgba(255, 255, 255, .045);
+      color: rgba(255, 255, 255, .86);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1;
+      letter-spacing: .005em;
+      white-space: nowrap;
+    }
+    .ym-sl-fs-hits-chip-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: none;
+    }
+    .ym-sl-fs-hits-chip-icon .ym-sl-provider-icon {
+      width: 16px;
+      height: 16px;
+    }
+    .ym-sl-fs-hits-chip-sync {
+      color: #ffd98a;
+      border-color: rgba(255, 206, 110, .28);
+      background: rgba(255, 196, 90, .14);
+    }
+    .ym-sl-fs-hits-chip-sync::before {
+      content: "";
+      width: 11px;
+      height: 10px;
+      border-radius: 2px;
+      background: linear-gradient(90deg,
+        #ffc65c 0 24%, rgba(255, 198, 92, .3) 24% 38%,
+        #ffc65c 38% 62%, rgba(255, 198, 92, .3) 62% 76%,
+        #ffc65c 76% 100%);
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
+    }
+    /* ---- Hits control dock (retired) -------------------------------------
+       The nodes stay in the tree for the live state sync, but cover-art Hits
+       hides the dock: no seek, transport or volume row. Playback is driven by
+       the keyboard, and the header carries only the track details. */
+    .ym-sl-fs-hits-dock {
+      display: none;
+      margin-top: 14px;
+      padding: 0;
+      box-sizing: border-box;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      color: #fff;
+      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
+        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
+        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      pointer-events: auto;
+    }
+    .ym-sl-fs-hits-seek {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-fs-hits-time {
+      flex: 0 0 auto;
+      min-width: 32px;
+      color: rgba(255, 255, 255, .5);
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .02em;
+      user-select: none;
+    }
+    .ym-sl-fs-hits-time[data-time="total"] { text-align: right; }
+    .ym-sl-fs-hits-range {
+      flex: 1 1 auto;
+      min-width: 0;
+      height: 3px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+    }
+    .ym-sl-fs-hits-range:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .5);
+      outline-offset: 4px;
+    }
+    /* The classic seek skin supplies the fill gradient; these make the thumb
+       visible without the hidden classic scrubber's hover class. */
+    .ym-sl-fs-hits-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 10px;
+      height: 10px;
+      margin-top: -3.5px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+      opacity: .65;
+    }
+    .ym-sl-fs-hits-range::-moz-range-thumb {
+      width: 10px;
+      height: 10px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+      opacity: .65;
+    }
+    .ym-sl-fs-hits-dock:hover .ym-sl-fs-hits-range::-webkit-slider-thumb { opacity: 1; }
+    .ym-sl-fs-hits-dock:hover .ym-sl-fs-hits-range::-moz-range-thumb { opacity: 1; }
+    .ym-sl-fs-hits-dock-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .ym-sl-fs-hits-transport {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 0 0 auto;
+    }
+    .ym-sl-fs-hits-dock .ym-sl-fs-hits-btn.is-icon {
+      width: 34px;
+      min-height: 34px;
+      padding: 0;
+    }
+    .ym-sl-fs-hits-transport .ym-sl-fs-hits-btn svg,
+    .ym-sl-fs-hits-transport .ym-sl-fs-hits-btn .ym-sl-fs-hits-icon {
+      width: 17px;
+      height: 17px;
+    }
+    .ym-sl-fs-hits-volume-group {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex: 1 1 100px;
+      min-width: 82px;
+      max-width: 160px;
+    }
+    .ym-sl-fs-hits-volume-icon {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      display: block;
+      color: rgba(255, 255, 255, .58);
+      fill: none;
+      stroke: currentColor;
+    }
+    .ym-sl-fs-hits-volume-icon.is-muted { opacity: .45; }
+    .ym-sl-fs-hits-volume { max-width: 150px; }
+    .ym-sl-fs-hits-btn {
+      -webkit-appearance: none;
+      appearance: none;
+      position: relative;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 12px;
+      box-sizing: border-box;
+      overflow: visible;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: rgba(255, 255, 255, .84);
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      line-height: 1;
+      cursor: pointer;
+      pointer-events: auto;
+      white-space: nowrap;
+      text-shadow: none;
+      transition: background-color .16s ease, color .16s ease,
+        transform .16s ease;
+    }
+    .ym-sl-fs-hits-btn:hover {
+      background: rgba(255, 255, 255, .1);
+      color: #fff;
+    }
+    .ym-sl-fs-hits-btn:active { transform: scale(.96); }
+    .ym-sl-fs-hits-btn:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .55);
+      outline-offset: 2px;
+    }
+    .ym-sl-fs-hits-btn.is-icon { width: 38px; padding: 0; }
+    .ym-sl-fs-hits-btn.is-on { color: #ffd98a; }
+    /* The custom thumb is one closed outline; the pressed state fills it. */
+    .ym-sl-fs-hits-btn.is-on .ym-sl-fs-hits-icon path { fill: currentColor; }
+    .ym-sl-fs-hits-btn.is-done { color: #9ff0b5; }
+    /* Icon-only controls get a floating confirmation; labeled copy buttons
+       swap their label instead. */
+    .ym-sl-fs-hits-btn[data-flash]::after {
+      content: attr(data-flash);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 7px);
+      z-index: 2;
+      padding: 4px 8px;
+      border-radius: 7px;
+      background: rgba(18, 18, 20, .94);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .ym-sl-fs-hits-btn svg,
+    .ym-sl-fs-hits-btn .ym-sl-fs-hits-icon {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      transform-origin: center;
+      transition: transform .24s cubic-bezier(.34, 1.56, .64, 1);
+    }
+    .ym-sl-fs-hits-btn svg * { vector-effect: non-scaling-stroke; }
+    /* Secondary actions sit in their own row under the metadata chips. They
+       reuse the provider-chip box so the old Copy link / Copy lyrics buttons
+       read the same as Uploaded by / Made by. */
+    .ym-sl-fs-hits-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn {
+      min-height: 30px;
+      padding: 0 12px;
+      gap: 7px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .045);
+      color: rgba(255, 255, 255, .86);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      transition: background-color .16s ease, border-color .16s ease,
+        color .16s ease, transform .16s ease;
+    }
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn:hover {
+      border-color: rgba(255, 255, 255, .38);
+      background: rgba(255, 255, 255, .13);
+      color: #fff;
+    }
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn.is-done {
+      color: #9ff0b5;
+      border-color: rgba(159, 240, 181, .3);
+    }
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn svg,
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn .ym-sl-fs-hits-icon {
+      width: 15px;
+      height: 15px;
+    }
+    .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* ---- top-right layout control ----------------------------------------
+       The old Hits layout button lives at the viewport's top-right; the
+       secondary actions now sit in the header row under the chips. */
+    .ym-sl-fs-hits-top-utils {
+      position: fixed;
+      top: clamp(18px, 2.4vh, 28px);
+      right: clamp(18px, 2vw, 28px);
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      opacity: .72;
+      transition: opacity .2s ease;
+      pointer-events: auto;
+    }
+    .ym-sl-fs-hits-top-utils:hover,
+    .ym-sl-fs-hits-top-utils:focus-within {
+      opacity: 1;
+    }
+    /* Keep the cluster compact once the header column starts to reach it. */
+    @media (max-width: 1400px) {
+      .ym-sl-fs-hits-top-utils .ym-sl-fs-hits-layout .ym-sl-fs-hits-btn-label {
+        display: none;
+      }
+      .ym-sl-fs-hits-top-utils .ym-sl-fs-hits-layout {
+        width: 34px;
+        padding: 0;
+        justify-content: center;
+      }
+    }
+    /* ---- lyrics column --------------------------------------------------- */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-lyrics {
+      left: 50% !important;
+      top: calc(var(--ym-sl-fs-hits-head-h, 360px) + clamp(16px, 2.6vh, 28px)) !important;
+      /* No reserved bottom band: the dock lives in the header flow (or the
+         left column for MV), so the column runs all the way to the screen
+         edge and only the top mask fades. The old 52px inset + 48px padding
+         stacked into ~100px of dead air that read as clipped lyrics
+         (AJ, 2026-11-10). */
+      bottom: 0 !important;
+      /* The base pane is height:100%; with top+bottom set, that height would
+         beat the insets and stop the column ending cleanly at the bottom. */
+      height: auto !important;
+      width: min(900px, calc(100% - 2 * clamp(24px, 4.5vw, 64px))) !important;
+      transform: translateX(-50%) !important;
+      padding: 0 !important;
+      box-sizing: border-box;
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      /* The column starts directly under the header and runs to the bottom
+         edge. Only the top fades into the backdrop: the old bottom fade began
+         ~30px above the edge and read as lyrics being cut off too early
+         (AJ, 2026-11-10). Lines now stay lit all the way to the screen edge. */
+      -webkit-mask-image: linear-gradient(to bottom,
+        transparent 0,
+        rgba(0, 0, 0, .35) clamp(14px, 4vh, 34px),
+        #000 clamp(56px, 12vh, 104px));
+      mask-image: linear-gradient(to bottom,
+        transparent 0,
+        rgba(0, 0, 0, .35) clamp(14px, 4vh, 34px),
+        #000 clamp(56px, 12vh, 104px));
+      transition: opacity .35s ease;
+    }
+    /* The general fullscreen scrollport carries its own mask that fades the
+       bottom 18% to transparent. Hits already runs to the screen edge, so that
+       inner fade made the last lines dissolve well above the bottom and read
+       as clipped (AJ, 2026-11-10). The pane's top-only mask above is the one
+       fade Hits keeps; suppress the inner one here. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-lyrics .LyricsContent {
+      -webkit-mask-image: none !important;
+      mask-image: none !important;
+    }
+
+    /* ---- Hits -> Video + Lyrics handoff (cover art) -----------------------
+       The header thumbnail becomes a fixed flying card and lands on the side
+       artwork's box; the header copy lifts and fades, and the lyrics column
+       keeps a real geometry transition instead of snapping right. JS adds this
+       class only for the handoff and removes it when the card lands. */
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits { display: block; }
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits-meta {
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity .38s ease, transform .38s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits-artwrap {
+      opacity: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits-top-utils {
+      opacity: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits-btn {
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-lyrics {
+      /* Auto height lets the pane grow with the animated top inset; height:100%
+         would jump to its final box on the first frame. */
+      height: auto;
+      transition:
+        left .55s cubic-bezier(.22, .61, .36, 1),
+        width .55s cubic-bezier(.22, .61, .36, 1),
+        top .55s cubic-bezier(.22, .61, .36, 1),
+        transform .55s cubic-bezier(.22, .61, .36, 1),
+        padding .55s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease;
+    }
+    .ym-sl-fs-art-fly {
+      position: fixed;
+      z-index: 30;
+      display: block;
+      transform-origin: top left;
+      object-fit: cover;
+      border: 0;
+      background: #000;
+      pointer-events: none;
+      will-change: transform;
+      backface-visibility: hidden;
+      contain: paint;
+      box-shadow: none;
+    }
+    /* ---- Video + Lyrics -> Hits handoff (cover art) -----------------------
+       The reverse trip: the side card becomes the flying clone, shrinks into
+       the header thumbnail, and the lyrics return to the centred column. The
+       header copy fades in while the side chrome fades out. */
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits { display: block; }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits-meta {
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity .38s ease, transform .38s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits.ym-sl-fs-mode-hits .ym-sl-fs-hits-meta {
+      opacity: 1;
+      transform: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits-artwrap {
+      /* No opacity transition: the clone is the only cover until it lands,
+         then the real thumbnail appears in the same frame. */
+      visibility: hidden;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits-top-utils {
+      opacity: 0;
+      transition: opacity .32s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits.ym-sl-fs-mode-hits .ym-sl-fs-hits-top-utils {
+      opacity: .72;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits-btn {
+      pointer-events: none;
+    }
+    /* Hits normally hides the classic chrome. Keep it in the tree for the
+       reverse handoff so the side title/controls fade out instead of blinking
+       away under the incoming header. */
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-controls,
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-player-controls {
+      display: flex !important;
+      opacity: 1;
+      pointer-events: none;
+      transition: opacity .32s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-title {
+      display: block !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits.ym-sl-fs-mode-hits .ym-sl-fs-controls,
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits.ym-sl-fs-mode-hits .ym-sl-fs-player-controls {
+      opacity: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-lyrics {
+      height: auto;
+      transition:
+        left .55s cubic-bezier(.22, .61, .36, 1),
+        width .55s cubic-bezier(.22, .61, .36, 1),
+        top .55s cubic-bezier(.22, .61, .36, 1),
+        transform .55s cubic-bezier(.22, .61, .36, 1),
+        padding .55s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease;
+    }
+    /* Spicy is real DOM text: animating the column's width, padding or height
+       rewraps every line on every frame of the handoff, which is the panel-only
+       stutter. 07 adds this class and FLIPs a transform from the old box instead;
+       disabling the geometry transition lets the final layout land in one frame.
+       AMLL is a canvas and keeps the full geometry glide. */
+    body:not(.amll-active) .ym-sl-fs-overlay.ym-sl-fs-lyrics-flip .ym-sl-fs-lyrics {
+      transition: none !important;
+    }
+    /* Hits entrance. The header is display:none until the mode class lands, so
+       a normal transition has no first painted frame to start from and the
+       title/buttons just appear. A keyframe animation starts from the explicit
+       0 state once the header is shown, which gives the reverse handoff a real
+       fade-in instead of a pop. */
+    @keyframes ym-sl-fs-hits-fade-in {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-meta > * {
+      animation: ym-sl-fs-hits-fade-in .42s cubic-bezier(.22, .61, .36, 1) both;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-hits-meta,
+      .ym-sl-fs-overlay.ym-sl-fs-hits-to-side .ym-sl-fs-lyrics,
+      .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-hits-meta,
+      .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-lyrics,
+      .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-controls,
+      .ym-sl-fs-overlay.ym-sl-fs-side-to-hits .ym-sl-fs-player-controls {
+        transition: none;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-meta > * {
+        animation: none;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .ym-sl-fs-hits-inner { padding-top: 20px; }
+      .ym-sl-fs-hits-head { align-items: center; gap: 16px; }
+      .ym-sl-fs-hits-artwrap { width: 84px; border-radius: 12px; }
+      .ym-sl-fs-hits-title { font-size: clamp(24px, 5.8vw, 34px); }
+      .ym-sl-fs-hits-byline-row { margin-top: 6px; gap: 8px; }
+      .ym-sl-fs-hits-chips { margin-top: 10px; gap: 6px; }
+      .ym-sl-fs-hits-credits { margin-top: 10px; }
+      .ym-sl-fs-hits-chip { min-height: 26px; padding: 0 9px; font-size: 11px; }
+      .ym-sl-fs-hits-actions { margin-top: 12px; gap: 6px; }
+      .ym-sl-fs-hits-btn { min-height: 34px; padding: 0 11px; font-size: 12px; }
+      .ym-sl-fs-hits-btn.is-icon { width: 34px; padding: 0; }
+      .ym-sl-fs-hits-dock { margin-top: 12px; }
+      .ym-sl-fs-hits-dock .ym-sl-fs-hits-btn.is-icon { width: 32px; min-height: 32px; }
+    }
+    @media (max-height: 760px) {
+      .ym-sl-fs-hits-inner { padding-top: 20px; }
+      .ym-sl-fs-hits-artwrap { width: clamp(76px, 9vw, 104px); }
+      .ym-sl-fs-hits-title { font-size: clamp(26px, 3vw, 38px); }
+      .ym-sl-fs-hits-credits { margin-top: 8px; }
+      .ym-sl-fs-hits-actions { margin-top: 10px; }
+      .ym-sl-fs-hits-dock { margin-top: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-fs-hits-btn,
+      .ym-sl-fs-hits-artwrap { transition: none; }
+      .ym-sl-fs-hits-actions .ym-sl-fs-hits-btn { transition: none; }
+      .ym-sl-fs-hits-btn:active { transform: none; }
+      .ym-sl-fs-hits-btn svg,
+      .ym-sl-fs-hits-btn .ym-sl-fs-hits-icon { transition: none; }
+      .ym-sl-fs-hits-btn:hover,
+      .ym-sl-fs-hits-btn:hover svg,
+      .ym-sl-fs-hits-btn:hover .ym-sl-fs-hits-icon,
+      .ym-sl-fs-hits-btn:active svg,
+      .ym-sl-fs-hits-btn:active .ym-sl-fs-hits-icon { transform: none; }
+      .ym-sl-fs-hits-people .ym-sl-uploader.ym-sl-fs-hits-chip,
+      .ym-sl-fs-hits-credits .ym-sl-uploader-link { transition: none; }
+      .ym-sl-fs-hits-people .ym-sl-uploader.ym-sl-fs-hits-chip:hover,
+      .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover { transform: none; }
     }
 
   `;
@@ -8061,7 +9193,6 @@
       return root;
     };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
-    const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
     const importButton = h("button", {
       class: "ym-sl-import",
       type: "button",
@@ -8142,6 +9273,70 @@
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
     });
 
+    // Community-shared offset. The first person to post claims the track + mode
+    // slot; everyone else gets that value on load. The owner token lives only in
+    // localStorage, so Undo appears on the poster's own browser. There is no
+    // Aurora account: the name is a display label, not an identity.
+    const communityOffsetWrap = h("div", { class: "ym-sl-community-offset" });
+    const communityOffsetHead = h("div", { class: "ym-sl-community-offset-head" });
+    communityOffsetHead.append(
+      h("span", { class: "ym-sl-options-section-title", text: "Community offset" }),
+      h("span", { class: "ym-sl-community-offset-badge", text: "shared" })
+    );
+    communityOffsetStatus = h("div", {
+      class: "ym-sl-community-offset-status",
+      role: "status",
+      "aria-live": "polite",
+      text: "Play a track to share an offset.",
+    });
+    communityOffsetName = h("input", {
+      class: "ym-sl-community-offset-name",
+      type: "text",
+      maxlength: "24",
+      autocomplete: "nickname",
+      placeholder: "Your name (optional)",
+      "aria-label": "Name shown next to the shared offset",
+    });
+    try {
+      if (window.localStorage) {
+        communityOffsetName.value = window.localStorage.getItem(COMMUNITY_OFFSET_NAME_KEY) || "";
+      }
+    } catch (_) {}
+    communityOffsetName.addEventListener("input", () => {
+      try {
+        if (window.localStorage) {
+          window.localStorage.setItem(COMMUNITY_OFFSET_NAME_KEY, communityOffsetName.value.slice(0, 24));
+        }
+      } catch (_) {}
+    });
+    communityOffsetPostButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-post",
+      type: "button",
+      title: "Share the current offset with everyone",
+      text: "Post offset",
+    });
+    communityOffsetUndoButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-undo hidden",
+      type: "button",
+      title: "Remove the shared offset you posted",
+      text: "Undo",
+    });
+    communityOffsetReportButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-report hidden",
+      type: "button",
+      title: "Report this offset to the moderators",
+      text: "Report",
+    });
+    communityOffsetPostButton.addEventListener("click", () => { postCommunityOffset(); });
+    communityOffsetUndoButton.addEventListener("click", () => { undoCommunityOffset(); });
+    communityOffsetReportButton.addEventListener("click", () => { reportCommunityOffset(); });
+    const communityOffsetActions = h("div", { class: "ym-sl-community-offset-actions" },
+      communityOffsetPostButton, communityOffsetUndoButton, communityOffsetReportButton
+    );
+    communityOffsetWrap.append(
+      communityOffsetHead, communityOffsetStatus, communityOffsetName, communityOffsetActions
+    );
+
     // Options is a pill beside the song-layout switcher, in the empty band
     // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
     // across the panel's own top edge, which only appeared for people who
@@ -8175,8 +9370,6 @@
       "aria-label": "Close options",
     });
     optionsHeader.append(optionsTitle, optionsClose);
-    const optionsTop = h("div", { class: "ym-sl-options-section" });
-    optionsTop.append(trackEl, videoOffsetWrap);
     const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
     const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
@@ -8297,7 +9490,7 @@
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";
-        console.warn("[AuroraLyrics] clear cache failed:", error);
+        alWarn("clear cache failed:", error);
       }
       cacheDelete.disabled = false;
       cacheCancel.disabled = false;
@@ -8314,13 +9507,10 @@
     const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
     const optionsPanels = h("div", { class: "ym-sl-options-panels" });
 
-    const panelNowPlaying = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Now playing" }),
-      trackEl
-    );
     const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
-      videoOffsetWrap
+      videoOffsetWrap,
+      communityOffsetWrap
     );
     // Per-SONG cache controls, in the File tab next to the import buttons. The
     // global purge lives in the Cache tab; this one only ever touches the track
@@ -8355,15 +9545,12 @@
     );
 
     const optionSections = [
-      { label: "Playing", panel: panelNowPlaying },
       { label: "Sync", panel: panelSync },
       { label: "File", panel: panelFile },
       { label: "Cache", panel: panelCache },
     ];
-    // Options opens on Sync rather than Playing (AJ, 2026-10-20): Sync is what the
-    // panel is opened for (offset + pause sync), so defaulting to Playing made
-    // every visit start with a click. Index into optionSections above.
-    const DEFAULT_OPTION_TAB = 1;
+    // Options opens on Sync, the reason the panel exists (offset + pause sync).
+    const DEFAULT_OPTION_TAB = 0;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -8429,13 +9616,19 @@
         text: section.label,
       });
       if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
+      section.panel.inert = index !== DEFAULT_OPTION_TAB;
+      section.panel.setAttribute("aria-hidden", index === DEFAULT_OPTION_TAB ? "false" : "true");
       optionsPanels.appendChild(section.panel);
       tab.addEventListener("click", () => {
         if (tab.classList.contains("active")) return;
         optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
         tab.classList.add("active");
         tab.setAttribute("aria-selected", "true");
-        optionSections.forEach((s) => s.panel.classList.remove("active"));
+        optionSections.forEach((s) => {
+          s.panel.classList.remove("active");
+          s.panel.inert = s !== section;
+          s.panel.setAttribute("aria-hidden", s === section ? "false" : "true");
+        });
         section.panel.classList.add("active");
         syncPanelsHeight(); // animate container height to the new panel
         staggerIn(section.panel, false); // clean spring on the newly shown panel
@@ -8590,6 +9783,18 @@
     return video && video.videoWidth > 0 ? video : null;
   }
 
+  // Publish the live video's aspect ratio so the side-by-side media pane can
+  // match it exactly. drawBgFrame() also writes these, but the entry and attach
+  // paths must seed them before the first paint or the pane starts at 16:9.
+  function publishFsVideoAspect(video) {
+    if (!fsOverlay || !video) return;
+    const width = Number(video.videoWidth) || 0;
+    const height = Number(video.videoHeight) || 0;
+    if (!width || !height) return;
+    fsOverlay.style.setProperty("--ym-sl-fs-video-ar", width + " / " + height);
+    fsOverlay.style.setProperty("--ym-sl-fs-video-ratio", String(width / height));
+  }
+
   // Bump a YouTube image CDN URL to a larger size so the cover art fills the
   // fullscreen pane crisply instead of rendering as a tiny thumbnail. The CDN
   // accepts a trailing =wWIDTH-hHEIGHT hint and resizes server-side.
@@ -8675,9 +9880,8 @@
   // The lyric shade is unconditional now, in BOTH layouts where lyrics float
   // over a picture: Video Background (full-bleed video) and Video + Lyrics (the
   // column sits on the Kawarp / blurred-frame backdrop, which can be just as
-  // bright). Lyrics Only has nothing behind the words but the overlay itself, so
-  // it never shows the layer. Portrait side compositions drop the column and
-  // hide the layer in CSS; leaving the target on costs nothing there.
+  // bright). Portrait side compositions drop the column and hide the layer in
+  // CSS; leaving the target on costs nothing there.
   function fsShadeLayoutActive() {
     return fsLayoutMode === "background" || fsLayoutMode === "side";
   }
@@ -8839,6 +10043,9 @@
   // away for performance.
   function drawBgFrame() {
     if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    // Hits paints Kawarp (or the blurred-cover fallback), not the video
+    // canvas, so do not keep copying decoded frames into a canvas nobody sees.
+    if (fsLayoutMode === "hits") return;
     // Kawarp OWNS the backdrop while it is up, and the stylesheet hides this
     // canvas behind it (.ym-sl-fs-has-kawarp .ym-sl-fs-bg-canvas: display none).
     // Drawing into it anyway was the most expensive thing in portrait music
@@ -9000,11 +10207,16 @@
   }
 
   const FS_LAYOUT_NAMES = {
+    hits: "Hits",
     side: "Video + Lyrics",
     background: "Video Background",
-    lyrics: "Lyrics Only",
   };
-  const FS_LAYOUT_ORDER = ["side", "background", "lyrics"];
+  // Hits is the cover-art default: artwork, title and actions at the top,
+  // lyrics directly beneath. Music videos deliberately do NOT get it — the
+  // side-by-side composition is the clean framing there, so a video cycles
+  // only between Video + Lyrics and Video Background.
+  const FS_LAYOUT_KEY = "better_lyrics_fullscreen_layout_v2";
+  const FS_LAYOUT_VIDEO_KEY = "better_lyrics_fullscreen_layout_video_v1";
   // Remembered across entries like the layout mode itself: the side is a
   // preference, not a per-song state.
   const FS_COVER_SIDE_KEY = "better_lyrics_fullscreen_cover_side_v1";
@@ -9013,16 +10225,13 @@
     return !!(fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video"));
   }
 
-  // The "Video Background" mode blurs the live music video as a backdrop. For
-  // audio-only tracks (cover art, no MV) there is nothing to use, so the cycle
-  // button SKIPS it instead of offering a broken layout. AJ 2026-09-28.
+  // Each track type has its own two-mode cycle: music videos go Video + Lyrics
+  // <-> Video Background, cover art goes Hits <-> Video + Lyrics. Hits is never
+  // offered for a video, and Background has no backdrop without one.
   function nextFsLayoutMode(current) {
-    const i0 = FS_LAYOUT_ORDER.indexOf(current);
-    for (let step = 1; step <= FS_LAYOUT_ORDER.length; step++) {
-      const cand = FS_LAYOUT_ORDER[(i0 + step) % FS_LAYOUT_ORDER.length];
-      if (cand !== "background" || hasFsVideo()) return cand;
-    }
-    return "side";
+    const order = hasFsVideo() ? ["side", "background"] : ["hits", "side"];
+    const i = order.indexOf(current);
+    return order[i < 0 ? 0 : (i + 1) % order.length];
   }
 
   /**
@@ -9044,12 +10253,215 @@
     if (label) label.textContent = current;
   }
 
-  function applyFullscreenLayout(mode) {
+  /* ---- Layout handoff (cover art) ---------------------------------------
+     One flying card carries the artwork between the small Hits header
+     thumbnail and the larger side cover. It is positioned against whichever
+     endpoint is larger and animated with transforms only, so the bitmap is
+     never re-rasterized at a growing size and border-radius does not repaint
+     on every frame. The real side card stays hidden until the clone lands.
+     MVs never enter Hits, so this is cover art only. */
+  function cleanupFsHitsToSide() {
+    if (fsHitsArtFlyTimer) {
+      window.clearTimeout(fsHitsArtFlyTimer);
+      fsHitsArtFlyTimer = 0;
+    }
+    if (fsLyricsFlipAnim) {
+      try { fsLyricsFlipAnim.cancel(); } catch (_) {}
+      fsLyricsFlipAnim = null;
+    }
+    if (fsLyricsHost) fsLyricsHost.style.translate = "";
+    const fly = fsHitsArtFly;
+    fsHitsArtFly = null;
+    if (fly) {
+      try { if (fly.anim) fly.anim.cancel(); } catch (_) {}
+      if (fly.node && fly.node.parentElement) fly.node.parentElement.removeChild(fly.node);
+      if (fly.art) fly.art.style.opacity = fly.opacity;
+    }
+    if (fsOverlay) {
+      fsOverlay.classList.remove(
+        "ym-sl-fs-hits-to-side",
+        "ym-sl-fs-side-to-hits",
+        "ym-sl-fs-lyrics-flip"
+      );
+    }
+    // The reverse flight lands on a smaller corner radius than the header
+    // card's native one. Let the card grow its corners back once the clone is
+    // gone instead of snapping there.
+    if (fly && fly.headerArt) {
+      fly.headerArt.style.borderRadius = fly.headerArtRadius;
+    }
+  }
+
+  function startFsArtHandoff(startRect, endRect, src, options) {
+    if (!fsOverlay || !fsArtImg || !src || !startRect || !endRect ||
+        !startRect.width || !startRect.height ||
+        !endRect.width || !endRect.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    const opts = options || {};
+    // Rasterize at the larger endpoint and scale down at the smaller one. This
+    // keeps the artwork crisp in both directions (a reverse flight would
+    // otherwise scale the 148px header bitmap up to the 583px side card).
+    const startArea = startRect.width * startRect.height;
+    const endArea = endRect.width * endRect.height;
+    const base = startArea >= endArea ? startRect : endRect;
+    const startSX = startRect.width / base.width;
+    const startSY = startRect.height / base.height;
+    const endSX = endRect.width / base.width;
+    const endSY = endRect.height / base.height;
+    const startX = startRect.left - base.left;
+    const startY = startRect.top - base.top;
+    const endX = endRect.left - base.left;
+    const endY = endRect.top - base.top;
+    const startTransform =
+      "translate(" + startX + "px, " + startY + "px) scale(" + startSX + ", " + startSY + ")";
+    const endTransform =
+      "translate(" + endX + "px, " + endY + "px) scale(" + endSX + ", " + endSY + ")";
+    const sideRadius = parseFloat(getComputedStyle(fsArtImg).borderTopLeftRadius) || 16;
+    const fly = h("img", { class: "ym-sl-fs-art-fly", src, alt: "" });
+    fly.style.left = base.left + "px";
+    fly.style.top = base.top + "px";
+    fly.style.width = base.width + "px";
+    fly.style.height = base.height + "px";
+    // A fixed base radius on the larger card; it scales down with the clone.
+    // Animating border-radius to compensate repainted the large bitmap every
+    // frame and was the main source of the jank.
+    fly.style.borderRadius = sideRadius + "px";
+    // Same bitmap, same box: hold the real card invisible so there is never a
+    // second cover on screen while the clone travels.
+    const previousOpacity = fsArtImg.style.opacity;
+    fsArtImg.style.opacity = "0";
+    let headerArt = null;
+    let headerArtRadius = "";
+    if (opts.matchHeaderRadius && fsHits && fsHits.artWrap) {
+      // The clone ends at endSX; make the real header card meet its corner
+      // radius and then transition back to the card's native radius.
+      headerArt = fsHits.artWrap;
+      headerArtRadius = headerArt.style.borderRadius;
+      headerArt.style.borderRadius = (sideRadius * endSX) + "px";
+    }
+    fsOverlay.appendChild(fly);
+    let anim = null;
+    try {
+      anim = fly.animate([
+        { transform: startTransform },
+        { transform: endTransform },
+      ], {
+        duration: 560,
+        easing: "cubic-bezier(.22, .61, .36, 1)",
+        fill: "forwards",
+      });
+    } catch (_) {}
+    fsHitsArtFly = {
+      node: fly, anim, art: fsArtImg, opacity: previousOpacity,
+      headerArt, headerArtRadius,
+    };
+    // WAAPI is the animation; this timer is the belt for a throttled/cancelled
+    // animation and the moment the real card takes over.
+    fsHitsArtFlyTimer = window.setTimeout(cleanupFsHitsToSide, 620);
+  }
+
+  function startFsHitsToSide(startRect, src) {
+    if (!fsOverlay || !fsArtImg || !src || !startRect ||
+        !startRect.width || !startRect.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    const target = fsArtImg.getBoundingClientRect();
+    if (!target.width || !target.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    startFsArtHandoff(startRect, target, src);
+  }
+
+  function startFsSideToHits(startRect, targetRect, src) {
+    if (!startRect || !targetRect || !src) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    startFsArtHandoff(startRect, targetRect, src, { matchHeaderRadius: true });
+  }
+
+  function measureFsHitsArtTarget() {
+    if (!fsHits || !fsHits.root || !fsHits.artWrap) return null;
+    const root = fsHits.root;
+    const prevDisplay = root.style.display;
+    const prevVisibility = root.style.visibility;
+    root.style.display = "block";
+    root.style.visibility = "hidden";
+    const rect = fsHits.artWrap.getBoundingClientRect();
+    root.style.display = prevDisplay;
+    root.style.visibility = prevVisibility;
+    return rect;
+  }
+
+  function applyFullscreenLayout(mode, persist) {
     if (!fsOverlay) return;
-    // Belt-and-suspenders: never land on Video Background without an MV
-    // (e.g. if savedMode was "background" and the track has no video).
-    if (mode === "background" && !hasFsVideo()) mode = "side";
-    fsLayoutMode = mode === "background" || mode === "lyrics" ? mode : "side";
+    // A second switch can land while the card is still flying; finish/cancel
+    // the previous handoff before choosing new geometry.
+    cleanupFsHitsToSide();
+    // A fast switch back into Video Background must not leave the outgoing
+    // media transition class (or its timer) attached to the new layout.
+    if (fsMediaLayoutAnimTimer) {
+      window.clearTimeout(fsMediaLayoutAnimTimer);
+      fsMediaLayoutAnimTimer = 0;
+    }
+    fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
+    const video = hasFsVideo();
+    // Saved "lyrics" (or any value this build no longer knows) falls through
+    // to the right default for the track type.
+    if (mode !== "hits" && mode !== "side" && mode !== "background") {
+      mode = video ? "side" : "hits";
+    }
+    // Music videos are side-by-side only: a saved Hits (from before this rule)
+    // must not bring the video composition back. Without a video there is no
+    // backdrop for Video Background, so that also falls back to side.
+    if (video && mode === "hits") mode = "side";
+    if (!video && mode === "background") mode = "side";
+
+    // Capture both ends before the class flip hides either one. The handoff is
+    // cover art only; a video that just appeared must cut straight to its side
+    // composition. fsLayoutApplied excludes the first paint, where the side
+    // layout has no mode class of its own.
+    const wasHits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
+    const wasBackground = fsOverlay.classList.contains("ym-sl-fs-mode-background");
+    const wasSide = fsLayoutApplied && !wasHits &&
+      !fsOverlay.classList.contains("ym-sl-fs-mode-background") && !video;
+    const reduceMotion = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let hitsArtStart = null;
+    let hitsArtSrc = "";
+    let animateHitsToSide = false;
+    let sideArtStart = null;
+    let sideArtSrc = "";
+    let hitsArtTarget = null;
+    let animateSideToHits = false;
+    let lyricsFlipStart = null;
+    if (wasHits && !video && mode === "side" && !reduceMotion &&
+        fsHits && fsHits.art && fsHits.artWrap &&
+        fsArtImg && fsArtImg.isConnected) {
+      hitsArtSrc = fsHits.art.currentSrc || fsHits.art.getAttribute("src") || "";
+      const sideSrc = fsArtImg.getAttribute("src") || "";
+      if (hitsArtSrc && sideSrc) {
+        hitsArtStart = fsHits.artWrap.getBoundingClientRect();
+        animateHitsToSide = hitsArtStart.width > 0 && hitsArtStart.height > 0;
+      }
+    } else if (wasSide && mode === "hits" && !reduceMotion &&
+        fsHits && fsHits.art && fsHits.artWrap &&
+        fsArtImg && fsArtImg.isConnected) {
+      sideArtSrc = fsArtImg.currentSrc || fsArtImg.getAttribute("src") || "";
+      const hitsSrc = fsHits.art.currentSrc || fsHits.art.getAttribute("src") || "";
+      if (sideArtSrc && hitsSrc) {
+        sideArtStart = fsArtImg.getBoundingClientRect();
+        hitsArtTarget = measureFsHitsArtTarget();
+        animateSideToHits = !!hitsArtTarget &&
+          sideArtStart.width > 0 && sideArtStart.height > 0 &&
+          hitsArtTarget.width > 0 && hitsArtTarget.height > 0;
+      }
+    }
+    fsLayoutMode = mode;
     if (fsLayoutMode !== "background") {
       // The controls scrim only exists in Video Background; drop it at once
       // rather than waiting up to a sample tick to clear it.
@@ -9059,17 +10471,78 @@
       fsLyricsFinalDimmed = false;
       fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
     }
+    // Spicy draws real DOM text. Animating the lyrics column's width, padding
+    // or height makes every line re-wrap and re-measure on every frame, which
+    // is the panel-only stutter in the Hits handoff. Snap the final geometry
+    // once, then FLIP a compositor-only translate from the old box below.
+    // AMLL is a canvas and keeps the existing full geometry transition.
+    if (!reduceMotion && (animateHitsToSide || animateSideToHits) &&
+        fsLyricsHost && !document.body.classList.contains("amll-active")) {
+      lyricsFlipStart = fsLyricsHost.getBoundingClientRect();
+      fsOverlay.classList.add("ym-sl-fs-lyrics-flip");
+    }
+    if (animateHitsToSide || animateSideToHits) {
+      fsOverlay.classList.add(
+        animateHitsToSide ? "ym-sl-fs-hits-to-side" : "ym-sl-fs-side-to-hits"
+      );
+      // Read the starting style once so the header/side chrome starts from the
+      // current composition and the lyrics animate from the current geometry.
+      // No paint happens between this flush and the class flip below.
+      void fsOverlay.offsetWidth;
+    }
+    // Leaving Video Background is the asymmetric case: entry to the full-bleed
+    // video reads as a fill, but removing the class used to cut the video back
+    // to its side column in one frame. Arm the media host's geometry transition
+    // while it is still full-bleed, then flip the layout class below.
+    if (wasBackground && mode !== "background" && !reduceMotion) {
+      fsOverlay.classList.add("ym-sl-fs-media-layout-out");
+      void fsOverlay.offsetWidth;
+    }
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
-    fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
-    // Background and Video + Lyrics both keep the readability layer on; Lyrics
-    // Only has no picture behind the words and fades it out.
+    fsOverlay.classList.toggle("ym-sl-fs-mode-hits", fsLayoutMode === "hits");
+    if (lyricsFlipStart && fsLyricsHost) {
+      // Hits positions the column from its measured header height. Make sure
+      // that height exists before measuring the final lyrics box, or the FLIP
+      // target would be the pre-header geometry.
+      if (fsLayoutMode === "hits") {
+        syncFsHitsCredits();
+        syncFsHitsGeometry();
+      }
+      const lyricsFlipEnd = fsLyricsHost.getBoundingClientRect();
+      const flipX = lyricsFlipStart.left - lyricsFlipEnd.left;
+      const flipY = lyricsFlipStart.top - lyricsFlipEnd.top;
+      if (Math.abs(flipX) > 0.5 || Math.abs(flipY) > 0.5) {
+        try {
+          fsLyricsFlipAnim = fsLyricsHost.animate(
+            [
+              { translate: flipX + "px " + flipY + "px" },
+              { translate: "0px 0px" },
+            ],
+            { duration: 550, easing: "cubic-bezier(.22, .61, .36, 1)" }
+          );
+        } catch (_) {
+          fsLyricsFlipAnim = null;
+        }
+      }
+    }
+    // The flying card targets the side artwork's final box, measured after the
+    // layout classes are in place. It keeps the real card hidden until landing.
+    if (animateHitsToSide) startFsHitsToSide(hitsArtStart, hitsArtSrc);
+    else if (animateSideToHits) startFsSideToHits(sideArtStart, hitsArtTarget, sideArtSrc);
+    // Background and Video + Lyrics both keep the readability layer on.
     syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
     // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
     // are static — this only moves the volume node between the chip and the
-    // scrubber row, and re-pins the two edge buttons.
-    syncFsChromeStructure();
+    // scrubber row, and re-pins the two edge buttons. Skip it during the reverse
+    // handoff: Hits hides this chrome anyway, and pulling the title out of the
+    // fading side column (or the volume into the scrubber) would rearrange it
+    // visibly mid-flight.
+    if (!animateSideToHits) syncFsChromeStructure();
+    // The Hits dock stays in the cover-art header flow; music videos never use
+    // this composition, so there is no bottom-left placement any more.
+    placeFsHitsDock();
     if (fsLayoutSelect) {
       // Now a button rather than a <select>, so the mode rides on the dataset
       // instead of .value, and the tooltip is refreshed so the announced
@@ -9079,7 +10552,15 @@
       }
       updateFsLayoutButtonTitle();
     }
-    try { localStorage.setItem("better_lyrics_fullscreen_layout_v1", fsLayoutMode); } catch (_) {}
+    // Separate preferences by track type: picking Video Background for an MV
+    // must not change the cover-art composition, and an MV must never inherit
+    // the audio Hits choice. Automatic fallbacks pass persist=false so dropping
+    // out of a mode the track no longer supports leaves the stored choice alone.
+    if (persist !== false) {
+      try {
+        localStorage.setItem(video ? FS_LAYOUT_VIDEO_KEY : FS_LAYOUT_KEY, fsLayoutMode);
+      } catch (_) {}
+    }
     recomputeActiveOffsetMode(true);
     // Switching layout resizes and moves the lyrics column with a CSS transition,
     // so the old scrollTop no longer centres the active line — and nothing
@@ -9087,6 +10568,26 @@
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
     recentreActiveLine();
+    // AMLL owns its own scroll offset, so keep its focal line in step with this
+    // layout switch too.
+    amllSyncAlignPosition();
+    // Hits places the lyrics column from the header's measured height. The
+    // header is display:none until the class above lands, so the measurement
+    // has to wait for the frame that actually shows it.
+    if (fsLayoutMode === "hits") {
+      // The header mirrors the attribution when the Spicy renderer owns the
+      // lyrics. Refresh it on every switch back into Hits, then re-measure the
+      // header now that the credit block can be present.
+      syncFsHitsCredits();
+      requestAnimationFrame(syncFsHitsGeometry);
+    }
+    fsLayoutApplied = true;
+    if (wasBackground && mode !== "background" && !reduceMotion) {
+      fsMediaLayoutAnimTimer = window.setTimeout(() => {
+        fsMediaLayoutAnimTimer = 0;
+        if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
+      }, 540);
+    }
   }
 
   /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------
@@ -9517,6 +11018,9 @@
     }
     syncFullscreenModeButtons();
     refreshFsRatingState();
+    // Mirrors play state and our rating onto the Hits header. Cheap: it only
+    // rewrites a glyph/label when the state actually flips.
+    syncFsHitsLive();
     // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
     // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
     // so there is nothing to chase; re-pinning was itself a source of the
@@ -9773,6 +11277,7 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
+  let fsRatingSeedBlockUntil = 0;           // skip a stale YTM seed after our own rating
   // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
   // gestures: above the scrubber for seeks, under the volume bar for volume.
   let fsHudEl = null;
@@ -9975,6 +11480,9 @@
   function clickFsRating(kind) {
     const videoId = getCurrentFsVideoId();
     if (!videoId) return;
+    // A dislike click can make YTM advance immediately; suppress its stale
+    // DISLIKE for the next video instead of trusting it.
+    fsRatingSeedBlockUntil = Date.now() + 6000;
     const current = getFsRating(videoId);
     // Toggle: pressing the active one clears it; pressing the other switches.
     const newState = current === kind ? null : kind;
@@ -9998,8 +11506,12 @@
     if (videoId !== fsCurrentFsVideoId) {
       fsCurrentFsVideoId = videoId;
       if (fsRatings[videoId] === undefined) {
-        const yt = getYtmLikeStatus();
-        if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+        // YTM is still catching up with the track WE just rated; leave the new
+        // one neutral instead of inheriting the previous song's dislike.
+        if (Date.now() >= fsRatingSeedBlockUntil) {
+          const yt = getYtmLikeStatus();
+          if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+        }
       }
       applyFsRatingToButtons(videoId);
     }
@@ -10062,6 +11574,619 @@
       fsHudTimer = 0;
       if (fsHudEl) fsHudEl.classList.remove("ym-sl-fs-hud-on");
     }, FS_HUD_HOLD_MS);
+  }
+
+  /* ---- Hits fullscreen layout (AJ, 2026-11-09) -----------------------------
+     The default fullscreen composition. Album art, track title, byline and the
+     real sync / provider chips sit in a centred header; the control dock under
+     it carries seek, transport, volume and the utilities. The lyrics start
+     beneath both. Music videos move that dock to the bottom-left of the
+     details column instead. The header's measured height is published as
+     --ym-sl-fs-hits-head-h, so a wrapped title or a narrower window still puts
+     the lyrics in the right place without any hard-coded pixel offset.
+
+     Built ONCE per entry. Text and live state refresh through refreshFsHits()
+     (track change plus the 500ms tick); the DOM is never rebuilt on a tick. */
+  const FS_HITS_ICON_COPY = [
+    { tag: "rect", attrs: { x: "9", y: "9", width: "11", height: "11", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+    { tag: "path", attrs: { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+  ];
+  const FS_HITS_ICON_LINK = [
+    { tag: "path", attrs: { d: "M10.6 13.4a4.5 4.5 0 0 0 6.4 0l2.2-2.2a4.5 4.5 0 0 0-6.4-6.4L11.6 6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "path", attrs: { d: "M13.4 10.6a4.5 4.5 0 0 0-6.4 0l-2.2 2.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+  ];
+  function fsHitsIcon(parts, viewBox) {
+    const svg = fsSvgIcon(parts, viewBox);
+    svg.setAttribute("class", "ym-sl-fs-hits-icon");
+    return svg;
+  }
+
+  // Apple Music-style custom player-bar glyphs (the set behind the theme's
+  // "Custom player-bar icons" switch). The thumb is one closed outline; the
+  // pressed state fills that same path. Previous/Next point in their own
+  // directions, so Hits no longer rotates the shared skip glyph.
+  function fsHitsSolid(d) {
+    return {
+      tag: "path",
+      attrs: {
+        d,
+        fill: "currentColor",
+        stroke: "currentColor",
+        "stroke-width": "0.8",
+        "stroke-linejoin": "round",
+      },
+    };
+  }
+  const FS_HITS_ICON_PREV = [
+    fsHitsSolid("M19.2 5.8v12.4L10.6 12l8.6-6.2Z"),
+    fsHitsSolid("M2 12 11.8 4.2v15.6L2 12Z"),
+  ];
+  const FS_HITS_ICON_NEXT = [
+    fsHitsSolid("M4.8 5.8v12.4L13.4 12 4.8 5.8Z"),
+    fsHitsSolid("M22 12 12.2 4.2v15.6L22 12Z"),
+  ];
+  const FS_HITS_ICON_PLAY = [
+    { tag: "path", attrs: { d: "M6 4.9 19.4 12 6 19.1Z", fill: "currentColor", stroke: "currentColor", "stroke-width": "1.6", "stroke-linejoin": "round" } },
+  ];
+  const FS_HITS_ICON_PAUSE = [
+    { tag: "rect", attrs: { x: "6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "rect", attrs: { x: "13.6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
+  ];
+  const FS_HITS_ICON_MORE = [
+    { tag: "circle", attrs: { cx: "5", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "circle", attrs: { cx: "12", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "circle", attrs: { cx: "19", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+  ];
+  const FS_HITS_LIKE_PATH = "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
+  function fsHitsThumbSvg(kind) {
+    const attrs = {
+      d: FS_HITS_LIKE_PATH,
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2.1",
+      "stroke-linejoin": "round",
+    };
+    if (kind === "dislike") attrs.transform = "translate(0 24) scale(1 -1)";
+    const svg = fsSvgIcon([{ tag: "path", attrs }], "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-hits-icon");
+    return svg;
+  }
+
+  function fsHitsButton(cls, label, icon, iconOnly) {
+    const btn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-hits-btn" + (cls ? " " + cls : "") + (iconOnly ? " is-icon" : ""),
+      title: label,
+      "aria-label": label,
+    });
+    btn.appendChild(icon);
+    if (!iconOnly) {
+      btn.appendChild(h("span", { class: "ym-sl-fs-hits-btn-label", text: label }));
+    }
+    return btn;
+  }
+
+  function flashFsHits(button, label) {
+    if (!button || !label) return;
+    const labelEl = button.querySelector(".ym-sl-fs-hits-btn-label");
+    const previous = labelEl ? labelEl.textContent : button.title;
+    // Per-button timer: the link and lyrics copy buttons sit next to each other,
+    // and one shared timer left the first button stuck green (or titled Copied)
+    // when the second was clicked within the same 1.2s.
+    if (button._fsHitsFlashTimer) window.clearTimeout(button._fsHitsFlashTimer);
+    if (labelEl) labelEl.textContent = label;
+    else button.title = label;
+    button.dataset.flash = label;
+    button.classList.add("is-done");
+    button._fsHitsFlashTimer = window.setTimeout(() => {
+      button._fsHitsFlashTimer = 0;
+      button.classList.remove("is-done");
+      delete button.dataset.flash;
+      if (labelEl) labelEl.textContent = previous;
+      else button.title = previous;
+    }, 1200);
+  }
+
+  function fsHitsLegacyCopy(text, done) {
+    try {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.setAttribute("readonly", "");
+      box.style.cssText = "position:fixed;top:-1000px;left:-1000px;opacity:0";
+      document.body.appendChild(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      if (ok) done();
+    } catch (_) {}
+  }
+
+  function fsHitsWriteClipboard(text, done) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => fsHitsLegacyCopy(text, done));
+      return;
+    }
+    fsHitsLegacyCopy(text, done);
+  }
+
+  function fsHitsSyncLabel() {
+    if (staticLyricsActive) return "Static";
+    if (currentLyricsIsTTML) {
+      const wordTimed = modelLines.some((line) => line && !line.DotLine &&
+        line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
+      return wordTimed ? "Syllable" : "Line synced";
+    }
+    return "Line synced";
+  }
+
+  function fsHitsLineText(line) {
+    if (!line) return "";
+    if (line.Syllables && line.Syllables.Lead && typeof syllablesToText === "function") {
+      return syllablesToText(line.Syllables.Lead).trim();
+    }
+    return String(line.Text || "").trim();
+  }
+
+  function fsHitsPlainText() {
+    const out = [];
+    for (const line of modelLines) {
+      if (!line || line.DotLine) continue;
+      const text = fsHitsLineText(line);
+      if (text) out.push(text);
+    }
+    return out.join("\n");
+  }
+
+  function syncFsHitsChips(force) {
+    if (!fsHits) return;
+    const labels = [fsHitsSyncLabel(), currentProvider || "Aurora"];
+    const key = labels.join("|");
+    if (!force && key === fsHitsMetaKey) return;
+    fsHitsMetaKey = key;
+    if (fsHits.chips[0].textContent !== labels[0]) fsHits.chips[0].textContent = labels[0];
+    if (fsHits.providerText.textContent !== labels[1]) fsHits.providerText.textContent = labels[1];
+    // The provider mark sits to the LEFT of the chip label. Rebuilding just the
+    // icon slot keeps the text node stable while the source changes.
+    const icon = buildProviderIcon(labels[1]);
+    fsHits.providerIcon.replaceChildren();
+    if (icon) fsHits.providerIcon.appendChild(icon);
+  }
+
+  function fsHitsPersonKey(person) {
+    return person
+      ? [person.id || "", person.username || "", person.avatar || "", person.url || ""].join("~")
+      : "";
+  }
+
+  // The attribution block belongs in the header in Hits, alongside the title
+  // and byline. Build a compact second copy for that header; the footer under
+  // the lyrics stays in the tree for every other layout.
+  function syncFsHitsCredits() {
+    if (!fsHits || !fsOverlay) return;
+    // Lyrics can land after the header was built, so keep the provider chip and
+    // the fullscreen writer line live from the same credit state.
+    syncFsHitsChips(false);
+    syncFsTitleWriters();
+    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const hasCredits = !!(names.length || currentProvider || currentUploader || currentMaker);
+    const clear = () => {
+      fsHits.creditsKey = "";
+      fsHits.writers.textContent = "";
+      fsHits.writers.classList.remove("has-writers");
+      fsHits.bylineRow.classList.remove("has-writers");
+      fsHits.people.replaceChildren();
+      fsOverlay.classList.remove("ym-sl-fs-hits-has-credits");
+    };
+    if (!hasCredits) { clear(); return; }
+    const key = [
+      names.join("\u0001"),
+      currentProvider || "",
+      fsHitsPersonKey(currentUploader),
+      fsHitsPersonKey(currentMaker),
+      staticLyricsActive ? "static" : "synced",
+    ].join("\u0002");
+    if (key === fsHits.creditsKey) return;
+    try {
+      const footer = buildCreditsFooter(names, false);
+      // People credits are chips in the header row, next to the provider chip.
+      const people = footer.querySelector(".ym-sl-credit-people");
+      if (people) {
+        people.querySelectorAll(".ym-sl-uploader").forEach((row) => {
+          row.classList.add("ym-sl-fs-hits-chip");
+        });
+        fsHits.people.replaceChildren(people);
+      } else {
+        fsHits.people.replaceChildren();
+      }
+      // Writers are inline after the byline: names only, no label and no box.
+      const writerNames = footer.querySelector(".ym-sl-credit-writers .ym-sl-credits-names");
+      const writerText = writerNames ? writerNames.textContent.trim() : "";
+      fsHits.writers.textContent = writerText;
+      fsHits.writers.classList.toggle("has-writers", !!writerText);
+      fsHits.bylineRow.classList.toggle("has-writers", !!writerText);
+      fsHits.creditsKey = key;
+      fsOverlay.classList.add("ym-sl-fs-hits-has-credits");
+    } catch (_) {
+      clear();
+    }
+  }
+
+  // "Like" becomes "Liked" when the rating lands. Snapping the width would
+  // make the pill's border jump, so measure the new natural width and animate
+  // the inline width between the two. The inline width is cleared afterwards
+  // so auto layout (wrapped rows, zoom) keeps working; reduced motion skips it.
+  function animateFsHitsLikeLabel(next) {
+    if (!fsHits || !fsHits.like) return;
+    const button = fsHits.like;
+    const label = button.querySelector(".ym-sl-fs-hits-btn-label");
+    if (!label || label.textContent === next) return;
+    if (!fsMotionOK() || typeof button.animate !== "function") {
+      label.textContent = next;
+      return;
+    }
+    if (fsHits.likeAnim) {
+      try { fsHits.likeAnim.cancel(); } catch (_) {}
+      fsHits.likeAnim = null;
+    }
+    button.style.width = "";
+    // offsetWidth, not the bounding rect: the pressed state applies a scale
+    // transform, and the border animation must start from the layout width.
+    const from = button.offsetWidth;
+    label.textContent = next;
+    button.style.width = "auto";
+    const to = button.offsetWidth;
+    button.style.width = from + "px";
+    void button.offsetWidth;
+    const anim = button.animate(
+      [{ width: from + "px" }, { width: to + "px" }],
+      { duration: 260, easing: "cubic-bezier(.22, .61, .36, 1)" }
+    );
+    fsHits.likeAnim = anim;
+    button.style.width = to + "px";
+    const done = () => {
+      // A rapid Like -> Unlike click cancels this animation and starts another.
+      // The cancelled promise settles afterwards; it must not clear the newer
+      // animation's inline width.
+      if (fsHits && fsHits.likeAnim && fsHits.likeAnim !== anim) return;
+      if (fsHits) fsHits.likeAnim = null;
+      button.style.width = "";
+    };
+    if (anim && anim.finished) anim.finished.then(done, done);
+    else window.setTimeout(done, 280);
+  }
+
+  function syncFsHitsGeometry() {
+    if (!fsOverlay || !fsHits) return;
+    const height = Math.ceil(fsHits.root.getBoundingClientRect().height);
+    if (!height) return;
+    fsOverlay.style.setProperty("--ym-sl-fs-hits-head-h", height + "px");
+  }
+
+  function fsHitsClock(ms) {
+    const raw = Number(ms);
+    const total = Number.isFinite(raw) && raw > 0 ? Math.floor(raw / 1000) : 0;
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function syncFsHitsSeek() {
+    if (!fsHits || !fsHits.seek) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getPositionMs !== "function") return;
+    const position = Number(player.getPositionMs());
+    const duration = typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : NaN;
+    if (!Number.isFinite(position)) return;
+    const total = Number.isFinite(duration) && duration > 0 ? duration : 0;
+    if (total) {
+      const max = String(total);
+      if (fsHits.seek.max !== max) fsHits.seek.max = max;
+      fsHits.seekTotal.textContent = fsHitsClock(total);
+    }
+    const driving = fsHits.seekDrag ||
+      performance.now() - (fsHits.seekAt || 0) < 1200;
+    if (!driving) {
+      fsHits.seek.value = String(clamp(position, 0, total || position));
+      const percent = total ? clamp(position / total * 100, 0, 100) : 0;
+      fsHits.seek.style.setProperty("--slider-fill", percent + "%");
+      fsHits.seekCurrent.textContent = fsHitsClock(position);
+    }
+  }
+
+  function syncFsHitsVolume() {
+    if (!fsHits || !fsHits.volume) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getVolume !== "function") return;
+    const info = player.getVolume();
+    if (!info) return;
+    const percent = Number.isFinite(info.media)
+      ? info.media * 100
+      : (Number.isFinite(info.slider) ? info.slider : null);
+    if (percent === null) return;
+    const clamped = clamp(percent, 0, 100);
+    if (!fsHits.volumeDrag && performance.now() - (fsHits.volumeAt || 0) > 900) {
+      fsHits.volume.value = String(Math.round(clamped));
+    }
+    fsHits.volume.style.setProperty("--slider-fill", clamped + "%");
+    fsHits.volume.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    if (fsHits.volumeIcon) {
+      fsHits.volumeIcon.classList.toggle("is-muted", info.muted === true);
+    }
+  }
+
+  // The Hits dock belongs to the cover-art header flow. Music videos use the
+  // regular Video + Lyrics chrome, so there is no second placement any more.
+  function placeFsHitsDock() {
+    if (!fsHits || !fsHits.dock || fsHits.dock.parentElement === fsHits.inner) return;
+    fsHits.inner.appendChild(fsHits.dock);
+  }
+
+  function syncFsHitsLive() {
+    if (!fsHits) return;
+    const paused = window.YTMod && window.YTMod.player && window.YTMod.player.isPaused
+      ? window.YTMod.player.isPaused()
+      : null;
+    // One button, two faces. Playing means the next click pauses, so the glyph
+    // shows Pause; paused shows Play. Only rebuild when the state actually flips.
+    if (fsHits.play) {
+      const action = paused === true ? "play" : (paused === false ? "pause" : "");
+      if (action && fsHits.play.dataset.playState !== action) {
+        fsHits.play.dataset.playState = action;
+        fsHits.play.replaceChildren(fsHitsIcon(
+          action === "pause" ? FS_HITS_ICON_PAUSE : FS_HITS_ICON_PLAY,
+          "0 0 24 24"
+        ));
+        const label = action === "pause" ? "Pause" : "Play";
+        fsHits.play.title = label;
+        fsHits.play.setAttribute("aria-label", label);
+      }
+    }
+    placeFsHitsDock();
+    syncFsHitsSeek();
+    syncFsHitsVolume();
+    const state = getFsRating(getCurrentFsVideoId());
+    const likeOn = state === "like";
+    const dislikeOn = state === "dislike";
+    fsHits.like.classList.toggle("is-on", likeOn);
+    fsHits.like.setAttribute("aria-pressed", likeOn ? "true" : "false");
+    fsHits.dislike.classList.toggle("is-on", dislikeOn);
+    fsHits.dislike.setAttribute("aria-pressed", dislikeOn ? "true" : "false");
+    syncFsHitsChips(false);
+    // The classic top-right chrome (and its layout button) is hidden in Hits,
+    // so the floating top-right layout button carries the next mode.
+    if (fsHits.layoutLabel) {
+      const nextMode = nextFsLayoutMode(fsLayoutMode);
+      const currentName = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
+      const nextName = FS_LAYOUT_NAMES[nextMode] || nextMode;
+      const text = "Layout: " + nextName;
+      if (fsHits.layoutLabel.textContent !== text) fsHits.layoutLabel.textContent = text;
+      const hint = "Current: " + currentName + " — switch to " + nextName;
+      if (fsHits.layout.title !== hint) fsHits.layout.title = hint;
+      fsHits.layout.setAttribute("aria-label", hint);
+    }
+  }
+
+  function refreshFsHits() {
+    if (!fsHits || !fsOverlay) return;
+    const track = getCurrentTrack();
+    const title = (track && track.title) || "";
+    const artist = (track && track.artist) || "";
+    const art = (track && track.artworkUrl) || "";
+    const key = [getCurrentFsVideoId(), title, artist, art].join("|");
+    if (key !== fsHitsTrackKey) {
+      fsHitsTrackKey = key;
+      fsHits.title.textContent = title || "Unknown song";
+      fsHits.byline.textContent = [artist, title].filter(Boolean).join(" • ");
+      if (art) {
+        fsHits.art.src = hiResArt(art);
+        fsHits.artWrap.classList.remove("is-empty");
+      } else {
+        fsHits.art.removeAttribute("src");
+        fsHits.artWrap.classList.add("is-empty");
+      }
+      syncFsHitsChips(true);
+    }
+    syncFsHitsLive();
+    syncFsHitsCredits();
+    syncFsHitsGeometry();
+  }
+
+  // Hits has ONE dynamic Play/Pause button. Ask for a STATE instead of blindly
+  // toggling: setPaused() keeps YTM's own UI, media session and listeners in
+  // step; clicking the player-bar toggle is the fallback for older bridges.
+  function setFsHitsPaused(paused) {
+    const player = window.YTMod && window.YTMod.player;
+    if (player && typeof player.setPaused === "function" &&
+        typeof player.isPaused === "function" && player.isPaused() !== null) {
+      const result = player.setPaused(!!paused);
+      if (result !== null) {
+        syncFsHitsLive();
+        return;
+      }
+    }
+    clickPlayerButton("play");
+    syncFsHitsLive();
+  }
+
+  function toggleFsHitsPlayback() {
+    const player = window.YTMod && window.YTMod.player;
+    const paused = player && typeof player.isPaused === "function"
+      ? player.isPaused()
+      : null;
+    if (paused === true || paused === false) {
+      setFsHitsPaused(!paused);
+      return;
+    }
+    clickPlayerButton("play");
+    syncFsHitsLive();
+  }
+
+  function buildFsHits() {
+    if (!fsOverlay || fsHits) return;
+    const art = h("img", { class: "ym-sl-fs-hits-art", alt: "" });
+    const artWrap = h("div", { class: "ym-sl-fs-hits-artwrap" }, art);
+    const title = h("div", { class: "ym-sl-fs-hits-title", text: "Unknown song" });
+    const byline = h("div", { class: "ym-sl-fs-hits-byline" });
+    const writers = h("div", { class: "ym-sl-fs-hits-writers" });
+    const bylineDivider = h("span", { class: "ym-sl-fs-hits-byline-divider", "aria-hidden": "true" });
+    const bylineRow = h("div", { class: "ym-sl-fs-hits-byline-row" }, byline, bylineDivider, writers);
+    const chipSync = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-sync", text: "Syllable" });
+    const chipProviderIcon = h("span", { class: "ym-sl-fs-hits-chip-icon" });
+    const chipProviderText = h("span", { class: "ym-sl-fs-hits-chip-text", text: "Aurora" });
+    const chipProvider = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-provider" }, chipProviderIcon, chipProviderText);
+    const people = h("div", { class: "ym-sl-fs-hits-people" });
+    const chips = h("div", { class: "ym-sl-fs-hits-chips" }, chipSync, chipProvider, people);
+    const play = fsHitsButton("ym-sl-fs-hits-play", "Play", fsHitsIcon(FS_HITS_ICON_PLAY, "0 0 24 24"), true);
+    const previous = fsHitsButton("ym-sl-fs-hits-prev", "Previous", fsHitsIcon(FS_HITS_ICON_PREV, "0 0 24 24"), true);
+    const next = fsHitsButton("ym-sl-fs-hits-next", "Next", fsHitsIcon(FS_HITS_ICON_NEXT, "0 0 24 24"), true);
+    const like = fsHitsButton("ym-sl-fs-hits-like", "Like", fsHitsThumbSvg("like"), true);
+    const dislike = fsHitsButton("ym-sl-fs-hits-dislike", "Dislike", fsHitsThumbSvg("dislike"), true);
+    // Labeled secondary actions sit in their own row under the metadata chips,
+    // matching the provider boxes. The layout control stays at the top-right.
+    const copyLink = fsHitsButton("ym-sl-fs-hits-copy-link", "Copy song link", fsHitsIcon(FS_HITS_ICON_LINK), false);
+    const copyLyrics = fsHitsButton("ym-sl-fs-hits-copy", "Copy lyrics", fsHitsIcon(FS_HITS_ICON_COPY), false);
+    const options = fsHitsButton("ym-sl-fs-hits-options", "Options", fsHitsIcon(FS_ICON_OPTIONS), false);
+    const layout = fsHitsButton("ym-sl-fs-hits-layout", "Layout", fsHitsIcon(FS_ICON_LAYOUT), false);
+    const layoutLabel = layout.querySelector(".ym-sl-fs-hits-btn-label");
+    const actions = h("div", { class: "ym-sl-fs-hits-actions" }, copyLink, copyLyrics, options);
+    const seekCurrent = h("span", { class: "ym-sl-fs-hits-time", "data-time": "current", text: "0:00" });
+    const seek = h("input", {
+      class: "ym-sl-fs-hits-range ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "1000", step: "100", value: "0",
+      title: "Song progress", "aria-label": "Song progress",
+    });
+    const seekTotal = h("span", { class: "ym-sl-fs-hits-time", "data-time": "total", text: "0:00" });
+    const seekRow = h("div", { class: "ym-sl-fs-hits-seek" }, seekCurrent, seek, seekTotal);
+    const volumeIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.2L12 5.8v12.4l-4.8-3.7H4Z", fill: "currentColor", stroke: "currentColor", "stroke-width": "1.3", "stroke-linejoin": "round" } },
+      { tag: "path", attrs: { d: "M15.2 9.4a4.4 4.4 0 0 1 0 5.2", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+      { tag: "path", attrs: { d: "M18 6.6a8 8 0 0 1 0 10.8", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    ], "0 0 24 24");
+    volumeIcon.setAttribute("class", "ym-sl-fs-hits-volume-icon");
+    const volume = h("input", {
+      class: "ym-sl-fs-hits-range ym-sl-fs-hits-volume ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "100", step: "1", value: "100",
+      title: "Volume", "aria-label": "Volume",
+    });
+    const volumeGroup = h("div", { class: "ym-sl-fs-hits-volume-group" }, volumeIcon, volume);
+    const transport = h("div", { class: "ym-sl-fs-hits-transport" }, play, previous, next, like, dislike);
+    const controlRow = h("div", { class: "ym-sl-fs-hits-dock-row" }, transport, volumeGroup);
+    // The dock stays in the tree for the live state refs, but cover-art Hits
+    // hides it: playback is keyboard-driven and the header is just the track.
+    const dock = h("div", { class: "ym-sl-fs-hits-dock" }, seekRow, controlRow);
+    const meta = h("div", { class: "ym-sl-fs-hits-meta" }, title, bylineRow, chips, actions);
+    const head = h("div", { class: "ym-sl-fs-hits-head" }, meta, artWrap);
+    const inner = h("div", { class: "ym-sl-fs-hits-inner" }, head, dock);
+    // The layout control keeps the old floating top-right position.
+    const topUtils = h("div", { class: "ym-sl-fs-hits-top-utils" }, layout);
+    const root = h("div", { class: "ym-sl-fs-hits" }, inner, topUtils);
+
+    fsHits = {
+      root, inner, art, artWrap, title, byline, writers, bylineRow, chips: [chipSync, chipProvider],
+      creditsKey: "", people, providerIcon: chipProviderIcon, providerText: chipProviderText,
+      play, previous, next, like, dislike,
+      copyLink, options, layout, copyLyrics, layoutLabel,
+      dock, seek, seekCurrent, seekTotal, volume, volumeIcon,
+      seekAt: 0, volumeAt: 0, seekTimer: 0, seekDrag: false, volumeDrag: false,
+    };
+    fsOverlay.appendChild(root);
+
+    play.addEventListener("click", toggleFsHitsPlayback);
+    previous.addEventListener("click", () => clickPlayerButton("previous"));
+    next.addEventListener("click", () => clickPlayerButton("next"));
+    const endHitsSeekDrag = () => {
+      fsHits.seekDrag = false;
+      fsHits.seekAt = performance.now();
+    };
+    seek.addEventListener("pointerdown", () => {
+      fsHits.seekDrag = true;
+      fsHits.seekAt = performance.now();
+    });
+    seek.addEventListener("pointerup", endHitsSeekDrag);
+    seek.addEventListener("pointercancel", endHitsSeekDrag);
+    seek.addEventListener("lostpointercapture", endHitsSeekDrag);
+    seek.addEventListener("input", () => {
+      fsHits.seekAt = performance.now();
+      const total = Number(seek.max) || 0;
+      const value = Number(seek.value);
+      if (Number.isFinite(value)) {
+        fsHits.seekCurrent.textContent = fsHitsClock(value);
+        const percent = total > 0 ? clamp(value / total * 100, 0, 100) : 0;
+        seek.style.setProperty("--slider-fill", percent + "%");
+      }
+      if (fsHits.seekTimer) window.clearTimeout(fsHits.seekTimer);
+      fsHits.seekTimer = window.setTimeout(() => {
+        fsHits.seekTimer = 0;
+        const player = window.YTMod && window.YTMod.player;
+        if (player && typeof player.seek === "function") player.seek(Number(seek.value));
+      }, 80);
+    });
+    const commitHitsSeek = () => {
+      fsHits.seekDrag = false;
+      fsHits.seekAt = performance.now();
+      if (fsHits.seekTimer) {
+        window.clearTimeout(fsHits.seekTimer);
+        fsHits.seekTimer = 0;
+      }
+      const player = window.YTMod && window.YTMod.player;
+      if (player && typeof player.seek === "function") player.seek(Number(seek.value));
+    };
+    seek.addEventListener("change", commitHitsSeek);
+    const applyHitsVolume = () => {
+      fsHits.volumeAt = performance.now();
+      const raw = Number(volume.value);
+      if (!Number.isFinite(raw)) return;
+      const percent = clamp(raw, 0, 100);
+      volume.style.setProperty("--slider-fill", percent + "%");
+      volume.setAttribute("aria-valuenow", String(Math.round(percent)));
+      const player = window.YTMod && window.YTMod.player;
+      if (!player) return;
+      if (typeof player.getVolume === "function") {
+        const info = player.getVolume();
+        if (info && info.muted && typeof player.setMuted === "function") player.setMuted(false);
+      }
+      if (typeof player.setVolume === "function") player.setVolume(percent / 100);
+    };
+    const endHitsVolumeDrag = () => {
+      fsHits.volumeDrag = false;
+      fsHits.volumeAt = performance.now();
+    };
+    volume.addEventListener("pointerdown", () => {
+      fsHits.volumeDrag = true;
+      fsHits.volumeAt = performance.now();
+    });
+    volume.addEventListener("pointerup", endHitsVolumeDrag);
+    volume.addEventListener("pointercancel", endHitsVolumeDrag);
+    volume.addEventListener("lostpointercapture", endHitsVolumeDrag);
+    volume.addEventListener("input", applyHitsVolume);
+    volume.addEventListener("change", applyHitsVolume);
+    like.addEventListener("click", () => { clickFsRating("like"); syncFsHitsLive(); });
+    dislike.addEventListener("click", () => { clickFsRating("dislike"); syncFsHitsLive(); });
+    copyLink.addEventListener("click", () => {
+      const videoId = getCurrentFsVideoId();
+      const url = videoId
+        ? "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId)
+        : location.href;
+      fsHitsWriteClipboard(url, () => flashFsHits(copyLink, "Link copied"));
+    });
+    options.addEventListener("click", () => {
+      if (fsOptionsButton) fsOptionsButton.click();
+    });
+    layout.addEventListener("click", () => {
+      applyFullscreenLayout(nextFsLayoutMode(fsLayoutMode));
+    });
+    copyLyrics.addEventListener("click", () => {
+      const text = fsHitsPlainText();
+      if (!text) return;
+      fsHitsWriteClipboard(text, () => flashFsHits(copyLyrics, "Lyrics copied"));
+    });
+
+    fsHitsRO = new ResizeObserver(() => syncFsHitsGeometry());
+    fsHitsRO.observe(root);
+    refreshFsHits();
   }
 
   function buildFullscreenControls() {
@@ -10150,12 +12275,11 @@
       overlay.classList.toggle("hidden");
       if (opening && overlay._staggerOpen) overlay._staggerOpen();
     });
-    // Order: Exit · Options · Layout · Hide lyrics (right). Options sits right
-    // next to Exit so the two most-used controls are adjacent, and cycling the
-    // layout still never sits next to Exit, or a mis-click exits fullscreen
-    // (AJ, 2026-10-19). Hide lyrics expands only in Video Background, so for
-    // every other layout the visible row is exactly Exit · Options · Layout.
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLayoutSelect, fsLyricsToggle);
+    // Order: Exit · Options · Hide lyrics · Layout (right). Options sits next
+    // to Exit so the two most-used controls are adjacent, and Layout stays last
+    // so expanding Hide lyrics in Video Background grows the row leftward
+    // without moving the layout button off the right edge.
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLyricsToggle, fsLayoutSelect);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -10247,6 +12371,10 @@
     fsPlayerPlayButton = playButton;
     fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
     fsOverlay.append(fsControls, fsPlayerControls);
+    // Hits header. Built after the classic chrome so its buttons can
+    // reuse the existing play / rating / options handlers instead of cloning
+    // their logic (AJ, 2026-11-09).
+    buildFsHits();
     // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
     // The media is z-index 2 and the lyrics pane is z-index 3, so a button
     // parented to the media was painted UNDER the lyrics and the dislike
@@ -10434,19 +12562,15 @@
       setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
     });
     attachFineOffsetDrag(fsOffsetRange);
-    let savedMode = "side";
-    try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
+    // Cover art opens in Hits. Music videos open in the side-by-side Video +
+    // Lyrics composition and never in Hits; their choice is stored separately
+    // so watching an MV cannot change the cover-art layout.
     const hasVideo = !!findPlayerVideo();
-    // The layout used to be a <select> with a Background option that had to be
-    // hidden and disabled when the track had no video. It is a cycle button now,
-    // so there is no `backgroundOption` to touch - and referencing the stale
-    // name threw a ReferenceError at the very END of this function.
-    // That is why it mattered far more than it looks: the throw aborted
-    // enterFullscreenMode() before it could attach the keydown and
-    // fullscreenchange listeners (so Escape left the overlay stranded on the
-    // page), start the 2s refresh interval (media reconcile, band anchor,
-    // Kawarp art sync) and start idle tracking (so the chrome never hid).
-    // All three are fixed by deleting the two dead lines.
+    let savedMode = hasVideo ? "side" : "hits";
+    try {
+      savedMode = localStorage.getItem(hasVideo ? FS_LAYOUT_VIDEO_KEY : FS_LAYOUT_KEY) || savedMode;
+    } catch (_) {}
+    if (hasVideo && savedMode === "hits") savedMode = "side";
     if (!hasVideo && savedMode === "background") savedMode = "side";
     applyFullscreenLayout(savedMode);
     fsLyricsHidden = false;
@@ -10723,8 +12847,8 @@
   function fullscreenKawarpFilter() {
     const s = bloomSettings();
     if (!s) return "";
-    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.5) +
-      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.78) +
+    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.2) +
+      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.60) +
       ") contrast(" + clampOption(s.contrast, 0.6, 1.6, 1) + ")";
   }
   function applyFullscreenKawarpLook() {
@@ -10808,7 +12932,7 @@
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
-      console.warn("[AuroraLyrics] Kawarp backdrop failed:", error);
+      alWarn("Kawarp backdrop failed:", error);
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
       if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
       fsKawarp = null;
@@ -11006,6 +13130,9 @@
       if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.remove("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // No video left to blur; drop Video Background back to side-by-side
+        // without rewriting the audio layout preference.
+        if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
       }
       return;
     }
@@ -11022,6 +13149,9 @@
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.add("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // Hits is cover-art only; a video appearing mid-session moves straight
+        // to the side-by-side composition without rewriting the stored MV layout.
+        if (fsLayoutMode === "hits") applyFullscreenLayout("side", false);
       }
       // The new MV's <video> is not decodable yet. Poll for it instead of leaving
       // the attach to the 2s refresh tick — THAT tick was the visible delay on a
@@ -11077,8 +13207,10 @@
           cssText: lv.style.cssText,
         };
         fsOverlay.classList.add("ym-sl-fs-has-video");
+        publishFsVideoAspect(lv);
         // The mode changed, so the volume group's home may have to change with it.
         syncFsChromeStructure();
+        if (fsLayoutMode === "hits") applyFullscreenLayout("side", false);
         // Defensive: drop any stale canvas before creating a new one so a repeated
         // attach can never leave two ambient backdrops stacked.
         if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -11177,15 +13309,16 @@
         // goes, and leaving it behind kept the pane on the MV's shape (it still
         // read 1920/1080 at the cover reveal).
         fsOverlay.style.removeProperty("--ym-sl-fs-video-ar");
+        fsOverlay.style.removeProperty("--ym-sl-fs-video-ratio");
         // The video is gone, so any pending "waiting for it to be ready" is moot
         // — drop it, or its spinner could appear over the cover art that is
         // about to load (AJ, 2026-09-28).
         cancelFsVideoReady();
         // If we were in Video Background, it has nothing to blur now - drop
         // back to Video + Lyrics so a non-MV skip can't strand a broken
-        // backdrop (AJ 2026-09-28). Guard with the call: applyFullscreenLayout
-        // itself also refuses "background" without a video.
-        if (fsLayoutMode === "background") applyFullscreenLayout("side");
+        // backdrop (AJ 2026-09-28). This is a fallback, not a preference, so
+        // do not rewrite the stored audio layout.
+        if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
         if (fsBgCanvas && fsBgCanvas.parentElement) {
           fsBgCanvas.parentElement.removeChild(fsBgCanvas);
         }
@@ -12021,6 +14154,7 @@
         cssText: video.style.cssText,
       };
       fsOverlay.classList.add("ym-sl-fs-has-video");
+      publishFsVideoAspect(video);
 
       // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
       // low-res blurred/dimmed copy of the video, which cost a full-viewport
@@ -12308,6 +14442,8 @@
     }
     fsArtImg = null;
     ++fsArtImgSeq;
+    cleanupFsHitsToSide();
+    fsLayoutApplied = false;
     const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
     if (fsOptionsOverlay) fsOptionsOverlay.remove();
     if (fsSavedHtmlOverflow !== null) {
@@ -12316,6 +14452,9 @@
     }
     if (fsOverlay) fsOverlay.remove();
     fsOverlay = null;
+    // AMLL outlives the overlay inside the restored panel; put its normal focal
+    // line back now that Hits is gone.
+    amllSyncAlignPosition();
     fsMediaHost = null;
     fsLyricsHost = null;
     fsControls = null;
@@ -12324,6 +14463,12 @@
     // class's pending timer so a second entry starts clean.
     fsCoverSwitch = null;
     fsArtLikeButton = null;
+    // Hits nodes went with the overlay. Drop the refs and the header observer
+    // so the next entry starts clean.
+    if (fsHitsRO) { fsHitsRO.disconnect(); fsHitsRO = null; }
+    fsHits = null;
+    fsHitsTrackKey = "";
+    fsHitsMetaKey = "";
     if (fsHudTimer) { window.clearTimeout(fsHudTimer); fsHudTimer = 0; }
     fsHudEl = null;
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
@@ -12819,6 +14964,8 @@
   }
   function refreshFsTitle() {
     renderFsNextUp();
+    // Hits owns its own credit; it refreshes from the same track-change signal.
+    refreshFsHits();
     if (!fsTitleEl) return;
     const track = getCurrentTrack();
     const artist = (track && track.artist) || "";
@@ -12829,15 +14976,29 @@
       // be measured against the container and a translateX tween applied to
       // it without affecting the container's own entrance/leave animation.
       const inner = h("div", { class: "ym-sl-fs-title-inner" });
+      const byline = h("div", { class: "ym-sl-fs-title-byline" });
       if (artist) {
-        inner.appendChild(h("span", { class: "ym-sl-fs-title-artist", text: artist }));
+        byline.appendChild(h("span", { class: "ym-sl-fs-title-artist", text: artist }));
       }
+      // The separator and writer viewport are always built so lyrics that
+      // arrive after fullscreen entry can fill them without rebuilding the
+      // title. CSS hides the separator when either side is missing.
+      byline.appendChild(h("span", {
+        class: "ym-sl-fs-title-sep",
+        text: "|",
+        "aria-hidden": "true",
+      }));
+      const writers = h("span", { class: "ym-sl-fs-title-writers" });
+      writers.appendChild(h("span", { class: "ym-sl-fs-title-writers-track" }));
+      byline.appendChild(writers);
+      inner.appendChild(byline);
       if (title) {
         if (artist) inner.appendChild(document.createTextNode(" "));
         inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
       }
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
+      syncFsTitleWriters();
       // Apply (or remove) the marquee now that the text is in the DOM and
       // measurable. No band re-measure follows: the chip no longer stacks off the
       // title's height (AJ, 2026-10-20).
@@ -12861,6 +15022,75 @@
     }, FS_TITLE_SWAP_MS);
   }
 
+  // Writers can arrive after the title was painted (the lyrics fetch usually
+  // lands after fullscreen entry), so update the existing writer track in place
+  // instead of rebuilding the credit. The key prevents the 500ms refresh from
+  // restarting the drift animation on every tick.
+  let fsTitleWritersKey = "";
+  function syncFsTitleWriters() {
+    if (!fsTitleEl) return;
+    const byline = fsTitleEl.querySelector(".ym-sl-fs-title-byline");
+    const writers = byline && byline.querySelector(".ym-sl-fs-title-writers");
+    const track = writers && writers.querySelector(".ym-sl-fs-title-writers-track");
+    if (!byline || !writers || !track) return;
+    const text = (Array.isArray(currentSongwriters) ? currentSongwriters : [])
+      .filter((name) => typeof name === "string" && name.trim())
+      .map((name) => name.trim())
+      .join(", ");
+    byline.classList.toggle("has-artist", !!byline.querySelector(".ym-sl-fs-title-artist"));
+    byline.classList.toggle("has-writers", !!text);
+    if (text === fsTitleWritersKey && track.textContent === text) return;
+    fsTitleWritersKey = text;
+    track.textContent = text;
+    updateFsTitleWritersMarquee();
+  }
+
+  // The writers sit in their own overflow viewport, so a long list stays on one
+  // row. When it overflows, both edges get a soft mask and the track drifts
+  // slowly to the end and back. Distance drives the duration, with a floor so
+  // the movement never reads as a snap.
+  function updateFsTitleWritersMarquee() {
+    if (!fsTitleEl) return;
+    const box = fsTitleEl.querySelector(".ym-sl-fs-title-writers");
+    const track = box && box.querySelector(".ym-sl-fs-title-writers-track");
+    if (!box || !track) return;
+    if (!track.textContent) {
+      box.classList.remove("is-overflowing");
+      track.classList.remove("is-scrolling");
+      track.style.removeProperty("--ym-sl-fs-writers-shift");
+      track.style.removeProperty("--ym-sl-fs-writers-duration");
+      return;
+    }
+    const cW = box.clientWidth;
+    const tW = track.scrollWidth;
+    const shift = cW > 0 && tW > cW + 1 ? -(tW - cW) : 0;
+    if (!shift) {
+      box.classList.remove("is-overflowing");
+      track.classList.remove("is-scrolling");
+      track.style.removeProperty("--ym-sl-fs-writers-shift");
+      track.style.removeProperty("--ym-sl-fs-writers-duration");
+      return;
+    }
+    const shiftValue = shift + "px";
+    const already = box.classList.contains("is-overflowing") &&
+      track.style.getPropertyValue("--ym-sl-fs-writers-shift") === shiftValue;
+    if (already) return;
+    // Short credits used to sit on an 18s floor, which read as sluggish for a
+    // four-name line. Give those a quicker pass; long lists (Uptown Funk's 11
+    // writers) keep the pace that already felt right.
+    const writerCount = Array.isArray(currentSongwriters) ? currentSongwriters.length : 0;
+    const shortCredit = writerCount > 0 && writerCount <= 5;
+    const seconds = shortCredit
+      ? Math.max(6, Math.min(12, Math.abs(shift) / 34))
+      : Math.max(16, Math.min(32, Math.abs(shift) / 19));
+    track.style.setProperty("--ym-sl-fs-writers-shift", shiftValue);
+    track.style.setProperty("--ym-sl-fs-writers-duration", seconds.toFixed(1) + "s");
+    box.classList.add("is-overflowing");
+    track.classList.remove("is-scrolling");
+    void track.offsetWidth;
+    track.classList.add("is-scrolling");
+  }
+
   // Per-render title-marquee updater. Measures the inner's scrollWidth
   // against the container's clientWidth. If the text fits, no class is
   // applied (no animation, no fade). If it overflows, the container gets
@@ -12871,6 +15101,7 @@
   // the END of the text right at the container's right edge so the
   // right fade takes it out smoothly.
   function updateFsTitleMarquee() {
+    updateFsTitleWritersMarquee();
     if (!fsTitleEl || !fsTitleInner) return;
     const cW = fsTitleEl.clientWidth;
     const tW = fsTitleInner.scrollWidth;
@@ -12914,12 +15145,17 @@
     const chip = fsOverlay.querySelector(".ym-sl-fs-play-chip");
     const vol = fsOverlay.querySelector(".ym-sl-fs-volume-group");
     if (!scrubber || !chip || !vol) return;
+    // Hits is its own composition: it has no classic credit or volume column
+    // to restructure, so it must be excluded from BOTH side checks. Without
+    // this the volume gets reparented out of the scrubber into the overlay's
+    // top-left corner (AJ, 2026-11-09).
+    const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
     const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+      !hits;
     const column = chip.parentElement;
     const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+      !hits;
     // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
     // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
     // only way the gaps stay equal: as a separate absolutely-positioned element
@@ -12930,11 +15166,11 @@
         column.insertBefore(fsTitleEl, column.firstChild);
       }
     } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
-      // Back to an overlay child for background / lyrics-only.
+      // Back to an overlay child for background.
       fsOverlay.appendChild(fsTitleEl);
     }
-    // The volume only leaves the scrubber for the cover-art column, which wants it
-    // on its own row under the transport.
+    // The volume only leaves the scrubber for the cover-art column, which wants
+    // it on its own row under the transport.
     const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
     if (coverSide) {
       if (vol.parentElement !== column) column.appendChild(vol);
@@ -13002,6 +15238,9 @@
   const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
   const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
   const VIDEO_OFFSET_LIMIT = 100;
+  const COMMUNITY_OFFSET_TOKENS_KEY = "better_lyrics_community_offset_tokens_v1";
+  const COMMUNITY_OFFSET_NAME_KEY = "better_lyrics_community_offset_name_v1";
+  const COMMUNITY_OFFSET_TOKEN_LIMIT = 100;
 
   // An offset entry is { video: ms, song: ms, pauseSync: {line, offset}|null }.
   // Legacy v1 stored a bare number (the music-video offset); migrate those into the
@@ -13058,6 +15297,32 @@
     } catch (_) {}
   }
 
+  function loadCommunityOffsetTokens() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(COMMUNITY_OFFSET_TOKENS_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return {};
+      const out = {};
+      for (const key in parsed) {
+        if (typeof parsed[key] === "string" && parsed[key]) out[key] = parsed[key];
+      }
+      return out;
+    } catch (_) { return {}; }
+  }
+
+  const communityOffsetTokens = loadCommunityOffsetTokens();
+
+  function persistCommunityOffsetTokens() {
+    try {
+      const keys = Object.keys(communityOffsetTokens);
+      while (keys.length > COMMUNITY_OFFSET_TOKEN_LIMIT) delete communityOffsetTokens[keys.shift()];
+      if (window.localStorage) {
+        window.localStorage.setItem(COMMUNITY_OFFSET_TOKENS_KEY, JSON.stringify(communityOffsetTokens));
+      }
+    } catch (_) {}
+  }
+
   function formatOffset(ms) {
     const sign = ms > 0 ? "+" : "";
     return sign + (ms / 1000).toFixed(1) + "s";
@@ -13106,6 +15371,7 @@
     if (changed) {
       editingOffsetMode = desired;
       refreshVideoOffsetControl();
+      renderCommunityOffsetUI();
       lastActiveLine = -1;
       publishSyncState();
     }
@@ -13197,6 +15463,13 @@
       : 0;
     if (editingOffsetMode === "video") offsetVideoMs = ms;
     else offsetSongMs = ms;
+    // Any manual slider/typed edit is a session-only override of the shared
+    // value. The next track load fetches the community offset again.
+    if (save) {
+      communityOffsetManual = true;
+      communityOffsetNotice = "";
+      communityOffsetNoticeError = false;
+    }
     const key = currentTrackKey || getTrackKey(getCurrentTrack());
     if (save && key) {
       // Preserve the pause sync point: this assignment replaces the whole entry.
@@ -13208,6 +15481,7 @@
       persistVideoOffsets();
     }
     refreshVideoOffsetControl();
+    renderCommunityOffsetUI();
     lastActiveLine = -1;
     publishSyncState();
   }
@@ -13223,6 +15497,375 @@
     refreshVideoOffsetControl();
     refreshPauseSyncControl();
     publishSyncState();
+    loadCommunityOffsetForTrack(track);
+  }
+
+  /* ===================== Community-shared offsets ===================== */
+
+  function currentCommunityOffset() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key || communityOffsetTrackKey !== key) return null;
+    return communityOffsetData[activeOffsetMode] || null;
+  }
+
+  function communityOffsetErrorText(body, fallback) {
+    const labels = {
+      offset_locked: "Someone already posted an offset for this track.",
+      offset_not_found: "That shared offset is no longer active.",
+      forbidden: "Only the person who posted this offset can undo it.",
+      missing_offset_token: "This browser does not have the owner token for that offset.",
+      rate_limited: "Too many reports from this connection. Try again later.",
+      reports_not_configured: "Reporting is not configured on the community server.",
+      invalid_offset: "That offset value is not valid.",
+      offset_out_of_range: "The offset must be between -60s and +60s.",
+      invalid_video_id: "YouTube did not give this track a video ID.",
+      invalid_mode: "The playback mode was not recognised.",
+      body_too_large: "The request was too large.",
+      db_unavailable: "The community database is unavailable right now.",
+      relay_failed: "Discord could not receive the report. Try again later.",
+    };
+    return labels[body && body.error] || fallback;
+  }
+
+  async function communityOffsetRequest(url, options) {
+    const opts = options || {};
+    const response = await fetch(url, {
+      credentials: "omit",
+      cache: "no-store",
+      ...opts,
+      headers: {
+        Accept: "application/json",
+        ...(opts.headers || {}),
+      },
+    });
+    const body = await response.json().catch(() => null);
+    return { response, body };
+  }
+
+  function renderCommunityOffsetUI() {
+    if (!communityOffsetStatus || !communityOffsetPostButton) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
+    const loaded = !!key && communityOffsetTrackKey === key;
+    const offset = loaded ? communityOffsetData[activeOffsetMode] : null;
+    const owner = !!(offset && communityOffsetTokens[offset.id]);
+    const busy = communityOffsetBusy;
+    const show = (el, visible) => { if (el) el.classList.toggle("hidden", !visible); };
+    const statusText = communityOffsetNotice || "";
+    const setStatus = (fallback, state) => {
+      communityOffsetStatus.textContent = statusText || fallback;
+      communityOffsetStatus.dataset.state = communityOffsetNoticeError ? "error" : (state || "none");
+      communityOffsetStatus.title = offset ? "Offset ID: " + offset.id : "";
+    };
+
+    communityOffsetPostButton.disabled = busy;
+    communityOffsetUndoButton.disabled = busy;
+    communityOffsetReportButton.disabled = busy;
+    communityOffsetName.disabled = busy;
+
+    if (!track || !key) {
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Play a track to share an offset.", "none");
+      return;
+    }
+
+    if (!videoId) {
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Waiting for this track's video ID…", "none");
+      return;
+    }
+
+    if (offset) {
+      const localMs = getActiveOffsetMs();
+      let text = "Saved by " + (offset.username || "Anonymous")
+        + (owner ? " (you)" : "") + " · " + formatOffset(offset.offsetMs);
+      text += " · ID " + offset.id.slice(0, 8);
+      if (communityOffsetManual && localMs !== offset.offsetMs) {
+        text += " · using " + formatOffset(localMs) + " locally";
+      }
+      setStatus(text, owner ? "owned" : "shared");
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, owner);
+      show(communityOffsetReportButton, !owner && !communityOffsetReported.has(offset.id));
+      return;
+    }
+
+    if (communityOffsetLoading) {
+      show(communityOffsetName, true);
+      show(communityOffsetPostButton, true);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      communityOffsetPostButton.disabled = true;
+      setStatus("Checking for a shared offset…", "none");
+      return;
+    }
+
+    show(communityOffsetName, true);
+    show(communityOffsetPostButton, true);
+    show(communityOffsetUndoButton, false);
+    show(communityOffsetReportButton, false);
+    communityOffsetPostButton.disabled = busy;
+    setStatus(
+      communityOffsetLoadError
+        ? "Could not check the shared offset. You can still post one."
+        : "No shared offset for this track yet. Set an offset and post it for everyone.",
+      communityOffsetLoadError ? "error" : "none"
+    );
+  }
+
+  function applyCommunityOffsetData() {
+    let changed = false;
+    for (const mode of ["video", "song"]) {
+      const shared = communityOffsetData[mode];
+      if (!shared || !Number.isFinite(Number(shared.offsetMs))) continue;
+      const ms = clamp(Math.round(Number(shared.offsetMs) / 100) * 100, -60000, 60000);
+      if (mode === "video") offsetVideoMs = ms;
+      else offsetSongMs = ms;
+      changed = true;
+    }
+    if (!changed) return;
+    refreshVideoOffsetControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function loadCommunityOffsetForTrack(track) {
+    const key = track ? getTrackKey(track) : "";
+    const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
+    const requestId = ++communityOffsetRequestSeq;
+    communityOffsetTrackKey = key;
+    communityOffsetData = { video: null, song: null };
+    communityOffsetManual = false;
+    communityOffsetLoadError = false;
+    communityOffsetBusy = false;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    communityOffsetLoading = !!videoId;
+    renderCommunityOffsetUI();
+    if (!videoId) return;
+    const url = AURORA_COMMUNITY_API + "/v1/offset?v=" + encodeURIComponent(videoId);
+    communityOffsetRequest(url).then(({ response, body }) => {
+      if (requestId !== communityOffsetRequestSeq) return;
+      if (key !== communityOffsetTrackKey) return;
+      if (currentTrackKey && key !== currentTrackKey) return;
+      communityOffsetLoading = false;
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetLoadError = true;
+        renderCommunityOffsetUI();
+        return;
+      }
+      const offsets = body.data && body.data.offsets;
+      communityOffsetData = {
+        video: offsets && offsets.video ? offsets.video : null,
+        song: offsets && offsets.song ? offsets.song : null,
+      };
+      // A slider edit made while this request was in flight wins for this
+      // session. The next track load applies the shared value again.
+      if (!communityOffsetManual) applyCommunityOffsetData();
+      renderCommunityOffsetUI();
+    }).catch((error) => {
+      if (requestId !== communityOffsetRequestSeq) return;
+      communityOffsetLoading = false;
+      communityOffsetLoadError = true;
+      alWarn("community offset lookup failed:", error && error.message);
+      renderCommunityOffsetUI();
+    });
+  }
+
+  async function postCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !track.videoId || !key) {
+      communityOffsetNotice = "Play a track before posting an offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    if (communityOffsetLoading) return;
+    if (currentCommunityOffset()) {
+      communityOffsetNotice = "This track already has a shared offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    const offsetMs = getActiveOffsetMs();
+    if (offsetMs === 0) {
+      communityOffsetNotice = "Set a non-zero offset before posting.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    const username = communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "";
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(AURORA_COMMUNITY_API + "/v1/offset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoId: track.videoId,
+          mode: activeOffsetMode,
+          offsetMs,
+          username,
+          title: track.title || "",
+          artist: track.artist || "",
+        }),
+      });
+      if (key !== (currentTrackKey || getTrackKey(getCurrentTrack()))) return;
+      if (response.status === 409 && body && body.data && body.data.offset) {
+        const shared = body.data.offset;
+        if (shared.mode === "video" || shared.mode === "song") communityOffsetData[shared.mode] = shared;
+        communityOffsetNotice = "Someone already posted an offset for this track. " +
+          (shared.username || "Anonymous") + " can undo it.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not post the offset. Try again.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      const offset = body.data && body.data.offset;
+      if (!offset) {
+        communityOffsetNotice = "The server did not return the posted offset.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      communityOffsetData[offset.mode] = offset;
+      const ownerToken = body.data && body.data.ownerToken;
+      if (ownerToken) {
+        communityOffsetTokens[offset.id] = ownerToken;
+        persistCommunityOffsetTokens();
+      }
+      communityOffsetManual = false;
+      communityOffsetLoadError = false;
+      communityOffsetNotice = "";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset post failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
+  }
+
+  async function undoCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const offset = currentCommunityOffset();
+    if (!offset) return;
+    const ownerToken = communityOffsetTokens[offset.id];
+    if (!ownerToken) {
+      communityOffsetNotice = "This browser does not have the owner token for that offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(
+        AURORA_COMMUNITY_API + "/v1/offset/" + encodeURIComponent(offset.id),
+        { method: "DELETE", headers: { "X-Offset-Token": ownerToken } }
+      );
+      if (response.status === 404) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetData[offset.mode] = null;
+        communityOffsetNotice = "That shared offset was already removed.";
+        communityOffsetNoticeError = false;
+        return;
+      }
+      if (response.status === 403) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetNotice = "This browser's owner token was rejected. Only the poster can undo it.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not undo the shared offset.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      delete communityOffsetTokens[offset.id];
+      persistCommunityOffsetTokens();
+      communityOffsetData[offset.mode] = null;
+      communityOffsetNotice = "Your shared offset was removed.";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset undo failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
+  }
+
+  async function reportCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const offset = currentCommunityOffset();
+    if (!offset) return;
+    let reason = "";
+    try {
+      if (typeof window.prompt === "function") {
+        const answer = window.prompt("Report this offset to the moderators?\n\nOptional: what is wrong with it?", "");
+        if (answer === null) return;
+        reason = String(answer || "").slice(0, 500);
+      }
+    } catch (_) {}
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(
+        AURORA_COMMUNITY_API + "/v1/offset/" + encodeURIComponent(offset.id) + "/report",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        }
+      );
+      if (response.status === 404) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetData[offset.mode] = null;
+        communityOffsetNotice = "That shared offset was already removed.";
+        communityOffsetNoticeError = false;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not send the report. Try again.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      communityOffsetReported.add(offset.id);
+      communityOffsetNotice = "Report sent to the moderators. Thanks.";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset report failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
   }
 
   /* ===================== MV pause re-sync ===================== */
@@ -13408,7 +16051,7 @@
     try {
       await removePermanentTTML(key);
     } catch (error) {
-      console.warn("[AuroraLyrics] Could not delete permanent TTML:", error);
+      alWarn("Could not delete permanent TTML:", error);
       showLyricsMessage("Could not delete the saved TTML for this track.");
       refreshFileTabState();
       return;
@@ -13508,7 +16151,7 @@
     try {
       await clearSpicyCacheForTrack(pending.track);
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear this song's cache:", error);
+      alWarn("could not clear this song's cache:", error);
     }
     refreshSongCacheRow();
   }
@@ -14227,9 +16870,15 @@
     const viewportRect = lineScrollEl.getBoundingClientRect();
     const lineCenter = lineRect.top + lineRect.height / 2;
     const viewportCenter = viewportRect.top + viewportRect.height / 2;
-    // Centre the line. (Upstream's live path nudges the target by -30px for
-    // centred lyrics and +85px when scrolling to the top; we always centre.)
-    const target = lineScrollEl.scrollTop + lineCenter - viewportCenter;
+    // Side-by-side and background keep the true centre. Hits lifts the active
+    // line above it, because reading near the bottom of a tall column makes the
+    // eye travel down on every line change.
+    const focal = fsActive && fsOverlay &&
+      fsOverlay.classList.contains("ym-sl-fs-mode-hits")
+      ? FS_HITS_ALIGN_POSITION
+      : 0.5;
+    const target = lineScrollEl.scrollTop + lineCenter -
+      (viewportRect.top + viewportRect.height * focal);
     // `force` only means "ignore manualScrollActive" — it is NOT a request to skip
     // the animation, so it does not make this immediate.
     //
@@ -14328,6 +16977,16 @@
     // credits footer and a live scroll container to do anything at all.
     if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
       if (!creditsFooterEl) creditsRevealActive = false;
+      return false;
+    }
+    // Hits keeps attribution in the header for both renderers, and the footer
+    // under the last line is hidden there. Do not let that hidden footer drag
+    // the lyrics down at the end of the track.
+    if (fsActive && fsOverlay &&
+        fsOverlay.classList.contains("ym-sl-fs-mode-hits") &&
+        fsOverlay.classList.contains("ym-sl-fs-hits-has-credits")) {
+      creditsRevealEngaged = false;
+      creditsRevealActive = false;
       return false;
     }
     // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not
@@ -14758,7 +17417,7 @@
 
   async function loadSpicyCache() {
     if (spicyCache) {
-      console.log(`[AuroraLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
+      alLog(`lyrics in cache: ${Object.keys(spicyCache).length}`);
       return Promise.resolve(spicyCache);
     }
     if (spicyCacheLoad) return spicyCacheLoad;
@@ -14766,17 +17425,16 @@
       // Without the bridge every lookup is a guaranteed miss and every result
       // is thrown away — a failure mode that looks exactly like a working
       // resolver feeding a broken API call.
-      console.warn("[AuroraLyrics] cache bridge unavailable; nothing will be cached this session.");
+      alWarn("cache unavailable; nothing will be saved this session.");
       spicyCache = {};
       return Promise.resolve(spicyCache);
     }
     spicyCacheLoad = window.YTMod.getSpicyCache().then((stored) => {
       spicyCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
-      console.log(`[AuroraLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
       invalidateStaleSpicyEntries();
       return spicyCache;
     }).catch((error) => {
-      console.warn("[AuroraLyrics] cache read failed; starting empty:", error && error.message);
+      alWarn("cache read failed; starting empty:", error && error.message);
       spicyCache = {};
       return spicyCache;
     });
@@ -14791,7 +17449,7 @@
     if (!window.YTMod || typeof window.YTMod.setSpicyCache !== "function") return;
     const snapshot = spicyCache;
     Promise.resolve(window.YTMod.setSpicyCache(snapshot)).catch((error) => {
-      console.warn("[AuroraLyrics] could not persist lyrics cache:", error);
+      alWarn("cache save failed:", error);
     });
   }
 
@@ -14852,7 +17510,7 @@
     if (!drops.length) return 0;
     drops.forEach((k) => { delete spicyCache[k]; });
     markSpicyCacheDirty();
-    console.log(`[AuroraLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
+    alLog(`cache: dropped ${drops.length} stale ${drops.length === 1 ? "entry" : "entries"}.`);
     return drops.length;
   }
 
@@ -14919,7 +17577,7 @@
     try {
       await window.YTMod.clearSpicyCache();
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear lyrics cache:", error);
+      alWarn("cache clear failed:", error);
     }
   }
 
@@ -15169,7 +17827,7 @@
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) console.warn("[AuroraLyrics] ListenBrainz lookup failed:", error && error.message);
+      if (!userAborted) alWarn("ListenBrainz lookup failed:", error && error.message);
       return { ids: [], transient: !userAborted };
     } finally {
       clearTimeout(timer);
@@ -15179,12 +17837,12 @@
     // 400 = our parameters were rejected. That is our bug, not a flake, so it is
     // a definitive no rather than something worth retrying.
     if (response.status === 400) {
-      console.warn("[AuroraLyrics] ListenBrainz rejected the query (HTTP 400).");
+      alWarn("ListenBrainz rejected the query (HTTP 400).");
       return { ids: [], transient: false };
     }
     if (response.status === 429) {
       lbThrottledUntil = Date.now() + 30_000;
-      console.warn("[AuroraLyrics] ListenBrainz rate-limited us; backing off for 30s.");
+      alWarn("ListenBrainz rate-limited us; backing off for 30s.");
       return { ids: [], transient: true };
     }
     if (response.status >= 500) return { ids: [], transient: true };
@@ -15288,15 +17946,15 @@
         .sort((a, b) => b.score - a.score);
       const best = candidates[0];
       if (!best) {
-        console.warn(`[AuroraLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
+        alWarn(`MusicBrainz: no Spotify match for "${track.title}".`);
         return { id: null, transient: false };
       }
       const id = musicBrainzSpotifyId(best.recording);
-      console.log(`[AuroraLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
+      alLog(`Spotify id ${id} via MusicBrainz (${best.score}).`);
       return { id, transient: false };
     } catch (error) {
       if (!controller.signal.aborted) {
-        console.warn("[AuroraLyrics] MusicBrainz fallback failed:", error && error.message);
+        alWarn("MusicBrainz fallback failed:", error && error.message);
       }
       return { id: null, transient: !controller.signal.aborted };
     }
@@ -15305,7 +17963,7 @@
   async function resolveSpotifyIdUncached(track, controller, key) {
     const title = track && track.title;
     if (!title) {
-      console.warn("[AuroraLyrics] no track title; cannot resolve Spotify id.");
+      alWarn("no track title; Spotify lookup skipped.");
       return { id: null, transient: false };
     }
 
@@ -15335,13 +17993,13 @@
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
           if (lbThrottledUntil > Date.now()) {
-            console.warn("[AuroraLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
+            alWarn("ListenBrainz backing off; trying MusicBrainz.");
             break lbLadder;
           }
           if (attempts >= LB_MAX_ATTEMPTS) {
             // Budget exhausted without a definitive answer, so the caller must
             // not record this as a permanent miss.
-            console.warn(`[AuroraLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
+            alWarn("ListenBrainz budget spent; trying MusicBrainz.");
             break lbLadder;
           }
           attempts++;
@@ -15352,14 +18010,14 @@
 
           if (out.ids.length) {
             const id = out.ids[0];
-            console.log(`[AuroraLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
+            alLog(`resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
             return { id, transient: false };
           }
         }
       }
     }
 
-    console.warn(`[AuroraLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
+    alWarn(`ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
@@ -15368,7 +18026,7 @@
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
     if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      console.warn(`[AuroraLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
+      alWarn(`free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
       return { id: null, transient: true };
     }
     return { id: null, transient: false };
@@ -15390,7 +18048,7 @@
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
       if (cached && cached.spotifyId) {
-        console.log(`[AuroraLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
+        alLog(`Spotify id ${cached.spotifyId} from cache (resolver).`);
         return cached.spotifyId;
       }
     }
@@ -15628,7 +18286,7 @@
     if (communityCache) return communityCache;
     if (communityCacheLoad) return communityCacheLoad;
     if (!window.YTMod || typeof window.YTMod.getCommunityCache !== "function") {
-      console.warn("[AuroraLyrics] community cache bridge unavailable; nothing will be cached this session.");
+      alWarn("community cache bridge unavailable; nothing will be cached this session.");
       communityCache = {};
       return communityCache;
     }
@@ -15643,7 +18301,7 @@
       }
       return communityCache;
     }).catch((error) => {
-      console.warn("[AuroraLyrics] community cache read failed; starting empty:", error && error.message);
+      alWarn("community cache read failed; starting empty:", error && error.message);
       communityCache = {};
       return communityCache;
     });
@@ -15658,7 +18316,7 @@
       .slice(0, COMMUNITY_CACHE_LIMIT);
     communityCache = Object.fromEntries(entries);
     window.YTMod.setCommunityCache(communityCache).catch((error) => {
-      console.warn("[AuroraLyrics] could not persist community cache:", error && error.message);
+      alWarn("could not persist community cache:", error && error.message);
     });
   }
 
@@ -15712,7 +18370,7 @@
     try {
       await window.YTMod.setCommunityCache({});
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear Aurora Community cache:", error);
+      alWarn("could not clear Aurora Community cache:", error);
     }
     return count;
   }
@@ -15764,11 +18422,11 @@
     const cached = await getCommunityCacheEntry(videoId);
     if (cached) {
       if (cached.hit === false) {
-        console.log(`[AuroraLyrics] cached Aurora Community miss for ${videoId}; skipping API.`);
+        alLog(`cached Aurora Community miss for ${videoId}; skipping API.`);
         return null;
       }
       if (cached.ttml) {
-        console.log(`[AuroraLyrics] served TTML from Aurora Community cache (${videoId}).`);
+        alLog(`served TTML from Aurora Community cache (${videoId}).`);
         return {
           ttml: cached.ttml,
           attribution: cached.attribution || null,
@@ -15798,7 +18456,7 @@
       });
     } catch (error) {
       if (controller.signal.aborted || (error && error.name === "AbortError")) return null;
-      console.warn("[AuroraLyrics] Aurora Community request failed:", error);
+      alWarn("Aurora Community request failed:", error);
       return null;
     }
     if (controller.signal.aborted || key !== currentTrackKey) return null;
@@ -15807,13 +18465,13 @@
       return null;
     }
     if (!response.ok) {
-      console.warn(`[AuroraLyrics] Aurora Community returned HTTP ${response.status}.`);
+      alWarn(`Aurora Community returned HTTP ${response.status}.`);
       return null;
     }
     const json = await response.json().catch(() => null);
     const data = json && json.data ? json.data : null;
     if (!data || typeof data.ttml !== "string" || !data.ttml.trim()) {
-      console.warn("[AuroraLyrics] Aurora Community returned no usable TTML.");
+      alWarn("Aurora Community returned no usable TTML.");
       return null;
     }
     const attribution = normalizeCommunityAttribution(data.attribution);
@@ -15829,7 +18487,7 @@
       test: data.test === true,
       updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : "",
     }, ttlMs);
-    console.log(`[AuroraLyrics] fetched Aurora Community TTML for ${videoId}.`);
+    alLog(`fetched Aurora Community TTML for ${videoId}.`);
     return {
       ttml: data.ttml,
       attribution,
@@ -15841,12 +18499,12 @@
 
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
-    if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
-    console.log(`[AuroraLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
+    if (!track || !track.title) { alWarn("no track title; skipping."); return null; }
+    alLog(`resolving for "${track.title}" / "${track.artist || "?"}"…`);
     const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
-      console.warn("[AuroraLyrics] no Spotify track id resolved; falling back.");
+      alWarn("no Spotify track id resolved; falling back.");
       return null;
     }
 
@@ -15857,20 +18515,20 @@
     const cached = await getSpicyCacheEntry(cacheKey);
     if (cached) {
       if (cached.ttml) {
-        console.log(`[AuroraLyrics] served TTML from cache (${spotifyId}).`);
+        alLog(`served TTML from cache (${spotifyId}).`);
         return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
       }
       if (cached.hit === false) {
-        console.log(`[AuroraLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
+        alLog(`cached "no sync available" for ${spotifyId}; skipping API.`);
         return null;
       }
       // An entry that is neither TTML nor a recorded miss is a half-written
       // record — exactly what a cache written while the page was being torn
       // down looks like. Log it, because otherwise this path is a silent
       // fall-through to the API and reads as "the cache did nothing".
-      console.warn(`[AuroraLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
+      alWarn(`cache entry for ${spotifyId} is incomplete; re-querying the API.`);
     }
-    console.log(`[AuroraLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
+    alLog(`querying ${SPICY_LYRICS_API}/${spotifyId}`);
 
     // Every exit from here on logs. This function used to have several silent
     // `return null` paths, and because those are indistinguishable in the console
@@ -15878,7 +18536,7 @@
     // sent us chasing the resolver twice. A drop-in replacement for the guard
     // below, used everywhere so no branch can go quiet again.
     const bail = (why) => {
-      console.warn(`[AuroraLyrics] giving up on ${spotifyId} — ${why}`);
+      alWarn(`giving up on ${spotifyId} — ${why}`);
       return null;
     };
 
@@ -15894,7 +18552,7 @@
       });
     } catch (e) {
       if (controller.signal.aborted) return bail("request was aborted (a newer track/request superseded it)");
-      console.warn("[AuroraLyrics] request failed:", e);
+      alWarn("request failed:", e);
       return null;
     }
     // Report WHICH condition dropped the answer — aborted vs a changed track are
@@ -15905,7 +18563,7 @@
     if (key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
-    console.log(`[AuroraLyrics] answered HTTP ${response.status} for ${spotifyId}`);
+    alLog(`answered HTTP ${response.status} for ${spotifyId}`);
     if (response.status === 404) {
       // The API itself says it has no TTML for this id. That is a real answer
       // and safe to remember.
@@ -15959,7 +18617,7 @@
       songwriters: parsed.songwriters || [],
       spotifyId,
     });
-    console.log(`[AuroraLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
     return parsed;
   }
 
@@ -15989,7 +18647,7 @@
     if (manualPick) {
       if (stale()) return;
       if (loadLRCLyrics(manualPick, track.durationMs)) {
-        console.log("[AuroraLyrics] manual search pick served from cache.");
+        alLog("manual search pick served from cache.");
         return;
       }
       // The entry no longer parses (corrupt or older shape): drop it and let
@@ -16073,17 +18731,17 @@
               test: communityResult.test === true,
             };
             if (loadTTML(communityResult.ttml, "external")) {
-              console.log("[AuroraLyrics] TTML rendered from Aurora Community.");
+              alLog("TTML rendered from Aurora Community.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[AuroraLyrics] Aurora Community returned TTML we could not parse; trying the next source.");
+            alWarn("Aurora Community returned TTML we could not parse; trying the next source.");
           } else {
-            console.log("[AuroraLyrics] no Aurora Community TTML for this track; trying the next source.");
+            alLog("no Aurora Community TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[AuroraLyrics] Aurora Community lookup failed; trying the next source:", error);
+          alWarn("Aurora Community lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -16095,7 +18753,7 @@
             // Silence here was a real dead end: the TTML was fetched and parsed,
             // then dropped on the floor with no output, which reads as "the fetch
             // failed".
-            console.warn(`[AuroraLyrics] discarding the Spicy result — ${
+            alWarn(`discarding the Spicy result — ${
               controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
             return true;
           }
@@ -16107,17 +18765,17 @@
               songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
             };
             if (loadTTML(spicyResult.ttml, "external")) {
-              console.log("[AuroraLyrics] TTML rendered from the Spicy Lyrics API.");
+              alLog("TTML rendered from the Spicy Lyrics API.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[AuroraLyrics] API returned TTML we could not parse; trying the next source.");
+            alWarn("API returned TTML we could not parse; trying the next source.");
           } else {
-            console.warn("[AuroraLyrics] no Spicy TTML for this track; trying the next source.");
+            alWarn("no Spicy TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[AuroraLyrics] lookup failed; trying the next source:", error);
+          alWarn("lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -16132,7 +18790,7 @@
         } catch (error) {
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
-          console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
+          alWarn("LRCLIB lookup failed:", error);
           lrclibOutage = isLrclibOutage(error);
           return false;
         }
@@ -16446,7 +19104,7 @@
       if (requestId !== searchRequestSeq) return;
       searchAbortController = null;
       panel._status.textContent = "LRCLIB is currently busy — please try a few more times.";
-      console.warn("[AuroraLyrics] manual lyric search failed:", error);
+      alWarn("manual lyric search failed:", error);
     }
   }
 
@@ -16598,7 +19256,7 @@
     try {
       savedTTML = await getPermanentTTML(key);
     } catch (error) {
-      console.warn("[AuroraLyrics] Could not read permanent TTML:", error);
+      alWarn("Could not read permanent TTML:", error);
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
@@ -16613,7 +19271,7 @@
       try {
         await removePermanentTTML(key);
       } catch (error) {
-        console.warn("[AuroraLyrics] Could not remove invalid permanent TTML:", error);
+        alWarn("Could not remove invalid permanent TTML:", error);
       }
       if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
     }
@@ -16892,6 +19550,9 @@
     return !!a.username && a.username === b.username;
   }
 
+  // Three segments hard against each other: songwriters, provider, and the two
+  // people. The rail's radius rounds the outer edges, and hairline dividers do
+  // the separating, so there is no gap to read as a fourth empty cell.
   function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
     // A track that ends on a duet line leaves the reader on the right-hand side.
@@ -16899,34 +19560,46 @@
     // instead of a full-width block they have to travel back left for.
     if (alignRight) footer.classList.add("align-right");
     if (names && names.length) {
-      footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-writers" });
+      box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written by" }));
       const namesEl = h("div", { class: "ym-sl-credits-names" });
       names.forEach((name, index) => {
         if (index) namesEl.appendChild(document.createTextNode(", "));
         namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
       });
-      footer.appendChild(namesEl);
+      box.appendChild(namesEl);
+      footer.appendChild(box);
     }
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
-    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
-    if (currentUploader) {
-      // A self-upload collapses the uploader and maker rows. Carry the maker's
-      // profile URL into the surviving row so the credit is still clickable.
-      const uploader = isSameCreditPerson(currentMaker, currentUploader)
-        ? Object.assign({}, currentUploader, {
-            url: currentUploader.url || currentMaker.url,
-          })
-        : currentUploader;
-      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    if (currentProvider) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-provider" });
+      box.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
+      footer.appendChild(box);
     }
-    if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
-      footer.appendChild(buildPersonRow("Made by", currentMaker));
+    // Uploader and maker share the people group: they are one credit (who put
+    // this here), not two separate rows pretending to be different sources.
+    if (currentUploader || currentMaker) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-people" });
+      if (currentUploader) {
+        // A self-upload collapses the uploader and maker rows. Carry the maker's
+        // profile URL into the surviving row so the credit is still clickable.
+        const uploader = isSameCreditPerson(currentMaker, currentUploader)
+          ? Object.assign({}, currentUploader, {
+              url: currentUploader.url || currentMaker.url,
+            })
+          : currentUploader;
+        box.appendChild(buildPersonRow("Uploaded by", uploader));
+      }
+      if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
+        box.appendChild(buildPersonRow("Made by", currentMaker));
+      }
+      footer.appendChild(box);
     }
     return footer;
   }
 
-  // "Lyrics provided by <provider>" — every API source owes this one, so it is
+  // "Provided by <provider>" — every API source owes this one, so it is
   // plain text and never conditional on a person existing. A link is the
   // strongest form of that credit: it lets the user check the source.
   const PROVIDER_URLS = {
@@ -16937,6 +19610,33 @@
   // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
   // (2026-10-22); kept as the hook for any future machine-aligned source.
   const PROVIDER_WARN = {};
+
+  // Provider marks ship beside the renderer so the page can load them from the
+  // extension origin without a network request. SCRIPT_URL is the injected
+  // script's own URL; the files sit next to it in src/extensions.
+  const PROVIDER_ICON_FILES = {
+    "Apple Music": "provider-apple-music.svg",
+    "Spicy Lyrics": "provider-spicy-lyrics.png",
+    "LRCLIB": "provider-lrclib.png",
+  };
+  function buildProviderIcon(provider) {
+    const file = PROVIDER_ICON_FILES[provider];
+    if (!file || !SCRIPT_URL) return null;
+    let src = "";
+    try { src = new URL(file, SCRIPT_URL).href; } catch (e) { return null; }
+    const img = h("img", {
+      class: "ym-sl-provider-icon",
+      src,
+      alt: "",
+      "aria-hidden": "true",
+      width: "17",
+      height: "17",
+      decoding: "async",
+    });
+    // A missing asset must not leave a broken-image glyph in the credit row.
+    img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+    return img;
+  }
 
   // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
   function buildProviderWarnIcon() {
@@ -16972,7 +19672,9 @@
     const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
-    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
+    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Provided by" }));
+    const icon = buildProviderIcon(provider);
+    if (icon) row.appendChild(icon);
     const url = PROVIDER_URLS[provider] || "";
     if (url) {
       row.appendChild(h("a", {
@@ -16995,6 +19697,28 @@
         text: "Timing may have felt off — this source aligns the lyrics automatically.",
       })
     );
+  }
+
+  // Small up-right arrow for the two people credits: those rows open a profile
+  // in a new tab, so the caption reads as a destination rather than a label.
+  function buildCreditArrow() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-uploader-arrow");
+    svg.setAttribute("width", "9");
+    svg.setAttribute("height", "9");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M7 17 17 7M9 7h8v8");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "2.2");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+    return svg;
   }
 
   // "<label> <avatar> <username>" — the whole pill links when the source
@@ -17027,6 +19751,7 @@
       link.appendChild(img);
     }
     link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
+    if (uploader.url) link.appendChild(buildCreditArrow());
 
     // If there is nowhere to go, render as plain (non-interactive) content so
     // it does not look like a dead link.
@@ -17427,6 +20152,9 @@
     } else {
       creditsFooterEl = null;
     }
+    // The Hits header mirrors this attribution; refresh it now rather than
+    // waiting for the next 500ms tick.
+    if (fsHits) syncFsHitsCredits();
     // A new track invalidates any in-progress credits reveal: position is about to
     // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
     // doing it here avoids a one-frame flash of the previous song parked at bottom.
@@ -17551,7 +20279,7 @@
         } catch (error) {
           manualLyricsIsPermanent = false;
           manualLyricsTrackKey = trackKey;
-          console.warn("[AuroraLyrics] Could not save permanent TTML:", error);
+          alWarn("Could not save permanent TTML:", error);
         }
       } else {
         manualLyricsIsPermanent = false;
@@ -18659,10 +21387,10 @@
       cache: "no-store",
     }).then((response) => {
       if (!response.ok) {
-        console.warn(`[AuroraLyrics] community view not recorded (HTTP ${response.status}).`);
+        alWarn(`community view not recorded (HTTP ${response.status}).`);
       }
     }).catch((error) => {
-      console.warn("[AuroraLyrics] community view failed:", error && error.message);
+      alWarn("community view failed:", error && error.message);
     });
   }
 
@@ -18721,7 +21449,7 @@
     if (!key) return;
     currentTrackKey = "";
     try { syncTrackLyrics(true); } catch (e) {
-      console.warn("[AuroraLyrics] re-resolve after source-order change failed:", e);
+      alWarn("re-resolve after source-order change failed:", e);
     }
   }
 
@@ -18861,7 +21589,7 @@
       try {
         syncTrackLyrics(true);
       } catch (error) {
-        console.warn("[AuroraLyrics] ad-end lyric retry failed:", error);
+        alWarn("ad-end lyric retry failed:", error);
       }
     }
   }
@@ -19095,6 +21823,30 @@
   // Focal line as a fraction of the player height. The loading skeleton reads
   // the same number through --amll-align-y, so nudging this moves both.
   const AMLL_ALIGN_POSITION = 0.42;
+  // AMLL reads lower than the built-in renderer in the Hits column, so it gets
+  // its own higher anchor. Spicy keeps FS_HITS_ALIGN_POSITION (0.38); the normal
+  // panel and the side-by-side video layout both keep 0.42.
+  const AMLL_HITS_ALIGN_POSITION = 0.30;
+  function amllTargetAlignPosition() {
+    if (!fsActive || !fsOverlay || !fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+      return AMLL_ALIGN_POSITION;
+    }
+    return AMLL_HITS_ALIGN_POSITION;
+  }
+  function amllSyncAlignPosition() {
+    const position = amllTargetAlignPosition();
+    if (amllHost) amllHost.style.setProperty("--amll-align-y", (position * 100) + "%");
+    if (amllPlayer && typeof amllPlayer.setAlignPosition === "function") {
+      try {
+        amllPlayer.setAlignPosition(position);
+        // setAlignPosition only writes the config; a layout pass is needed for
+        // the new focal line to take effect without waiting for a resize.
+        if (typeof amllPlayer.calcLayout === "function") {
+          amllPlayer.calcLayout("config-change");
+        }
+      } catch (_) {}
+    }
+  }
 
   // YouTube Music loads its own Web Animations polyfill
   // (web-animations-next-lite.min.js), and its Animation.effect objects do NOT
@@ -19597,7 +22349,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLine) {
   visibility: hidden !important;
 }
-/* Credits footer (Written By / Lyrics provided by / Uploaded by / Made by) goes
+/* Credits footer (Written by / Provided by / Uploaded by / Made by) goes
    into the engine's own bottom-line slot, so it scrolls with the lyrics as the
    last block - the same behaviour as the built-in renderer. The engine watches
    that element with a MutationObserver and re-lays-out when its content
@@ -19608,6 +22360,13 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 #ym-sl-amll-host .FmKaba_bottomLineWrapper {
   filter: none !important;
   opacity: 1 !important;
+}
+/* The engine gives every lyric line paint containment for scroll performance.
+   The bottom line is the credits card, whose soft outer shadow is not a lyric:
+   paint containment sliced that shadow off at the line box. Keep the layout and
+   style containment, drop paint, so the card can cast its full shadow. */
+#ym-sl-amll-host .FmKaba_bottomLine {
+  contain: layout style;
 }
 /* In a duet song the engine reserves 15% on the opposite side of every line that
    is NOT a duet line, so the two voices never collide. The bottom line is not a
@@ -19635,17 +22394,16 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
   font-weight: 400 !important;
   line-height: 1.35 !important;
   letter-spacing: 0 !important;
-  opacity: .85 !important;
+  opacity: .94 !important;
   margin: 24px 0 10px !important;
-  padding: 10px 0 0 !important;
+  padding: 16px 20px !important;
 }
 /* A song that ends on a duet line leaves the reader on the right-hand side, so
    the credits follow the last line there. Same rule as the built-in renderer. */
 #ym-sl-amll-host .ym-sl-credits.align-right {
   text-align: right !important;
-}
-#ym-sl-amll-host .ym-sl-credits.align-right :is(.ym-sl-provider, .ym-sl-uploader) {
   justify-content: flex-end !important;
+  margin-left: auto !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) > * {
   -webkit-text-stroke: 0 !important;
@@ -19653,24 +22411,24 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
   margin-bottom: 0 !important;
 }
 /* The label/name/provider weights are the footer's own; only the gaps differ
-   here, so the three lines read as one block instead of drifting apart in the
-   engine's taller line box. */
+   here, so the writer row and metadata line read as one block instead of
+   drifting apart in the engine's taller line box. */
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-label {
-  margin-bottom: 4px !important;
+  margin-bottom: 0 !important;
   line-height: 1.2 !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-names {
   line-height: 1.4 !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider, .ym-sl-provider-block, .ym-sl-uploader) {
-  margin-top: 10px !important;
+  margin-top: 0 !important;
 }
 /* Inside the pill+note block the block owns the gap (flex gap 7px). */
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-provider-block .ym-sl-provider {
   margin-top: 0 !important;
 }
-#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider + .ym-sl-uploader, .ym-sl-uploader + .ym-sl-uploader) {
-  margin-top: 4px !important;
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-uploader + .ym-sl-uploader {
+  margin-top: 0 !important;
 }
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
@@ -20008,8 +22766,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
 
       amllHost = document.createElement("div");
       amllHost.id = "ym-sl-amll-host";
+      const alignPosition = amllTargetAlignPosition();
       // Keep the skeleton on the same focal line as the real lines.
-      amllHost.style.setProperty("--amll-align-y", (AMLL_ALIGN_POSITION * 100) + "%");
+      amllHost.style.setProperty("--amll-align-y", (alignPosition * 100) + "%");
       // Middle-click autoscroll: the gesture Chrome gives a native scroller.
       amllHost.addEventListener("mousedown", amllStartAutoScroll);
       container.appendChild(amllHost);
@@ -20031,9 +22790,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       player.supportMaskImage = false;
       player.setEnableSpring(true);
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
-      // Focal line sits a little further down than AMLL's own 0.35 default, so
-      // the active line reads lower in the panel.
-      player.setAlignPosition(AMLL_ALIGN_POSITION);
+      // Normal panel: a little below AMLL's own 0.35 default. Fullscreen Hits
+      // lifts to AMLL's own above-centre anchor; music videos keep the default.
+      player.setAlignPosition(alignPosition);
       // Halve the render buffer. The engine defaults to 300px of overscan, which
       // on a ~950px panel means it builds roughly twice the viewport's worth of
       // lines - and every one of those words re-resolves its CSS mask every
@@ -20079,7 +22838,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
 
       if (amllLastContent) amllSyncLyrics(amllLastContent);
     } catch (e) {
-      console.warn("[AuroraLyrics] AMLL engine failed to load; using built-in Simple renderer.", e);
+      alWarn("AMLL engine failed to load; using built-in Simple renderer.", e);
       amllFailed = true;
       // Leave the built-in renderer visible: amllActive drives the body class
       // that HIDES .VirtualLyricsContainer, so it must be cleared on failure or
@@ -20287,7 +23046,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
 
-  // Credits footer. Aurora already builds a full "Written By / Lyrics provided by
+  // Credits footer. Aurora already builds a full "Written by / Provided by
   // / Uploaded by / Made by" block for the built-in renderer (buildCreditsFooter
   // in 16-lyric-dom), and it reads the same shared state, so the
   // Apple-Music-style panel can simply reuse it rather than duplicating the
@@ -20362,7 +23121,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       amllHideSkeleton();
       amllSyncCredits();
     } catch (e) {
-      console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
+      alWarn("AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
       amllHideSkeleton();
       amllHide();
@@ -20919,10 +23678,10 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       // the session. Retry, and only give up after ~1s of solid failures.
       amllDriveErrors++;
       if (amllDriveErrors === 1) {
-        console.warn("[AuroraLyrics] AMLL drive failed; retrying.", e);
+        alWarn("AMLL drive failed; retrying.", e);
       }
       if (amllDriveErrors > 60) {
-        console.warn("[AuroraLyrics] AMLL drive failed repeatedly; falling back.", e);
+        alWarn("AMLL drive failed repeatedly; falling back.", e);
         amllFailed = true;
         amllHide();
         setJumpButtonVisible(false);
@@ -21366,7 +24125,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     const tag = source + " " + ((error && error.name) || "Error");
     if (atErrorNote === tag) return;
     atErrorNote = tag;
-    console.warn("[AuroraLyrics] on-device translation failed (" + tag + "):", (error && error.message) || error);
+    alWarn("on-device translation failed (" + tag + "):", (error && error.message) || error);
   }
 
   // One pass over the entries. Returns how many filled and which ones threw,

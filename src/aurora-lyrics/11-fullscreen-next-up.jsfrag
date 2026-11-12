@@ -79,6 +79,8 @@
   }
   function refreshFsTitle() {
     renderFsNextUp();
+    // Hits owns its own credit; it refreshes from the same track-change signal.
+    refreshFsHits();
     if (!fsTitleEl) return;
     const track = getCurrentTrack();
     const artist = (track && track.artist) || "";
@@ -89,15 +91,29 @@
       // be measured against the container and a translateX tween applied to
       // it without affecting the container's own entrance/leave animation.
       const inner = h("div", { class: "ym-sl-fs-title-inner" });
+      const byline = h("div", { class: "ym-sl-fs-title-byline" });
       if (artist) {
-        inner.appendChild(h("span", { class: "ym-sl-fs-title-artist", text: artist }));
+        byline.appendChild(h("span", { class: "ym-sl-fs-title-artist", text: artist }));
       }
+      // The separator and writer viewport are always built so lyrics that
+      // arrive after fullscreen entry can fill them without rebuilding the
+      // title. CSS hides the separator when either side is missing.
+      byline.appendChild(h("span", {
+        class: "ym-sl-fs-title-sep",
+        text: "|",
+        "aria-hidden": "true",
+      }));
+      const writers = h("span", { class: "ym-sl-fs-title-writers" });
+      writers.appendChild(h("span", { class: "ym-sl-fs-title-writers-track" }));
+      byline.appendChild(writers);
+      inner.appendChild(byline);
       if (title) {
         if (artist) inner.appendChild(document.createTextNode(" "));
         inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
       }
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
+      syncFsTitleWriters();
       // Apply (or remove) the marquee now that the text is in the DOM and
       // measurable. No band re-measure follows: the chip no longer stacks off the
       // title's height (AJ, 2026-10-20).
@@ -121,6 +137,75 @@
     }, FS_TITLE_SWAP_MS);
   }
 
+  // Writers can arrive after the title was painted (the lyrics fetch usually
+  // lands after fullscreen entry), so update the existing writer track in place
+  // instead of rebuilding the credit. The key prevents the 500ms refresh from
+  // restarting the drift animation on every tick.
+  let fsTitleWritersKey = "";
+  function syncFsTitleWriters() {
+    if (!fsTitleEl) return;
+    const byline = fsTitleEl.querySelector(".ym-sl-fs-title-byline");
+    const writers = byline && byline.querySelector(".ym-sl-fs-title-writers");
+    const track = writers && writers.querySelector(".ym-sl-fs-title-writers-track");
+    if (!byline || !writers || !track) return;
+    const text = (Array.isArray(currentSongwriters) ? currentSongwriters : [])
+      .filter((name) => typeof name === "string" && name.trim())
+      .map((name) => name.trim())
+      .join(", ");
+    byline.classList.toggle("has-artist", !!byline.querySelector(".ym-sl-fs-title-artist"));
+    byline.classList.toggle("has-writers", !!text);
+    if (text === fsTitleWritersKey && track.textContent === text) return;
+    fsTitleWritersKey = text;
+    track.textContent = text;
+    updateFsTitleWritersMarquee();
+  }
+
+  // The writers sit in their own overflow viewport, so a long list stays on one
+  // row. When it overflows, both edges get a soft mask and the track drifts
+  // slowly to the end and back. Distance drives the duration, with a floor so
+  // the movement never reads as a snap.
+  function updateFsTitleWritersMarquee() {
+    if (!fsTitleEl) return;
+    const box = fsTitleEl.querySelector(".ym-sl-fs-title-writers");
+    const track = box && box.querySelector(".ym-sl-fs-title-writers-track");
+    if (!box || !track) return;
+    if (!track.textContent) {
+      box.classList.remove("is-overflowing");
+      track.classList.remove("is-scrolling");
+      track.style.removeProperty("--ym-sl-fs-writers-shift");
+      track.style.removeProperty("--ym-sl-fs-writers-duration");
+      return;
+    }
+    const cW = box.clientWidth;
+    const tW = track.scrollWidth;
+    const shift = cW > 0 && tW > cW + 1 ? -(tW - cW) : 0;
+    if (!shift) {
+      box.classList.remove("is-overflowing");
+      track.classList.remove("is-scrolling");
+      track.style.removeProperty("--ym-sl-fs-writers-shift");
+      track.style.removeProperty("--ym-sl-fs-writers-duration");
+      return;
+    }
+    const shiftValue = shift + "px";
+    const already = box.classList.contains("is-overflowing") &&
+      track.style.getPropertyValue("--ym-sl-fs-writers-shift") === shiftValue;
+    if (already) return;
+    // Short credits used to sit on an 18s floor, which read as sluggish for a
+    // four-name line. Give those a quicker pass; long lists (Uptown Funk's 11
+    // writers) keep the pace that already felt right.
+    const writerCount = Array.isArray(currentSongwriters) ? currentSongwriters.length : 0;
+    const shortCredit = writerCount > 0 && writerCount <= 5;
+    const seconds = shortCredit
+      ? Math.max(6, Math.min(12, Math.abs(shift) / 34))
+      : Math.max(16, Math.min(32, Math.abs(shift) / 19));
+    track.style.setProperty("--ym-sl-fs-writers-shift", shiftValue);
+    track.style.setProperty("--ym-sl-fs-writers-duration", seconds.toFixed(1) + "s");
+    box.classList.add("is-overflowing");
+    track.classList.remove("is-scrolling");
+    void track.offsetWidth;
+    track.classList.add("is-scrolling");
+  }
+
   // Per-render title-marquee updater. Measures the inner's scrollWidth
   // against the container's clientWidth. If the text fits, no class is
   // applied (no animation, no fade). If it overflows, the container gets
@@ -131,6 +216,7 @@
   // the END of the text right at the container's right edge so the
   // right fade takes it out smoothly.
   function updateFsTitleMarquee() {
+    updateFsTitleWritersMarquee();
     if (!fsTitleEl || !fsTitleInner) return;
     const cW = fsTitleEl.clientWidth;
     const tW = fsTitleInner.scrollWidth;
@@ -174,12 +260,17 @@
     const chip = fsOverlay.querySelector(".ym-sl-fs-play-chip");
     const vol = fsOverlay.querySelector(".ym-sl-fs-volume-group");
     if (!scrubber || !chip || !vol) return;
+    // Hits is its own composition: it has no classic credit or volume column
+    // to restructure, so it must be excluded from BOTH side checks. Without
+    // this the volume gets reparented out of the scrubber into the overlay's
+    // top-left corner (AJ, 2026-11-09).
+    const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
     const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+      !hits;
     const column = chip.parentElement;
     const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-lyrics-only");
+      !hits;
     // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
     // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
     // only way the gaps stay equal: as a separate absolutely-positioned element
@@ -190,11 +281,11 @@
         column.insertBefore(fsTitleEl, column.firstChild);
       }
     } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
-      // Back to an overlay child for background / lyrics-only.
+      // Back to an overlay child for background.
       fsOverlay.appendChild(fsTitleEl);
     }
-    // The volume only leaves the scrubber for the cover-art column, which wants it
-    // on its own row under the transport.
+    // The volume only leaves the scrubber for the cover-art column, which wants
+    // it on its own row under the transport.
     const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
     if (coverSide) {
       if (vol.parentElement !== column) column.appendChild(vol);

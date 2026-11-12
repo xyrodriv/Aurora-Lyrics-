@@ -934,10 +934,10 @@
       cache: "no-store",
     }).then((response) => {
       if (!response.ok) {
-        console.warn(`[AuroraLyrics] community view not recorded (HTTP ${response.status}).`);
+        alWarn(`community view not recorded (HTTP ${response.status}).`);
       }
     }).catch((error) => {
-      console.warn("[AuroraLyrics] community view failed:", error && error.message);
+      alWarn("community view failed:", error && error.message);
     });
   }
 

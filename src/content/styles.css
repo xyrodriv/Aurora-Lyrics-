@@ -874,9 +874,9 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: rgba(6,10,12,.5);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background: rgba(8,8,10,.62);
+  backdrop-filter: blur(16px) saturate(120%);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
   animation: ym-upd-fade-in .22s ease;
 }
 .ym-upd-card {
@@ -888,53 +888,47 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 22px;
-  /* DARK glass, not light (AJ, 2026-10-21): the blurred logo behind is dark, so
-     dark text on a 45%-white wash was barely readable. White text needs a dark
-     surface under it. */
-  border: 1px solid rgba(255,255,255,.14);
-  background: rgba(16,16,22,.82);
-  backdrop-filter: blur(28px) saturate(160%);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border-radius: 20px;
+  /* Opaque graphite on a hairline, like the panel (AJ, 2026-11-04): the glass
+     card was the last surface still reading as the pre-redesign UI. */
+  border: 0;
+  background: #17171a;
   box-shadow:
-    0 30px 80px rgba(0,0,0,.55),
-    inset 0 1px 0 rgba(255,255,255,.08);
-  color: #f3f3f5;
-  font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
+    inset 0 0 0 1px rgba(255,255,255,.08),
+    0 40px 110px -40px rgba(0,0,0,.9);
+  color: rgba(255,255,255,.85);
+  font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   animation: ym-upd-pop-in .26s cubic-bezier(.22,.61,.36,1);
 }
-/* The logo fills the panel, blurred, behind the text. z-index:-1 paints it
-   above the card's own background but below the static head/body/foot
-   content, so no extra positioning is needed on those. */
-.ym-upd-cardface {
-  position: absolute;
-  inset: -40px;            /* bleed past the edges so the blur halo is clipped */
+/* The mark: a 30px tile in the header, the same chip the top-bar banner uses.
+   No blurred wash behind the card (AJ, 2026-11-04): on the panel's graphite the
+   notice should read as one of the panel's own surfaces, not a separate ad. */
+.ym-upd-mark {
+  width: 30px; height: 30px;
+  flex: 0 0 auto;
+  border-radius: 8px;
   background-size: cover;
   background-position: center;
-  filter: blur(26px) saturate(125%);
-  /* Dimmed from .72 so white text stays readable over a bright cover. */
-  opacity: .34;
-  z-index: -1;
-  pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
 }
 .ym-upd-head {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 18px 22px;
-  border-bottom: 1px solid rgba(255,255,255,.09);
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
 }
 .ym-upd-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.ym-upd-title { margin: 0; font-size: 16px; font-weight: 700; color: #fff; }
+.ym-upd-title { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.01em; color: #fff; }
 .ym-upd-ver {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: .04em;
   padding: 3px 9px;
   border-radius: 999px;
-  background: rgba(255,255,255,.1);
-  color: rgba(255,255,255,.72);
+  background: rgba(224,16,64,.16);
+  color: rgba(255,255,255,.82);
   white-space: nowrap;
 }
 .ym-upd-close {
@@ -946,37 +940,58 @@
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
-  color: rgba(255,255,255,.6);
+  color: rgba(255,255,255,.5);
   cursor: pointer;
   transition: background .15s ease, color .15s ease;
 }
 .ym-upd-close:hover { color: #fff; background: rgba(255,255,255,.1); }
-.ym-upd-close:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
+.ym-upd-close:focus-visible { outline: 2px solid rgba(224,16,64,.55); outline-offset: 2px; }
 .ym-upd-close svg { fill: currentColor; }
 .ym-upd-body {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 22px;
+  gap: 12px;
+  padding: 18px 22px 20px;
   overflow-y: auto;
 }
 .ym-upd-sub { margin: 0; font-size: 14px; font-weight: 600; color: #fff; }
-.ym-upd-date { margin: 0; font-size: 12px; color: rgba(255,255,255,.45); }
-.ym-upd-sect { margin: 4px 0 0; font-size: 12px; font-weight: 700; letter-spacing: .05em;
-  text-transform: uppercase; color: rgba(255,255,255,.45); }
-.ym-upd-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
-.ym-upd-list li { font-size: 13.5px; line-height: 1.5; color: rgba(255,255,255,.82); }
+.ym-upd-date { margin: 0; font-size: 12px; color: rgba(255,255,255,.4); }
+.ym-upd-meta { display: flex; flex-direction: column; gap: 3px; }
+.ym-upd-block {
+  padding: 2px 14px 4px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.028);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+}
+.ym-upd-sect { margin: 12px 0 2px; font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: rgba(255,255,255,.42); }
+.ym-upd-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.ym-upd-list li {
+  position: relative;
+  padding: 9px 0 9px 16px;
+  font-size: 13.5px; line-height: 1.55; color: rgba(255,255,255,.78);
+}
+.ym-upd-list li + li { border-top: 1px solid rgba(255,255,255,.06); }
+.ym-upd-list li::before {
+  content: "";
+  position: absolute;
+  left: 1px; top: 16px;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: rgba(224,16,64,.7);
+}
 .ym-upd-hint {
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: rgba(255,255,255,.72);
-  background: rgba(255,255,255,.06);
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 10px;
+  color: rgba(255,255,255,.6);
+  background: rgba(255,255,255,.04);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
+  border: 0;
+  border-radius: 12px;
   padding: 12px 14px;
 }
 .ym-upd-foot {
@@ -986,31 +1001,32 @@
   justify-content: flex-end;
   gap: 10px;
   padding: 16px 22px 20px;
-  border-top: 1px solid rgba(255,255,255,.09);
+  border-top: 1px solid rgba(255,255,255,.06);
 }
 .ym-upd-btn {
-  padding: 11px 18px;
-  font-size: 14px;
-  font-weight: 700;
-  border-radius: 12px;
+  padding: 10px 18px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border-radius: 10px;
   cursor: pointer;
   text-decoration: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #f3f3f5;
-  background: rgba(255,255,255,.1);
-  border: 1px solid rgba(255,255,255,.16);
+  color: #fff;
+  background: rgba(255,255,255,.06);
+  border: 0;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.1);
   transition: background .15s ease, transform .12s ease, filter .15s ease;
 }
-.ym-upd-btn:hover { background: rgba(255,255,255,.18); }
+.ym-upd-btn:hover { background: rgba(255,255,255,.1); }
 .ym-upd-btn:active { transform: translateY(1px); }
-.ym-upd-btn:focus-visible { outline: 2px solid rgba(120,8,32,.55); outline-offset: 2px; }
+.ym-upd-btn:focus-visible { outline: 2px solid rgba(224,16,64,.55); outline-offset: 2px; }
 .ym-upd-btn.primary {
   background: #e01040;
-  border-color: rgba(255,255,255,.14);
   color: #fff;
-  box-shadow: 0 6px 18px -6px rgba(224,16,64,.7);
+  /* Flat, not glowing: the panel's accent never blooms (AJ, 2026-11-04). */
+  box-shadow: none;
 }
 .ym-upd-btn.primary:hover { filter: brightness(1.1); }
 @keyframes ym-upd-fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -1043,18 +1059,21 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 210px;
-  padding: 4px 10px;
-  border: 1px solid rgba(255,180,190,.45);
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(224,16,64,.88), rgba(255,77,106,.88));
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  width: auto;
+  max-width: 300px;
+  padding: 5px 6px 5px 8px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(23,23,26,.94);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.08),
+    0 18px 40px -24px rgba(0,0,0,.9);
   color: #fff;
+  font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   cursor: pointer;
   animation: ym-upd-banner-in .26s cubic-bezier(.22,.61,.36,1);
 }
-.ym-upd-banner:hover { filter: brightness(1.1); }
+.ym-upd-banner:hover { background: #202024; }
 .ym-upd-banner:focus-visible { outline: 2px solid rgba(255,255,255,.6); outline-offset: 2px; }
 .ym-upd-banner-logo {
   width: 28px; height: 28px; flex: 0 0 auto;
@@ -1063,26 +1082,30 @@
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
 }
 .ym-upd-banner-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
-.ym-upd-banner-title { font-size: 13px; font-weight: 700; line-height: 1.2; letter-spacing: .01em; }
-.ym-upd-banner-sub { font-size: 11px; font-weight: 600; opacity: .85; }
+.ym-upd-banner-title { font-size: 12.5px; font-weight: 700; line-height: 1.2; letter-spacing: .01em; }
+.ym-upd-banner-sub { font-size: 11px; font-weight: 500; color: rgba(255,255,255,.45); }
 .ym-upd-banner-close {
   flex: 0 0 auto;
   width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
   margin: 0; padding: 0;
   border: none; border-radius: 50%;
-  background: rgba(255,255,255,.16);
-  color: #fff;
+  background: rgba(255,255,255,.08);
+  color: rgba(255,255,255,.8);
   font-size: 15px; line-height: 1;
   cursor: pointer;
-  transition: background .15s ease;
+  /* The press is native, not scripted: it dips the moment the pointer goes down
+     and comes back on release, so the feedback lands during the click. */
+  transition: background .15s ease, transform .12s ease;
 }
-.ym-upd-banner-close:hover { background: rgba(255,255,255,.3); }
+.ym-upd-banner-close:hover { background: rgba(255,255,255,.16); color: #fff; }
+.ym-upd-banner-close:active { transform: scale(.82); }
 .ym-upd-banner-close:focus-visible { outline: 2px solid rgba(255,255,255,.7); outline-offset: 1px; }
 @keyframes ym-upd-banner-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   .ym-upd-banner { animation: none; }
 }
+
 
 /* =====================================================================
    GLASS SKIN (AJ, 2026-09-28)
@@ -2259,7 +2282,17 @@ ytmusic-player-bar .ym-pb-btn:active,
   transition: transform .18s cubic-bezier(.34,1.4,.5,1);
 }
 .ym-report-discord:hover .ym-report-discord-arrow { transform: translate(1.5px, -1.5px); }
-.ym-report-foot { display: flex; justify-content: flex-end; margin-top: 18px; }
+.ym-report-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.ym-feedback-btn {
+  appearance: none;
+  padding: 9px 16px; border: 0; border-radius: 11px;
+  background: rgba(255,255,255,.06); color: rgba(255,255,255,.82);
+  font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
+  transition: background .18s ease, color .18s ease, transform .15s ease;
+}
+.ym-feedback-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+.ym-feedback-btn:active { transform: scale(.97); }
 .ym-report-btn {
   appearance: none;
   padding: 9px 18px; border: 0; border-radius: 11px;

@@ -142,6 +142,30 @@
   // Focal line as a fraction of the player height. The loading skeleton reads
   // the same number through --amll-align-y, so nudging this moves both.
   const AMLL_ALIGN_POSITION = 0.42;
+  // AMLL reads lower than the built-in renderer in the Hits column, so it gets
+  // its own higher anchor. Spicy keeps FS_HITS_ALIGN_POSITION (0.38); the normal
+  // panel and the side-by-side video layout both keep 0.42.
+  const AMLL_HITS_ALIGN_POSITION = 0.30;
+  function amllTargetAlignPosition() {
+    if (!fsActive || !fsOverlay || !fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+      return AMLL_ALIGN_POSITION;
+    }
+    return AMLL_HITS_ALIGN_POSITION;
+  }
+  function amllSyncAlignPosition() {
+    const position = amllTargetAlignPosition();
+    if (amllHost) amllHost.style.setProperty("--amll-align-y", (position * 100) + "%");
+    if (amllPlayer && typeof amllPlayer.setAlignPosition === "function") {
+      try {
+        amllPlayer.setAlignPosition(position);
+        // setAlignPosition only writes the config; a layout pass is needed for
+        // the new focal line to take effect without waiting for a resize.
+        if (typeof amllPlayer.calcLayout === "function") {
+          amllPlayer.calcLayout("config-change");
+        }
+      } catch (_) {}
+    }
+  }
 
   // YouTube Music loads its own Web Animations polyfill
   // (web-animations-next-lite.min.js), and its Animation.effect objects do NOT
@@ -644,7 +668,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
 body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLine) {
   visibility: hidden !important;
 }
-/* Credits footer (Written By / Lyrics provided by / Uploaded by / Made by) goes
+/* Credits footer (Written by / Provided by / Uploaded by / Made by) goes
    into the engine's own bottom-line slot, so it scrolls with the lyrics as the
    last block - the same behaviour as the built-in renderer. The engine watches
    that element with a MutationObserver and re-lays-out when its content
@@ -655,6 +679,13 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 #ym-sl-amll-host .FmKaba_bottomLineWrapper {
   filter: none !important;
   opacity: 1 !important;
+}
+/* The engine gives every lyric line paint containment for scroll performance.
+   The bottom line is the credits card, whose soft outer shadow is not a lyric:
+   paint containment sliced that shadow off at the line box. Keep the layout and
+   style containment, drop paint, so the card can cast its full shadow. */
+#ym-sl-amll-host .FmKaba_bottomLine {
+  contain: layout style;
 }
 /* In a duet song the engine reserves 15% on the opposite side of every line that
    is NOT a duet line, so the two voices never collide. The bottom line is not a
@@ -682,17 +713,16 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
   font-weight: 400 !important;
   line-height: 1.35 !important;
   letter-spacing: 0 !important;
-  opacity: .85 !important;
+  opacity: .94 !important;
   margin: 24px 0 10px !important;
-  padding: 10px 0 0 !important;
+  padding: 16px 20px !important;
 }
 /* A song that ends on a duet line leaves the reader on the right-hand side, so
    the credits follow the last line there. Same rule as the built-in renderer. */
 #ym-sl-amll-host .ym-sl-credits.align-right {
   text-align: right !important;
-}
-#ym-sl-amll-host .ym-sl-credits.align-right :is(.ym-sl-provider, .ym-sl-uploader) {
   justify-content: flex-end !important;
+  margin-left: auto !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) > * {
   -webkit-text-stroke: 0 !important;
@@ -700,24 +730,24 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
   margin-bottom: 0 !important;
 }
 /* The label/name/provider weights are the footer's own; only the gaps differ
-   here, so the three lines read as one block instead of drifting apart in the
-   engine's taller line box. */
+   here, so the writer row and metadata line read as one block instead of
+   drifting apart in the engine's taller line box. */
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-label {
-  margin-bottom: 4px !important;
+  margin-bottom: 0 !important;
   line-height: 1.2 !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-credits-names {
   line-height: 1.4 !important;
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider, .ym-sl-provider-block, .ym-sl-uploader) {
-  margin-top: 10px !important;
+  margin-top: 0 !important;
 }
 /* Inside the pill+note block the block owns the gap (flex gap 7px). */
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-provider-block .ym-sl-provider {
   margin-top: 0 !important;
 }
-#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) :is(.ym-sl-provider + .ym-sl-uploader, .ym-sl-uploader + .ym-sl-uploader) {
-  margin-top: 4px !important;
+#ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-uploader + .ym-sl-uploader {
+  margin-top: 0 !important;
 }
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
@@ -1055,8 +1085,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
 
       amllHost = document.createElement("div");
       amllHost.id = "ym-sl-amll-host";
+      const alignPosition = amllTargetAlignPosition();
       // Keep the skeleton on the same focal line as the real lines.
-      amllHost.style.setProperty("--amll-align-y", (AMLL_ALIGN_POSITION * 100) + "%");
+      amllHost.style.setProperty("--amll-align-y", (alignPosition * 100) + "%");
       // Middle-click autoscroll: the gesture Chrome gives a native scroller.
       amllHost.addEventListener("mousedown", amllStartAutoScroll);
       container.appendChild(amllHost);
@@ -1078,9 +1109,9 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       player.supportMaskImage = false;
       player.setEnableSpring(true);
       player.setWordFadeWidth(0.5);          // Apple Music for iPad karaoke width
-      // Focal line sits a little further down than AMLL's own 0.35 default, so
-      // the active line reads lower in the panel.
-      player.setAlignPosition(AMLL_ALIGN_POSITION);
+      // Normal panel: a little below AMLL's own 0.35 default. Fullscreen Hits
+      // lifts to AMLL's own above-centre anchor; music videos keep the default.
+      player.setAlignPosition(alignPosition);
       // Halve the render buffer. The engine defaults to 300px of overscan, which
       // on a ~950px panel means it builds roughly twice the viewport's worth of
       // lines - and every one of those words re-resolves its CSS mask every
@@ -1126,7 +1157,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
 
       if (amllLastContent) amllSyncLyrics(amllLastContent);
     } catch (e) {
-      console.warn("[AuroraLyrics] AMLL engine failed to load; using built-in Simple renderer.", e);
+      alWarn("AMLL engine failed to load; using built-in Simple renderer.", e);
       amllFailed = true;
       // Leave the built-in renderer visible: amllActive drives the body class
       // that HIDES .VirtualLyricsContainer, so it must be cleared on failure or
@@ -1334,7 +1365,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
 
-  // Credits footer. Aurora already builds a full "Written By / Lyrics provided by
+  // Credits footer. Aurora already builds a full "Written by / Provided by
   // / Uploaded by / Made by" block for the built-in renderer (buildCreditsFooter
   // in 16-lyric-dom), and it reads the same shared state, so the
   // Apple-Music-style panel can simply reuse it rather than duplicating the
@@ -1409,7 +1440,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       amllHideSkeleton();
       amllSyncCredits();
     } catch (e) {
-      console.warn("[AuroraLyrics] AMLL setLyricLines failed; falling back.", e);
+      alWarn("AMLL setLyricLines failed; falling back.", e);
       amllFailed = true;
       amllHideSkeleton();
       amllHide();
@@ -1966,10 +1997,10 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       // the session. Retry, and only give up after ~1s of solid failures.
       amllDriveErrors++;
       if (amllDriveErrors === 1) {
-        console.warn("[AuroraLyrics] AMLL drive failed; retrying.", e);
+        alWarn("AMLL drive failed; retrying.", e);
       }
       if (amllDriveErrors > 60) {
-        console.warn("[AuroraLyrics] AMLL drive failed repeatedly; falling back.", e);
+        alWarn("AMLL drive failed repeatedly; falling back.", e);
         amllFailed = true;
         amllHide();
         setJumpButtonVisible(false);

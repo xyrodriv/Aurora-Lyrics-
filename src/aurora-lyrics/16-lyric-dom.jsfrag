@@ -267,6 +267,9 @@
     return !!a.username && a.username === b.username;
   }
 
+  // Three segments hard against each other: songwriters, provider, and the two
+  // people. The rail's radius rounds the outer edges, and hairline dividers do
+  // the separating, so there is no gap to read as a fourth empty cell.
   function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
     // A track that ends on a duet line leaves the reader on the right-hand side.
@@ -274,34 +277,46 @@
     // instead of a full-width block they have to travel back left for.
     if (alignRight) footer.classList.add("align-right");
     if (names && names.length) {
-      footer.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written By" }));
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-writers" });
+      box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written by" }));
       const namesEl = h("div", { class: "ym-sl-credits-names" });
       names.forEach((name, index) => {
         if (index) namesEl.appendChild(document.createTextNode(", "));
         namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: name }));
       });
-      footer.appendChild(namesEl);
+      box.appendChild(namesEl);
+      footer.appendChild(box);
     }
     // Order matters: the provider is the credit every source owes, then the
     // people who made the sync (community syncs only).
-    if (currentProvider) footer.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
-    if (currentUploader) {
-      // A self-upload collapses the uploader and maker rows. Carry the maker's
-      // profile URL into the surviving row so the credit is still clickable.
-      const uploader = isSameCreditPerson(currentMaker, currentUploader)
-        ? Object.assign({}, currentUploader, {
-            url: currentUploader.url || currentMaker.url,
-          })
-        : currentUploader;
-      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    if (currentProvider) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-provider" });
+      box.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
+      footer.appendChild(box);
     }
-    if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
-      footer.appendChild(buildPersonRow("Made by", currentMaker));
+    // Uploader and maker share the people group: they are one credit (who put
+    // this here), not two separate rows pretending to be different sources.
+    if (currentUploader || currentMaker) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-people" });
+      if (currentUploader) {
+        // A self-upload collapses the uploader and maker rows. Carry the maker's
+        // profile URL into the surviving row so the credit is still clickable.
+        const uploader = isSameCreditPerson(currentMaker, currentUploader)
+          ? Object.assign({}, currentUploader, {
+              url: currentUploader.url || currentMaker.url,
+            })
+          : currentUploader;
+        box.appendChild(buildPersonRow("Uploaded by", uploader));
+      }
+      if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
+        box.appendChild(buildPersonRow("Made by", currentMaker));
+      }
+      footer.appendChild(box);
     }
     return footer;
   }
 
-  // "Lyrics provided by <provider>" — every API source owes this one, so it is
+  // "Provided by <provider>" — every API source owes this one, so it is
   // plain text and never conditional on a person existing. A link is the
   // strongest form of that credit: it lets the user check the source.
   const PROVIDER_URLS = {
@@ -312,6 +327,33 @@
   // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
   // (2026-10-22); kept as the hook for any future machine-aligned source.
   const PROVIDER_WARN = {};
+
+  // Provider marks ship beside the renderer so the page can load them from the
+  // extension origin without a network request. SCRIPT_URL is the injected
+  // script's own URL; the files sit next to it in src/extensions.
+  const PROVIDER_ICON_FILES = {
+    "Apple Music": "provider-apple-music.svg",
+    "Spicy Lyrics": "provider-spicy-lyrics.png",
+    "LRCLIB": "provider-lrclib.png",
+  };
+  function buildProviderIcon(provider) {
+    const file = PROVIDER_ICON_FILES[provider];
+    if (!file || !SCRIPT_URL) return null;
+    let src = "";
+    try { src = new URL(file, SCRIPT_URL).href; } catch (e) { return null; }
+    const img = h("img", {
+      class: "ym-sl-provider-icon",
+      src,
+      alt: "",
+      "aria-hidden": "true",
+      width: "17",
+      height: "17",
+      decoding: "async",
+    });
+    // A missing asset must not leave a broken-image glyph in the credit row.
+    img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+    return img;
+  }
 
   // Red triangle, white exclamation. Drawn as SVG so it stays crisp at any size.
   function buildProviderWarnIcon() {
@@ -347,7 +389,9 @@
     const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
-    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Lyrics provided by" }));
+    row.appendChild(h("span", { class: "ym-sl-provider-label", text: "Provided by" }));
+    const icon = buildProviderIcon(provider);
+    if (icon) row.appendChild(icon);
     const url = PROVIDER_URLS[provider] || "";
     if (url) {
       row.appendChild(h("a", {
@@ -370,6 +414,28 @@
         text: "Timing may have felt off — this source aligns the lyrics automatically.",
       })
     );
+  }
+
+  // Small up-right arrow for the two people credits: those rows open a profile
+  // in a new tab, so the caption reads as a destination rather than a label.
+  function buildCreditArrow() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-uploader-arrow");
+    svg.setAttribute("width", "9");
+    svg.setAttribute("height", "9");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M7 17 17 7M9 7h8v8");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "2.2");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+    return svg;
   }
 
   // "<label> <avatar> <username>" — the whole pill links when the source
@@ -402,6 +468,7 @@
       link.appendChild(img);
     }
     link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
+    if (uploader.url) link.appendChild(buildCreditArrow());
 
     // If there is nowhere to go, render as plain (non-interactive) content so
     // it does not look like a dead link.

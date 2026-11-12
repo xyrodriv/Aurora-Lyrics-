@@ -85,6 +85,9 @@
     }
     syncFullscreenModeButtons();
     refreshFsRatingState();
+    // Mirrors play state and our rating onto the Hits header. Cheap: it only
+    // rewrites a glyph/label when the state actually flips.
+    syncFsHitsLive();
     // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
     // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
     // so there is nothing to chase; re-pinning was itself a source of the
@@ -341,6 +344,7 @@
   const FS_RATINGS_KEY = "ytmod_spicy_lyrics_fs_ratings";
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
+  let fsRatingSeedBlockUntil = 0;           // skip a stale YTM seed after our own rating
   // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
   // gestures: above the scrubber for seeks, under the volume bar for volume.
   let fsHudEl = null;
@@ -543,6 +547,9 @@
   function clickFsRating(kind) {
     const videoId = getCurrentFsVideoId();
     if (!videoId) return;
+    // A dislike click can make YTM advance immediately; suppress its stale
+    // DISLIKE for the next video instead of trusting it.
+    fsRatingSeedBlockUntil = Date.now() + 6000;
     const current = getFsRating(videoId);
     // Toggle: pressing the active one clears it; pressing the other switches.
     const newState = current === kind ? null : kind;
@@ -566,8 +573,12 @@
     if (videoId !== fsCurrentFsVideoId) {
       fsCurrentFsVideoId = videoId;
       if (fsRatings[videoId] === undefined) {
-        const yt = getYtmLikeStatus();
-        if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+        // YTM is still catching up with the track WE just rated; leave the new
+        // one neutral instead of inheriting the previous song's dislike.
+        if (Date.now() >= fsRatingSeedBlockUntil) {
+          const yt = getYtmLikeStatus();
+          if (yt === "LIKE" || yt === "DISLIKE") fsRatings[videoId] = yt.toLowerCase();
+        }
       }
       applyFsRatingToButtons(videoId);
     }
@@ -630,6 +641,619 @@
       fsHudTimer = 0;
       if (fsHudEl) fsHudEl.classList.remove("ym-sl-fs-hud-on");
     }, FS_HUD_HOLD_MS);
+  }
+
+  /* ---- Hits fullscreen layout (AJ, 2026-11-09) -----------------------------
+     The default fullscreen composition. Album art, track title, byline and the
+     real sync / provider chips sit in a centred header; the control dock under
+     it carries seek, transport, volume and the utilities. The lyrics start
+     beneath both. Music videos move that dock to the bottom-left of the
+     details column instead. The header's measured height is published as
+     --ym-sl-fs-hits-head-h, so a wrapped title or a narrower window still puts
+     the lyrics in the right place without any hard-coded pixel offset.
+
+     Built ONCE per entry. Text and live state refresh through refreshFsHits()
+     (track change plus the 500ms tick); the DOM is never rebuilt on a tick. */
+  const FS_HITS_ICON_COPY = [
+    { tag: "rect", attrs: { x: "9", y: "9", width: "11", height: "11", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
+    { tag: "path", attrs: { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+  ];
+  const FS_HITS_ICON_LINK = [
+    { tag: "path", attrs: { d: "M10.6 13.4a4.5 4.5 0 0 0 6.4 0l2.2-2.2a4.5 4.5 0 0 0-6.4-6.4L11.6 6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    { tag: "path", attrs: { d: "M13.4 10.6a4.5 4.5 0 0 0-6.4 0l-2.2 2.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+  ];
+  function fsHitsIcon(parts, viewBox) {
+    const svg = fsSvgIcon(parts, viewBox);
+    svg.setAttribute("class", "ym-sl-fs-hits-icon");
+    return svg;
+  }
+
+  // Apple Music-style custom player-bar glyphs (the set behind the theme's
+  // "Custom player-bar icons" switch). The thumb is one closed outline; the
+  // pressed state fills that same path. Previous/Next point in their own
+  // directions, so Hits no longer rotates the shared skip glyph.
+  function fsHitsSolid(d) {
+    return {
+      tag: "path",
+      attrs: {
+        d,
+        fill: "currentColor",
+        stroke: "currentColor",
+        "stroke-width": "0.8",
+        "stroke-linejoin": "round",
+      },
+    };
+  }
+  const FS_HITS_ICON_PREV = [
+    fsHitsSolid("M19.2 5.8v12.4L10.6 12l8.6-6.2Z"),
+    fsHitsSolid("M2 12 11.8 4.2v15.6L2 12Z"),
+  ];
+  const FS_HITS_ICON_NEXT = [
+    fsHitsSolid("M4.8 5.8v12.4L13.4 12 4.8 5.8Z"),
+    fsHitsSolid("M22 12 12.2 4.2v15.6L22 12Z"),
+  ];
+  const FS_HITS_ICON_PLAY = [
+    { tag: "path", attrs: { d: "M6 4.9 19.4 12 6 19.1Z", fill: "currentColor", stroke: "currentColor", "stroke-width": "1.6", "stroke-linejoin": "round" } },
+  ];
+  const FS_HITS_ICON_PAUSE = [
+    { tag: "rect", attrs: { x: "6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "rect", attrs: { x: "13.6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
+  ];
+  const FS_HITS_ICON_MORE = [
+    { tag: "circle", attrs: { cx: "5", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "circle", attrs: { cx: "12", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+    { tag: "circle", attrs: { cx: "19", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
+  ];
+  const FS_HITS_LIKE_PATH = "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
+  function fsHitsThumbSvg(kind) {
+    const attrs = {
+      d: FS_HITS_LIKE_PATH,
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2.1",
+      "stroke-linejoin": "round",
+    };
+    if (kind === "dislike") attrs.transform = "translate(0 24) scale(1 -1)";
+    const svg = fsSvgIcon([{ tag: "path", attrs }], "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-hits-icon");
+    return svg;
+  }
+
+  function fsHitsButton(cls, label, icon, iconOnly) {
+    const btn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-hits-btn" + (cls ? " " + cls : "") + (iconOnly ? " is-icon" : ""),
+      title: label,
+      "aria-label": label,
+    });
+    btn.appendChild(icon);
+    if (!iconOnly) {
+      btn.appendChild(h("span", { class: "ym-sl-fs-hits-btn-label", text: label }));
+    }
+    return btn;
+  }
+
+  function flashFsHits(button, label) {
+    if (!button || !label) return;
+    const labelEl = button.querySelector(".ym-sl-fs-hits-btn-label");
+    const previous = labelEl ? labelEl.textContent : button.title;
+    // Per-button timer: the link and lyrics copy buttons sit next to each other,
+    // and one shared timer left the first button stuck green (or titled Copied)
+    // when the second was clicked within the same 1.2s.
+    if (button._fsHitsFlashTimer) window.clearTimeout(button._fsHitsFlashTimer);
+    if (labelEl) labelEl.textContent = label;
+    else button.title = label;
+    button.dataset.flash = label;
+    button.classList.add("is-done");
+    button._fsHitsFlashTimer = window.setTimeout(() => {
+      button._fsHitsFlashTimer = 0;
+      button.classList.remove("is-done");
+      delete button.dataset.flash;
+      if (labelEl) labelEl.textContent = previous;
+      else button.title = previous;
+    }, 1200);
+  }
+
+  function fsHitsLegacyCopy(text, done) {
+    try {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.setAttribute("readonly", "");
+      box.style.cssText = "position:fixed;top:-1000px;left:-1000px;opacity:0";
+      document.body.appendChild(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      if (ok) done();
+    } catch (_) {}
+  }
+
+  function fsHitsWriteClipboard(text, done) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => fsHitsLegacyCopy(text, done));
+      return;
+    }
+    fsHitsLegacyCopy(text, done);
+  }
+
+  function fsHitsSyncLabel() {
+    if (staticLyricsActive) return "Static";
+    if (currentLyricsIsTTML) {
+      const wordTimed = modelLines.some((line) => line && !line.DotLine &&
+        line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
+      return wordTimed ? "Syllable" : "Line synced";
+    }
+    return "Line synced";
+  }
+
+  function fsHitsLineText(line) {
+    if (!line) return "";
+    if (line.Syllables && line.Syllables.Lead && typeof syllablesToText === "function") {
+      return syllablesToText(line.Syllables.Lead).trim();
+    }
+    return String(line.Text || "").trim();
+  }
+
+  function fsHitsPlainText() {
+    const out = [];
+    for (const line of modelLines) {
+      if (!line || line.DotLine) continue;
+      const text = fsHitsLineText(line);
+      if (text) out.push(text);
+    }
+    return out.join("\n");
+  }
+
+  function syncFsHitsChips(force) {
+    if (!fsHits) return;
+    const labels = [fsHitsSyncLabel(), currentProvider || "Aurora"];
+    const key = labels.join("|");
+    if (!force && key === fsHitsMetaKey) return;
+    fsHitsMetaKey = key;
+    if (fsHits.chips[0].textContent !== labels[0]) fsHits.chips[0].textContent = labels[0];
+    if (fsHits.providerText.textContent !== labels[1]) fsHits.providerText.textContent = labels[1];
+    // The provider mark sits to the LEFT of the chip label. Rebuilding just the
+    // icon slot keeps the text node stable while the source changes.
+    const icon = buildProviderIcon(labels[1]);
+    fsHits.providerIcon.replaceChildren();
+    if (icon) fsHits.providerIcon.appendChild(icon);
+  }
+
+  function fsHitsPersonKey(person) {
+    return person
+      ? [person.id || "", person.username || "", person.avatar || "", person.url || ""].join("~")
+      : "";
+  }
+
+  // The attribution block belongs in the header in Hits, alongside the title
+  // and byline. Build a compact second copy for that header; the footer under
+  // the lyrics stays in the tree for every other layout.
+  function syncFsHitsCredits() {
+    if (!fsHits || !fsOverlay) return;
+    // Lyrics can land after the header was built, so keep the provider chip and
+    // the fullscreen writer line live from the same credit state.
+    syncFsHitsChips(false);
+    syncFsTitleWriters();
+    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const hasCredits = !!(names.length || currentProvider || currentUploader || currentMaker);
+    const clear = () => {
+      fsHits.creditsKey = "";
+      fsHits.writers.textContent = "";
+      fsHits.writers.classList.remove("has-writers");
+      fsHits.bylineRow.classList.remove("has-writers");
+      fsHits.people.replaceChildren();
+      fsOverlay.classList.remove("ym-sl-fs-hits-has-credits");
+    };
+    if (!hasCredits) { clear(); return; }
+    const key = [
+      names.join("\u0001"),
+      currentProvider || "",
+      fsHitsPersonKey(currentUploader),
+      fsHitsPersonKey(currentMaker),
+      staticLyricsActive ? "static" : "synced",
+    ].join("\u0002");
+    if (key === fsHits.creditsKey) return;
+    try {
+      const footer = buildCreditsFooter(names, false);
+      // People credits are chips in the header row, next to the provider chip.
+      const people = footer.querySelector(".ym-sl-credit-people");
+      if (people) {
+        people.querySelectorAll(".ym-sl-uploader").forEach((row) => {
+          row.classList.add("ym-sl-fs-hits-chip");
+        });
+        fsHits.people.replaceChildren(people);
+      } else {
+        fsHits.people.replaceChildren();
+      }
+      // Writers are inline after the byline: names only, no label and no box.
+      const writerNames = footer.querySelector(".ym-sl-credit-writers .ym-sl-credits-names");
+      const writerText = writerNames ? writerNames.textContent.trim() : "";
+      fsHits.writers.textContent = writerText;
+      fsHits.writers.classList.toggle("has-writers", !!writerText);
+      fsHits.bylineRow.classList.toggle("has-writers", !!writerText);
+      fsHits.creditsKey = key;
+      fsOverlay.classList.add("ym-sl-fs-hits-has-credits");
+    } catch (_) {
+      clear();
+    }
+  }
+
+  // "Like" becomes "Liked" when the rating lands. Snapping the width would
+  // make the pill's border jump, so measure the new natural width and animate
+  // the inline width between the two. The inline width is cleared afterwards
+  // so auto layout (wrapped rows, zoom) keeps working; reduced motion skips it.
+  function animateFsHitsLikeLabel(next) {
+    if (!fsHits || !fsHits.like) return;
+    const button = fsHits.like;
+    const label = button.querySelector(".ym-sl-fs-hits-btn-label");
+    if (!label || label.textContent === next) return;
+    if (!fsMotionOK() || typeof button.animate !== "function") {
+      label.textContent = next;
+      return;
+    }
+    if (fsHits.likeAnim) {
+      try { fsHits.likeAnim.cancel(); } catch (_) {}
+      fsHits.likeAnim = null;
+    }
+    button.style.width = "";
+    // offsetWidth, not the bounding rect: the pressed state applies a scale
+    // transform, and the border animation must start from the layout width.
+    const from = button.offsetWidth;
+    label.textContent = next;
+    button.style.width = "auto";
+    const to = button.offsetWidth;
+    button.style.width = from + "px";
+    void button.offsetWidth;
+    const anim = button.animate(
+      [{ width: from + "px" }, { width: to + "px" }],
+      { duration: 260, easing: "cubic-bezier(.22, .61, .36, 1)" }
+    );
+    fsHits.likeAnim = anim;
+    button.style.width = to + "px";
+    const done = () => {
+      // A rapid Like -> Unlike click cancels this animation and starts another.
+      // The cancelled promise settles afterwards; it must not clear the newer
+      // animation's inline width.
+      if (fsHits && fsHits.likeAnim && fsHits.likeAnim !== anim) return;
+      if (fsHits) fsHits.likeAnim = null;
+      button.style.width = "";
+    };
+    if (anim && anim.finished) anim.finished.then(done, done);
+    else window.setTimeout(done, 280);
+  }
+
+  function syncFsHitsGeometry() {
+    if (!fsOverlay || !fsHits) return;
+    const height = Math.ceil(fsHits.root.getBoundingClientRect().height);
+    if (!height) return;
+    fsOverlay.style.setProperty("--ym-sl-fs-hits-head-h", height + "px");
+  }
+
+  function fsHitsClock(ms) {
+    const raw = Number(ms);
+    const total = Number.isFinite(raw) && raw > 0 ? Math.floor(raw / 1000) : 0;
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function syncFsHitsSeek() {
+    if (!fsHits || !fsHits.seek) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getPositionMs !== "function") return;
+    const position = Number(player.getPositionMs());
+    const duration = typeof player.getDurationMs === "function"
+      ? Number(player.getDurationMs())
+      : NaN;
+    if (!Number.isFinite(position)) return;
+    const total = Number.isFinite(duration) && duration > 0 ? duration : 0;
+    if (total) {
+      const max = String(total);
+      if (fsHits.seek.max !== max) fsHits.seek.max = max;
+      fsHits.seekTotal.textContent = fsHitsClock(total);
+    }
+    const driving = fsHits.seekDrag ||
+      performance.now() - (fsHits.seekAt || 0) < 1200;
+    if (!driving) {
+      fsHits.seek.value = String(clamp(position, 0, total || position));
+      const percent = total ? clamp(position / total * 100, 0, 100) : 0;
+      fsHits.seek.style.setProperty("--slider-fill", percent + "%");
+      fsHits.seekCurrent.textContent = fsHitsClock(position);
+    }
+  }
+
+  function syncFsHitsVolume() {
+    if (!fsHits || !fsHits.volume) return;
+    const player = window.YTMod && window.YTMod.player;
+    if (!player || typeof player.getVolume !== "function") return;
+    const info = player.getVolume();
+    if (!info) return;
+    const percent = Number.isFinite(info.media)
+      ? info.media * 100
+      : (Number.isFinite(info.slider) ? info.slider : null);
+    if (percent === null) return;
+    const clamped = clamp(percent, 0, 100);
+    if (!fsHits.volumeDrag && performance.now() - (fsHits.volumeAt || 0) > 900) {
+      fsHits.volume.value = String(Math.round(clamped));
+    }
+    fsHits.volume.style.setProperty("--slider-fill", clamped + "%");
+    fsHits.volume.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    if (fsHits.volumeIcon) {
+      fsHits.volumeIcon.classList.toggle("is-muted", info.muted === true);
+    }
+  }
+
+  // The Hits dock belongs to the cover-art header flow. Music videos use the
+  // regular Video + Lyrics chrome, so there is no second placement any more.
+  function placeFsHitsDock() {
+    if (!fsHits || !fsHits.dock || fsHits.dock.parentElement === fsHits.inner) return;
+    fsHits.inner.appendChild(fsHits.dock);
+  }
+
+  function syncFsHitsLive() {
+    if (!fsHits) return;
+    const paused = window.YTMod && window.YTMod.player && window.YTMod.player.isPaused
+      ? window.YTMod.player.isPaused()
+      : null;
+    // One button, two faces. Playing means the next click pauses, so the glyph
+    // shows Pause; paused shows Play. Only rebuild when the state actually flips.
+    if (fsHits.play) {
+      const action = paused === true ? "play" : (paused === false ? "pause" : "");
+      if (action && fsHits.play.dataset.playState !== action) {
+        fsHits.play.dataset.playState = action;
+        fsHits.play.replaceChildren(fsHitsIcon(
+          action === "pause" ? FS_HITS_ICON_PAUSE : FS_HITS_ICON_PLAY,
+          "0 0 24 24"
+        ));
+        const label = action === "pause" ? "Pause" : "Play";
+        fsHits.play.title = label;
+        fsHits.play.setAttribute("aria-label", label);
+      }
+    }
+    placeFsHitsDock();
+    syncFsHitsSeek();
+    syncFsHitsVolume();
+    const state = getFsRating(getCurrentFsVideoId());
+    const likeOn = state === "like";
+    const dislikeOn = state === "dislike";
+    fsHits.like.classList.toggle("is-on", likeOn);
+    fsHits.like.setAttribute("aria-pressed", likeOn ? "true" : "false");
+    fsHits.dislike.classList.toggle("is-on", dislikeOn);
+    fsHits.dislike.setAttribute("aria-pressed", dislikeOn ? "true" : "false");
+    syncFsHitsChips(false);
+    // The classic top-right chrome (and its layout button) is hidden in Hits,
+    // so the floating top-right layout button carries the next mode.
+    if (fsHits.layoutLabel) {
+      const nextMode = nextFsLayoutMode(fsLayoutMode);
+      const currentName = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
+      const nextName = FS_LAYOUT_NAMES[nextMode] || nextMode;
+      const text = "Layout: " + nextName;
+      if (fsHits.layoutLabel.textContent !== text) fsHits.layoutLabel.textContent = text;
+      const hint = "Current: " + currentName + " — switch to " + nextName;
+      if (fsHits.layout.title !== hint) fsHits.layout.title = hint;
+      fsHits.layout.setAttribute("aria-label", hint);
+    }
+  }
+
+  function refreshFsHits() {
+    if (!fsHits || !fsOverlay) return;
+    const track = getCurrentTrack();
+    const title = (track && track.title) || "";
+    const artist = (track && track.artist) || "";
+    const art = (track && track.artworkUrl) || "";
+    const key = [getCurrentFsVideoId(), title, artist, art].join("|");
+    if (key !== fsHitsTrackKey) {
+      fsHitsTrackKey = key;
+      fsHits.title.textContent = title || "Unknown song";
+      fsHits.byline.textContent = [artist, title].filter(Boolean).join(" • ");
+      if (art) {
+        fsHits.art.src = hiResArt(art);
+        fsHits.artWrap.classList.remove("is-empty");
+      } else {
+        fsHits.art.removeAttribute("src");
+        fsHits.artWrap.classList.add("is-empty");
+      }
+      syncFsHitsChips(true);
+    }
+    syncFsHitsLive();
+    syncFsHitsCredits();
+    syncFsHitsGeometry();
+  }
+
+  // Hits has ONE dynamic Play/Pause button. Ask for a STATE instead of blindly
+  // toggling: setPaused() keeps YTM's own UI, media session and listeners in
+  // step; clicking the player-bar toggle is the fallback for older bridges.
+  function setFsHitsPaused(paused) {
+    const player = window.YTMod && window.YTMod.player;
+    if (player && typeof player.setPaused === "function" &&
+        typeof player.isPaused === "function" && player.isPaused() !== null) {
+      const result = player.setPaused(!!paused);
+      if (result !== null) {
+        syncFsHitsLive();
+        return;
+      }
+    }
+    clickPlayerButton("play");
+    syncFsHitsLive();
+  }
+
+  function toggleFsHitsPlayback() {
+    const player = window.YTMod && window.YTMod.player;
+    const paused = player && typeof player.isPaused === "function"
+      ? player.isPaused()
+      : null;
+    if (paused === true || paused === false) {
+      setFsHitsPaused(!paused);
+      return;
+    }
+    clickPlayerButton("play");
+    syncFsHitsLive();
+  }
+
+  function buildFsHits() {
+    if (!fsOverlay || fsHits) return;
+    const art = h("img", { class: "ym-sl-fs-hits-art", alt: "" });
+    const artWrap = h("div", { class: "ym-sl-fs-hits-artwrap" }, art);
+    const title = h("div", { class: "ym-sl-fs-hits-title", text: "Unknown song" });
+    const byline = h("div", { class: "ym-sl-fs-hits-byline" });
+    const writers = h("div", { class: "ym-sl-fs-hits-writers" });
+    const bylineDivider = h("span", { class: "ym-sl-fs-hits-byline-divider", "aria-hidden": "true" });
+    const bylineRow = h("div", { class: "ym-sl-fs-hits-byline-row" }, byline, bylineDivider, writers);
+    const chipSync = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-sync", text: "Syllable" });
+    const chipProviderIcon = h("span", { class: "ym-sl-fs-hits-chip-icon" });
+    const chipProviderText = h("span", { class: "ym-sl-fs-hits-chip-text", text: "Aurora" });
+    const chipProvider = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-provider" }, chipProviderIcon, chipProviderText);
+    const people = h("div", { class: "ym-sl-fs-hits-people" });
+    const chips = h("div", { class: "ym-sl-fs-hits-chips" }, chipSync, chipProvider, people);
+    const play = fsHitsButton("ym-sl-fs-hits-play", "Play", fsHitsIcon(FS_HITS_ICON_PLAY, "0 0 24 24"), true);
+    const previous = fsHitsButton("ym-sl-fs-hits-prev", "Previous", fsHitsIcon(FS_HITS_ICON_PREV, "0 0 24 24"), true);
+    const next = fsHitsButton("ym-sl-fs-hits-next", "Next", fsHitsIcon(FS_HITS_ICON_NEXT, "0 0 24 24"), true);
+    const like = fsHitsButton("ym-sl-fs-hits-like", "Like", fsHitsThumbSvg("like"), true);
+    const dislike = fsHitsButton("ym-sl-fs-hits-dislike", "Dislike", fsHitsThumbSvg("dislike"), true);
+    // Labeled secondary actions sit in their own row under the metadata chips,
+    // matching the provider boxes. The layout control stays at the top-right.
+    const copyLink = fsHitsButton("ym-sl-fs-hits-copy-link", "Copy song link", fsHitsIcon(FS_HITS_ICON_LINK), false);
+    const copyLyrics = fsHitsButton("ym-sl-fs-hits-copy", "Copy lyrics", fsHitsIcon(FS_HITS_ICON_COPY), false);
+    const options = fsHitsButton("ym-sl-fs-hits-options", "Options", fsHitsIcon(FS_ICON_OPTIONS), false);
+    const layout = fsHitsButton("ym-sl-fs-hits-layout", "Layout", fsHitsIcon(FS_ICON_LAYOUT), false);
+    const layoutLabel = layout.querySelector(".ym-sl-fs-hits-btn-label");
+    const actions = h("div", { class: "ym-sl-fs-hits-actions" }, copyLink, copyLyrics, options);
+    const seekCurrent = h("span", { class: "ym-sl-fs-hits-time", "data-time": "current", text: "0:00" });
+    const seek = h("input", {
+      class: "ym-sl-fs-hits-range ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "1000", step: "100", value: "0",
+      title: "Song progress", "aria-label": "Song progress",
+    });
+    const seekTotal = h("span", { class: "ym-sl-fs-hits-time", "data-time": "total", text: "0:00" });
+    const seekRow = h("div", { class: "ym-sl-fs-hits-seek" }, seekCurrent, seek, seekTotal);
+    const volumeIcon = fsSvgIcon([
+      { tag: "path", attrs: { d: "M4 9.5h3.2L12 5.8v12.4l-4.8-3.7H4Z", fill: "currentColor", stroke: "currentColor", "stroke-width": "1.3", "stroke-linejoin": "round" } },
+      { tag: "path", attrs: { d: "M15.2 9.4a4.4 4.4 0 0 1 0 5.2", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+      { tag: "path", attrs: { d: "M18 6.6a8 8 0 0 1 0 10.8", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    ], "0 0 24 24");
+    volumeIcon.setAttribute("class", "ym-sl-fs-hits-volume-icon");
+    const volume = h("input", {
+      class: "ym-sl-fs-hits-range ym-sl-fs-hits-volume ym-sl-fs-player-seek",
+      type: "range", min: "0", max: "100", step: "1", value: "100",
+      title: "Volume", "aria-label": "Volume",
+    });
+    const volumeGroup = h("div", { class: "ym-sl-fs-hits-volume-group" }, volumeIcon, volume);
+    const transport = h("div", { class: "ym-sl-fs-hits-transport" }, play, previous, next, like, dislike);
+    const controlRow = h("div", { class: "ym-sl-fs-hits-dock-row" }, transport, volumeGroup);
+    // The dock stays in the tree for the live state refs, but cover-art Hits
+    // hides it: playback is keyboard-driven and the header is just the track.
+    const dock = h("div", { class: "ym-sl-fs-hits-dock" }, seekRow, controlRow);
+    const meta = h("div", { class: "ym-sl-fs-hits-meta" }, title, bylineRow, chips, actions);
+    const head = h("div", { class: "ym-sl-fs-hits-head" }, meta, artWrap);
+    const inner = h("div", { class: "ym-sl-fs-hits-inner" }, head, dock);
+    // The layout control keeps the old floating top-right position.
+    const topUtils = h("div", { class: "ym-sl-fs-hits-top-utils" }, layout);
+    const root = h("div", { class: "ym-sl-fs-hits" }, inner, topUtils);
+
+    fsHits = {
+      root, inner, art, artWrap, title, byline, writers, bylineRow, chips: [chipSync, chipProvider],
+      creditsKey: "", people, providerIcon: chipProviderIcon, providerText: chipProviderText,
+      play, previous, next, like, dislike,
+      copyLink, options, layout, copyLyrics, layoutLabel,
+      dock, seek, seekCurrent, seekTotal, volume, volumeIcon,
+      seekAt: 0, volumeAt: 0, seekTimer: 0, seekDrag: false, volumeDrag: false,
+    };
+    fsOverlay.appendChild(root);
+
+    play.addEventListener("click", toggleFsHitsPlayback);
+    previous.addEventListener("click", () => clickPlayerButton("previous"));
+    next.addEventListener("click", () => clickPlayerButton("next"));
+    const endHitsSeekDrag = () => {
+      fsHits.seekDrag = false;
+      fsHits.seekAt = performance.now();
+    };
+    seek.addEventListener("pointerdown", () => {
+      fsHits.seekDrag = true;
+      fsHits.seekAt = performance.now();
+    });
+    seek.addEventListener("pointerup", endHitsSeekDrag);
+    seek.addEventListener("pointercancel", endHitsSeekDrag);
+    seek.addEventListener("lostpointercapture", endHitsSeekDrag);
+    seek.addEventListener("input", () => {
+      fsHits.seekAt = performance.now();
+      const total = Number(seek.max) || 0;
+      const value = Number(seek.value);
+      if (Number.isFinite(value)) {
+        fsHits.seekCurrent.textContent = fsHitsClock(value);
+        const percent = total > 0 ? clamp(value / total * 100, 0, 100) : 0;
+        seek.style.setProperty("--slider-fill", percent + "%");
+      }
+      if (fsHits.seekTimer) window.clearTimeout(fsHits.seekTimer);
+      fsHits.seekTimer = window.setTimeout(() => {
+        fsHits.seekTimer = 0;
+        const player = window.YTMod && window.YTMod.player;
+        if (player && typeof player.seek === "function") player.seek(Number(seek.value));
+      }, 80);
+    });
+    const commitHitsSeek = () => {
+      fsHits.seekDrag = false;
+      fsHits.seekAt = performance.now();
+      if (fsHits.seekTimer) {
+        window.clearTimeout(fsHits.seekTimer);
+        fsHits.seekTimer = 0;
+      }
+      const player = window.YTMod && window.YTMod.player;
+      if (player && typeof player.seek === "function") player.seek(Number(seek.value));
+    };
+    seek.addEventListener("change", commitHitsSeek);
+    const applyHitsVolume = () => {
+      fsHits.volumeAt = performance.now();
+      const raw = Number(volume.value);
+      if (!Number.isFinite(raw)) return;
+      const percent = clamp(raw, 0, 100);
+      volume.style.setProperty("--slider-fill", percent + "%");
+      volume.setAttribute("aria-valuenow", String(Math.round(percent)));
+      const player = window.YTMod && window.YTMod.player;
+      if (!player) return;
+      if (typeof player.getVolume === "function") {
+        const info = player.getVolume();
+        if (info && info.muted && typeof player.setMuted === "function") player.setMuted(false);
+      }
+      if (typeof player.setVolume === "function") player.setVolume(percent / 100);
+    };
+    const endHitsVolumeDrag = () => {
+      fsHits.volumeDrag = false;
+      fsHits.volumeAt = performance.now();
+    };
+    volume.addEventListener("pointerdown", () => {
+      fsHits.volumeDrag = true;
+      fsHits.volumeAt = performance.now();
+    });
+    volume.addEventListener("pointerup", endHitsVolumeDrag);
+    volume.addEventListener("pointercancel", endHitsVolumeDrag);
+    volume.addEventListener("lostpointercapture", endHitsVolumeDrag);
+    volume.addEventListener("input", applyHitsVolume);
+    volume.addEventListener("change", applyHitsVolume);
+    like.addEventListener("click", () => { clickFsRating("like"); syncFsHitsLive(); });
+    dislike.addEventListener("click", () => { clickFsRating("dislike"); syncFsHitsLive(); });
+    copyLink.addEventListener("click", () => {
+      const videoId = getCurrentFsVideoId();
+      const url = videoId
+        ? "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId)
+        : location.href;
+      fsHitsWriteClipboard(url, () => flashFsHits(copyLink, "Link copied"));
+    });
+    options.addEventListener("click", () => {
+      if (fsOptionsButton) fsOptionsButton.click();
+    });
+    layout.addEventListener("click", () => {
+      applyFullscreenLayout(nextFsLayoutMode(fsLayoutMode));
+    });
+    copyLyrics.addEventListener("click", () => {
+      const text = fsHitsPlainText();
+      if (!text) return;
+      fsHitsWriteClipboard(text, () => flashFsHits(copyLyrics, "Lyrics copied"));
+    });
+
+    fsHitsRO = new ResizeObserver(() => syncFsHitsGeometry());
+    fsHitsRO.observe(root);
+    refreshFsHits();
   }
 
   function buildFullscreenControls() {
@@ -718,12 +1342,11 @@
       overlay.classList.toggle("hidden");
       if (opening && overlay._staggerOpen) overlay._staggerOpen();
     });
-    // Order: Exit · Options · Layout · Hide lyrics (right). Options sits right
-    // next to Exit so the two most-used controls are adjacent, and cycling the
-    // layout still never sits next to Exit, or a mis-click exits fullscreen
-    // (AJ, 2026-10-19). Hide lyrics expands only in Video Background, so for
-    // every other layout the visible row is exactly Exit · Options · Layout.
-    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLayoutSelect, fsLyricsToggle);
+    // Order: Exit · Options · Hide lyrics · Layout (right). Options sits next
+    // to Exit so the two most-used controls are adjacent, and Layout stays last
+    // so expanding Hide lyrics in Video Background grows the row leftward
+    // without moving the layout button off the right edge.
+    fsControls = h("div", { class: "ym-sl-fs-controls" }, exit, fsOptionsButton, fsLyricsToggle, fsLayoutSelect);
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
@@ -815,6 +1438,10 @@
     fsPlayerPlayButton = playButton;
     fsPlayerControls = h("div", { class: "ym-sl-fs-player-controls" }, playChip, scrubber);
     fsOverlay.append(fsControls, fsPlayerControls);
+    // Hits header. Built after the classic chrome so its buttons can
+    // reuse the existing play / rating / options handlers instead of cloning
+    // their logic (AJ, 2026-11-09).
+    buildFsHits();
     // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
     // The media is z-index 2 and the lyrics pane is z-index 3, so a button
     // parented to the media was painted UNDER the lyrics and the dislike
@@ -1002,19 +1629,15 @@
       setVideoOffsetMs(Number(fsOffsetRange.value) || 0, true);
     });
     attachFineOffsetDrag(fsOffsetRange);
-    let savedMode = "side";
-    try { savedMode = localStorage.getItem("better_lyrics_fullscreen_layout_v1") || "side"; } catch (_) {}
+    // Cover art opens in Hits. Music videos open in the side-by-side Video +
+    // Lyrics composition and never in Hits; their choice is stored separately
+    // so watching an MV cannot change the cover-art layout.
     const hasVideo = !!findPlayerVideo();
-    // The layout used to be a <select> with a Background option that had to be
-    // hidden and disabled when the track had no video. It is a cycle button now,
-    // so there is no `backgroundOption` to touch - and referencing the stale
-    // name threw a ReferenceError at the very END of this function.
-    // That is why it mattered far more than it looks: the throw aborted
-    // enterFullscreenMode() before it could attach the keydown and
-    // fullscreenchange listeners (so Escape left the overlay stranded on the
-    // page), start the 2s refresh interval (media reconcile, band anchor,
-    // Kawarp art sync) and start idle tracking (so the chrome never hid).
-    // All three are fixed by deleting the two dead lines.
+    let savedMode = hasVideo ? "side" : "hits";
+    try {
+      savedMode = localStorage.getItem(hasVideo ? FS_LAYOUT_VIDEO_KEY : FS_LAYOUT_KEY) || savedMode;
+    } catch (_) {}
+    if (hasVideo && savedMode === "hits") savedMode = "side";
     if (!hasVideo && savedMode === "background") savedMode = "side";
     applyFullscreenLayout(savedMode);
     fsLyricsHidden = false;

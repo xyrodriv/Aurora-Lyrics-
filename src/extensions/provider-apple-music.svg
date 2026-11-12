@@ -1,0 +1,46 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="128"
+  height="128"
+  viewBox="0 0 128 128"
+  role="img"
+  aria-label="Apple Music"
+>
+  <defs>
+    <linearGradient id="apple-music-gradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FA5876"/>
+      <stop offset="100%" stop-color="#F52D48"/>
+    </linearGradient>
+  </defs>
+
+  <rect
+    width="128"
+    height="128"
+    rx="28"
+    fill="url(#apple-music-gradient)"
+  />
+
+  <path
+    transform="translate(-3 0)"
+    fill="#FFF"
+    d="
+      M91 25
+      Q94 24.4 94 28
+      V82
+      C94 89 88 94 81 94
+      C75 94 71 91 71 86
+      C71 80 77 76 84 76
+      H87
+      V46
+      L55 53
+      V91
+      C55 98 49 103 42 103
+      C36 103 32 100 32 95
+      C32 89 38 85 45 85
+      H48
+      V37
+      Q48 34 51 33.4
+      Z
+    "
+  />
+</svg>

@@ -169,7 +169,6 @@
       return root;
     };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
-    const trackEl = h("div", { id: "ym-sl-track", class: "ym-sl-track", text: "Synced Lyrics" });
     const importButton = h("button", {
       class: "ym-sl-import",
       type: "button",
@@ -250,6 +249,70 @@
       if (Number.isFinite(seconds)) setVideoOffsetMs(seconds * 1000, true);
     });
 
+    // Community-shared offset. The first person to post claims the track + mode
+    // slot; everyone else gets that value on load. The owner token lives only in
+    // localStorage, so Undo appears on the poster's own browser. There is no
+    // Aurora account: the name is a display label, not an identity.
+    const communityOffsetWrap = h("div", { class: "ym-sl-community-offset" });
+    const communityOffsetHead = h("div", { class: "ym-sl-community-offset-head" });
+    communityOffsetHead.append(
+      h("span", { class: "ym-sl-options-section-title", text: "Community offset" }),
+      h("span", { class: "ym-sl-community-offset-badge", text: "shared" })
+    );
+    communityOffsetStatus = h("div", {
+      class: "ym-sl-community-offset-status",
+      role: "status",
+      "aria-live": "polite",
+      text: "Play a track to share an offset.",
+    });
+    communityOffsetName = h("input", {
+      class: "ym-sl-community-offset-name",
+      type: "text",
+      maxlength: "24",
+      autocomplete: "nickname",
+      placeholder: "Your name (optional)",
+      "aria-label": "Name shown next to the shared offset",
+    });
+    try {
+      if (window.localStorage) {
+        communityOffsetName.value = window.localStorage.getItem(COMMUNITY_OFFSET_NAME_KEY) || "";
+      }
+    } catch (_) {}
+    communityOffsetName.addEventListener("input", () => {
+      try {
+        if (window.localStorage) {
+          window.localStorage.setItem(COMMUNITY_OFFSET_NAME_KEY, communityOffsetName.value.slice(0, 24));
+        }
+      } catch (_) {}
+    });
+    communityOffsetPostButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-post",
+      type: "button",
+      title: "Share the current offset with everyone",
+      text: "Post offset",
+    });
+    communityOffsetUndoButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-undo hidden",
+      type: "button",
+      title: "Remove the shared offset you posted",
+      text: "Undo",
+    });
+    communityOffsetReportButton = h("button", {
+      class: "ym-sl-community-offset-btn ym-sl-community-offset-report hidden",
+      type: "button",
+      title: "Report this offset to the moderators",
+      text: "Report",
+    });
+    communityOffsetPostButton.addEventListener("click", () => { postCommunityOffset(); });
+    communityOffsetUndoButton.addEventListener("click", () => { undoCommunityOffset(); });
+    communityOffsetReportButton.addEventListener("click", () => { reportCommunityOffset(); });
+    const communityOffsetActions = h("div", { class: "ym-sl-community-offset-actions" },
+      communityOffsetPostButton, communityOffsetUndoButton, communityOffsetReportButton
+    );
+    communityOffsetWrap.append(
+      communityOffsetHead, communityOffsetStatus, communityOffsetName, communityOffsetActions
+    );
+
     // Options is a pill beside the song-layout switcher, in the empty band
     // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
     // across the panel's own top edge, which only appeared for people who
@@ -283,8 +346,6 @@
       "aria-label": "Close options",
     });
     optionsHeader.append(optionsTitle, optionsClose);
-    const optionsTop = h("div", { class: "ym-sl-options-section" });
-    optionsTop.append(trackEl, videoOffsetWrap);
     const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
     const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
@@ -405,7 +466,7 @@
           : "Nothing to clear — the cache was already empty.";
       } catch (error) {
         cacheStatus.textContent = "Could not clear the cache.";
-        console.warn("[AuroraLyrics] clear cache failed:", error);
+        alWarn("clear cache failed:", error);
       }
       cacheDelete.disabled = false;
       cacheCancel.disabled = false;
@@ -422,13 +483,10 @@
     const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
     const optionsPanels = h("div", { class: "ym-sl-options-panels" });
 
-    const panelNowPlaying = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Now playing" }),
-      trackEl
-    );
     const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
       h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
-      videoOffsetWrap
+      videoOffsetWrap,
+      communityOffsetWrap
     );
     // Per-SONG cache controls, in the File tab next to the import buttons. The
     // global purge lives in the Cache tab; this one only ever touches the track
@@ -463,15 +521,12 @@
     );
 
     const optionSections = [
-      { label: "Playing", panel: panelNowPlaying },
       { label: "Sync", panel: panelSync },
       { label: "File", panel: panelFile },
       { label: "Cache", panel: panelCache },
     ];
-    // Options opens on Sync rather than Playing (AJ, 2026-10-20): Sync is what the
-    // panel is opened for (offset + pause sync), so defaulting to Playing made
-    // every visit start with a click. Index into optionSections above.
-    const DEFAULT_OPTION_TAB = 1;
+    // Options opens on Sync, the reason the panel exists (offset + pause sync).
+    const DEFAULT_OPTION_TAB = 0;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -537,13 +592,19 @@
         text: section.label,
       });
       if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
+      section.panel.inert = index !== DEFAULT_OPTION_TAB;
+      section.panel.setAttribute("aria-hidden", index === DEFAULT_OPTION_TAB ? "false" : "true");
       optionsPanels.appendChild(section.panel);
       tab.addEventListener("click", () => {
         if (tab.classList.contains("active")) return;
         optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
         tab.classList.add("active");
         tab.setAttribute("aria-selected", "true");
-        optionSections.forEach((s) => s.panel.classList.remove("active"));
+        optionSections.forEach((s) => {
+          s.panel.classList.remove("active");
+          s.panel.inert = s !== section;
+          s.panel.setAttribute("aria-hidden", s === section ? "false" : "true");
+        });
         section.panel.classList.add("active");
         syncPanelsHeight(); // animate container height to the new panel
         staggerIn(section.panel, false); // clean spring on the newly shown panel

@@ -387,6 +387,9 @@
     } else {
       creditsFooterEl = null;
     }
+    // The Hits header mirrors this attribution; refresh it now rather than
+    // waiting for the next 500ms tick.
+    if (fsHits) syncFsHitsCredits();
     // A new track invalidates any in-progress credits reveal: position is about to
     // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
     // doing it here avoids a one-frame flash of the previous song parked at bottom.
@@ -511,7 +514,7 @@
         } catch (error) {
           manualLyricsIsPermanent = false;
           manualLyricsTrackKey = trackKey;
-          console.warn("[AuroraLyrics] Could not save permanent TTML:", error);
+          alWarn("Could not save permanent TTML:", error);
         }
       } else {
         manualLyricsIsPermanent = false;

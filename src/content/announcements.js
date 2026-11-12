@@ -12,6 +12,12 @@
  */
 (function () {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alDebug = console.debug.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+
 
   const FEED_URL = "https://site-ecb11ddf30644a24b5d9f12c57480dbd.freebuff.page/latest";
   const POLL_MS = 5 * 60 * 1000;
@@ -313,16 +319,6 @@
       "aria-label": "Aurora announcement: " + announcement.title,
     });
 
-    const face = el("div", { class: "ym-upd-cardface", "aria-hidden": "true" });
-    try {
-      const src = chrome.runtime.getURL("assets/manifest-logo.webp");
-      const image = new Image();
-      image.onload = () => {
-        face.style.backgroundImage = 'url("' + src + '")';
-      };
-      image.src = src;
-    } catch (_) {}
-
     const closeButton = el("button", {
       class: "ym-upd-close ym-announcement-close",
       type: "button",
@@ -356,7 +352,7 @@
 
     const ok = el("button", { class: "ym-upd-btn primary", type: "button", text: "Got it" });
     const foot = el("div", { class: "ym-upd-foot" }, ok);
-    card.append(face, head, body, foot);
+    card.append(head, body, foot);
     overlay.appendChild(card);
 
     const focusables = () => Array.from(overlay.querySelectorAll(
@@ -516,7 +512,7 @@
       });
     } catch (error) {
       if (!warned) {
-        console.debug("[Aurora Lyrics] announcement feed unavailable", error);
+        alDebug("announcement feed unavailable", error);
         warned = true;
       }
       return;

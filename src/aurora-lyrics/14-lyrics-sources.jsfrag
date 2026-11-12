@@ -91,7 +91,7 @@
 
   async function loadSpicyCache() {
     if (spicyCache) {
-      console.log(`[AuroraLyrics] cache live: ${Object.keys(spicyCache).length} entries.`);
+      alLog(`lyrics in cache: ${Object.keys(spicyCache).length}`);
       return Promise.resolve(spicyCache);
     }
     if (spicyCacheLoad) return spicyCacheLoad;
@@ -99,17 +99,16 @@
       // Without the bridge every lookup is a guaranteed miss and every result
       // is thrown away — a failure mode that looks exactly like a working
       // resolver feeding a broken API call.
-      console.warn("[AuroraLyrics] cache bridge unavailable; nothing will be cached this session.");
+      alWarn("cache unavailable; nothing will be saved this session.");
       spicyCache = {};
       return Promise.resolve(spicyCache);
     }
     spicyCacheLoad = window.YTMod.getSpicyCache().then((stored) => {
       spicyCache = (stored && typeof stored === "object" && !Array.isArray(stored)) ? stored : {};
-      console.log(`[AuroraLyrics] cache init: ${Object.keys(spicyCache).length} entries. [${Object.keys(spicyCache).slice(0, 8).join(", ")}]`);
       invalidateStaleSpicyEntries();
       return spicyCache;
     }).catch((error) => {
-      console.warn("[AuroraLyrics] cache read failed; starting empty:", error && error.message);
+      alWarn("cache read failed; starting empty:", error && error.message);
       spicyCache = {};
       return spicyCache;
     });
@@ -124,7 +123,7 @@
     if (!window.YTMod || typeof window.YTMod.setSpicyCache !== "function") return;
     const snapshot = spicyCache;
     Promise.resolve(window.YTMod.setSpicyCache(snapshot)).catch((error) => {
-      console.warn("[AuroraLyrics] could not persist lyrics cache:", error);
+      alWarn("cache save failed:", error);
     });
   }
 
@@ -185,7 +184,7 @@
     if (!drops.length) return 0;
     drops.forEach((k) => { delete spicyCache[k]; });
     markSpicyCacheDirty();
-    console.log(`[AuroraLyrics] cache version changed; dropped ${drops.length} re-derivable "sp:" entr${drops.length === 1 ? "y" : "ies"}.`);
+    alLog(`cache: dropped ${drops.length} stale ${drops.length === 1 ? "entry" : "entries"}.`);
     return drops.length;
   }
 
@@ -252,7 +251,7 @@
     try {
       await window.YTMod.clearSpicyCache();
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear lyrics cache:", error);
+      alWarn("cache clear failed:", error);
     }
   }
 
@@ -502,7 +501,7 @@
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) console.warn("[AuroraLyrics] ListenBrainz lookup failed:", error && error.message);
+      if (!userAborted) alWarn("ListenBrainz lookup failed:", error && error.message);
       return { ids: [], transient: !userAborted };
     } finally {
       clearTimeout(timer);
@@ -512,12 +511,12 @@
     // 400 = our parameters were rejected. That is our bug, not a flake, so it is
     // a definitive no rather than something worth retrying.
     if (response.status === 400) {
-      console.warn("[AuroraLyrics] ListenBrainz rejected the query (HTTP 400).");
+      alWarn("ListenBrainz rejected the query (HTTP 400).");
       return { ids: [], transient: false };
     }
     if (response.status === 429) {
       lbThrottledUntil = Date.now() + 30_000;
-      console.warn("[AuroraLyrics] ListenBrainz rate-limited us; backing off for 30s.");
+      alWarn("ListenBrainz rate-limited us; backing off for 30s.");
       return { ids: [], transient: true };
     }
     if (response.status >= 500) return { ids: [], transient: true };
@@ -621,15 +620,15 @@
         .sort((a, b) => b.score - a.score);
       const best = candidates[0];
       if (!best) {
-        console.warn(`[AuroraLyrics] MusicBrainz found no Spotify-linked recording for "${track.title}".`);
+        alWarn(`MusicBrainz: no Spotify match for "${track.title}".`);
         return { id: null, transient: false };
       }
       const id = musicBrainzSpotifyId(best.recording);
-      console.log(`[AuroraLyrics] resolved Spotify id ${id} via MusicBrainz (${best.score} score).`);
+      alLog(`Spotify id ${id} via MusicBrainz (${best.score}).`);
       return { id, transient: false };
     } catch (error) {
       if (!controller.signal.aborted) {
-        console.warn("[AuroraLyrics] MusicBrainz fallback failed:", error && error.message);
+        alWarn("MusicBrainz fallback failed:", error && error.message);
       }
       return { id: null, transient: !controller.signal.aborted };
     }
@@ -638,7 +637,7 @@
   async function resolveSpotifyIdUncached(track, controller, key) {
     const title = track && track.title;
     if (!title) {
-      console.warn("[AuroraLyrics] no track title; cannot resolve Spotify id.");
+      alWarn("no track title; Spotify lookup skipped.");
       return { id: null, transient: false };
     }
 
@@ -668,13 +667,13 @@
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
           if (lbThrottledUntil > Date.now()) {
-            console.warn("[AuroraLyrics] ListenBrainz is in backoff; moving to MusicBrainz fallback.");
+            alWarn("ListenBrainz backing off; trying MusicBrainz.");
             break lbLadder;
           }
           if (attempts >= LB_MAX_ATTEMPTS) {
             // Budget exhausted without a definitive answer, so the caller must
             // not record this as a permanent miss.
-            console.warn(`[AuroraLyrics] ListenBrainz attempt budget (${LB_MAX_ATTEMPTS}) exhausted; moving to MusicBrainz fallback.`);
+            alWarn("ListenBrainz budget spent; trying MusicBrainz.");
             break lbLadder;
           }
           attempts++;
@@ -685,14 +684,14 @@
 
           if (out.ids.length) {
             const id = out.ids[0];
-            console.log(`[AuroraLyrics] resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
+            alLog(`resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
             return { id, transient: false };
           }
         }
       }
     }
 
-    console.warn(`[AuroraLyrics] ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
+    alWarn(`ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
@@ -701,7 +700,7 @@
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
     if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      console.warn(`[AuroraLyrics] free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
+      alWarn(`free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
       return { id: null, transient: true };
     }
     return { id: null, transient: false };
@@ -723,7 +722,7 @@
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
       if (cached && cached.spotifyId) {
-        console.log(`[AuroraLyrics] Spotify id ${cached.spotifyId} from cache (resolver).`);
+        alLog(`Spotify id ${cached.spotifyId} from cache (resolver).`);
         return cached.spotifyId;
       }
     }
@@ -961,7 +960,7 @@
     if (communityCache) return communityCache;
     if (communityCacheLoad) return communityCacheLoad;
     if (!window.YTMod || typeof window.YTMod.getCommunityCache !== "function") {
-      console.warn("[AuroraLyrics] community cache bridge unavailable; nothing will be cached this session.");
+      alWarn("community cache bridge unavailable; nothing will be cached this session.");
       communityCache = {};
       return communityCache;
     }
@@ -976,7 +975,7 @@
       }
       return communityCache;
     }).catch((error) => {
-      console.warn("[AuroraLyrics] community cache read failed; starting empty:", error && error.message);
+      alWarn("community cache read failed; starting empty:", error && error.message);
       communityCache = {};
       return communityCache;
     });
@@ -991,7 +990,7 @@
       .slice(0, COMMUNITY_CACHE_LIMIT);
     communityCache = Object.fromEntries(entries);
     window.YTMod.setCommunityCache(communityCache).catch((error) => {
-      console.warn("[AuroraLyrics] could not persist community cache:", error && error.message);
+      alWarn("could not persist community cache:", error && error.message);
     });
   }
 
@@ -1045,7 +1044,7 @@
     try {
       await window.YTMod.setCommunityCache({});
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear Aurora Community cache:", error);
+      alWarn("could not clear Aurora Community cache:", error);
     }
     return count;
   }
@@ -1097,11 +1096,11 @@
     const cached = await getCommunityCacheEntry(videoId);
     if (cached) {
       if (cached.hit === false) {
-        console.log(`[AuroraLyrics] cached Aurora Community miss for ${videoId}; skipping API.`);
+        alLog(`cached Aurora Community miss for ${videoId}; skipping API.`);
         return null;
       }
       if (cached.ttml) {
-        console.log(`[AuroraLyrics] served TTML from Aurora Community cache (${videoId}).`);
+        alLog(`served TTML from Aurora Community cache (${videoId}).`);
         return {
           ttml: cached.ttml,
           attribution: cached.attribution || null,
@@ -1131,7 +1130,7 @@
       });
     } catch (error) {
       if (controller.signal.aborted || (error && error.name === "AbortError")) return null;
-      console.warn("[AuroraLyrics] Aurora Community request failed:", error);
+      alWarn("Aurora Community request failed:", error);
       return null;
     }
     if (controller.signal.aborted || key !== currentTrackKey) return null;
@@ -1140,13 +1139,13 @@
       return null;
     }
     if (!response.ok) {
-      console.warn(`[AuroraLyrics] Aurora Community returned HTTP ${response.status}.`);
+      alWarn(`Aurora Community returned HTTP ${response.status}.`);
       return null;
     }
     const json = await response.json().catch(() => null);
     const data = json && json.data ? json.data : null;
     if (!data || typeof data.ttml !== "string" || !data.ttml.trim()) {
-      console.warn("[AuroraLyrics] Aurora Community returned no usable TTML.");
+      alWarn("Aurora Community returned no usable TTML.");
       return null;
     }
     const attribution = normalizeCommunityAttribution(data.attribution);
@@ -1162,7 +1161,7 @@
       test: data.test === true,
       updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : "",
     }, ttlMs);
-    console.log(`[AuroraLyrics] fetched Aurora Community TTML for ${videoId}.`);
+    alLog(`fetched Aurora Community TTML for ${videoId}.`);
     return {
       ttml: data.ttml,
       attribution,
@@ -1174,12 +1173,12 @@
 
   async function fetchSpicyLyrics(track, key, controller) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
-    if (!track || !track.title) { console.warn("[AuroraLyrics] no track title; skipping."); return null; }
-    console.log(`[AuroraLyrics] resolving for "${track.title}" / "${track.artist || "?"}"…`);
+    if (!track || !track.title) { alWarn("no track title; skipping."); return null; }
+    alLog(`resolving for "${track.title}" / "${track.artist || "?"}"…`);
     const spotifyId = await resolveSpotifyId(track, controller, key);
     if (controller.signal.aborted || key !== currentTrackKey) return null;
     if (!spotifyId) {
-      console.warn("[AuroraLyrics] no Spotify track id resolved; falling back.");
+      alWarn("no Spotify track id resolved; falling back.");
       return null;
     }
 
@@ -1190,20 +1189,20 @@
     const cached = await getSpicyCacheEntry(cacheKey);
     if (cached) {
       if (cached.ttml) {
-        console.log(`[AuroraLyrics] served TTML from cache (${spotifyId}).`);
+        alLog(`served TTML from cache (${spotifyId}).`);
         return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
       }
       if (cached.hit === false) {
-        console.log(`[AuroraLyrics] cached "no sync available" for ${spotifyId}; skipping API.`);
+        alLog(`cached "no sync available" for ${spotifyId}; skipping API.`);
         return null;
       }
       // An entry that is neither TTML nor a recorded miss is a half-written
       // record — exactly what a cache written while the page was being torn
       // down looks like. Log it, because otherwise this path is a silent
       // fall-through to the API and reads as "the cache did nothing".
-      console.warn(`[AuroraLyrics] cache entry for ${spotifyId} is incomplete; re-querying the API.`);
+      alWarn(`cache entry for ${spotifyId} is incomplete; re-querying the API.`);
     }
-    console.log(`[AuroraLyrics] querying ${SPICY_LYRICS_API}/${spotifyId}`);
+    alLog(`querying ${SPICY_LYRICS_API}/${spotifyId}`);
 
     // Every exit from here on logs. This function used to have several silent
     // `return null` paths, and because those are indistinguishable in the console
@@ -1211,7 +1210,7 @@
     // sent us chasing the resolver twice. A drop-in replacement for the guard
     // below, used everywhere so no branch can go quiet again.
     const bail = (why) => {
-      console.warn(`[AuroraLyrics] giving up on ${spotifyId} — ${why}`);
+      alWarn(`giving up on ${spotifyId} — ${why}`);
       return null;
     };
 
@@ -1227,7 +1226,7 @@
       });
     } catch (e) {
       if (controller.signal.aborted) return bail("request was aborted (a newer track/request superseded it)");
-      console.warn("[AuroraLyrics] request failed:", e);
+      alWarn("request failed:", e);
       return null;
     }
     // Report WHICH condition dropped the answer — aborted vs a changed track are
@@ -1238,7 +1237,7 @@
     if (key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
-    console.log(`[AuroraLyrics] answered HTTP ${response.status} for ${spotifyId}`);
+    alLog(`answered HTTP ${response.status} for ${spotifyId}`);
     if (response.status === 404) {
       // The API itself says it has no TTML for this id. That is a real answer
       // and safe to remember.
@@ -1292,7 +1291,7 @@
       songwriters: parsed.songwriters || [],
       spotifyId,
     });
-    console.log(`[AuroraLyrics] parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
     return parsed;
   }
 
@@ -1322,7 +1321,7 @@
     if (manualPick) {
       if (stale()) return;
       if (loadLRCLyrics(manualPick, track.durationMs)) {
-        console.log("[AuroraLyrics] manual search pick served from cache.");
+        alLog("manual search pick served from cache.");
         return;
       }
       // The entry no longer parses (corrupt or older shape): drop it and let
@@ -1406,17 +1405,17 @@
               test: communityResult.test === true,
             };
             if (loadTTML(communityResult.ttml, "external")) {
-              console.log("[AuroraLyrics] TTML rendered from Aurora Community.");
+              alLog("TTML rendered from Aurora Community.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[AuroraLyrics] Aurora Community returned TTML we could not parse; trying the next source.");
+            alWarn("Aurora Community returned TTML we could not parse; trying the next source.");
           } else {
-            console.log("[AuroraLyrics] no Aurora Community TTML for this track; trying the next source.");
+            alLog("no Aurora Community TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[AuroraLyrics] Aurora Community lookup failed; trying the next source:", error);
+          alWarn("Aurora Community lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -1428,7 +1427,7 @@
             // Silence here was a real dead end: the TTML was fetched and parsed,
             // then dropped on the floor with no output, which reads as "the fetch
             // failed".
-            console.warn(`[AuroraLyrics] discarding the Spicy result — ${
+            alWarn(`discarding the Spicy result — ${
               controller.signal.aborted ? "request aborted" : "a newer lyrics request superseded this one"}.`);
             return true;
           }
@@ -1440,17 +1439,17 @@
               songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
             };
             if (loadTTML(spicyResult.ttml, "external")) {
-              console.log("[AuroraLyrics] TTML rendered from the Spicy Lyrics API.");
+              alLog("TTML rendered from the Spicy Lyrics API.");
               return true;
             }
             pendingSpicyCredits = null;
-            console.warn("[AuroraLyrics] API returned TTML we could not parse; trying the next source.");
+            alWarn("API returned TTML we could not parse; trying the next source.");
           } else {
-            console.warn("[AuroraLyrics] no Spicy TTML for this track; trying the next source.");
+            alWarn("no Spicy TTML for this track; trying the next source.");
           }
         } catch (error) {
           if (error && error.name === "AbortError") return true;
-          console.warn("[AuroraLyrics] lookup failed; trying the next source:", error);
+          alWarn("lookup failed; trying the next source:", error);
         }
         return false;
       },
@@ -1465,7 +1464,7 @@
         } catch (error) {
           if (error && error.name === "AbortError") return true;
           if (stale()) return true;
-          console.warn("[AuroraLyrics] LRCLIB lookup failed:", error);
+          alWarn("LRCLIB lookup failed:", error);
           lrclibOutage = isLrclibOutage(error);
           return false;
         }

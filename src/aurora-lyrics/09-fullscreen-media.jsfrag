@@ -73,8 +73,8 @@
   function fullscreenKawarpFilter() {
     const s = bloomSettings();
     if (!s) return "";
-    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.5) +
-      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.78) +
+    return "saturate(" + clampOption(s.saturation, 0.5, 2.5, 1.2) +
+      ") brightness(" + clampOption(s.brightness, 0.5, 1.2, 0.60) +
       ") contrast(" + clampOption(s.contrast, 0.6, 1.6, 1) + ")";
   }
   function applyFullscreenKawarpLook() {
@@ -158,7 +158,7 @@
     } catch (error) {
       // Any failure (module load, WebGL context, image) falls back to the
       // static blurred cover by dropping the canvas and the hiding class.
-      console.warn("[AuroraLyrics] Kawarp backdrop failed:", error);
+      alWarn("Kawarp backdrop failed:", error);
       if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
       if (fsKawarp) { try { fsKawarp.dispose(); } catch (_) {} }
       fsKawarp = null;
@@ -356,6 +356,9 @@
       if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.remove("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // No video left to blur; drop Video Background back to side-by-side
+        // without rewriting the audio layout preference.
+        if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
       }
       return;
     }
@@ -372,6 +375,9 @@
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.add("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // Hits is cover-art only; a video appearing mid-session moves straight
+        // to the side-by-side composition without rewriting the stored MV layout.
+        if (fsLayoutMode === "hits") applyFullscreenLayout("side", false);
       }
       // The new MV's <video> is not decodable yet. Poll for it instead of leaving
       // the attach to the 2s refresh tick — THAT tick was the visible delay on a
@@ -427,8 +433,10 @@
           cssText: lv.style.cssText,
         };
         fsOverlay.classList.add("ym-sl-fs-has-video");
+        publishFsVideoAspect(lv);
         // The mode changed, so the volume group's home may have to change with it.
         syncFsChromeStructure();
+        if (fsLayoutMode === "hits") applyFullscreenLayout("side", false);
         // Defensive: drop any stale canvas before creating a new one so a repeated
         // attach can never leave two ambient backdrops stacked.
         if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -527,15 +535,16 @@
         // goes, and leaving it behind kept the pane on the MV's shape (it still
         // read 1920/1080 at the cover reveal).
         fsOverlay.style.removeProperty("--ym-sl-fs-video-ar");
+        fsOverlay.style.removeProperty("--ym-sl-fs-video-ratio");
         // The video is gone, so any pending "waiting for it to be ready" is moot
         // — drop it, or its spinner could appear over the cover art that is
         // about to load (AJ, 2026-09-28).
         cancelFsVideoReady();
         // If we were in Video Background, it has nothing to blur now - drop
         // back to Video + Lyrics so a non-MV skip can't strand a broken
-        // backdrop (AJ 2026-09-28). Guard with the call: applyFullscreenLayout
-        // itself also refuses "background" without a video.
-        if (fsLayoutMode === "background") applyFullscreenLayout("side");
+        // backdrop (AJ 2026-09-28). This is a fallback, not a preference, so
+        // do not rewrite the stored audio layout.
+        if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
         if (fsBgCanvas && fsBgCanvas.parentElement) {
           fsBgCanvas.parentElement.removeChild(fsBgCanvas);
         }

@@ -18,12 +18,13 @@
  */
 (function () {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alLog = console.log.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+  const alWarn = console.warn.bind(console, "%cAurora Lyrics", AURORA_BADGE);
 
-  // LOAD MARKER — confirms the updated Spicy Lyrics script actually executed in
-  // the page. If this line does NOT appear in the DevTools console after a full
-  // extension + tab reload, the new code is not being loaded (stale cache /
-  // wrong reload procedure), and any lyric-rendering change will have no effect.
-  console.log("[AuroraLyrics] Synced Lyrics loaded — Written By footer · build 2026-09-04a");
 
   // Keep the original internal ID so existing installs and saved lyrics remain active.
   const EXT_ID = "ytmod-spicy-lyrics";
@@ -33,8 +34,9 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
-  // Aurora Community — community TTML, keyed by the exact YouTube video id.
-  // The extension is read-only; uploads are handled by the Discord bot.
+  // Aurora Community — community TTML and shared offsets, keyed by the exact
+  // YouTube video id. TTML uploads are handled by the Discord bot; offsets can
+  // be posted from the Sync tab and are reported to the same API.
   const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
@@ -84,8 +86,8 @@
     warpIntensity: 1,
     blurPasses: 6,
     animationSpeed: 0.1,
-    saturation: 1.5,
-    dithering: 0.008,
+    saturation: 1.2,
+    // Dithering is the fixed kawarp-core default, not a user setting.
     transitionDuration: 1000,
     tintIntensity: 0,
     scale: 1,

@@ -20,6 +20,13 @@
 
 (() => {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alLog = console.log.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+  const alDebug = console.debug.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+
 
   /* ---- DOM helpers (Trusted-Types safe) ---- */
   const $ = (s, r) => (r || document).querySelector(s);
@@ -884,18 +891,19 @@
     // above (AJ, 2026-10-23).
     {
       id: "ytmod-dynamic",
-      name: "Aurora Bloom",
+      name: "Kawarp",
       author: "Aurora Lyrics",
       category: "Themes",
       stars: 5,
       tags: ["theme", "dynamic", "kawarp", "artwork"],
-      description: "An immersive full-screen theme that turns the playing track into a flowing, full-page backdrop.",
+      description: "Turns the playing track into a flowing, full-page Kawarp backdrop.",
       version: "1.0.0",
       lastUpdated: "2026-09-28",
+      website: "https://kawarp.vercel.app/",
       jsUrl: chrome.runtime.getURL("src/extensions/dynamic.js"),
       settings: [
-        { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 1.12, display: "decimal" },
-        { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.60, display: "decimal" },
+        { key: "brightness", label: "Brightness", min: 0.5, max: 1.2, step: 0.01, default: 0.60, display: "decimal" },
+        { key: "saturation", label: "Saturation", min: 0.5, max: 2.5, step: 0.05, default: 1.20, display: "decimal" },
         { key: "blurPasses", label: "Blur passes", min: 2, max: 8, step: 1, default: 6, display: "passes" },
         { key: "warpIntensity", label: "Warp intensity", min: 0.2, max: 1, step: 0.05, default: 1, display: "decimal" },
         // Music videos don't use Kawarp, so they get their own blurred backdrop
@@ -913,21 +921,22 @@
         // to tint the player bar and the sliders. It ships ON, which is what
         // Ambient's own default was (AJ, 2026-10-26).
         { key: "artworkAccent", label: "Artwork glow and accent colour", type: "toggle", default: true },
+        // Contrast applies to the Kawarp canvas AND the blurred image, like
+        // brightness/saturation above. Keep it above the collapsible custom
+        // background block so it stays visible with the image controls closed.
+        { key: "contrast", label: "Contrast", min: 0.6, max: 1.6, step: 0.01, default: 1, display: "decimal" },
         // Custom background (AJ, 2026-10-21). The blob lives in IndexedDB; the
         // key is only the boolean "an image is set and should be used".
-        // The header gives the block its own labelled section instead of letting
-        // it trail off the bottom of the Kawarp sliders.
-        { type: "header", label: "Custom background" },
+        // The disclosure keeps the image controls out of the way until they are
+        // needed, instead of letting them trail off the Kawarp sliders.
+        { type: "header", label: "Custom background", collapsible: true },
         { key: "customBg", label: "Background image", type: "file", default: false },
         { key: "customBgKawarp", label: "Use Kawarp on the image", type: "toggle", default: true },
         { key: "customBgBlur", label: "Blur", min: 0, max: 60, step: 1, default: 24, display: "pixels", disabledWhen: "customBgKawarp" },
-        // Contrast applies to the Kawarp canvas AND the blurred image, like
-        // brightness/saturation above.
-        { key: "contrast", label: "Contrast", min: 0.6, max: 1.6, step: 0.01, default: 1, display: "decimal" },
       ],
     },
     // Ambient used to live here as its own card. It read the same artwork the
-    // backdrop does, so it is now a switch on Aurora Bloom above (AJ,
+    // backdrop does, so it is now a switch on Kawarp above (AJ,
     // 2026-10-26). Its registry record is dropped by the orphan sweep at boot.
     {
       id: "ytmod-spicy-lyrics",
@@ -993,7 +1002,7 @@
         // track renders through the Spicy renderer, which honours this toggle.
         // (Line-synced tracks are drawn by the engine, which springs its own
         // scroll regardless.)
-        { key: "smoothScrolling", label: "Smooth scrolling", type: "toggle", default: true },
+        { key: "smoothScrolling", label: "Smooth scrolling", note: "Only for the Spicy Lyrics renderer", type: "toggle", default: true },
         { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
         { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
         // NOTE: "Use the Spicy Lyrics font across YouTube Music" used to live here.
@@ -2140,7 +2149,8 @@
   const reportedExts = new Set(); // ext ids reported this session (per-add-on gate)
   let reportSendCount = 0;        // total reports sent this session
   const REPORT_MAX = 3;           // beyond this, the panel points to Discord only
-  let currentReportExtId = "";    // ext id currently open in the modal
+  let currentReportExtId = "";
+  let currentReportExtName = "";    // ext id currently open in the modal
   let reportGen = 0;              // bumped on open; guards stale close/Send callbacks
   const REPORT_DISCORD_URL = "https://discord.gg/wsZxTSnaMa";
   function reportIssuesFor(ext) {
@@ -2153,6 +2163,61 @@
     };
     return (ext && byId[ext.id]) || ["Doesn't work", "Visual / layout", "Performance", "Buttons / controls", "Other"];
   }
+  // Discord link (inline, with a top-right arrow), shared by the report and
+  // feedback views' thanks states.
+  function makeReportDiscordLink() {
+    const arrowNs = "http://www.w3.org/2000/svg";
+    const arrow = document.createElementNS(arrowNs, "svg");
+    arrow.setAttribute("viewBox", "0 0 24 24");
+    arrow.setAttribute("class", "ym-report-discord-arrow");
+    arrow.setAttribute("aria-hidden", "true");
+    ["M7 17 17 7", "M8 7h9v9"].forEach((d) => {
+      const path = document.createElementNS(arrowNs, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "2.5");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      arrow.appendChild(path);
+    });
+    return h("a", { class: "ym-report-discord", href: REPORT_DISCORD_URL, target: "_blank", rel: "noopener noreferrer" },
+      h("span", { class: "ym-report-discord-text", text: "Join our Discord" }), arrow);
+  }
+  /* ---- submitting reports and feedback (AJ, 2026-11-04) -------------------
+     One endpoint, two kinds. The request goes through the service worker: it
+     owns the host permission, so the page's CORS policy never applies, and the
+     Discord bot token stays on the server — it is never in the extension.
+     Nothing identifying is sent: add-on, version, what broke, and the words
+     typed in the box. */
+  const REPORTS_URL = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page/v1/reports";
+  const REPORT_ERROR_TEXT = "Couldn't send. Check your connection and try again.";
+  function reportRequestId() {
+    try {
+      if (crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    } catch (_) {}
+    return String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+  function submitReport(payload) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (result) => { if (settled) return; settled = true; resolve(result || { ok: false, status: 0 }); };
+      try {
+        chrome.runtime.sendMessage(
+          { type: "ym-post-report", url: REPORTS_URL, body: JSON.stringify(payload) },
+          (response) => {
+            if (chrome.runtime.lastError) { done({ ok: false, status: 0 }); return; }
+            done(response);
+          }
+        );
+      } catch (_) {
+        done({ ok: false, status: 0 });
+      }
+      // A hung worker must not leave the button on "Sending…" forever.
+      window.setTimeout(() => done({ ok: false, status: 0 }), 8000);
+    });
+  }
+
   function buildReportProblem() {
     const scrim = h("div", { class: "ym-report-scrim hidden" });
     const card = h("div", { class: "ym-report-card" });
@@ -2173,6 +2238,7 @@
     otherWrap.append(otherInput);
     const send = h("button", { class: "ym-report-send", type: "button", text: "Send" });
     send.disabled = true;
+    const sendError = h("div", { class: "ym-report-error hidden" });
 
     let rows = [];
     // Single source of truth for the Other textarea (AJ, 2026-10-20). It used to
@@ -2288,34 +2354,13 @@
         return row;
       });
     };
-    pick.append(options, otherWrap, send);
+    pick.append(options, otherWrap, send, sendError);
 
-    // Discord link (embedded inline with a top-right arrow); reused by the
-    // thanks / "already reported" / "report limit reached" views.
-    const arrowNs = "http://www.w3.org/2000/svg";
-    const makeDiscordLink = () => {
-      const arrow = document.createElementNS(arrowNs, "svg");
-      arrow.setAttribute("viewBox", "0 0 24 24");
-      arrow.setAttribute("class", "ym-report-discord-arrow");
-      arrow.setAttribute("aria-hidden", "true");
-      ["M7 17 17 7", "M8 7h9v9"].forEach((d) => {
-        const path = document.createElementNS(arrowNs, "path");
-        path.setAttribute("d", d);
-        path.setAttribute("fill", "none");
-        path.setAttribute("stroke", "currentColor");
-        path.setAttribute("stroke-width", "2.5");
-        path.setAttribute("stroke-linecap", "round");
-        path.setAttribute("stroke-linejoin", "round");
-        arrow.appendChild(path);
-      });
-      return h("a", { class: "ym-report-discord", href: REPORT_DISCORD_URL, target: "_blank", rel: "noopener noreferrer" },
-        h("span", { class: "ym-report-discord-text", text: "Join our Discord" }), arrow);
-    };
     const thanks = h("div", { class: "ym-report-thanks hidden" },
       h("div", { class: "ym-report-thanks-title", text: "Thanks for reporting!" }),
       h("div", { class: "ym-report-thanks-sub" },
         document.createTextNode("Need extra help? "),
-        makeDiscordLink(),
+        makeReportDiscordLink(),
         document.createTextNode(".")
       ),
       h("button", { class: "ym-report-close", type: "button", text: "Close" })
@@ -2325,7 +2370,7 @@
       h("div", { class: "ym-report-done-title", text: "You've already reported" }),
       h("div", { class: "ym-report-done-sub" },
         document.createTextNode("If you're experiencing another bug, please "),
-        makeDiscordLink(),
+        makeReportDiscordLink(),
         document.createTextNode(".")
       ),
       h("button", { class: "ym-report-close", type: "button", text: "Close" })
@@ -2335,7 +2380,7 @@
       h("div", { class: "ym-report-done-title", text: "You can't report anymore" }),
       h("div", { class: "ym-report-done-sub" },
         document.createTextNode("You've reached the report limit. Please "),
-        makeDiscordLink(),
+        makeReportDiscordLink(),
         document.createTextNode(" if you need help.")
       ),
       h("button", { class: "ym-report-close", type: "button", text: "Close" })
@@ -2385,9 +2430,31 @@
     blocked.querySelector(".ym-report-close").addEventListener("click", closeReport);
     scrim.addEventListener("click", (e) => { if (e.target === scrim) closeReport(); });
 
-    send.addEventListener("click", () => {
+    send.addEventListener("click", async () => {
       if (send.disabled) return;
-      // Placeholder — wire the real submit later (AJ, 2026-10-19).
+      const issues = rows.filter((r) => r.classList.contains("selected")).map((r) => r.getAttribute("data-value"));
+      const other = otherVisible ? otherInput.value.trim() : "";
+      send.disabled = true;
+      send.textContent = "Sending…";
+      sendError.classList.add("hidden");
+      const result = await submitReport({
+        kind: "bug",
+        addon: currentReportExtId,
+        addonName: currentReportExtName,
+        version: runningVersion(),
+        issues: issues,
+        message: other,
+        id: reportRequestId(),
+        at: Date.now(),
+      });
+      send.textContent = "Send";
+      if (!result.ok) {
+        // Nothing was recorded, so the form stays open with what they typed.
+        send.disabled = false;
+        sendError.textContent = REPORT_ERROR_TEXT;
+        sendError.classList.remove("hidden");
+        return;
+      }
       if (reducedMotion() || !pick.animate) { pick.classList.add("hidden"); thanks.classList.remove("hidden"); markReported(); return; }
       // Track this fade so a re-open's cancelAll() clears it — an untracked
       // fill:forwards would pin `pick` at opacity:0 and render the form invisible
@@ -2421,7 +2488,7 @@
     });
 
     document.body.appendChild(scrim);
-    reportOverlay = { scrim, title, pick, thanks, done, blocked, options, otherWrap, otherInput, send, renderOptions, cancelAll, resetStyles };
+    reportOverlay = { scrim, title, pick, thanks, done, blocked, options, otherWrap, otherInput, send, sendError, renderOptions, cancelAll, resetStyles };
     return reportOverlay;
   }
   function openReportProblem(ext) {
@@ -2430,6 +2497,7 @@
     r.cancelAll();             // kill stale fill:forwards so nothing looks "closed"
     r.resetStyles();           // clear inline height/opacity/transform from last time
     currentReportExtId = (ext && ext.id) || "";
+    currentReportExtName = (ext && ext.name) || "";
     const atLimit = reportSendCount >= REPORT_MAX;
     const alreadyExt = !atLimit && reportedExts.has(currentReportExtId);
     const showingPick = !atLimit && !alreadyExt;
@@ -2445,6 +2513,8 @@
       r.otherWrap.classList.add("hidden");
       r.otherInput.value = "";
       r.send.disabled = true;
+      r.send.textContent = "Send";
+      r.sendError.classList.add("hidden");
       r.renderOptions(reportIssuesFor(ext));
     } else if (alreadyExt) {
       // This add-on was already reported this session (others can still report).
@@ -2472,13 +2542,166 @@
       });
     }
   }
-  // Appends the right-aligned "Report a problem" footer button to a detail host, so
-  // EVERY add-on has it — even ones with no settings — and it never reads as an
-  // Uninstall/Action button (AJ, 2026-10-19).
+  // ---- Send feedback (AJ, 2026-11-04) --------------------------------------
+  // The quieter sibling of "Report a problem": same surface and the same thanks
+  // state, but the ask is a suggestion rather than a fault, so it is one
+  // free-text box instead of an issue list. Send is a placeholder like the
+  // report form's — the Discord relay is not wired up yet.
+  let feedbackOverlay = null;
+  let feedbackExtId = "";
+  let feedbackName = "";
+  function buildFeedback() {
+    const scrim = h("div", { class: "ym-report-scrim hidden" });
+    const card = h("div", { class: "ym-report-card" });
+    const form = h("div", { class: "ym-report-pick" });
+    const title = h("div", { class: "ym-report-title", text: "Send feedback" });
+    const x = h("button", { class: "ym-report-x", type: "button", "aria-label": "Close", title: "Close", text: "\u00d7" });
+    form.append(h("div", { class: "ym-report-head" }, title, x));
+    const sub = h("div", { class: "ym-report-sub" });
+    const input = h("textarea", {
+      class: "ym-report-other-input",
+      placeholder: "What would make it better?",
+      rows: "4",
+      maxlength: "1000",
+    });
+    const send = h("button", { class: "ym-report-send", type: "button", text: "Send" });
+    send.disabled = true;
+    const sendError = h("div", { class: "ym-report-error hidden" });
+    input.addEventListener("input", () => { send.disabled = !input.value.trim(); });
+    form.append(sub, input, send, sendError);
+    const thanks = h("div", { class: "ym-report-thanks hidden" },
+      h("div", { class: "ym-report-thanks-title", text: "Thanks for the feedback!" }),
+      h("div", { class: "ym-report-thanks-sub" },
+        document.createTextNode("We read every one. To talk it through, "),
+        makeReportDiscordLink(),
+        document.createTextNode(".")
+      ),
+      h("button", { class: "ym-report-close", type: "button", text: "Close" })
+    );
+    card.append(form, thanks);
+    scrim.appendChild(card);
+    document.body.appendChild(scrim);
+
+    let isOpen = false;
+    // A finished forwards-fill would pin the card or the form at opacity 0 on the
+    // next open, so every show/close cancels and clears both layers first.
+    const clearAnim = (el) => {
+      if (!el) return;
+      if (el.getAnimations) el.getAnimations().forEach((a) => { try { a.cancel(); } catch (_) {} });
+      el.style.opacity = "";
+      el.style.transform = "";
+      el.style.filter = "";
+    };
+    const hide = () => {
+      scrim.classList.add("hidden");
+      clearAnim(card);
+      clearAnim(form);
+      clearAnim(thanks);
+      clearAnim(scrim);
+    };
+    const close = () => {
+      if (!isOpen) return;
+      isOpen = false;
+      if (reducedMotion() || !card.animate) { hide(); return; }
+      const finish = () => hide();
+      card.animate(
+        [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.96) translateY(8px)" }],
+        { duration: 200, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }
+      ).onfinish = finish;
+      scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: "ease-out", fill: "forwards" });
+      window.setTimeout(finish, 320);
+    };
+    x.addEventListener("click", close);
+    thanks.querySelector(".ym-report-close").addEventListener("click", close);
+    scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
+
+    send.addEventListener("click", async () => {
+      if (send.disabled) return;
+      send.disabled = true;
+      send.textContent = "Sending…";
+      sendError.classList.add("hidden");
+      const result = await submitReport({
+        kind: "feedback",
+        addon: feedbackExtId,
+        addonName: feedbackName,
+        version: runningVersion(),
+        issues: [],
+        message: input.value.trim(),
+        id: reportRequestId(),
+        at: Date.now(),
+      });
+      send.textContent = "Send";
+      if (!result.ok) {
+        send.disabled = false;
+        sendError.textContent = REPORT_ERROR_TEXT;
+        sendError.classList.remove("hidden");
+        return;
+      }
+      if (reducedMotion() || !form.animate) {
+        form.classList.add("hidden");
+        thanks.classList.remove("hidden");
+        return;
+      }
+      form.animate(
+        [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-8px)" }],
+        { duration: 240, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }
+      ).onfinish = () => {
+        form.classList.add("hidden");
+        form.style.opacity = "";
+        form.style.transform = "";
+        thanks.classList.remove("hidden");
+        thanks.animate(
+          [{ opacity: 0, transform: "translateY(12px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, easing: "cubic-bezier(.34,1.4,.5,1)" }
+        );
+      };
+    });
+
+    return {
+      open(name) {
+        isOpen = true;
+        clearAnim(card);
+        clearAnim(form);
+        clearAnim(thanks);
+        clearAnim(scrim);
+        form.classList.remove("hidden");
+        thanks.classList.add("hidden");
+        input.value = "";
+        send.disabled = true;
+        send.textContent = "Send";
+        sendError.classList.add("hidden");
+        sub.textContent = name
+          ? "Tell us what to add or change in " + name + "."
+          : "Tell us what to add or change.";
+        scrim.classList.remove("hidden");
+        if (!reducedMotion() && card.animate) {
+          scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
+          card.animate(
+            [{ opacity: 0, transform: "scale(.96) translateY(10px)" }, { opacity: 1, transform: "none" }],
+            { duration: 420, easing: "cubic-bezier(.34,1.4,.5,1)" }
+          );
+        }
+        window.setTimeout(() => { if (isOpen) input.focus(); }, 60);
+      },
+      close,
+    };
+  }
+  function openFeedback(ext) {
+    const r = feedbackOverlay || (feedbackOverlay = buildFeedback());
+    feedbackExtId = (ext && ext.id) || "";
+    feedbackName = (ext && ext.name) || "";
+    r.open(feedbackName);
+  }
+
+  // Appends the add-on's footer actions to a detail host: "Send feedback" and
+  // "Report a problem". EVERY add-on gets both — even ones with no settings —
+  // and neither reads as an Uninstall/Action button (AJ, 2026-10-19).
   function mountReportButton(host, ext) {
-    const btn = h("button", { class: "ym-report-btn", type: "button", text: "Report a problem" });
-    btn.addEventListener("click", () => openReportProblem(ext));
-    host.appendChild(h("div", { class: "ym-report-foot" }, btn));
+    const feedback = h("button", { class: "ym-feedback-btn", type: "button", text: "Send feedback" });
+    feedback.addEventListener("click", () => openFeedback(ext));
+    const report = h("button", { class: "ym-report-btn", type: "button", text: "Report a problem" });
+    report.addEventListener("click", () => openReportProblem(ext));
+    host.appendChild(h("div", { class: "ym-report-foot" }, feedback, report));
   }
 
   /* ===== custom background storage (AJ, 2026-10-21) =====================
@@ -2792,11 +3015,37 @@
       groups.appendChild(box);
       return groupRows;
     };
-    const startGroup = (label) => {
+    const startGroup = (label, opts) => {
       const box = h("div", { class: "ym-mk-sec" });
-      box.appendChild(h("div", { class: "ym-mk-sec-title", text: label }));
-      groupRows = h("div", { class: "ym-mk-sec-rows" });
-      box.appendChild(groupRows);
+      if (opts && opts.collapsible) {
+        const head = h("button", {
+          class: "ym-mk-sec-title ym-mk-sec-toggle",
+          type: "button",
+          "aria-expanded": "false",
+        });
+        head.appendChild(h("span", { text: label }));
+        const chev = svgIcon(ICON_CHEVRON);
+        chev.classList.add("ym-mk-sec-chev");
+        head.appendChild(chev);
+        const body = h("div", { class: "ym-mk-sec-collapse", "aria-hidden": "true" });
+        groupRows = h("div", { class: "ym-mk-sec-rows" });
+        body.appendChild(groupRows);
+        body.setAttribute("inert", "");
+        box.append(head, body);
+        head.addEventListener("click", () => {
+          const open = head.getAttribute("aria-expanded") !== "true";
+          head.setAttribute("aria-expanded", open ? "true" : "false");
+          head.classList.toggle("is-open", open);
+          body.classList.toggle("open", open);
+          body.setAttribute("aria-hidden", open ? "false" : "true");
+          if (open) body.removeAttribute("inert");
+          else body.setAttribute("inert", "");
+        });
+      } else {
+        box.appendChild(h("div", { class: "ym-mk-sec-title", text: label }));
+        groupRows = h("div", { class: "ym-mk-sec-rows" });
+        box.appendChild(groupRows);
+      }
       groups.appendChild(box);
       return groupRows;
     };
@@ -2806,7 +3055,7 @@
         // (so the Reset button ignores it) and no entry in `values` (so
         // postExtensionSettings does not post a junk key to the extension).
         // It opens a new card for the rows that follow it.
-        startGroup(setting.label);
+        startGroup(setting.label, setting);
         continue;
       }
       if (setting.type === "file") {
@@ -2877,7 +3126,10 @@
       input.addEventListener(isToggle ? "change" : "input", updateSetting);
       syncRangeFill();
       const row = h("div", { class: "ym-detail-setting-row", "data-key": setting.key },
-        h("div", { class: "ym-detail-setting-label", text: setting.label }),
+        h("div", { class: "ym-detail-setting-label" },
+          setting.label,
+          setting.note ? h("span", { class: "ym-detail-setting-note-inline", text: setting.note }) : null
+        ),
         h("div", { class: "ym-detail-setting-control" }, input, valueEl)
       );
       // `childOf`: a nested row that only exists while its parent toggle is ON
@@ -3547,10 +3799,43 @@
     },
     "snippet-npv-panel": {
       what: "A docked side rail with cover art or video, title, artist card, lyrics and the up-next queue.",
-      pros: ["Keeps lyrics and queue visible while browsing", "Collapses to a thin edge", "Follows the Aurora Bloom backdrop"],
+      pros: ["Keeps lyrics and queue visible while browsing", "Collapses to a thin edge", "Follows the Kawarp backdrop"],
       cons: ["Takes horizontal space while open", "Feels cramped in a narrow window"],
     },
   };
+
+  // Kawarp's own mark, traced from the supplied 512px SVG. It is inline rather
+  // than an extension URL so it paints in the isolated-world panel without a
+  // web_accessible_resources entry.
+  const KAWARP_LOGO_PATHS = [
+    {
+      fill: "rgb(242, 12, 50)",
+      d: "M 512 256 C 512 397.385 397.385 512 256 512 C 114.615 512 0 397.385 0 256 C 0 114.615 114.615 0 256 0 C 397.385 0 512 114.615 512 256 Z M 216.877 101.494 C 129.312 123.247 77.337 215.006 103.18 301.61 C 121.687 363.631 176.581 409.295 240.38 414.757 C 287.712 418.809 329.728 405.453 364.631 372.705 C 402.973 336.73 419.903 291.754 414.474 239.817 C 408.507 182.738 378.509 140.758 327.553 113.442 C 291.849 96.169 254.947 92.037 216.877 101.494 Z M 111.49 258.009 C 111.657 203.346 135.045 160.293 181.947 132.029 C 257.535 86.476 354.347 118.494 389.27 199.487 C 425.321 283.1 374.187 380.741 284.761 397.772 C 230.539 408.099 184.56 391.825 147.1 351.356 C 123.778 324.1 111.384 293.035 111.49 258.009 Z M 275.782 205.816 C 285.751 205.816 295.066 205.859 304.381 205.802 C 312.272 205.755 316.316 201.706 316.432 193.751 C 316.512 188.253 316.544 182.75 316.422 177.253 C 316.252 169.635 312.169 165.693 304.507 165.667 C 292.342 165.626 280.176 165.637 268.011 165.66 C 259.036 165.678 255.746 169.021 255.743 178.109 C 255.734 207.273 255.743 236.436 255.729 265.6 C 255.729 267.311 255.584 269.021 255.493 271.034 C 252.926 269.96 250.993 269 248.965 268.328 C 234.723 263.608 221.596 265.768 210.09 275.438 C 198.291 285.355 193.507 298.277 196.25 313.409 C 200.094 334.613 218.73 348.223 240.237 346.153 C 260.242 344.228 275.646 326.851 275.757 305.878 C 275.856 287.047 275.781 268.215 275.782 248.883 C 275.782 234.286 275.782 220.188 275.782 205.816 Z",
+    },
+    {
+      fill: "#fff",
+      d: "M 216.877 101.494 C 129.312 123.247 77.337 215.006 103.18 301.61 C 121.687 363.631 176.581 409.295 240.38 414.757 C 287.712 418.809 329.728 405.453 364.631 372.705 C 402.973 336.73 419.903 291.754 414.474 239.817 C 408.507 182.738 378.509 140.758 327.553 113.442 C 291.849 96.169 254.947 92.037 216.877 101.494 Z M 111.49 258.009 C 111.657 203.346 135.045 160.293 181.947 132.029 C 257.535 86.476 354.347 118.494 389.27 199.487 C 425.321 283.1 374.187 380.741 284.761 397.772 C 230.539 408.099 184.56 391.825 147.1 351.356 C 123.778 324.1 111.384 293.035 111.49 258.009 Z M 275.782 205.816 C 285.751 205.816 295.066 205.859 304.381 205.802 C 312.272 205.755 316.316 201.706 316.432 193.751 C 316.512 188.253 316.544 182.75 316.422 177.253 C 316.252 169.635 312.169 165.693 304.507 165.667 C 292.342 165.626 280.176 165.637 268.011 165.66 C 259.036 165.678 255.746 169.021 255.743 178.109 C 255.734 207.273 255.743 236.436 255.729 265.6 C 255.729 267.311 255.584 269.021 255.493 271.034 C 252.926 269.96 250.993 269 248.965 268.328 C 234.723 263.608 221.596 265.768 210.09 275.438 C 198.291 285.355 193.507 298.277 196.25 313.409 C 200.094 334.613 218.73 348.223 240.237 346.153 C 260.242 344.228 275.646 326.851 275.757 305.878 C 275.856 287.047 275.781 268.215 275.782 248.883 C 275.782 234.286 275.782 220.188 275.782 205.816 Z",
+    },
+  ];
+
+  // Material "north-east": a compact outbound cue that reads as "open this
+  // somewhere else" without a full external-link glyph beside the host name.
+  const ICON_OPEN_NEW = "M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z";
+
+  function kawarpIcon() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 512 512");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.classList.add("ym-kawarp-logo");
+    for (const path of KAWARP_LOGO_PATHS) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      node.setAttribute("d", path.d);
+      node.setAttribute("fill", path.fill);
+      svg.appendChild(node);
+    }
+    return svg;
+  }
 
   // Per-add-on glyph + tint for the rail tiles and the detail monogram.
   const MK_GLYPH = {
@@ -4157,6 +4442,28 @@
     const a = btn.animate([{ width: first + "px" }, { width: last + "px" }],
       { duration: 300, easing: "cubic-bezier(.34,1.16,.5,1)" });
     a.onfinish = () => { btn.style.overflow = ""; };
+  }
+
+  // A quiet outbound link for add-ons that have their own home. Kawarp is the
+  // first one: its mark is the supplied SVG, and the label is the bare host so
+  // the title row reads as Kawarp | kawarp.vercel.app ↗ rather than a card.
+  function mkSiteLink(ext) {
+    if (!ext || !ext.website) return null;
+    let label = ext.website;
+    try { label = new URL(ext.website).hostname.replace(/^www\./, ""); } catch (_) {}
+    const a = h("a", {
+      class: "ym-mk-site",
+      href: ext.website,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: ext.website,
+    });
+    a.appendChild(kawarpIcon());
+    a.appendChild(h("span", { text: label }));
+    const arrow = svgIcon(ICON_OPEN_NEW);
+    arrow.classList.add("ym-mk-site-arrow");
+    a.appendChild(arrow);
+    return a;
   }
 
   function mkActions(ext, installed) {
@@ -6510,7 +6817,17 @@
     }
     head.appendChild(dmono);
     const titles = h("div", { class: "ym-mk-dtitles" });
-    titles.appendChild(h("h1", { text: ext.name }));
+    // The outbound home sits WITH the name, not in a box under the actions:
+    // Kawarp | kawarp.vercel.app ↗. It reads as provenance and keeps the
+    // description directly under the title.
+    const titleRow = h("div", { class: "ym-mk-dtitle-row" });
+    titleRow.appendChild(h("h1", { text: ext.name }));
+    const site = mkSiteLink(ext);
+    if (site) {
+      titleRow.appendChild(h("span", { class: "ym-mk-dtitle-sep", text: "|" }));
+      titleRow.appendChild(site);
+    }
+    titles.appendChild(titleRow);
     // Small, dimmed provenance line under the name (AJ, 2026-10-19).
     if (ext.disclaimer) {
       titles.appendChild(h("div", { class: "ym-mk-disclaimer", text: ext.disclaimer }));
@@ -6682,6 +6999,17 @@
 
     // Settings is a BUTTON, not a rail row (AJ, 2026-10-26): it is an app-wide page,
     // so it must not read as another add-on to install.
+    // Feedback is general (not tied to an add-on): open the same modal with no
+    // extension, so the subtitle and report body stay generic.
+    const feedbackBtn = h("button", {
+      class: "ym-mk-chbtn",
+      type: "button",
+      title: "Send feedback",
+      "aria-label": "Send feedback",
+    }, svgIcon("M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM6 9h12v2H6V9zm0 4h8v2H6v-2z"),
+      h("span", { text: "Feedback" }));
+    feedbackBtn.addEventListener("click", () => openFeedback());
+
     // Changelogs is a page like Settings: it slides over the whole card, and it
     // toggles — the same button brings it back out.
     const changelogBtn = h("button", {
@@ -6707,7 +7035,7 @@
 
     const header = h("div", { class: "ym-head ym-mk-head" },
       h("div", { class: "ym-mk-hleft" }, discord, ytBtn),
-      h("div", { class: "ym-mk-hright" }, changelogBtn, settingsBtn, h("span", { class: "ym-mk-seam" }), close)
+      h("div", { class: "ym-mk-hright" }, feedbackBtn, changelogBtn, settingsBtn, h("span", { class: "ym-mk-seam" }), close)
     );
 
     const tabs = h("div", { class: "ym-mk-tabs" });
@@ -7422,11 +7750,11 @@
     try {
       const url = chrome.runtime.getURL("changelog.json");
       const res = await fetch(url, { cache: "no-store" });
-      console.debug("[Aurora Lyrics] update check: changelog fetch " + url + " -> " + res.status);
+      alDebug("update check: changelog fetch " + url + " -> " + res.status);
       if (!res.ok) return null;
       return await res.json();
     } catch (err) {
-      console.debug("[Aurora Lyrics] update check: changelog fetch threw " + ((err && err.message) || err));
+      alDebug("update check: changelog fetch threw " + ((err && err.message) || err));
       return null;
     }
   }
@@ -7496,42 +7824,49 @@
       if (dismiss) Promise.resolve(dismiss()).catch(() => {});
     };
 
-    // Blurred logo layer that fills the panel. Same MV3 workaround: the image
-    // source is set from JS via chrome.runtime.getURL, preloaded with an
-    // Image() so a failure logs instead of leaving an empty panel.
-    const cardface = h("div", { class: "ym-upd-cardface" });
+    // The mark, small and inline (AJ, 2026-11-04). The blurred logo that used
+    // to fill the card made the notice read as its own product; a 30px tile in
+    // the header is the same chip the top-bar banner uses.
+    const mark = h("div", { class: "ym-upd-mark", "aria-hidden": "true" });
     try {
       const logoSrc = chrome.runtime.getURL("assets/manifest-logo.webp");
       const preload = new Image();
-      preload.onload = () => { cardface.style.backgroundImage = 'url("' + logoSrc + '")'; };
+      preload.onload = () => { mark.style.backgroundImage = 'url("' + logoSrc + '")'; };
       preload.onerror = () => {
-        console.debug("[Aurora Lyrics] update check: manifest logo failed to load from " + logoSrc);
+        alDebug("update check: manifest logo failed to load from " + logoSrc);
       };
       preload.src = logoSrc;
     } catch (err) {
-      console.debug("[Aurora Lyrics] update check: logo preload threw " + ((err && err.message) || err));
+      alDebug("update check: logo preload threw " + ((err && err.message) || err));
     }
 
     const body = h("div", { class: "ym-upd-body" });
-    if (release.title) body.appendChild(h("p", { class: "ym-upd-sub", text: release.title }));
-    if (release.date) body.appendChild(h("p", { class: "ym-upd-date", text: release.date }));
+    // Title and date share one meta stack above the notes, so the first thing
+    // read is what the release IS, not a pair of loose paragraphs.
+    if (release.title || release.date) {
+      body.appendChild(h("div", { class: "ym-upd-meta" },
+        release.title ? h("p", { class: "ym-upd-sub", text: release.title }) : null,
+        release.date ? h("p", { class: "ym-upd-date", text: release.date }) : null
+      ));
+    }
     const sections = [["New", release.features], ["Fixed", release.fixes]];
     for (const entry of sections) {
       const items = entry[1];
       if (!Array.isArray(items) || !items.length) continue;
-      body.appendChild(h("p", { class: "ym-upd-sect", text: entry[0] }));
       const ul = h("ul", { class: "ym-upd-list" });
       for (const item of items) {
         if (typeof item !== "string" || !item) continue;
         ul.appendChild(h("li", { text: item }));
       }
-      body.appendChild(ul);
+      // One card per section, like the panel's settings blocks: heading row,
+      // then hairline-separated rows rather than a bullet list on the card.
+      body.appendChild(h("div", { class: "ym-upd-block" },
+        h("p", { class: "ym-upd-sect", text: entry[0] }), ul));
     }
     if (!isUpdated) {
       body.appendChild(h("p", { class: "ym-upd-hint", text:
-        "Chrome will install this update for you, usually within a few hours. " +
-        "There's nothing to install yourself — just keep using Aurora Lyrics and it'll arrive. " +
-        "Restart Chrome if you'd like it sooner." }));
+        "Chrome installs updates on its own, usually within a few hours. " +
+        "There's nothing to install yourself." }));
     }
 
     const foot = h("div", { class: "ym-upd-foot" });
@@ -7549,14 +7884,13 @@
     x.addEventListener("click", dismissAndClose);
 
     const heading = h("div", { class: "ym-upd-heading" },
-      h("h2", { class: "ym-upd-title", text: isUpdated ? "Aurora Lyrics updated" : "Update available" }),
+      h("h2", { class: "ym-upd-title", text: isUpdated ? "Aurora Lyrics updated" : "Updating soon" }),
       version ? h("span", { class: "ym-upd-ver", text: "v" + version }) : null
     );
     ensurePanelFont();
     const card = h("div", { class: "ym-upd-card", role: "dialog", "aria-modal": "true",
-      "aria-label": isUpdated ? "Aurora Lyrics updated" : "Aurora Lyrics update available" },
-      cardface,
-      h("div", { class: "ym-upd-head" }, heading, x),
+      "aria-label": isUpdated ? "Aurora Lyrics updated" : "A newer version of Aurora Lyrics is on the way" },
+      h("div", { class: "ym-upd-head" }, mark, heading, x),
       body,
       foot
     );
@@ -7588,13 +7922,13 @@
     }
     // console.debug is hidden unless the console filter is set to Verbose, so
     // this stays out of the way for real users but is there when diagnosing.
-    console.debug("[Aurora Lyrics] update check: running v" + version +
+    alDebug("update check: running v" + version +
       ", previously seen " + (state.lastSeenVersion || "nothing"));
 
     // First run on this profile: record the version and stay quiet. Otherwise
     // every existing user would get an "updated" card the day this ships.
     if (!state.lastSeenVersion) {
-      console.debug("[Aurora Lyrics] update check: first run, recording v" + version + " and staying quiet");
+      alDebug("update check: first run, recording v" + version + " and staying quiet");
       await saveUpdateState(Object.assign({}, state, { lastSeenVersion: version }));
       return;
     }
@@ -7602,11 +7936,11 @@
     if (state.lastSeenVersion !== version) {
       const release = findRelease(await readBundledChangelog(), version);
       await saveUpdateState(Object.assign({}, state, { lastSeenVersion: version }));
-      console.debug("[Aurora Lyrics] update check: changelog entry for v" + version + " -> " + (release ? "found" : "MISSING"));
+      alDebug("update check: changelog entry for v" + version + " -> " + (release ? "found" : "MISSING"));
       if (release) {
         showUpdateModal({ mode: "updated", version: version, release: release });
       } else {
-        console.debug("[Aurora Lyrics] changelog.json has no entry for v" + version);
+        alDebug("changelog.json has no entry for v" + version);
       }
       return;
     }
@@ -7653,8 +7987,8 @@
     const banner = h("div", {
       class: "ym-upd-banner",
       role: "status",
-      "aria-label": "A newer version of Aurora Lyrics is available",
-      title: "A newer version of Aurora Lyrics is available - Chrome installs it automatically, or restart Chrome to fetch now"
+      "aria-label": "A newer version of Aurora Lyrics is on the way",
+      title: "A newer version of Aurora Lyrics is on the way - Chrome installs it automatically, or restart Chrome to fetch now"
     });
     const logo = h("div", { class: "ym-upd-banner-logo", "aria-hidden": "true" });
     try {
@@ -7665,7 +7999,7 @@
       pre.src = logoSrc;
     } catch (_) {}
     const text = h("div", { class: "ym-upd-banner-text" },
-      h("div", { class: "ym-upd-banner-title", text: "Update available" }),
+      h("div", { class: "ym-upd-banner-title", text: "Update soon" }),
       h("div", { class: "ym-upd-banner-sub", text: "v" + version })
     );
     banner.appendChild(logo);
@@ -7736,10 +8070,31 @@
     });
   }
 
+  // The x shrinks while it is HELD, which the stylesheet does with :active, so
+  // the dip happens during the click instead of after it (AJ, 2026-11-04).
+  // All that is left here is the chip's fade once the click lands.
+  function animateBannerOut(banner, done) {
+    if (!banner || typeof banner.animate !== "function" || reducedMotion()) { done(); return; }
+    let closed = false;
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      done();
+    };
+    const anim = banner.animate(
+      [{ opacity: 1 }, { opacity: 0 }],
+      { duration: 300, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" }
+    );
+    anim.onfinish = finish;
+    window.setTimeout(finish, 420); // in case the tab is backgrounded mid-fade
+  }
+
   function hideUpdateIndicator() {
     if (updateIndicatorPosIv) { clearInterval(updateIndicatorPosIv); updateIndicatorPosIv = null; }
-    if (updateIndicatorEl && updateIndicatorEl.parentNode) updateIndicatorEl.parentNode.removeChild(updateIndicatorEl);
+    const el = updateIndicatorEl;
     updateIndicatorEl = null;
+    if (!el || !el.parentNode) return;
+    animateBannerOut(el, () => { if (el.parentNode) el.parentNode.removeChild(el); });
   }
 
   // Dismiss the persistent banner for good: hide it and clear the pending state
@@ -7859,7 +8214,6 @@
       rltSaveEnabled = true;
       return;
     }
-    console.log("[Aurora Lyrics] restoring last watch tab:", rltPending);
     rltSaveEnabled = false; // suppress the select we are about to trigger
     rltSelect(target);
     rltPending = null;
@@ -7873,7 +8227,6 @@
     const found = watchTabs();
     if (!found) return;
     const identity = { label: tabLabel(tab), index: found.tabs.indexOf(tab) };
-    console.log("[Aurora Lyrics] remembered watch tab:", identity.label);
     rltPending = null;
     rltAppliedFor = currentVideoId();
     safeStorageSet({ [LAST_TAB_KEY]: identity });
@@ -7943,7 +8296,6 @@
       rltPending = null;
       rltApplyRemembered();
     });
-    console.log("[Aurora Lyrics] remember-last-watch-tab active");
   }
 
   /* ---- song view: the layout switcher -------------------------------------
@@ -8377,7 +8729,6 @@
       ensureSongLayoutPicker();
       syncSongLayoutPicker();
     });
-    console.log("[Aurora Lyrics] song-view layout switcher active");
   }
 
   /* ---- boot ---- */
@@ -8546,7 +8897,7 @@
     // Always-on, too: the layout of the player page, from a pill beside the tabs.
     initSongLayoutPicker();
 
-    console.log("[Aurora Lyrics] booted v" + (runningVersion() || "unknown"));
+    alLog("booted v" + (runningVersion() || "unknown"));
   }
 
   if (document.readyState === "complete" || document.readyState === "interactive") setTimeout(boot, 600);

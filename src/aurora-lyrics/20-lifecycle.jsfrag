@@ -18,7 +18,7 @@
     if (!key) return;
     currentTrackKey = "";
     try { syncTrackLyrics(true); } catch (e) {
-      console.warn("[AuroraLyrics] re-resolve after source-order change failed:", e);
+      alWarn("re-resolve after source-order change failed:", e);
     }
   }
 
@@ -158,7 +158,7 @@
       try {
         syncTrackLyrics(true);
       } catch (error) {
-        console.warn("[AuroraLyrics] ad-end lyric retry failed:", error);
+        alWarn("ad-end lyric retry failed:", error);
       }
     }
   }

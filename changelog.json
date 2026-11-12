@@ -1,6 +1,21 @@
 {
   "releases": [
     {
+      "version": "1.2.0",
+      "date": "2026-11-12",
+      "title": "A new fullscreen layout, shared offsets, and reports that actually send.",
+      "features": [
+        "Fullscreen now opens in a new Hits layout for songs: artwork, title, playback controls and credits at the top, with the lyrics directly underneath. The layout button switches between Hits and Video + Lyrics.",
+        "The Sync tab now has a Community offset section: set an offset, add an optional name, and post it for everyone. Other listeners get the shared offset automatically; the poster can undo it, and anyone can report a bad one.",
+        "The Aurora Bloom theme is now Kawarp, with a refreshed set of controls.",
+        "More quality-of-life updates across the extension."
+      ],
+      "fixes": [
+        "The Options panel no longer goes blank when you switch between Sync, File, and Cache.",
+        "Report a problem now actually sends your report, and every add-on has a Send feedback option."
+      ]
+    },
+    {
       "version": "1.1.0",
       "date": "2026-11-04",
       "title": "A rebuilt add-ons panel, and singers on the line.",

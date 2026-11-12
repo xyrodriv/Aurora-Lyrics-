@@ -18,8 +18,56 @@
 
 const ALLOWED_HOSTS = new Set(["api.deezer.com"]);
 
+const REPORT_HOSTS = new Set(["site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page"]);
+const REPORT_PATH = "/v1/reports";
+const REPORT_BODY_MAX = 8 * 1024;
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || message.type !== "ym-fetch-json") return false;
+  if (!message) return false;
+
+  // Reports and feedback: POST JSON to the ONE reporting endpoint, allow-listed
+  // by host AND path so this proxy can never be pointed anywhere else. The
+  // Discord token lives on the server; the extension never holds it.
+  if (message.type === "ym-post-report") {
+    let url;
+    try {
+      url = new URL(String(message.url || ""));
+    } catch (_) {
+      sendResponse({ ok: false, status: 0 });
+      return false;
+    }
+    const body = typeof message.body === "string" ? message.body : "";
+    if (
+      url.protocol !== "https:" ||
+      !REPORT_HOSTS.has(url.hostname) ||
+      url.pathname !== REPORT_PATH ||
+      !body ||
+      body.length > REPORT_BODY_MAX
+    ) {
+      sendResponse({ ok: false, status: 0 });
+      return false;
+    }
+    fetch(url.href, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body,
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    })
+      .then(async (response) => {
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (_) {
+          data = null;
+        }
+        sendResponse({ ok: response.ok, status: response.status, data });
+      })
+      .catch(() => sendResponse({ ok: false, status: 0 }));
+    return true;
+  }
+
+  if (message.type !== "ym-fetch-json") return false;
 
   let url;
   try {

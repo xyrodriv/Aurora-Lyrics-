@@ -158,6 +158,7 @@
         cssText: video.style.cssText,
       };
       fsOverlay.classList.add("ym-sl-fs-has-video");
+      publishFsVideoAspect(video);
 
       // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
       // low-res blurred/dimmed copy of the video, which cost a full-viewport
@@ -445,6 +446,8 @@
     }
     fsArtImg = null;
     ++fsArtImgSeq;
+    cleanupFsHitsToSide();
+    fsLayoutApplied = false;
     const fsOptionsOverlay = document.querySelector(".ym-sl-fs-options-overlay");
     if (fsOptionsOverlay) fsOptionsOverlay.remove();
     if (fsSavedHtmlOverflow !== null) {
@@ -453,6 +456,9 @@
     }
     if (fsOverlay) fsOverlay.remove();
     fsOverlay = null;
+    // AMLL outlives the overlay inside the restored panel; put its normal focal
+    // line back now that Hits is gone.
+    amllSyncAlignPosition();
     fsMediaHost = null;
     fsLyricsHost = null;
     fsControls = null;
@@ -461,6 +467,12 @@
     // class's pending timer so a second entry starts clean.
     fsCoverSwitch = null;
     fsArtLikeButton = null;
+    // Hits nodes went with the overlay. Drop the refs and the header observer
+    // so the next entry starts clean.
+    if (fsHitsRO) { fsHitsRO.disconnect(); fsHitsRO = null; }
+    fsHits = null;
+    fsHitsTrackKey = "";
+    fsHitsMetaKey = "";
     if (fsHudTimer) { window.clearTimeout(fsHudTimer); fsHudTimer = 0; }
     fsHudEl = null;
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }

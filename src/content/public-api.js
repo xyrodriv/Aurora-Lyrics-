@@ -15,6 +15,13 @@
  */
 (function () {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alLog = console.log.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+  const alWarn = console.warn.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+
 
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
@@ -548,7 +555,7 @@
         seekMax: seek ? seek.max : null,
         track: this.getTrack(),
       };
-      console.log("[Aurora Lyrics] diagnose ->", JSON.stringify(diag, null, 2));
+      alLog("diagnose ->", JSON.stringify(diag, null, 2));
       return diag;
     },
   };
@@ -558,7 +565,7 @@
     const pos = player.getPositionMs();
     const dur = player.getDurationMs();
     const out = { track, positionMs: pos, durationMs: dur };
-    console.log("[Aurora Lyrics] player probe ->", JSON.stringify(out));
+    alLog("player probe ->", JSON.stringify(out));
     return out;
   }
 
@@ -903,7 +910,7 @@
       set.add(handler);
       if (opts && opts.replay && busLast.has(topic)) {
         try { handler(busLast.get(topic)); }
-        catch (e) { console.warn("[Aurora Lyrics] bus replay failed on " + topic, e); }
+        catch (e) { alWarn("bus replay failed on " + topic, e); }
       }
       return () => bus.off(topic, handler);
     },
@@ -918,7 +925,7 @@
       let delivered = 0;
       for (const handler of Array.from(set)) {
         try { handler(payload); delivered++; }
-        catch (e) { console.warn("[Aurora Lyrics] bus handler failed on " + topic, e); }
+        catch (e) { alWarn("bus handler failed on " + topic, e); }
       }
       return delivered;
     },
@@ -968,5 +975,5 @@
       cmd("fetchDeezerTracks", [title, artist, album]),
     fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
   };
-  console.log("[Aurora Lyrics] public API ready (page world) v" + window.YTMod.version);
+  alLog("public API ready (page world) v" + window.YTMod.version);
 })();

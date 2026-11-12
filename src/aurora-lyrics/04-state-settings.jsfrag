@@ -89,6 +89,12 @@
   let fsChromeFadeHoldTimer = 0;
   let fsSavedPanel = null; // { parent, next }
   let fsLayoutMode = "side";
+  // True once applyFullscreenLayout has painted a mode on this overlay. The
+  // side layout has no mode class of its own, so this lets the reverse handoff
+  // tell a real side composition apart from the very first paint on entry.
+  let fsLayoutApplied = false;
+  // Media host geometry transition used only while leaving Video Background.
+  let fsMediaLayoutAnimTimer = 0;
   // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
   // cover-art side layout. "right" is the composition the overlay shipped
   // with (art left, words right); "left" mirrors it. Cover art only — the
@@ -96,6 +102,21 @@
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
   let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
+  // ---- Hits fullscreen layout (AJ, 2026-11-09) ---------------------------
+  // Built once per entry in 08. fsHits is the header model (root plus the
+  // nodes that change); the header's measured height is what positions the
+  // lyrics column beneath it.
+  let fsHits = null;
+  let fsHitsRO = null;
+  let fsHitsTrackKey = "";
+  let fsHitsMetaKey = "";
+  // Layout handoff (cover art): the artwork is carried between the Hits
+  // thumbnail and the side cover by a fixed flying card. Null when idle.
+  let fsHitsArtFly = null;
+  let fsHitsArtFlyTimer = 0;
+  // The Spicy lyrics column gets a transform-only handoff (see 07), so its
+  // geometry snaps once and this animation carries the visual move.
+  let fsLyricsFlipAnim = null;
   let fsCoverFlipTimer = 0; // drops the flip transition helper class
   let fsCoverShadeTimer = 0; // drops the shade's longer dissolve helper class
   let fsCoverShadeSideTimer = 0; // moves the shade to its new side once it is invisible
@@ -210,6 +231,10 @@
   const FS_LYRICS_GAP_DIM_MS = 3000; // only dim genuinely long lyric gaps
   const FS_LYRICS_RESTORE_LEAD_MS = 850; // restore shortly before the next line
   const FS_FINAL_LYRICS_HIDE_MS = 6000; // stale final lyric -> hide after 6s
+  // Fullscreen Hits lifts the Spicy active lyric line above the true centre so
+  // the eye does not have to drop to read along. AMLL has its own higher Hits
+  // anchor in 22-amll-integration because it reads lower in the column.
+  const FS_HITS_ALIGN_POSITION = 0.38;
   let fsIdleTimer = 0; // setTimeout id for the idle countdown
   let fsIdleHidden = false; // is the overlay currently in the idle state?
   let fsPointerDown = false; // is a button held (i.e. actively dragging)?
@@ -294,6 +319,28 @@
   let activeOffsetMode = "video";   // which slot is applied to playback (auto by hasMusicVideo)
   let editingOffsetMode = "video";  // which slot the on-screen control edits / displays
   let lastOffsetModeCheckAt = 0;
+
+  /* ---- Community-shared offsets ---------------------------------------------
+     `communityOffsetData` holds the active public offset for BOTH slots, keyed
+     by the track's video id. A fetch happens once per track. The shared value is
+     applied on load; any slider edit after that is a local, session-only
+     override. The owner token is kept in localStorage by 12-track-offset-sync,
+     never in this object, and is only used for the Undo request. */
+  let communityOffsetStatus = null;
+  let communityOffsetName = null;
+  let communityOffsetPostButton = null;
+  let communityOffsetUndoButton = null;
+  let communityOffsetReportButton = null;
+  let communityOffsetTrackKey = "";
+  let communityOffsetData = { video: null, song: null };
+  let communityOffsetManual = false;
+  let communityOffsetLoading = false;
+  let communityOffsetLoadError = false;
+  let communityOffsetBusy = false;
+  let communityOffsetRequestSeq = 0;
+  let communityOffsetNotice = "";
+  let communityOffsetNoticeError = false;
+  const communityOffsetReported = new Set();
 
   /* ---- MV pause re-sync state ------------------------------------------------
      A music video can stop the MUSIC while the video keeps playing, so after the

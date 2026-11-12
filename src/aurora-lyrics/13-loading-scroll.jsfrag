@@ -464,9 +464,15 @@
     const viewportRect = lineScrollEl.getBoundingClientRect();
     const lineCenter = lineRect.top + lineRect.height / 2;
     const viewportCenter = viewportRect.top + viewportRect.height / 2;
-    // Centre the line. (Upstream's live path nudges the target by -30px for
-    // centred lyrics and +85px when scrolling to the top; we always centre.)
-    const target = lineScrollEl.scrollTop + lineCenter - viewportCenter;
+    // Side-by-side and background keep the true centre. Hits lifts the active
+    // line above it, because reading near the bottom of a tall column makes the
+    // eye travel down on every line change.
+    const focal = fsActive && fsOverlay &&
+      fsOverlay.classList.contains("ym-sl-fs-mode-hits")
+      ? FS_HITS_ALIGN_POSITION
+      : 0.5;
+    const target = lineScrollEl.scrollTop + lineCenter -
+      (viewportRect.top + viewportRect.height * focal);
     // `force` only means "ignore manualScrollActive" — it is NOT a request to skip
     // the animation, so it does not make this immediate.
     //
@@ -565,6 +571,16 @@
     // credits footer and a live scroll container to do anything at all.
     if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
       if (!creditsFooterEl) creditsRevealActive = false;
+      return false;
+    }
+    // Hits keeps attribution in the header for both renderers, and the footer
+    // under the last line is hidden there. Do not let that hidden footer drag
+    // the lyrics down at the end of the track.
+    if (fsActive && fsOverlay &&
+        fsOverlay.classList.contains("ym-sl-fs-mode-hits") &&
+        fsOverlay.classList.contains("ym-sl-fs-hits-has-credits")) {
+      creditsRevealEngaged = false;
+      creditsRevealActive = false;
       return false;
     }
     // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not

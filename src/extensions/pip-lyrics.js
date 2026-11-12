@@ -21,6 +21,12 @@
  */
 (function () {
   "use strict";
+  // Console branding: a red Aurora badge on every log, shaped like the
+  // coloured tags Better Lyrics prints. Bound helpers keep the real call
+  // site in DevTools instead of pointing at a wrapper.
+  const AURORA_BADGE = "background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-weight:600";
+  const alWarn = console.warn.bind(console, "%cAurora Lyrics", AURORA_BADGE);
+
 
   const EXT_ID = "ytmod-pip-lyrics";
   const SCRIPT_URL = (document.currentScript && document.currentScript.src) || "";
@@ -63,7 +69,7 @@
     blurPasses: 6,
     animationSpeed: 0.5,
     saturation: 1.5,
-    dithering: 0.008,
+    // Dithering is the fixed kawarp-core default, not a user setting.
     transitionDuration: 1000,
     tintIntensity: 0,
     scale: 1.08,
@@ -769,7 +775,12 @@
       [600, "LyricsSemibold.woff2"],
       [700, "LyricsBold.woff2"],
     ];
-    return faces.map(([weight, file]) =>
+    // The credits use the add-ons face, which the page gets from panel.css. The
+    // PiP is a separate document with no panel.css, so declare it here too.
+    const satoshi =
+      "@font-face{font-family:'Satoshi';font-style:normal;font-weight:300 900;" +
+      "font-display:swap;src:url('" + FONT_BASE + "Satoshi-Variable.woff2') format('woff2');}";
+    return satoshi + faces.map(([weight, file]) =>
       "@font-face{font-family:'SpicyLyrics';font-style:normal;font-weight:" + weight +
       ";font-display:swap;src:url('" + FONT_BASE + file + "') format('woff2');}"
     ).join("");
@@ -1228,7 +1239,7 @@
       amllPlayer.setLyricLines(amllLinesFromPublished(), Math.max(0, amllLastPos));
       syncAmllCredits();
     } catch (e) {
-      console.warn("[AuroraLyrics] PiP: could not give the lyrics to AMLL.", e);
+      alWarn("PiP: could not give the lyrics to AMLL.", e);
     }
   }
 
@@ -1455,7 +1466,7 @@
       syncAmllLines();
       amllLastFrameAt = 0;
     } catch (e) {
-      console.warn("[AuroraLyrics] PiP: AMLL engine unavailable; using the built-in renderer.", e);
+      alWarn("PiP: AMLL engine unavailable; using the built-in renderer.", e);
       amllUnavailable = true;
       dropAmll();
       rendererMode = "spicy";
@@ -1737,7 +1748,7 @@
     }).catch((error) => {
       // Any failure falls back to the gradient background — never a blank window.
       if (kawarpPendingSeq === seq) kawarpPendingSeq = 0;
-      console.warn("[Aurora Lyrics] PiP Kawarp failed:", error);
+      alWarn("PiP Kawarp failed:", error);
       if (canvas) canvas.classList.remove("ready");
       if (kawarp) { try { kawarp.dispose(); } catch (e) {} }
       kawarp = null;
@@ -1990,9 +2001,31 @@
 
   function buildProviderRow(provider) {
     const row = makeEl(pipDoc, "div", "ym-sl-provider");
-    row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-label", "Lyrics provided by"));
+    row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-label", "Provided by"));
     row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-name", provider));
     return row;
+  }
+
+  // Same up-right arrow as the panel's person credits; PiP copies the panel
+  // stylesheet, so the tag styling travels with it.
+  function creditArrow() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = pipDoc.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-uploader-arrow");
+    svg.setAttribute("width", "9");
+    svg.setAttribute("height", "9");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const path = pipDoc.createElementNS(NS, "path");
+    path.setAttribute("d", "M7 17 17 7M9 7h8v8");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "2.2");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+    return svg;
   }
 
   function buildPersonRow(label, person) {
@@ -2015,6 +2048,7 @@
       link.appendChild(img);
     }
     link.appendChild(makeEl(pipDoc, "span", "ym-sl-uploader-name", person && person.username));
+    if (person && person.url) link.appendChild(creditArrow());
     if (!person || !person.url) link.classList.add("no-link");
     row.appendChild(link);
     return row;
@@ -2026,31 +2060,43 @@
     return !!a.username && a.username === b.username;
   }
 
+  // Mirrors the panel's three-cell rail, because the PiP copies the panel's
+  // stylesheet and the two must not drift apart.
   function buildCreditsFooter() {
     if (!songwriters.length && !(attribution && (attribution.provider || attribution.uploader || attribution.maker))) return null;
     const footer = makeEl(pipDoc, "div", "ym-sl-credits");
     if (songwriters.length) {
-      footer.appendChild(makeEl(pipDoc, "div", "ym-sl-credits-label", "Written By"));
+      const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-writers");
+      box.appendChild(makeEl(pipDoc, "div", "ym-sl-credits-label", "Written by"));
       const names = makeEl(pipDoc, "div", "ym-sl-credits-names");
       songwriters.forEach((name, index) => {
         if (index) names.appendChild(pipDoc.createTextNode(", "));
         names.appendChild(makeEl(pipDoc, "span", "ym-sl-credits-name", name));
       });
-      footer.appendChild(names);
+      box.appendChild(names);
+      footer.appendChild(box);
     }
-    if (attribution && attribution.provider) footer.appendChild(buildProviderRow(attribution.provider));
-    if (attribution && attribution.uploader) {
-      // Self-uploads suppress the maker row; preserve its profile URL on the
-      // one credit that remains.
-      const uploader = isSameCreditPerson(attribution.maker, attribution.uploader)
-        ? Object.assign({}, attribution.uploader, {
-            url: attribution.uploader.url || attribution.maker.url,
-          })
-        : attribution.uploader;
-      footer.appendChild(buildPersonRow("Uploaded by", uploader));
+    if (attribution && attribution.provider) {
+      const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-provider");
+      box.appendChild(buildProviderRow(attribution.provider));
+      footer.appendChild(box);
     }
-    if (attribution && attribution.maker && !isSameCreditPerson(attribution.maker, attribution.uploader)) {
-      footer.appendChild(buildPersonRow("Made by", attribution.maker));
+    if (attribution && (attribution.uploader || attribution.maker)) {
+      const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-people");
+      if (attribution.uploader) {
+        // Self-uploads suppress the maker row; preserve its profile URL on the
+        // one credit that remains.
+        const uploader = isSameCreditPerson(attribution.maker, attribution.uploader)
+          ? Object.assign({}, attribution.uploader, {
+              url: attribution.uploader.url || attribution.maker.url,
+            })
+          : attribution.uploader;
+        box.appendChild(buildPersonRow("Uploaded by", uploader));
+      }
+      if (attribution.maker && !isSameCreditPerson(attribution.maker, attribution.uploader)) {
+        box.appendChild(buildPersonRow("Made by", attribution.maker));
+      }
+      footer.appendChild(box);
     }
     return footer;
   }

@@ -32,6 +32,9 @@
   const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
   const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
   const VIDEO_OFFSET_LIMIT = 100;
+  const COMMUNITY_OFFSET_TOKENS_KEY = "better_lyrics_community_offset_tokens_v1";
+  const COMMUNITY_OFFSET_NAME_KEY = "better_lyrics_community_offset_name_v1";
+  const COMMUNITY_OFFSET_TOKEN_LIMIT = 100;
 
   // An offset entry is { video: ms, song: ms, pauseSync: {line, offset}|null }.
   // Legacy v1 stored a bare number (the music-video offset); migrate those into the
@@ -88,6 +91,32 @@
     } catch (_) {}
   }
 
+  function loadCommunityOffsetTokens() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(COMMUNITY_OFFSET_TOKENS_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return {};
+      const out = {};
+      for (const key in parsed) {
+        if (typeof parsed[key] === "string" && parsed[key]) out[key] = parsed[key];
+      }
+      return out;
+    } catch (_) { return {}; }
+  }
+
+  const communityOffsetTokens = loadCommunityOffsetTokens();
+
+  function persistCommunityOffsetTokens() {
+    try {
+      const keys = Object.keys(communityOffsetTokens);
+      while (keys.length > COMMUNITY_OFFSET_TOKEN_LIMIT) delete communityOffsetTokens[keys.shift()];
+      if (window.localStorage) {
+        window.localStorage.setItem(COMMUNITY_OFFSET_TOKENS_KEY, JSON.stringify(communityOffsetTokens));
+      }
+    } catch (_) {}
+  }
+
   function formatOffset(ms) {
     const sign = ms > 0 ? "+" : "";
     return sign + (ms / 1000).toFixed(1) + "s";
@@ -136,6 +165,7 @@
     if (changed) {
       editingOffsetMode = desired;
       refreshVideoOffsetControl();
+      renderCommunityOffsetUI();
       lastActiveLine = -1;
       publishSyncState();
     }
@@ -227,6 +257,13 @@
       : 0;
     if (editingOffsetMode === "video") offsetVideoMs = ms;
     else offsetSongMs = ms;
+    // Any manual slider/typed edit is a session-only override of the shared
+    // value. The next track load fetches the community offset again.
+    if (save) {
+      communityOffsetManual = true;
+      communityOffsetNotice = "";
+      communityOffsetNoticeError = false;
+    }
     const key = currentTrackKey || getTrackKey(getCurrentTrack());
     if (save && key) {
       // Preserve the pause sync point: this assignment replaces the whole entry.
@@ -238,6 +275,7 @@
       persistVideoOffsets();
     }
     refreshVideoOffsetControl();
+    renderCommunityOffsetUI();
     lastActiveLine = -1;
     publishSyncState();
   }
@@ -253,6 +291,375 @@
     refreshVideoOffsetControl();
     refreshPauseSyncControl();
     publishSyncState();
+    loadCommunityOffsetForTrack(track);
+  }
+
+  /* ===================== Community-shared offsets ===================== */
+
+  function currentCommunityOffset() {
+    const key = currentTrackKey || getTrackKey(getCurrentTrack());
+    if (!key || communityOffsetTrackKey !== key) return null;
+    return communityOffsetData[activeOffsetMode] || null;
+  }
+
+  function communityOffsetErrorText(body, fallback) {
+    const labels = {
+      offset_locked: "Someone already posted an offset for this track.",
+      offset_not_found: "That shared offset is no longer active.",
+      forbidden: "Only the person who posted this offset can undo it.",
+      missing_offset_token: "This browser does not have the owner token for that offset.",
+      rate_limited: "Too many reports from this connection. Try again later.",
+      reports_not_configured: "Reporting is not configured on the community server.",
+      invalid_offset: "That offset value is not valid.",
+      offset_out_of_range: "The offset must be between -60s and +60s.",
+      invalid_video_id: "YouTube did not give this track a video ID.",
+      invalid_mode: "The playback mode was not recognised.",
+      body_too_large: "The request was too large.",
+      db_unavailable: "The community database is unavailable right now.",
+      relay_failed: "Discord could not receive the report. Try again later.",
+    };
+    return labels[body && body.error] || fallback;
+  }
+
+  async function communityOffsetRequest(url, options) {
+    const opts = options || {};
+    const response = await fetch(url, {
+      credentials: "omit",
+      cache: "no-store",
+      ...opts,
+      headers: {
+        Accept: "application/json",
+        ...(opts.headers || {}),
+      },
+    });
+    const body = await response.json().catch(() => null);
+    return { response, body };
+  }
+
+  function renderCommunityOffsetUI() {
+    if (!communityOffsetStatus || !communityOffsetPostButton) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
+    const loaded = !!key && communityOffsetTrackKey === key;
+    const offset = loaded ? communityOffsetData[activeOffsetMode] : null;
+    const owner = !!(offset && communityOffsetTokens[offset.id]);
+    const busy = communityOffsetBusy;
+    const show = (el, visible) => { if (el) el.classList.toggle("hidden", !visible); };
+    const statusText = communityOffsetNotice || "";
+    const setStatus = (fallback, state) => {
+      communityOffsetStatus.textContent = statusText || fallback;
+      communityOffsetStatus.dataset.state = communityOffsetNoticeError ? "error" : (state || "none");
+      communityOffsetStatus.title = offset ? "Offset ID: " + offset.id : "";
+    };
+
+    communityOffsetPostButton.disabled = busy;
+    communityOffsetUndoButton.disabled = busy;
+    communityOffsetReportButton.disabled = busy;
+    communityOffsetName.disabled = busy;
+
+    if (!track || !key) {
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Play a track to share an offset.", "none");
+      return;
+    }
+
+    if (!videoId) {
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Waiting for this track's video ID…", "none");
+      return;
+    }
+
+    if (offset) {
+      const localMs = getActiveOffsetMs();
+      let text = "Saved by " + (offset.username || "Anonymous")
+        + (owner ? " (you)" : "") + " · " + formatOffset(offset.offsetMs);
+      text += " · ID " + offset.id.slice(0, 8);
+      if (communityOffsetManual && localMs !== offset.offsetMs) {
+        text += " · using " + formatOffset(localMs) + " locally";
+      }
+      setStatus(text, owner ? "owned" : "shared");
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, owner);
+      show(communityOffsetReportButton, !owner && !communityOffsetReported.has(offset.id));
+      return;
+    }
+
+    if (communityOffsetLoading) {
+      show(communityOffsetName, true);
+      show(communityOffsetPostButton, true);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      communityOffsetPostButton.disabled = true;
+      setStatus("Checking for a shared offset…", "none");
+      return;
+    }
+
+    show(communityOffsetName, true);
+    show(communityOffsetPostButton, true);
+    show(communityOffsetUndoButton, false);
+    show(communityOffsetReportButton, false);
+    communityOffsetPostButton.disabled = busy;
+    setStatus(
+      communityOffsetLoadError
+        ? "Could not check the shared offset. You can still post one."
+        : "No shared offset for this track yet. Set an offset and post it for everyone.",
+      communityOffsetLoadError ? "error" : "none"
+    );
+  }
+
+  function applyCommunityOffsetData() {
+    let changed = false;
+    for (const mode of ["video", "song"]) {
+      const shared = communityOffsetData[mode];
+      if (!shared || !Number.isFinite(Number(shared.offsetMs))) continue;
+      const ms = clamp(Math.round(Number(shared.offsetMs) / 100) * 100, -60000, 60000);
+      if (mode === "video") offsetVideoMs = ms;
+      else offsetSongMs = ms;
+      changed = true;
+    }
+    if (!changed) return;
+    refreshVideoOffsetControl();
+    lastActiveLine = -1;
+    publishSyncState();
+  }
+
+  function loadCommunityOffsetForTrack(track) {
+    const key = track ? getTrackKey(track) : "";
+    const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
+    const requestId = ++communityOffsetRequestSeq;
+    communityOffsetTrackKey = key;
+    communityOffsetData = { video: null, song: null };
+    communityOffsetManual = false;
+    communityOffsetLoadError = false;
+    communityOffsetBusy = false;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    communityOffsetLoading = !!videoId;
+    renderCommunityOffsetUI();
+    if (!videoId) return;
+    const url = AURORA_COMMUNITY_API + "/v1/offset?v=" + encodeURIComponent(videoId);
+    communityOffsetRequest(url).then(({ response, body }) => {
+      if (requestId !== communityOffsetRequestSeq) return;
+      if (key !== communityOffsetTrackKey) return;
+      if (currentTrackKey && key !== currentTrackKey) return;
+      communityOffsetLoading = false;
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetLoadError = true;
+        renderCommunityOffsetUI();
+        return;
+      }
+      const offsets = body.data && body.data.offsets;
+      communityOffsetData = {
+        video: offsets && offsets.video ? offsets.video : null,
+        song: offsets && offsets.song ? offsets.song : null,
+      };
+      // A slider edit made while this request was in flight wins for this
+      // session. The next track load applies the shared value again.
+      if (!communityOffsetManual) applyCommunityOffsetData();
+      renderCommunityOffsetUI();
+    }).catch((error) => {
+      if (requestId !== communityOffsetRequestSeq) return;
+      communityOffsetLoading = false;
+      communityOffsetLoadError = true;
+      alWarn("community offset lookup failed:", error && error.message);
+      renderCommunityOffsetUI();
+    });
+  }
+
+  async function postCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const track = getCurrentTrack();
+    const key = currentTrackKey || getTrackKey(track);
+    if (!track || !track.videoId || !key) {
+      communityOffsetNotice = "Play a track before posting an offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    if (communityOffsetLoading) return;
+    if (currentCommunityOffset()) {
+      communityOffsetNotice = "This track already has a shared offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    const offsetMs = getActiveOffsetMs();
+    if (offsetMs === 0) {
+      communityOffsetNotice = "Set a non-zero offset before posting.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    const username = communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "";
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(AURORA_COMMUNITY_API + "/v1/offset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoId: track.videoId,
+          mode: activeOffsetMode,
+          offsetMs,
+          username,
+          title: track.title || "",
+          artist: track.artist || "",
+        }),
+      });
+      if (key !== (currentTrackKey || getTrackKey(getCurrentTrack()))) return;
+      if (response.status === 409 && body && body.data && body.data.offset) {
+        const shared = body.data.offset;
+        if (shared.mode === "video" || shared.mode === "song") communityOffsetData[shared.mode] = shared;
+        communityOffsetNotice = "Someone already posted an offset for this track. " +
+          (shared.username || "Anonymous") + " can undo it.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not post the offset. Try again.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      const offset = body.data && body.data.offset;
+      if (!offset) {
+        communityOffsetNotice = "The server did not return the posted offset.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      communityOffsetData[offset.mode] = offset;
+      const ownerToken = body.data && body.data.ownerToken;
+      if (ownerToken) {
+        communityOffsetTokens[offset.id] = ownerToken;
+        persistCommunityOffsetTokens();
+      }
+      communityOffsetManual = false;
+      communityOffsetLoadError = false;
+      communityOffsetNotice = "";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset post failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
+  }
+
+  async function undoCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const offset = currentCommunityOffset();
+    if (!offset) return;
+    const ownerToken = communityOffsetTokens[offset.id];
+    if (!ownerToken) {
+      communityOffsetNotice = "This browser does not have the owner token for that offset.";
+      communityOffsetNoticeError = true;
+      renderCommunityOffsetUI();
+      return;
+    }
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(
+        AURORA_COMMUNITY_API + "/v1/offset/" + encodeURIComponent(offset.id),
+        { method: "DELETE", headers: { "X-Offset-Token": ownerToken } }
+      );
+      if (response.status === 404) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetData[offset.mode] = null;
+        communityOffsetNotice = "That shared offset was already removed.";
+        communityOffsetNoticeError = false;
+        return;
+      }
+      if (response.status === 403) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetNotice = "This browser's owner token was rejected. Only the poster can undo it.";
+        communityOffsetNoticeError = true;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not undo the shared offset.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      delete communityOffsetTokens[offset.id];
+      persistCommunityOffsetTokens();
+      communityOffsetData[offset.mode] = null;
+      communityOffsetNotice = "Your shared offset was removed.";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset undo failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
+  }
+
+  async function reportCommunityOffset() {
+    if (communityOffsetBusy) return;
+    const offset = currentCommunityOffset();
+    if (!offset) return;
+    let reason = "";
+    try {
+      if (typeof window.prompt === "function") {
+        const answer = window.prompt("Report this offset to the moderators?\n\nOptional: what is wrong with it?", "");
+        if (answer === null) return;
+        reason = String(answer || "").slice(0, 500);
+      }
+    } catch (_) {}
+    communityOffsetBusy = true;
+    communityOffsetNotice = "";
+    communityOffsetNoticeError = false;
+    renderCommunityOffsetUI();
+    try {
+      const { response, body } = await communityOffsetRequest(
+        AURORA_COMMUNITY_API + "/v1/offset/" + encodeURIComponent(offset.id) + "/report",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        }
+      );
+      if (response.status === 404) {
+        delete communityOffsetTokens[offset.id];
+        persistCommunityOffsetTokens();
+        communityOffsetData[offset.mode] = null;
+        communityOffsetNotice = "That shared offset was already removed.";
+        communityOffsetNoticeError = false;
+        return;
+      }
+      if (!response.ok || !body || !body.ok) {
+        communityOffsetNotice = communityOffsetErrorText(body, "Could not send the report. Try again.");
+        communityOffsetNoticeError = true;
+        return;
+      }
+      communityOffsetReported.add(offset.id);
+      communityOffsetNotice = "Report sent to the moderators. Thanks.";
+      communityOffsetNoticeError = false;
+    } catch (error) {
+      communityOffsetNotice = "Could not reach the community server. Try again.";
+      communityOffsetNoticeError = true;
+      alWarn("community offset report failed:", error && error.message);
+    } finally {
+      communityOffsetBusy = false;
+      renderCommunityOffsetUI();
+    }
   }
 
   /* ===================== MV pause re-sync ===================== */
@@ -438,7 +845,7 @@
     try {
       await removePermanentTTML(key);
     } catch (error) {
-      console.warn("[AuroraLyrics] Could not delete permanent TTML:", error);
+      alWarn("Could not delete permanent TTML:", error);
       showLyricsMessage("Could not delete the saved TTML for this track.");
       refreshFileTabState();
       return;
@@ -538,7 +945,7 @@
     try {
       await clearSpicyCacheForTrack(pending.track);
     } catch (error) {
-      console.warn("[AuroraLyrics] could not clear this song's cache:", error);
+      alWarn("could not clear this song's cache:", error);
     }
     refreshSongCacheRow();
   }

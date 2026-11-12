@@ -1,6 +1,6 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 1 November 2026
+**Last updated:** 12 November 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -10,11 +10,15 @@ Aurora Lyrics reads a small public announcement feed, looks up community lyrics
 by YouTube video ID, and sends one view report when a community sync starts.
 Makers may optionally sign in on the website with Discord to customise their
 public profile; that sign-in is described under [This website](#this-website).
+The optional community-offset feature shares a timing value and an optional
+display name; it is described under [Community offsets](#community-offsets).
 
 ## What we collect
 
-**Nothing personal.** Aurora Lyrics has no telemetry, no crash reporting, and no
-user accounts. The announcement relay stores only the announcement text you see
+**No account, analytics, or telemetry.** The optional community-offset feature
+can store a display name you type and a random owner token on your device; no
+Aurora account is created. Aurora Lyrics has no crash reporting and no user
+accounts. The announcement relay stores only the announcement text you see
 in the app; it does not receive anything about you. Community lyric lookups send
 the current YouTube video ID and nothing else about you. When a community-synced
 track starts playing, the extension sends one report containing that upload's
@@ -32,6 +36,26 @@ sign in to add optional social links and choose a profile background; those
 details are public. Staff can remove an upload; ask in Discord if you want one
 taken down. Do not upload lyrics or a sync you do not have permission to share.
 
+## Community offsets
+
+In the Sync tab you can share one lyric-timing offset for the current YouTube
+video and playback mode. Posting sends the YouTube video id, mode, offset value,
+and optional title, artist, and display name to the Aurora Community API. The
+display name is capped at 24 characters, defaults to `Anonymous`, and is shown
+publicly next to the offset; it is not verified and creates no account. The API
+stores the offset and a salted hash of a random owner token. The raw owner token
+is returned once and kept only in your browser's `localStorage` so this browser
+can Undo the post. A shared offset is public and is applied to other listeners'
+tracks when they load the same video.
+
+Anyone can report a shared offset from the extension. A report sends the offset
+id, an optional reason you type, and a salted SHA-256 hash of your IP address to
+the Aurora Community API; the raw IP is not stored. The report is mirrored into
+the Aurora Lyrics Discord moderation channel with the offset's public details
+(track, mode, value, display name, and id) so a moderator can Keep or Delete it.
+Discord receives that message, as it would any message in that server. Keep
+leaves the offset active; Delete removes it.
+
 ## What is stored on your device
 
 Aurora Lyrics uses Chrome's `storage` permission to save the following **locally,
@@ -43,7 +67,11 @@ on your machine**:
   looked up again.
 - Any TTML lyric files you import, saved per track.
 
-This data never leaves your browser. Uninstalling the extension removes it.
+This also includes the optional community-offset display name (so you do not
+have to retype it) and the owner token for an offset you posted (so Undo works
+after a reload). These stay local; only the posted offset and its display name
+are sent to the community API. Uninstalling the extension removes this local
+data.
 
 ## What is transmitted, and to whom
 
@@ -67,7 +95,7 @@ The services contacted are:
 |---|---|
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
 | `lrclib.net` | Synced lyrics |
-| `site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page` | Aurora Community TTML, profiles, uploads and view counts |
+| `site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page` | Aurora Community TTML, offsets, profiles, uploads and view counts |
 | `discord.com` | Optional Discord sign-in for maker profiles |
 | `cdn.discordapp.com` | Community uploader and maker avatars |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |

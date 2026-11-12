@@ -435,7 +435,7 @@
     const tag = source + " " + ((error && error.name) || "Error");
     if (atErrorNote === tag) return;
     atErrorNote = tag;
-    console.warn("[AuroraLyrics] on-device translation failed (" + tag + "):", (error && error.message) || error);
+    alWarn("on-device translation failed (" + tag + "):", (error && error.message) || error);
   }
 
   // One pass over the entries. Returns how many filled and which ones threw,

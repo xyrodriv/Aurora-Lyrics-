@@ -288,7 +288,7 @@
       if (requestId !== searchRequestSeq) return;
       searchAbortController = null;
       panel._status.textContent = "LRCLIB is currently busy — please try a few more times.";
-      console.warn("[AuroraLyrics] manual lyric search failed:", error);
+      alWarn("manual lyric search failed:", error);
     }
   }
 
@@ -440,7 +440,7 @@
     try {
       savedTTML = await getPermanentTTML(key);
     } catch (error) {
-      console.warn("[AuroraLyrics] Could not read permanent TTML:", error);
+      alWarn("Could not read permanent TTML:", error);
     }
     if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
 
@@ -455,7 +455,7 @@
       try {
         await removePermanentTTML(key);
       } catch (error) {
-        console.warn("[AuroraLyrics] Could not remove invalid permanent TTML:", error);
+        alWarn("Could not remove invalid permanent TTML:", error);
       }
       if (requestId !== trackRequestSeq || key !== currentTrackKey) return;
     }

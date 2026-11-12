@@ -24,6 +24,18 @@
     return video && video.videoWidth > 0 ? video : null;
   }
 
+  // Publish the live video's aspect ratio so the side-by-side media pane can
+  // match it exactly. drawBgFrame() also writes these, but the entry and attach
+  // paths must seed them before the first paint or the pane starts at 16:9.
+  function publishFsVideoAspect(video) {
+    if (!fsOverlay || !video) return;
+    const width = Number(video.videoWidth) || 0;
+    const height = Number(video.videoHeight) || 0;
+    if (!width || !height) return;
+    fsOverlay.style.setProperty("--ym-sl-fs-video-ar", width + " / " + height);
+    fsOverlay.style.setProperty("--ym-sl-fs-video-ratio", String(width / height));
+  }
+
   // Bump a YouTube image CDN URL to a larger size so the cover art fills the
   // fullscreen pane crisply instead of rendering as a tiny thumbnail. The CDN
   // accepts a trailing =wWIDTH-hHEIGHT hint and resizes server-side.
@@ -109,9 +121,8 @@
   // The lyric shade is unconditional now, in BOTH layouts where lyrics float
   // over a picture: Video Background (full-bleed video) and Video + Lyrics (the
   // column sits on the Kawarp / blurred-frame backdrop, which can be just as
-  // bright). Lyrics Only has nothing behind the words but the overlay itself, so
-  // it never shows the layer. Portrait side compositions drop the column and
-  // hide the layer in CSS; leaving the target on costs nothing there.
+  // bright). Portrait side compositions drop the column and hide the layer in
+  // CSS; leaving the target on costs nothing there.
   function fsShadeLayoutActive() {
     return fsLayoutMode === "background" || fsLayoutMode === "side";
   }
@@ -273,6 +284,9 @@
   // away for performance.
   function drawBgFrame() {
     if (!fsActive || !fsBgCanvas || !fsBgCtx || !fsSavedVideo || !fsSavedVideo.node) return;
+    // Hits paints Kawarp (or the blurred-cover fallback), not the video
+    // canvas, so do not keep copying decoded frames into a canvas nobody sees.
+    if (fsLayoutMode === "hits") return;
     // Kawarp OWNS the backdrop while it is up, and the stylesheet hides this
     // canvas behind it (.ym-sl-fs-has-kawarp .ym-sl-fs-bg-canvas: display none).
     // Drawing into it anyway was the most expensive thing in portrait music
@@ -434,11 +448,16 @@
   }
 
   const FS_LAYOUT_NAMES = {
+    hits: "Hits",
     side: "Video + Lyrics",
     background: "Video Background",
-    lyrics: "Lyrics Only",
   };
-  const FS_LAYOUT_ORDER = ["side", "background", "lyrics"];
+  // Hits is the cover-art default: artwork, title and actions at the top,
+  // lyrics directly beneath. Music videos deliberately do NOT get it — the
+  // side-by-side composition is the clean framing there, so a video cycles
+  // only between Video + Lyrics and Video Background.
+  const FS_LAYOUT_KEY = "better_lyrics_fullscreen_layout_v2";
+  const FS_LAYOUT_VIDEO_KEY = "better_lyrics_fullscreen_layout_video_v1";
   // Remembered across entries like the layout mode itself: the side is a
   // preference, not a per-song state.
   const FS_COVER_SIDE_KEY = "better_lyrics_fullscreen_cover_side_v1";
@@ -447,16 +466,13 @@
     return !!(fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video"));
   }
 
-  // The "Video Background" mode blurs the live music video as a backdrop. For
-  // audio-only tracks (cover art, no MV) there is nothing to use, so the cycle
-  // button SKIPS it instead of offering a broken layout. AJ 2026-09-28.
+  // Each track type has its own two-mode cycle: music videos go Video + Lyrics
+  // <-> Video Background, cover art goes Hits <-> Video + Lyrics. Hits is never
+  // offered for a video, and Background has no backdrop without one.
   function nextFsLayoutMode(current) {
-    const i0 = FS_LAYOUT_ORDER.indexOf(current);
-    for (let step = 1; step <= FS_LAYOUT_ORDER.length; step++) {
-      const cand = FS_LAYOUT_ORDER[(i0 + step) % FS_LAYOUT_ORDER.length];
-      if (cand !== "background" || hasFsVideo()) return cand;
-    }
-    return "side";
+    const order = hasFsVideo() ? ["side", "background"] : ["hits", "side"];
+    const i = order.indexOf(current);
+    return order[i < 0 ? 0 : (i + 1) % order.length];
   }
 
   /**
@@ -478,12 +494,215 @@
     if (label) label.textContent = current;
   }
 
-  function applyFullscreenLayout(mode) {
+  /* ---- Layout handoff (cover art) ---------------------------------------
+     One flying card carries the artwork between the small Hits header
+     thumbnail and the larger side cover. It is positioned against whichever
+     endpoint is larger and animated with transforms only, so the bitmap is
+     never re-rasterized at a growing size and border-radius does not repaint
+     on every frame. The real side card stays hidden until the clone lands.
+     MVs never enter Hits, so this is cover art only. */
+  function cleanupFsHitsToSide() {
+    if (fsHitsArtFlyTimer) {
+      window.clearTimeout(fsHitsArtFlyTimer);
+      fsHitsArtFlyTimer = 0;
+    }
+    if (fsLyricsFlipAnim) {
+      try { fsLyricsFlipAnim.cancel(); } catch (_) {}
+      fsLyricsFlipAnim = null;
+    }
+    if (fsLyricsHost) fsLyricsHost.style.translate = "";
+    const fly = fsHitsArtFly;
+    fsHitsArtFly = null;
+    if (fly) {
+      try { if (fly.anim) fly.anim.cancel(); } catch (_) {}
+      if (fly.node && fly.node.parentElement) fly.node.parentElement.removeChild(fly.node);
+      if (fly.art) fly.art.style.opacity = fly.opacity;
+    }
+    if (fsOverlay) {
+      fsOverlay.classList.remove(
+        "ym-sl-fs-hits-to-side",
+        "ym-sl-fs-side-to-hits",
+        "ym-sl-fs-lyrics-flip"
+      );
+    }
+    // The reverse flight lands on a smaller corner radius than the header
+    // card's native one. Let the card grow its corners back once the clone is
+    // gone instead of snapping there.
+    if (fly && fly.headerArt) {
+      fly.headerArt.style.borderRadius = fly.headerArtRadius;
+    }
+  }
+
+  function startFsArtHandoff(startRect, endRect, src, options) {
+    if (!fsOverlay || !fsArtImg || !src || !startRect || !endRect ||
+        !startRect.width || !startRect.height ||
+        !endRect.width || !endRect.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    const opts = options || {};
+    // Rasterize at the larger endpoint and scale down at the smaller one. This
+    // keeps the artwork crisp in both directions (a reverse flight would
+    // otherwise scale the 148px header bitmap up to the 583px side card).
+    const startArea = startRect.width * startRect.height;
+    const endArea = endRect.width * endRect.height;
+    const base = startArea >= endArea ? startRect : endRect;
+    const startSX = startRect.width / base.width;
+    const startSY = startRect.height / base.height;
+    const endSX = endRect.width / base.width;
+    const endSY = endRect.height / base.height;
+    const startX = startRect.left - base.left;
+    const startY = startRect.top - base.top;
+    const endX = endRect.left - base.left;
+    const endY = endRect.top - base.top;
+    const startTransform =
+      "translate(" + startX + "px, " + startY + "px) scale(" + startSX + ", " + startSY + ")";
+    const endTransform =
+      "translate(" + endX + "px, " + endY + "px) scale(" + endSX + ", " + endSY + ")";
+    const sideRadius = parseFloat(getComputedStyle(fsArtImg).borderTopLeftRadius) || 16;
+    const fly = h("img", { class: "ym-sl-fs-art-fly", src, alt: "" });
+    fly.style.left = base.left + "px";
+    fly.style.top = base.top + "px";
+    fly.style.width = base.width + "px";
+    fly.style.height = base.height + "px";
+    // A fixed base radius on the larger card; it scales down with the clone.
+    // Animating border-radius to compensate repainted the large bitmap every
+    // frame and was the main source of the jank.
+    fly.style.borderRadius = sideRadius + "px";
+    // Same bitmap, same box: hold the real card invisible so there is never a
+    // second cover on screen while the clone travels.
+    const previousOpacity = fsArtImg.style.opacity;
+    fsArtImg.style.opacity = "0";
+    let headerArt = null;
+    let headerArtRadius = "";
+    if (opts.matchHeaderRadius && fsHits && fsHits.artWrap) {
+      // The clone ends at endSX; make the real header card meet its corner
+      // radius and then transition back to the card's native radius.
+      headerArt = fsHits.artWrap;
+      headerArtRadius = headerArt.style.borderRadius;
+      headerArt.style.borderRadius = (sideRadius * endSX) + "px";
+    }
+    fsOverlay.appendChild(fly);
+    let anim = null;
+    try {
+      anim = fly.animate([
+        { transform: startTransform },
+        { transform: endTransform },
+      ], {
+        duration: 560,
+        easing: "cubic-bezier(.22, .61, .36, 1)",
+        fill: "forwards",
+      });
+    } catch (_) {}
+    fsHitsArtFly = {
+      node: fly, anim, art: fsArtImg, opacity: previousOpacity,
+      headerArt, headerArtRadius,
+    };
+    // WAAPI is the animation; this timer is the belt for a throttled/cancelled
+    // animation and the moment the real card takes over.
+    fsHitsArtFlyTimer = window.setTimeout(cleanupFsHitsToSide, 620);
+  }
+
+  function startFsHitsToSide(startRect, src) {
+    if (!fsOverlay || !fsArtImg || !src || !startRect ||
+        !startRect.width || !startRect.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    const target = fsArtImg.getBoundingClientRect();
+    if (!target.width || !target.height) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    startFsArtHandoff(startRect, target, src);
+  }
+
+  function startFsSideToHits(startRect, targetRect, src) {
+    if (!startRect || !targetRect || !src) {
+      cleanupFsHitsToSide();
+      return;
+    }
+    startFsArtHandoff(startRect, targetRect, src, { matchHeaderRadius: true });
+  }
+
+  function measureFsHitsArtTarget() {
+    if (!fsHits || !fsHits.root || !fsHits.artWrap) return null;
+    const root = fsHits.root;
+    const prevDisplay = root.style.display;
+    const prevVisibility = root.style.visibility;
+    root.style.display = "block";
+    root.style.visibility = "hidden";
+    const rect = fsHits.artWrap.getBoundingClientRect();
+    root.style.display = prevDisplay;
+    root.style.visibility = prevVisibility;
+    return rect;
+  }
+
+  function applyFullscreenLayout(mode, persist) {
     if (!fsOverlay) return;
-    // Belt-and-suspenders: never land on Video Background without an MV
-    // (e.g. if savedMode was "background" and the track has no video).
-    if (mode === "background" && !hasFsVideo()) mode = "side";
-    fsLayoutMode = mode === "background" || mode === "lyrics" ? mode : "side";
+    // A second switch can land while the card is still flying; finish/cancel
+    // the previous handoff before choosing new geometry.
+    cleanupFsHitsToSide();
+    // A fast switch back into Video Background must not leave the outgoing
+    // media transition class (or its timer) attached to the new layout.
+    if (fsMediaLayoutAnimTimer) {
+      window.clearTimeout(fsMediaLayoutAnimTimer);
+      fsMediaLayoutAnimTimer = 0;
+    }
+    fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
+    const video = hasFsVideo();
+    // Saved "lyrics" (or any value this build no longer knows) falls through
+    // to the right default for the track type.
+    if (mode !== "hits" && mode !== "side" && mode !== "background") {
+      mode = video ? "side" : "hits";
+    }
+    // Music videos are side-by-side only: a saved Hits (from before this rule)
+    // must not bring the video composition back. Without a video there is no
+    // backdrop for Video Background, so that also falls back to side.
+    if (video && mode === "hits") mode = "side";
+    if (!video && mode === "background") mode = "side";
+
+    // Capture both ends before the class flip hides either one. The handoff is
+    // cover art only; a video that just appeared must cut straight to its side
+    // composition. fsLayoutApplied excludes the first paint, where the side
+    // layout has no mode class of its own.
+    const wasHits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
+    const wasBackground = fsOverlay.classList.contains("ym-sl-fs-mode-background");
+    const wasSide = fsLayoutApplied && !wasHits &&
+      !fsOverlay.classList.contains("ym-sl-fs-mode-background") && !video;
+    const reduceMotion = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let hitsArtStart = null;
+    let hitsArtSrc = "";
+    let animateHitsToSide = false;
+    let sideArtStart = null;
+    let sideArtSrc = "";
+    let hitsArtTarget = null;
+    let animateSideToHits = false;
+    let lyricsFlipStart = null;
+    if (wasHits && !video && mode === "side" && !reduceMotion &&
+        fsHits && fsHits.art && fsHits.artWrap &&
+        fsArtImg && fsArtImg.isConnected) {
+      hitsArtSrc = fsHits.art.currentSrc || fsHits.art.getAttribute("src") || "";
+      const sideSrc = fsArtImg.getAttribute("src") || "";
+      if (hitsArtSrc && sideSrc) {
+        hitsArtStart = fsHits.artWrap.getBoundingClientRect();
+        animateHitsToSide = hitsArtStart.width > 0 && hitsArtStart.height > 0;
+      }
+    } else if (wasSide && mode === "hits" && !reduceMotion &&
+        fsHits && fsHits.art && fsHits.artWrap &&
+        fsArtImg && fsArtImg.isConnected) {
+      sideArtSrc = fsArtImg.currentSrc || fsArtImg.getAttribute("src") || "";
+      const hitsSrc = fsHits.art.currentSrc || fsHits.art.getAttribute("src") || "";
+      if (sideArtSrc && hitsSrc) {
+        sideArtStart = fsArtImg.getBoundingClientRect();
+        hitsArtTarget = measureFsHitsArtTarget();
+        animateSideToHits = !!hitsArtTarget &&
+          sideArtStart.width > 0 && sideArtStart.height > 0 &&
+          hitsArtTarget.width > 0 && hitsArtTarget.height > 0;
+      }
+    }
+    fsLayoutMode = mode;
     if (fsLayoutMode !== "background") {
       // The controls scrim only exists in Video Background; drop it at once
       // rather than waiting up to a sample tick to clear it.
@@ -493,17 +712,78 @@
       fsLyricsFinalDimmed = false;
       fsOverlay.classList.remove("ym-sl-fs-gap-dim", "ym-sl-fs-intro-dim", "ym-sl-fs-final-dim");
     }
+    // Spicy draws real DOM text. Animating the lyrics column's width, padding
+    // or height makes every line re-wrap and re-measure on every frame, which
+    // is the panel-only stutter in the Hits handoff. Snap the final geometry
+    // once, then FLIP a compositor-only translate from the old box below.
+    // AMLL is a canvas and keeps the existing full geometry transition.
+    if (!reduceMotion && (animateHitsToSide || animateSideToHits) &&
+        fsLyricsHost && !document.body.classList.contains("amll-active")) {
+      lyricsFlipStart = fsLyricsHost.getBoundingClientRect();
+      fsOverlay.classList.add("ym-sl-fs-lyrics-flip");
+    }
+    if (animateHitsToSide || animateSideToHits) {
+      fsOverlay.classList.add(
+        animateHitsToSide ? "ym-sl-fs-hits-to-side" : "ym-sl-fs-side-to-hits"
+      );
+      // Read the starting style once so the header/side chrome starts from the
+      // current composition and the lyrics animate from the current geometry.
+      // No paint happens between this flush and the class flip below.
+      void fsOverlay.offsetWidth;
+    }
+    // Leaving Video Background is the asymmetric case: entry to the full-bleed
+    // video reads as a fill, but removing the class used to cut the video back
+    // to its side column in one frame. Arm the media host's geometry transition
+    // while it is still full-bleed, then flip the layout class below.
+    if (wasBackground && mode !== "background" && !reduceMotion) {
+      fsOverlay.classList.add("ym-sl-fs-media-layout-out");
+      void fsOverlay.offsetWidth;
+    }
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
-    fsOverlay.classList.toggle("ym-sl-fs-mode-lyrics-only", fsLayoutMode === "lyrics");
-    // Background and Video + Lyrics both keep the readability layer on; Lyrics
-    // Only has no picture behind the words and fades it out.
+    fsOverlay.classList.toggle("ym-sl-fs-mode-hits", fsLayoutMode === "hits");
+    if (lyricsFlipStart && fsLyricsHost) {
+      // Hits positions the column from its measured header height. Make sure
+      // that height exists before measuring the final lyrics box, or the FLIP
+      // target would be the pre-header geometry.
+      if (fsLayoutMode === "hits") {
+        syncFsHitsCredits();
+        syncFsHitsGeometry();
+      }
+      const lyricsFlipEnd = fsLyricsHost.getBoundingClientRect();
+      const flipX = lyricsFlipStart.left - lyricsFlipEnd.left;
+      const flipY = lyricsFlipStart.top - lyricsFlipEnd.top;
+      if (Math.abs(flipX) > 0.5 || Math.abs(flipY) > 0.5) {
+        try {
+          fsLyricsFlipAnim = fsLyricsHost.animate(
+            [
+              { translate: flipX + "px " + flipY + "px" },
+              { translate: "0px 0px" },
+            ],
+            { duration: 550, easing: "cubic-bezier(.22, .61, .36, 1)" }
+          );
+        } catch (_) {
+          fsLyricsFlipAnim = null;
+        }
+      }
+    }
+    // The flying card targets the side artwork's final box, measured after the
+    // layout classes are in place. It keeps the real card hidden until landing.
+    if (animateHitsToSide) startFsHitsToSide(hitsArtStart, hitsArtSrc);
+    else if (animateSideToHits) startFsSideToHits(sideArtStart, hitsArtTarget, sideArtSrc);
+    // Background and Video + Lyrics both keep the readability layer on.
     syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
     // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
     // are static — this only moves the volume node between the chip and the
-    // scrubber row, and re-pins the two edge buttons.
-    syncFsChromeStructure();
+    // scrubber row, and re-pins the two edge buttons. Skip it during the reverse
+    // handoff: Hits hides this chrome anyway, and pulling the title out of the
+    // fading side column (or the volume into the scrubber) would rearrange it
+    // visibly mid-flight.
+    if (!animateSideToHits) syncFsChromeStructure();
+    // The Hits dock stays in the cover-art header flow; music videos never use
+    // this composition, so there is no bottom-left placement any more.
+    placeFsHitsDock();
     if (fsLayoutSelect) {
       // Now a button rather than a <select>, so the mode rides on the dataset
       // instead of .value, and the tooltip is refreshed so the announced
@@ -513,7 +793,15 @@
       }
       updateFsLayoutButtonTitle();
     }
-    try { localStorage.setItem("better_lyrics_fullscreen_layout_v1", fsLayoutMode); } catch (_) {}
+    // Separate preferences by track type: picking Video Background for an MV
+    // must not change the cover-art composition, and an MV must never inherit
+    // the audio Hits choice. Automatic fallbacks pass persist=false so dropping
+    // out of a mode the track no longer supports leaves the stored choice alone.
+    if (persist !== false) {
+      try {
+        localStorage.setItem(video ? FS_LAYOUT_VIDEO_KEY : FS_LAYOUT_KEY, fsLayoutMode);
+      } catch (_) {}
+    }
     recomputeActiveOffsetMode(true);
     // Switching layout resizes and moves the lyrics column with a CSS transition,
     // so the old scrollTop no longer centres the active line — and nothing
@@ -521,6 +809,26 @@
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
     recentreActiveLine();
+    // AMLL owns its own scroll offset, so keep its focal line in step with this
+    // layout switch too.
+    amllSyncAlignPosition();
+    // Hits places the lyrics column from the header's measured height. The
+    // header is display:none until the class above lands, so the measurement
+    // has to wait for the frame that actually shows it.
+    if (fsLayoutMode === "hits") {
+      // The header mirrors the attribution when the Spicy renderer owns the
+      // lyrics. Refresh it on every switch back into Hits, then re-measure the
+      // header now that the credit block can be present.
+      syncFsHitsCredits();
+      requestAnimationFrame(syncFsHitsGeometry);
+    }
+    fsLayoutApplied = true;
+    if (wasBackground && mode !== "background" && !reduceMotion) {
+      fsMediaLayoutAnimTimer = window.setTimeout(() => {
+        fsMediaLayoutAnimTimer = 0;
+        if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
+      }, 540);
+    }
   }
 
   /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------

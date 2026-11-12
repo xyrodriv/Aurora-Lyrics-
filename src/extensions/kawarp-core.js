@@ -370,7 +370,11 @@ export class Kawarp {
         this._saturation = options.saturation ?? 1.5;
         this._tintColor = options.tintColor ?? [0.157, 0.157, 0.235];
         this._tintIntensity = options.tintIntensity ?? 0.15;
-        this._dithering = options.dithering ?? 0.008;
+        // Fixed grain for the Aurora backdrops: the old 0.008 was only about
+        // one 8-bit step and barely read, and 0.02 was still too subtle in use.
+        // Raised from 0.03 to 0.05 so the page and fullscreen gradients show
+        // more texture instead of banding; still deliberately not a setting.
+        this._dithering = options.dithering ?? 0.05;
         this._scale = options.scale ?? 1.0;
         // Optional frame cap (fps). 0 = uncapped, the historical behaviour.
         // The performance modes use it to run the same shader at 30 or 24 fps
