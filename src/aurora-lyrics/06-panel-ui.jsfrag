@@ -170,7 +170,7 @@
     };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
     const importButton = h("button", {
-      class: "ym-sl-import",
+      class: "ym-sl-import ym-sl-op-btn ym-sl-op-btn-primary",
       type: "button",
       title: "Import TTML lyrics",
       "aria-label": "Import TTML lyrics",
@@ -251,8 +251,9 @@
 
     // Community-shared offset. The first person to post claims the track + mode
     // slot; everyone else gets that value on load. The owner token lives only in
-    // localStorage, so Undo appears on the poster's own browser. There is no
-    // Aurora account: the name is a display label, not an identity.
+    // localStorage, so Undo appears on the poster's own browser. Guests can use
+    // a display label; a signed-in maker's public identity replaces that input
+    // through the website bridge.
     const communityOffsetWrap = h("div", { class: "ym-sl-community-offset" });
     const communityOffsetHead = h("div", { class: "ym-sl-community-offset-head" });
     communityOffsetHead.append(
@@ -285,6 +286,27 @@
         }
       } catch (_) {}
     });
+    // An anchor rather than a div: once the maker identity arrives, both the
+    // avatar and the username become one target for the public profile. Without
+    // a profile URL the href is removed again and the row stays inert.
+    communityOffsetAccount = h("a", {
+      class: "ym-sl-community-offset-account hidden",
+    });
+    communityOffsetAccountAvatar = h("span", {
+      class: "ym-sl-community-offset-avatar",
+      "aria-hidden": "true",
+    });
+    const communityOffsetAccountCopy = h("span", {
+      class: "ym-sl-community-offset-accountcopy",
+    });
+    communityOffsetAccountName = h("strong", {
+      class: "ym-sl-community-offset-accountname",
+    });
+    communityOffsetAccountCopy.append(
+      communityOffsetAccountName,
+      h("span", { class: "ym-sl-community-offset-accountmeta", text: "Aurora maker" })
+    );
+    communityOffsetAccount.append(communityOffsetAccountAvatar, communityOffsetAccountCopy);
     communityOffsetPostButton = h("button", {
       class: "ym-sl-community-offset-btn ym-sl-community-offset-post",
       type: "button",
@@ -310,7 +332,7 @@
       communityOffsetPostButton, communityOffsetUndoButton, communityOffsetReportButton
     );
     communityOffsetWrap.append(
-      communityOffsetHead, communityOffsetStatus, communityOffsetName, communityOffsetActions
+      communityOffsetHead, communityOffsetStatus, communityOffsetAccount, communityOffsetName, communityOffsetActions
     );
 
     // Options is a pill beside the song-layout switcher, in the empty band
@@ -335,17 +357,7 @@
     // purpose: .ym-sl-panel sets container-type: size, which makes the panel a
     // containing block for fixed-position descendants and would trap + clip a
     // nested overlay (the panel also has overflow: hidden).
-    const optionsOverlay = h("div", { class: "ym-sl-options-overlay hidden" });
-    const optionsHeader = h("div", { class: "ym-sl-options-header" });
-    const optionsTitle = h("span", { class: "ym-sl-options-title", text: "Options" });
-    const optionsClose = h("button", {
-      class: "ym-sl-options-close",
-      type: "button",
-      text: "\u00d7",
-      title: "Close options",
-      "aria-label": "Close options",
-    });
-    optionsHeader.append(optionsTitle, optionsClose);
+    const optionsOverlay = h("div", { class: "ym-sl-options-overlay ym-sl-op2 hidden" });
     const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
     const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
@@ -474,20 +486,94 @@
     });
     cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    // ---- Options body: TABBED SIDE-RAIL (AJ, 2026-10-19) ------------------------
-    // A vertical tab rail on the LEFT, the selected section's controls on the
-    // RIGHT, one panel visible at a time. Reuses the addon settings panel's clean
-    // spring — opacity + rise + a touch of blur, staggered per child — on open and
-    // on every tab switch.
-    const optionsBody = h("div", { class: "ym-sl-options-body ym-sl-options-tabbed" });
-    const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
-    const optionsPanels = h("div", { class: "ym-sl-options-panels" });
-
-    const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
-      videoOffsetWrap,
-      communityOffsetWrap
+    // ---- Options body: ADAPTIVE SHELL (AJ, 2026-11-14) -------------------
+    // The add-ons panel's split, reused here: one rail, one scrolling pane,
+    // and a single red marker that slides between rows. The old build stacked
+    // absolutely positioned pages inside a height it measured itself; one missed
+    // measurement left the visible page blank or put its controls under an
+    // invisible sibling. Here only the active page is in flow, so there is
+    // nothing to measure and nothing to overlap.
+    // YouTube Music enforces Trusted Types: assigning SVG markup with innerHTML
+    // throws and aborts buildUI, taking the Options pill and the Lyrics tab with
+    // it. Build the icons as real SVG nodes instead.
+    const OP_SVG_NS = "http://www.w3.org/2000/svg";
+    const opSvgNode = (tag, attrs) => {
+      const node = document.createElementNS(OP_SVG_NS, tag);
+      for (const key in attrs) node.setAttribute(key, attrs[key]);
+      return node;
+    };
+    const opIcon = (draw, className) => {
+      const el = h("span", { class: className, "aria-hidden": "true" });
+      const svg = opSvgNode("svg", {
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        focusable: "false",
+        "aria-hidden": "true",
+      });
+      draw(svg);
+      el.appendChild(svg);
+      return el;
+    };
+    const OP_ICON = {
+      sliders: (svg) => {
+        svg.appendChild(opSvgNode("path", { d: "M4 7h9M17 7h3M4 17h3M11 17h9" }));
+        svg.appendChild(opSvgNode("circle", { cx: "15", cy: "7", r: "2" }));
+        svg.appendChild(opSvgNode("circle", { cx: "9", cy: "17", r: "2" }));
+      },
+      sync: (svg) => {
+        ["M12 7v5l3 2", "M20 12a8 8 0 1 1-2.34-5.66", "M20 4v4h-4"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      file: (svg) => {
+        ["M7 3h7l4 4v14H7z", "M14 3v5h5", "M9 13h6M9 17h5"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      cache: (svg) => {
+        svg.appendChild(opSvgNode("ellipse", { cx: "12", cy: "6", rx: "7", ry: "3" }));
+        ["M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6", "M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      close: (svg) => {
+        svg.appendChild(opSvgNode("path", { d: "M6 6l12 12M18 6L6 18", "stroke-width": "2" }));
+      },
+    };
+    const optionPageId = (id) => "ym-sl-op-page-" + id;
+    const optionTabId = (id) => "ym-sl-op-tab-" + id;
+    const optionPageHead = (title, copy) => h("header", { class: "ym-sl-op-pagehead" },
+      h("h2", { class: "ym-sl-op-pagetitle", text: title }),
+      h("p", { class: "ym-sl-op-pagesub", text: copy })
     );
+    const optionCard = (title, copy, ...children) => h("section", { class: "ym-sl-op-card" },
+      title ? h("div", { class: "ym-sl-op-cardhead" },
+        h("h3", { class: "ym-sl-op-cardtitle", text: title }),
+        copy ? h("p", { class: "ym-sl-op-cardcopy", text: copy }) : null
+      ) : null,
+      ...children
+    );
+
+    const panelSync = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("sync"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("sync"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Sync & timing",
+        "Nudge the lyrics into place for this track, then share the fix with everyone."
+      ),
+      optionCard(
+        "Offset",
+        "Nudge the lyrics earlier or later for this track, then post the fix to share it with everyone.",
+        videoOffsetWrap,
+        communityOffsetWrap
+      )
+    );
+
     // Per-SONG cache controls, in the File tab next to the import buttons. The
     // global purge lives in the Cache tab; this one only ever touches the track
     // that is on screen, and it cannot run while that track is playing — see
@@ -505,152 +591,360 @@
       if (songCacheClearButton.disabled) return;
       queueSongCacheClear();
     });
-    const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
-      importMode,
-      h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
-      exportActions,
-      fileImportedNote,
-      h("hr", { class: "ym-sl-options-divider" }),
-      songCacheClearButton,
-      songCacheStatus
+    const panelFile = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("file"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("file"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Lyrics file",
+        "Bring your own TTML, export the current sync, or clear this song's lookup."
+      ),
+      optionCard(
+        "Import",
+        "Choose a TTML file and whether it should stay for this session or permanently.",
+        importMode,
+        h("div", { class: "ym-sl-options-file-actions" }, importButton, deletePermanentButton),
+        exportActions,
+        fileImportedNote
+      ),
+      optionCard(
+        "This song's cache",
+        "The cached lookup is dropped only after this track has finished playing.",
+        songCacheStatus,
+        songCacheClearButton
+      )
     );
-    const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
-      cacheSection
+
+    const panelCache = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("cache"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("cache"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Cache",
+        "Spicy Lyrics and Aurora Community results are kept for up to 30 days so repeats load instantly."
+      ),
+      optionCard(
+        "Stored results",
+        "Clearing is immediate and cannot be undone.",
+        cacheSection
+      )
     );
 
     const optionSections = [
-      { label: "Sync", panel: panelSync },
-      { label: "File", panel: panelFile },
-      { label: "Cache", panel: panelCache },
+      { id: "sync", label: "Sync & timing", hint: "Offset & community", icon: OP_ICON.sync, panel: panelSync },
+      { id: "file", label: "Lyrics file", hint: "Import & export", icon: OP_ICON.file, panel: panelFile },
+      { id: "cache", label: "Cache", hint: "Stored results", icon: OP_ICON.cache, panel: panelCache },
     ];
-    // Options opens on Sync, the reason the panel exists (offset + pause sync).
+    // Options opens on Sync, the reason the panel exists (offset + community).
     const DEFAULT_OPTION_TAB = 0;
+    let activeOptionIndex = DEFAULT_OPTION_TAB;
+    let optionsSwapFinish = null;
+    let optionsLayoutRaf = 0;
+    let optionsEntrancePending = false;
+    let optionsFocusBefore = null;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-    // Panels absolutely overlap inside a fixed-height stack so switching fades the
-    // old panel out, springs the new one in, and animates the container HEIGHT to
-    // the new panel's size — no abrupt jump when a taller tab (e.g. File) opens.
-    let panelsHeightRaf = 0;
-    let panelsHeightEmptyTries = 0;
-    const syncPanelsHeight = () => {
-      const active = optionSections.find((section) => section.panel.classList.contains("active"));
-      if (!active) return;
-      const next = active.panel.offsetHeight;
-      if (next) {
-        panelsHeightEmptyTries = 0;
-        optionsPanels.style.height = Math.ceil(next) + "px";
-      } else if (panelsHeightEmptyTries < 8) {
-        // Not laid out yet (fonts still loading, or measured too early). Retry for a
-        // few frames instead of collapsing the stack to 0 and showing an EMPTY panel
-        // — the intermittent "no content" bug (AJ, 2026-10-19). The CSS min-height
-        // also floors it so it can never fully collapse.
-        panelsHeightEmptyTries++;
-        requestAnimationFrame(syncPanelsHeight);
-      }
-    };
-    const scheduleSyncPanelsHeight = () => {
-      if (panelsHeightRaf) return;
-      panelsHeightRaf = requestAnimationFrame(() => { panelsHeightRaf = 0; syncPanelsHeight(); });
-    };
-    if (window.ResizeObserver) {
-      // Keeps height in sync when a panel's content changes size after it is shown
-      // (cache status text, Export/Saved rows appearing, etc.).
-      const ro = new ResizeObserver(scheduleSyncPanelsHeight);
-      optionSections.forEach((section) => ro.observe(section.panel));
-    }
-    // SpicyLyrics font load reflows line/row heights — resync once it settles.
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(scheduleSyncPanelsHeight).catch(() => {});
-    }
-    window.addEventListener("resize", scheduleSyncPanelsHeight);
-    // Same clean spring the addon settings panel uses (cubic-bezier(.34,1.4,.5,1)):
-    // opacity + rise + a touch of blur, staggered per child. fromLeft slides the
-    // rail in from the left; otherwise rows rise up with a blur.
-    const staggerIn = (container, fromLeft) => {
-      if (!container || !container.children || !optionsMotionOK()) return;
-      Array.from(container.children).forEach((el, i) => {
-        if (!el.animate) return;
-        el.animate(
-          fromLeft
-            ? [{ opacity: 0, transform: "translateX(-16px)" }, { opacity: 1, transform: "none" }]
-            : [{ opacity: 0, transform: "translateY(16px)", filter: "blur(7px)" },
-               { opacity: 1, transform: "none", filter: "blur(0px)" }],
-          { duration: 520, delay: 40 + i * 55, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
-        );
-      });
-    };
+
+    const optionsTabs = h("div", {
+      class: "ym-sl-op-tabs",
+      role: "tablist",
+      "aria-label": "Options sections",
+    });
+    const optionsIndicator = h("span", { class: "ym-sl-op-ind", "aria-hidden": "true" });
+    optionsTabs.appendChild(optionsIndicator);
 
     const optionTabs = optionSections.map((section, index) => {
       const tab = h("button", {
-        class: "ym-sl-options-tab" + (index === DEFAULT_OPTION_TAB ? " active" : ""),
+        class: "ym-sl-op-tab" + (index === DEFAULT_OPTION_TAB ? " is-active" : ""),
         type: "button",
         role: "tab",
+        id: optionTabId(section.id),
+        "aria-controls": optionPageId(section.id),
         "aria-selected": index === DEFAULT_OPTION_TAB ? "true" : "false",
-        text: section.label,
+        tabindex: index === DEFAULT_OPTION_TAB ? "0" : "-1",
+      },
+        opIcon(section.icon, "ym-sl-op-tabicon"),
+        h("span", { class: "ym-sl-op-tabcopy" },
+          h("strong", { text: section.label }),
+          h("small", { text: section.hint })
+        )
+      );
+      tab.addEventListener("click", () => switchOptionTab(index, { focusTab: true }));
+      tab.addEventListener("keydown", (event) => {
+        const key = event.key;
+        let next = null;
+        if (key === "ArrowDown" || key === "ArrowRight") next = (index + 1) % optionSections.length;
+        else if (key === "ArrowUp" || key === "ArrowLeft") next = (index - 1 + optionSections.length) % optionSections.length;
+        else if (key === "Home") next = 0;
+        else if (key === "End") next = optionSections.length - 1;
+        if (next == null) return;
+        event.preventDefault();
+        switchOptionTab(next, { focusTab: true });
       });
-      if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
-      section.panel.inert = index !== DEFAULT_OPTION_TAB;
-      section.panel.setAttribute("aria-hidden", index === DEFAULT_OPTION_TAB ? "false" : "true");
-      optionsPanels.appendChild(section.panel);
-      tab.addEventListener("click", () => {
-        if (tab.classList.contains("active")) return;
-        optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
-        tab.classList.add("active");
-        tab.setAttribute("aria-selected", "true");
-        optionSections.forEach((s) => {
-          s.panel.classList.remove("active");
-          s.panel.inert = s !== section;
-          s.panel.setAttribute("aria-hidden", s === section ? "false" : "true");
-        });
-        section.panel.classList.add("active");
-        syncPanelsHeight(); // animate container height to the new panel
-        staggerIn(section.panel, false); // clean spring on the newly shown panel
-      });
-      optionsRail.appendChild(tab);
+      optionsTabs.appendChild(tab);
       return tab;
     });
 
-    optionsBody.append(optionsRail, optionsPanels);
-    optionsOverlay.append(optionsHeader, optionsBody);
-    // Size the stack to the default active panel (rAF so fonts/content settle).
-    scheduleSyncPanelsHeight();
-    // Entrance choreography used by the Options button (below).
+    optionSections.forEach((section, index) => {
+      const active = index === DEFAULT_OPTION_TAB;
+      section.panel.hidden = !active;
+      section.panel.inert = !active;
+      section.panel.setAttribute("aria-hidden", active ? "false" : "true");
+    });
+
+    const optionsReel = h("div", { class: "ym-sl-op-reel" });
+    optionSections.forEach((section) => optionsReel.appendChild(section.panel));
+    const optionsScroll = h("div", { class: "ym-sl-op-scroll", tabindex: "-1" }, optionsReel);
+    const optionsPane = h("main", { class: "ym-sl-op-pane" }, optionsScroll);
+    const optionsRail = h("aside", { class: "ym-sl-op-rail" },
+      h("div", { class: "ym-sl-op-railhead", text: "Settings" }),
+      optionsTabs,
+      h("div", { class: "ym-sl-op-railfoot", text: "Changes save as you go." })
+    );
+    const optionsBody = h("div", { class: "ym-sl-op-body" }, optionsRail, optionsPane);
+
+    const optionsHeading = h("span", { class: "ym-sl-op-title", id: "ym-sl-op-heading", text: "Options" });
+    const optionsShellClose = h("button", {
+      class: "ym-sl-op-close",
+      type: "button",
+      title: "Close options",
+      "aria-label": "Close options",
+    }, opIcon(OP_ICON.close, "ym-sl-op-closesvg"));
+    const optionsShellHead = h("header", { class: "ym-sl-op-head" },
+      h("div", { class: "ym-sl-op-brand" },
+        opIcon(OP_ICON.sliders, "ym-sl-op-mark"),
+        h("div", { class: "ym-sl-op-brandcopy" }, optionsHeading)
+      ),
+      optionsShellClose
+    );
+    const optionsShell = h("section", {
+      class: "ym-sl-op-shell",
+      role: "dialog",
+      "aria-labelledby": "ym-sl-op-heading",
+    }, optionsShellHead, optionsBody);
+
+    function positionOptionIndicator(instant) {
+      const tab = optionTabs[activeOptionIndex];
+      if (!tab) return;
+      if (instant) {
+        optionsIndicator.classList.remove("ready");
+        void optionsIndicator.offsetWidth;
+      }
+      optionsIndicator.style.height = tab.offsetHeight + "px";
+      optionsIndicator.style.transform = "translateY(" + tab.offsetTop + "px)";
+      optionsIndicator.style.opacity = tab.offsetHeight ? "1" : "0";
+      optionsIndicator.classList.add("ready");
+    }
+
+    function syncOptionEdges() {
+      const max = optionsScroll.scrollHeight - optionsScroll.clientHeight;
+      optionsPane.classList.toggle("has-top", optionsScroll.scrollTop > 2);
+      optionsPane.classList.toggle("has-bottom", max > 2 && optionsScroll.scrollTop < max - 2);
+    }
+
+    function settleOptionSwap() {
+      const finish = optionsSwapFinish;
+      optionsSwapFinish = null;
+      if (finish) finish();
+    }
+
+    function reelOptionPages(oldPage, newPage, dir) {
+      const span = Math.max(optionsScroll.clientHeight, 260);
+      const dur = 380;
+      const ease = "cubic-bezier(.32,.72,0,1)";
+      oldPage.style.position = "absolute";
+      oldPage.style.top = "0";
+      oldPage.style.left = "0";
+      oldPage.style.right = "0";
+      oldPage.style.width = "100%";
+      oldPage.style.pointerEvents = "none";
+      newPage.style.position = "absolute";
+      newPage.style.top = "0";
+      newPage.style.left = "0";
+      newPage.style.right = "0";
+      newPage.style.width = "100%";
+      newPage.style.pointerEvents = "none";
+      optionsScroll.style.overflowY = "hidden";
+      const out = oldPage.animate(
+        [{ opacity: 1, transform: "translateY(0px)" },
+         { opacity: 0, transform: "translateY(" + (-span * dir) + "px)" }],
+        { duration: dur, easing: ease }
+      );
+      const inn = newPage.animate(
+        [{ opacity: 0, transform: "translateY(" + (span * dir) + "px)" },
+         { opacity: 1, transform: "translateY(0px)" }],
+        { duration: dur, easing: ease }
+      );
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try { out.cancel(); inn.cancel(); } catch (_) {}
+        oldPage.hidden = true;
+        oldPage.removeAttribute("style");
+        newPage.hidden = false;
+        newPage.removeAttribute("style");
+        optionsScroll.style.overflowY = "";
+        if (optionsSwapFinish === finish) optionsSwapFinish = null;
+        syncOptionEdges();
+      };
+      optionsSwapFinish = finish;
+      out.onfinish = finish;
+      inn.onfinish = finish;
+      window.setTimeout(finish, dur + 90);
+    }
+
+    function switchOptionTab(next, opts) {
+      if (next < 0 || next >= optionSections.length) return;
+      if (next === activeOptionIndex) {
+        if (opts && opts.focusTab) optionTabs[next].focus({ preventScroll: true });
+        return;
+      }
+      settleOptionSwap();
+      const oldIndex = activeOptionIndex;
+      const dir = next > oldIndex ? 1 : -1;
+      const oldPage = optionSections[oldIndex].panel;
+      const newPage = optionSections[next].panel;
+      activeOptionIndex = next;
+      optionTabs.forEach((tab, i) => {
+        const on = i === next;
+        tab.classList.toggle("is-active", on);
+        tab.setAttribute("aria-selected", on ? "true" : "false");
+        tab.tabIndex = on ? 0 : -1;
+      });
+      optionSections.forEach((section, i) => {
+        const on = i === next;
+        section.panel.inert = !on;
+        section.panel.setAttribute("aria-hidden", on ? "false" : "true");
+      });
+      newPage.hidden = false;
+      optionsScroll.scrollTop = 0;
+      positionOptionIndicator(false);
+      if (optionsMotionOK() && typeof oldPage.animate === "function") {
+        reelOptionPages(oldPage, newPage, dir);
+      } else {
+        oldPage.hidden = true;
+        syncOptionEdges();
+      }
+      if (opts && opts.focusTab) {
+        optionTabs[next].focus({ preventScroll: true });
+      }
+    }
+
+    function playOptionEntrance() {
+      if (!optionsMotionOK() || optionsOverlay.classList.contains("ym-sl-options-docked")) return;
+      optionTabs.forEach((tab, i) => {
+        if (!tab.animate) return;
+        tab.animate(
+          [{ opacity: 0, transform: "translateX(-12px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, delay: 30 + i * 45, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+        );
+      });
+      const page = optionSections[activeOptionIndex].panel;
+      if (page && page.animate) {
+        page.animate(
+          [{ opacity: 0, transform: "translateY(16px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, delay: 70, easing: "cubic-bezier(.22,1,.36,1)", fill: "backwards" }
+        );
+      }
+    }
+
+    function queueOptionLayout(entrance) {
+      if (entrance) optionsEntrancePending = true;
+      if (optionsLayoutRaf) return;
+      optionsLayoutRaf = requestAnimationFrame(() => {
+        optionsLayoutRaf = 0;
+        if (optionsOverlay.classList.contains("hidden")) return;
+        positionOptionIndicator(true);
+        syncOptionEdges();
+        if (optionsEntrancePending) {
+          optionsEntrancePending = false;
+          playOptionEntrance();
+        }
+      });
+    }
+
+    function openOptionsPanel() {
+      if (!optionsOverlay.classList.contains("hidden")) return;
+      optionsFocusBefore = document.activeElement;
+      settleOptionSwap();
+      optionsOverlay.classList.remove("hidden");
+      refreshFileTabState();
+      optionsScroll.scrollTop = 0;
+      queueOptionLayout(true);
+      requestAnimationFrame(() => {
+        optionTabs[activeOptionIndex].focus({ preventScroll: true });
+      });
+    }
+
+    function closeOptionsPanel() {
+      if (optionsOverlay.classList.contains("hidden")) return;
+      if (optionsOverlay.classList.contains("ym-sl-options-docked")) return;
+      optionsOverlay.classList.add("hidden");
+      if (optionsFocusBefore && optionsFocusBefore.isConnected) {
+        optionsFocusBefore.focus({ preventScroll: true });
+      }
+    }
+
+    optionsOverlay.replaceChildren(optionsShell);
+    makeDraggable(optionsOverlay, optionsShellHead);
     optionsOverlay._staggerOpen = () => {
-      syncPanelsHeight();
-      staggerIn(optionsRail, true);
-      staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
+      if (optionsOverlay.classList.contains("hidden")) return;
+      settleOptionSwap();
+      refreshFileTabState();
+      optionsScroll.scrollTop = 0;
+      queueOptionLayout(true);
+      optionTabs[activeOptionIndex].focus({ preventScroll: true });
     };
-    // The card opens under the button. It used to appear at the viewport's
-    // top-right because that is where its button was; a card that materialises
-    // somewhere else than the click reads as a different feature. Clamped so a
-    // narrow window cannot push it off-screen.
-    function anchorOptionsCard() {
-      const rect = optionsButton.getBoundingClientRect();
-      const width = optionsOverlay.offsetWidth || 430;
-      const height = optionsOverlay.offsetHeight || 320;
-      const left = Math.min(Math.max(12, rect.left - 6), Math.max(12, innerWidth - width - 12));
-      const top = Math.min(Math.max(12, rect.bottom + 10), Math.max(12, innerHeight - height - 12));
-      optionsOverlay.style.left = left + "px";
-      optionsOverlay.style.top = top + "px";
-      optionsOverlay.style.right = "auto";
-      optionsOverlay.style.bottom = "auto";
+    optionsOverlay._exportActions = exportActions;
+    if (window.MutationObserver) {
+      // Other features (fullscreen, PiP) show this overlay by removing the
+      // hidden class themselves. Re-measure on that class change instead of
+      // assuming our own button is the only way in.
+      const optionsVisibilityObserver = new MutationObserver(() => {
+        if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(true);
+      });
+      optionsVisibilityObserver.observe(optionsOverlay, { attributes: true, attributeFilter: ["class"] });
     }
     optionsButton.addEventListener("click", () => {
-      const opening = optionsOverlay.classList.contains("hidden");
-      if (opening) anchorOptionsCard();
-      optionsOverlay.classList.toggle("hidden");
-      if (opening) {
-        refreshFileTabState();
-        if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
+      if (optionsOverlay.classList.contains("hidden")) openOptionsPanel();
+      else closeOptionsPanel();
+    });
+    optionsShellClose.addEventListener("click", closeOptionsPanel);
+    optionsOverlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeOptionsPanel();
       }
     });
-    optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
-    optionsOverlay._exportActions = exportActions;
-    makeDraggable(optionsOverlay, optionsHeader);
+    optionsScroll.addEventListener("scroll", syncOptionEdges, { passive: true });
+    window.addEventListener("resize", () => {
+      if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(false);
+    });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => {
+        if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(false);
+      }).catch(() => {});
+    }
+    if (window.ResizeObserver) {
+      // Sizing the rail marker from a single frame can leave it a few pixels
+      // taller than the active row when Satoshi swaps in after measurement.
+      // Watching the tab stack catches that reflow without reintroducing any
+      // page-height measuring or animation.
+      const optionsTabObserver = new ResizeObserver(() => {
+        if (!optionsOverlay.classList.contains("hidden")) positionOptionIndicator(true);
+      });
+      optionsTabObserver.observe(optionsTabs);
+    }
     document.body.appendChild(optionsOverlay);
+
     const lyricsContainer = h("div", { class: "LyricsContainer" });
     const content = h("div", { class: "LyricsContent offline" });
     const scrollContainer = h("div", {
@@ -679,6 +973,19 @@
     adBreakSourceEl = h("div", { class: "ym-sl-ad-source", text: "" });
     adBreakOverlayEl.append(adBreakTitleEl, adBreakSubEl, adBreakSourceEl);
     panelEl.appendChild(adBreakOverlayEl);
+    // Top-of-lyrics notice for LRCLIB's machine-generated word timing (see
+    // loadLRCLyrics). It is a sibling of the lyrics surface rather than a line,
+    // so rebuilding the renderer never drops it. The timer line is restarted by
+    // syncWordSyncQualityNotice each time the notice is shown.
+    wordSyncQualityNoticeEl = h("div", {
+      class: "ym-sl-mv-sync-chip ym-sl-lrclib-word-note hidden",
+      role: "note",
+      "aria-label": "LRCLIB word-by-word timing may be less accurate than hand-synced lyrics",
+    },
+      h("span", { text: "LRCLIB word-by-word timing may be less accurate" }),
+      h("span", { class: "ym-sl-mv-sync-chip-timer", "aria-hidden": "true" })
+    );
+    panelEl.appendChild(wordSyncQualityNoticeEl);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");

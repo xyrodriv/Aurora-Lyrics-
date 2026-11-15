@@ -10,8 +10,8 @@ add-ons.
 
 - **Synced lyrics** — word-level (syllable), line-level, and plain/static
   rendering driven by live playback position.
-- **Multiple lyric sources** — auto-fetches from the **Spicy Lyrics API**,
-  **LRCLIB**, and the **Aurora Community API**; the Discord bot accepts community
+- **Multiple lyric sources** — auto-fetches from the **Aurora Community API**,
+  the **Spicy Lyrics API**, **Unison**, and **LRCLIB**; the Discord bot accepts community
   TTML uploads, with staff review before Contributor submissions go live. TTML
   files can be dropped or picked in, re-exported with your sync, and saved per
   track so they survive a reload.

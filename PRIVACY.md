@@ -1,6 +1,6 @@
 # Aurora Lyrics privacy policy
 
-**Last updated:** 12 November 2026
+**Last updated:** 15 November 2026
 
 Aurora Lyrics is a browser extension for YouTube Music. This document explains
 what it does with your information.
@@ -58,20 +58,33 @@ leaves the offset active; Delete removes it.
 
 ## What is stored on your device
 
-Aurora Lyrics uses Chrome's `storage` permission to save the following **locally,
-on your machine**:
+Aurora Lyrics stores data locally with `chrome.storage.local` and with the
+YouTube Music page's `localStorage`. It never uses `chrome.storage.sync`.
 
-- Your add-on settings and preferences.
+**`chrome.storage.local`** holds:
+
+- Your add-on settings and preferences, including YouTube Music player
+  preferences.
 - Which announcements you have seen or dismissed.
 - A cache of fetched lyrics, so tracks you have already played do not need to be
   looked up again.
 - Any TTML lyric files you import, saved per track.
+- The public display name, Discord avatar, and public profile URL of a signed-in
+  maker, so the offset form can show who is posting and link to their profile.
+  The avatar is not uploaded with the offset.
 
-This also includes the optional community-offset display name (so you do not
-have to retype it) and the owner token for an offset you posted (so Undo works
-after a reload). These stay local; only the posted offset and its display name
-are sent to the community API. Uninstalling the extension removes this local
-data.
+**The YouTube Music page's `localStorage`** holds:
+
+- The optional community-offset display name, so you do not have to retype it.
+- The owner token for an offset you posted, so Undo works after a reload.
+- Per-video offset values and fullscreen layout/rating choices.
+- Plain-text song notes you save for a track.
+
+This data stays on your device. Only the posted community offset and its
+optional display name are sent to the community API; if you are signed in as a
+maker, only the display name is posted with an offset. Uninstalling the
+extension removes the extension's local data; site data can be cleared from the
+browser's site settings.
 
 ## What is transmitted, and to whom
 
@@ -80,10 +93,10 @@ metadata** (title, artist, album, and duration) to third-party lyric and
 metadata services. This is necessary: a lyric service cannot return lyrics
 without being told which song you want.
 
-**No personal information is included.** No account, no identifiers, no browsing
-history. The requests contain only what is needed to identify the song. They do
-come from your browser, so the service answering one sees your IP address, the
-same way it would for any page you opened.
+**For lyric lookups, no personal information is included.** No account, no
+identifiers, no browsing history. The requests contain only what is needed to
+identify the song. They do come from your browser, so the service answering one
+sees your IP address, the same way it would for any page you opened.
 
 Aurora Lyrics also reads a small public announcement feed. That is a plain GET
 for a JSON file: no track metadata, no account, and no identifier. The feed
@@ -94,8 +107,9 @@ The services contacted are:
 | Service | Purpose |
 |---|---|
 | `api.spicylyrics.org` | Synced (TTML) lyrics |
+| `unison.boidu.dev` | Synced lyrics |
 | `lrclib.net` | Synced lyrics |
-| `site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page` | Aurora Community TTML, offsets, profiles, uploads and view counts |
+| `aurora-community-api.mitsyonsp.workers.dev` | Aurora Community TTML, offsets, profiles, uploads and view counts |
 | `discord.com` | Optional Discord sign-in for maker profiles |
 | `cdn.discordapp.com` | Community uploader and maker avatars |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
@@ -124,6 +138,28 @@ The update check requests a release-notes file and nothing else; it carries no
 track metadata. The announcement feed is also read-only and carries nothing
 about you. The typeface stylesheet is requested only when the bundled copy
 cannot be resolved, and is the same face the lyrics are drawn in.
+
+## Data handled by the extension
+
+For Chrome Web Store disclosure, the extension handles these categories:
+
+- **Website content:** the video id, title, artist, album, and duration of the
+  track playing on YouTube Music. They are read from the page and sent only to
+  the lyric and metadata services listed above to find the track's lyrics.
+- **Personally identifiable information, only if you choose to provide it:** a
+  signed-in maker's public display name, avatar, and profile URL are stored
+  locally for the offset form. A community-offset display name is optional and
+  is sent publicly only when you post an offset.
+- **User activity, limited to one anonymous view report:** when a
+  community-synced track starts, the extension sends that upload's id so its
+  aggregate view count can be updated. It contains no account, install id, or
+  browsing history.
+- **Local-only data:** settings, player preferences, announcements, lyric
+  cache, imported TTML, song notes, offsets, fullscreen choices, and owner
+  tokens. These stay on your device.
+
+No health, financial, authentication, personal-communications, location, or web
+history data is collected.
 
 ## This website
 
@@ -157,13 +193,14 @@ request is never made.
 - No advertising.
 - No selling or sharing of data.
 - No reading of your browsing history, bookmarks, or other tabs.
-- No access to any site other than `music.youtube.com` and the services listed
-  above.
+- No access to any site other than `music.youtube.com`, the Aurora Lyrics
+  website for the optional maker identity handoff, and the services listed above.
 
 ## Permissions, and why each is needed
 
-- **`storage`**: saves your settings, lyric cache, imported TTML, and which
-  announcements you have seen or dismissed locally on your device.
+- **`storage`**: saves your settings, player preferences, lyric cache, imported
+  TTML, which announcements you have seen or dismissed, and maker identity
+  locally on your device.
 - **Host permissions**: allow the extension to request lyrics and track metadata
   from the services listed above, and to run on YouTube Music.
 
@@ -186,6 +223,7 @@ If this policy changes, the "last updated" date above will change with it.
 
 ## Contact
 
-Questions or concerns: open an issue at
+Questions or concerns: email
+[mitsyonsp@gmail.com](mailto:mitsyonsp@gmail.com), open an issue at
 [github.com/xyrodriv/Aurora-Lyrics-](https://github.com/xyrodriv/Aurora-Lyrics-/issues)
 or join the [Discord](https://discord.gg/wsZxTSnaMa).

@@ -111,6 +111,7 @@
         if (artist) inner.appendChild(document.createTextNode(" "));
         inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
       }
+      fsTitleEl.dataset.trackKey = fullscreenTrackKey(track);
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       syncFsTitleWriters();
@@ -142,13 +143,51 @@
   // instead of rebuilding the credit. The key prevents the 500ms refresh from
   // restarting the drift animation on every tick.
   let fsTitleWritersKey = "";
+
+  function fullscreenTrackKey(track) {
+    const t = track || getCurrentTrack();
+    return t && t.videoId ? "v:" + t.videoId : getTrackKey(t);
+  }
+
+  // The attribution array is replaced when the next track's lyrics land, not
+  // when the track changes. Until that replacement happens, its contents belong
+  // to the previous song and must not be shown against the new title.
+  function fullscreenSongwriters() {
+    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const key = fullscreenTrackKey();
+    if (key && !fsFullscreenWritersTrackKey) {
+      fsFullscreenWritersTrackKey = key;
+      return names;
+    }
+    if (key && key !== fsFullscreenWritersTrackKey) {
+      fsFullscreenWritersTrackKey = key;
+      fsFullscreenWritersStaleRef = fsFullscreenWritersSourceRef;
+    }
+    if (fsFullscreenWritersStaleRef && currentSongwriters === fsFullscreenWritersStaleRef) return [];
+    fsFullscreenWritersStaleRef = null;
+    return names;
+  }
+
   function syncFsTitleWriters() {
     if (!fsTitleEl) return;
     const byline = fsTitleEl.querySelector(".ym-sl-fs-title-byline");
     const writers = byline && byline.querySelector(".ym-sl-fs-title-writers");
     const track = writers && writers.querySelector(".ym-sl-fs-title-writers-track");
     if (!byline || !writers || !track) return;
-    const text = (Array.isArray(currentSongwriters) ? currentSongwriters : [])
+    // Let the old title finish its leave animation with its own writers. The
+    // new title carries a new track key and gets the cleared/incoming set.
+    const liveKey = fullscreenTrackKey();
+    const paintedKey = fsTitleEl.dataset.trackKey || "";
+    if (paintedKey && liveKey && paintedKey !== liveKey) {
+      const oldWriters = fsTitleEl.querySelector(".ym-sl-fs-title-writers");
+      if (oldWriters) {
+        oldWriters.classList.remove("is-writers-in");
+        oldWriters.classList.add("is-writers-out");
+      }
+      return;
+    }
+    const next = fullscreenSongwriters();
+    const text = next
       .filter((name) => typeof name === "string" && name.trim())
       .map((name) => name.trim())
       .join(", ");
@@ -156,7 +195,13 @@
     byline.classList.toggle("has-writers", !!text);
     if (text === fsTitleWritersKey && track.textContent === text) return;
     fsTitleWritersKey = text;
+    if (text) fsFullscreenWritersSourceRef = next;
+    writers.classList.remove("is-writers-in");
     track.textContent = text;
+    if (text) {
+      void writers.offsetWidth;
+      writers.classList.add("is-writers-in");
+    }
     updateFsTitleWritersMarquee();
   }
 

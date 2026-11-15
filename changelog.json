@@ -1,6 +1,20 @@
 {
   "releases": [
     {
+      "version": "1.3.0",
+      "date": "2026-11-15",
+      "title": "Faster lyrics loading, Unison, and a rebuilt Options panel.",
+      "features": [
+        "Lyrics for the next track are fetched ahead of time, so skipping ahead fills the panel faster instead of waiting for a fresh lookup.",
+        "Unison is now a lyrics source, with word-level and line-level syncs and the uploader credited in the panel and fullscreen view. When Spicy only has line-level timing, Aurora checks Unison for a word-level version before falling back.",
+        "LRCLIB tracks that include word timing now highlight each word as it is sung. A short notice appears when that timing may be less precise than a hand-made sync.",
+        "The Options panel has a new layout with three sections: Sync & timing, Lyrics file, and Cache. The Cache section shows what is stored for the current song and lets you clear it."
+      ],
+      "fixes": [
+        "Fixed the previous song's lyrics sometimes staying on screen after the track changed."
+      ]
+    },
+    {
       "version": "1.2.0",
       "date": "2026-11-12",
       "title": "A new fullscreen layout, shared offsets, and reports that actually send.",

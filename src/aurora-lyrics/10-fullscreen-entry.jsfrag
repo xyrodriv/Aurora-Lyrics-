@@ -8,9 +8,6 @@
     // to restore on exit. Cannot call setPanel(true) — fsActive is already true.
     fsSavedPanelVisible = panelVisible;
     panelVisible = true;
-    // QOL #1: entering fullscreen cancels the credits reveal (its scroll target
-    // belongs to the main panel; fullscreen uses its own lyrics host).
-    cancelCreditsReveal();
     // Fullscreen takes over the backdrop entirely, so stop the page-wide Kawarp
     // for every track (song or music video) — only one Kawarp ever runs.
     suspendPageKawarp();

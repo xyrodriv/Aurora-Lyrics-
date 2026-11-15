@@ -55,9 +55,9 @@
       // at most once per edit session, never on every drag nudge (AJ, 2026-10-19).
       const prevOrder = Array.isArray(currentSettings.sourceOrder)
         ? currentSettings.sourceOrder.join(",") : "";
-      const nextOrder = data.settings && Array.isArray(data.settings.sourceOrder)
-        ? data.settings.sourceOrder.join(",") : prevOrder;
       applySettings(data.settings);
+      const nextOrder = Array.isArray(currentSettings.sourceOrder)
+        ? currentSettings.sourceOrder.join(",") : "";
       if (nextOrder !== prevOrder) reresolveCurrentTrackLyrics();
       return;
     }
@@ -195,6 +195,11 @@
     lineElements = [];
     scrollCandidateIndices = [];
     lrclibCache.clear();
+    if (prefetchAbort) {
+      prefetchAbort.abort();
+      prefetchAbort = null;
+    }
+    prefetchedLyrics.clear();
     // The Spicy Lyrics cache lives in chrome.storage, so it outlives teardown.
     // Only the in-memory mirror and its pending writes are page-lifetime state:
     // flush anything queued, then drop the mirror so the next enable re-reads.
@@ -224,6 +229,18 @@
       manualScrollReturnTimer = 0;
     }
     currentSongwriters = [];
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
+    if (wordSyncQualityNoticeFadeTimer) {
+      clearTimeout(wordSyncQualityNoticeFadeTimer);
+      wordSyncQualityNoticeFadeTimer = 0;
+    }
+    if (wordSyncQualityNoticeHideTimer) {
+      clearTimeout(wordSyncQualityNoticeHideTimer);
+      wordSyncQualityNoticeHideTimer = 0;
+    }
+    wordSyncQualityNoticeShownFor = "";
+    wordSyncQualityNoticeEl = null;
     panelVisible = false;
     adBreakActive = false;
     adBreakLyricsState = "idle";

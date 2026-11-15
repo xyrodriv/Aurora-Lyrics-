@@ -1999,10 +1999,50 @@
     return rec;
   }
 
+  const PROVIDER_URLS = {
+    "Spicy Lyrics": "https://spicylyrics.org/",
+    "Unison": "https://unison.boidu.dev/",
+    "LRCLIB": "https://lrclib.net/",
+  };
+  const PROVIDER_ICON_FILES = {
+    "Apple Music": "provider-apple-music.png",
+    "Spicy Lyrics": "provider-spicy-lyrics.png",
+    "Unison": "provider-unison.svg",
+    "Aurora Community": "provider-aurora.png",
+    "LRCLIB": "provider-lrclib.png",
+  };
+
+  function buildProviderIcon(provider) {
+    const file = PROVIDER_ICON_FILES[provider];
+    if (!file || !SCRIPT_URL) return null;
+    let src = "";
+    try { src = new URL(file, SCRIPT_URL).href; } catch (e) { return null; }
+    const img = makeEl(pipDoc, "img", "ym-sl-provider-icon");
+    img.src = src;
+    img.alt = "";
+    img.setAttribute("aria-hidden", "true");
+    img.width = 17;
+    img.height = 17;
+    img.decoding = "async";
+    img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+    return img;
+  }
+
   function buildProviderRow(provider) {
     const row = makeEl(pipDoc, "div", "ym-sl-provider");
     row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-label", "Provided by"));
-    row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-name", provider));
+    const icon = buildProviderIcon(provider);
+    if (icon) row.appendChild(icon);
+    const url = PROVIDER_URLS[provider] || "";
+    if (url) {
+      const link = makeEl(pipDoc, "a", "ym-sl-provider-name", provider);
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      row.appendChild(link);
+    } else {
+      row.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-name", provider));
+    }
     return row;
   }
 
@@ -2028,15 +2068,34 @@
     return svg;
   }
 
+  function formatCreditDate(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    const date = new Date(seconds > 1e12 ? seconds : seconds * 1000);
+    if (Number.isNaN(date.getTime())) return "";
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(date);
+    } catch (e) {
+      return "";
+    }
+  }
+
   function buildPersonRow(label, person) {
     const row = makeEl(pipDoc, "div", "ym-sl-uploader");
+    const level = Number(person && person.level);
+    const hasLevel = Number.isFinite(level) && level > 0;
+    if (hasLevel) row.setAttribute("data-level", String(level));
     row.appendChild(makeEl(pipDoc, "span", "ym-sl-uploader-label", label));
     const link = makeEl(pipDoc, "a", "ym-sl-uploader-link");
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     if (person && person.url) {
       link.href = person.url;
-      link.title = `Open ${person.username || "maker"}'s Aurora profile`;
+      link.title = `Open ${person.username || "maker"}'s ${person.profileLabel || "Aurora"} profile`;
     }
     if (person && person.avatar) {
       const img = makeEl(pipDoc, "img", "ym-sl-uploader-avatar");
@@ -2065,6 +2124,41 @@
   function buildCreditsFooter() {
     if (!songwriters.length && !(attribution && (attribution.provider || attribution.uploader || attribution.maker))) return null;
     const footer = makeEl(pipDoc, "div", "ym-sl-credits");
+    const hasWriters = songwriters.length > 0;
+    if (attribution && attribution.provider === "Unison") {
+      footer.classList.add("ym-sl-credits--unison");
+      if (!hasWriters) footer.classList.add("ym-sl-credits--no-writers");
+    } else if (attribution && attribution.provider === "Spicy Lyrics") {
+      footer.classList.add("ym-sl-credits--spicy");
+      if (SCRIPT_URL) {
+        try {
+          footer.style.setProperty(
+            "--ym-sl-spicy-banner-image",
+            `url("${new URL("spicy-lyrics-banner.png", SCRIPT_URL).href}")`
+          );
+        } catch (e) {}
+      }
+    } else if (attribution && attribution.provider === "Aurora Community") {
+      // Same rail treatment as Spicy; the extra class is the Aurora hook.
+      footer.classList.add("ym-sl-credits--spicy", "ym-sl-credits--aurora");
+      const brand = buildProviderIcon("Aurora Community");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (attribution && attribution.provider === "Apple Music") {
+      // Apple has no contributor rows; the provider mark leads the rail.
+      footer.classList.add("ym-sl-credits--apple");
+      const brand = buildProviderIcon("Apple Music");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (attribution && attribution.provider === "LRCLIB") {
+      // LRCLIB has no contributor rows; reuse Apple's icon-led layout with
+      // the flat deep-blue LRCLIB skin.
+      footer.classList.add("ym-sl-credits--apple", "ym-sl-credits--lrclib");
+    }
     if (songwriters.length) {
       const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-writers");
       box.appendChild(makeEl(pipDoc, "div", "ym-sl-credits-label", "Written by"));
@@ -2079,23 +2173,28 @@
     if (attribution && attribution.provider) {
       const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-provider");
       box.appendChild(buildProviderRow(attribution.provider));
+      const submitted = formatCreditDate(attribution.uploader && attribution.uploader.createdAt);
+      if (submitted && hasWriters) {
+        box.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-date", submitted));
+      }
       footer.appendChild(box);
+      if (submitted && !hasWriters) {
+        footer.appendChild(makeEl(pipDoc, "span", "ym-sl-provider-date", submitted));
+      }
     }
     if (attribution && (attribution.uploader || attribution.maker)) {
       const box = makeEl(pipDoc, "div", "ym-sl-credit-box ym-sl-credit-people");
-      if (attribution.uploader) {
-        // Self-uploads suppress the maker row; preserve its profile URL on the
-        // one credit that remains.
-        const uploader = isSameCreditPerson(attribution.maker, attribution.uploader)
-          ? Object.assign({}, attribution.uploader, {
-              url: attribution.uploader.url || attribution.maker.url,
-            })
-          : attribution.uploader;
-        box.appendChild(buildPersonRow("Uploaded by", uploader));
-      }
+      // Self-uploads suppress the maker row; preserve its profile URL on the
+      // one credit that remains.
+      const uploader = attribution.uploader && isSameCreditPerson(attribution.maker, attribution.uploader)
+        ? Object.assign({}, attribution.uploader, {
+            url: attribution.uploader.url || attribution.maker.url,
+          })
+        : attribution.uploader;
       if (attribution.maker && !isSameCreditPerson(attribution.maker, attribution.uploader)) {
         box.appendChild(buildPersonRow("Made by", attribution.maker));
       }
+      if (uploader) box.appendChild(buildPersonRow("Uploaded by", uploader));
       footer.appendChild(box);
     }
     return footer;

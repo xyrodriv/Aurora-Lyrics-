@@ -81,7 +81,13 @@
     return root.children.filter((node) => node.closeEnd != null);
   }
 
-  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd) {
+  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd, options = null) {
+    // Background vocals in some TTML exports are wrapped in parentheses as a
+    // visual cue, e.g. "(background line)". The renderer already marks these
+    // lines as background, so the parentheses are redundant chrome. Strip them
+    // here, and only when the caller says this is a background-vocal run:
+    // parentheses in a lead lyric may be part of the words themselves.
+    const stripParentheses = !!(options && options.stripParentheses);
     const words = nodes
       .map((node) => {
         const beginAttr = node.attrs.begin || node.attrs["ttm:begin"] || "";
@@ -106,8 +112,11 @@
               ? endValue
               : (duration ? start + duration : fallbackEnd))
           : fallbackEnd;
+        const rawText = node.text || textOf(node.inner);
         return {
-          text: node.text || textOf(node.inner),
+          text: stripParentheses
+            ? rawText.replace(/[()]/g, "").replace(/\s+/g, " ").trim()
+            : rawText,
           start,
           end,
           // True only when this span carried real timing. Drives the
@@ -397,7 +406,8 @@
             node.children,
             body,
             wrapStart == null ? start : wrapStart,
-            wrapEnd == null ? end : wrapEnd
+            wrapEnd == null ? end : wrapEnd,
+            { stripParentheses: true }
           );
           if (!bgWords.length) return null;
 

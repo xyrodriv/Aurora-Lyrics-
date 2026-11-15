@@ -23,10 +23,57 @@
     } catch (_) { /* prefetch must never affect playback */ }
   }
 
-  // Warm the lyric cache for the upcoming track so the song change has no
-  // blank flash. Best-effort only: any failure is swallowed and never touches
-  // the current track's UI. Uses its own prefetchSeq + AbortController so it
-  // cannot abort or race the active track's request.
+  // Warm the NEXT track's resolved winner so the song change paints from memory.
+  // Better Lyrics' order is the model here: wait until the current track has
+  // loaded, resolve the next track once, walk the real source order, and stop at
+  // the first usable payload. Best-effort only: every failure is swallowed and
+  // the normal loader still runs on the track change. Uses its own prefetchSeq +
+  // AbortController so it cannot abort or race the active track's request.
+
+  const PREFETCHED_LYRICS_LIMIT = 6;
+  let prefetchAbort = null;
+  let prefetchInFlightKey = "";
+
+  function rememberPrefetchedLyrics(key, entry) {
+    if (!key || !entry) return;
+    prefetchedLyrics.delete(key);
+    prefetchedLyrics.set(key, entry);
+    while (prefetchedLyrics.size > PREFETCHED_LYRICS_LIMIT) {
+      prefetchedLyrics.delete(prefetchedLyrics.keys().next().value);
+    }
+  }
+
+  async function fetchPrefetchedLrclib(track, key, controller, stale) {
+    const params = new URLSearchParams();
+    params.set("track_name", track.title);
+    if (track.artist) params.set("artist_name", track.artist);
+    if (Number.isFinite(Number(track.durationMs)) && Number(track.durationMs) > 0) {
+      params.set("duration", String(Math.round(Number(track.durationMs) / 1000)));
+    }
+    const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
+    if (stale()) return null;
+    let data = response && response.ok ? response.data : null;
+    if (data && !data.syncedLyrics && !data.plainLyrics && !data.lyricsfile) data = null;
+    if (!data) {
+      if (response && !response.ok && response.status !== 404) return null;
+      const searchParams = new URLSearchParams({
+        q: [track.title, track.artist].filter(Boolean).join(" "),
+      });
+      const searchResponse = await fetchLrclibJson(
+        `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
+        controller.signal
+      );
+      if (stale()) return null;
+      if (!searchResponse || !searchResponse.ok) return null;
+      data = selectLRCLIBResult(searchResponse.data, track)
+        || selectLRCLIBPlainResult(searchResponse.data, track);
+    }
+    if (!data || (!data.syncedLyrics && !data.plainLyrics && !data.lyricsfile)) return null;
+    cacheLRCLyrics(key, data);
+    cacheLyricsPersistent(key, data);
+    return data;
+  }
+
   async function prefetchNextTrackLyrics() {
     const player = window.YTMod && window.YTMod.player;
     if (!player || typeof player.getNextTrack !== "function") return;
@@ -35,44 +82,119 @@
     if (!next || !next.title) return;
     const key = getTrackKey(next);
     if (!key || key === currentTrackKey) return;
-    // Already cached (memory or persistent file)? Nothing to do.
-    if (lrclibCache.has(key) || getLyricsPersistent(key)) return;
+    if (prefetchedLyrics.has(key) || prefetchInFlightKey === key) return;
+
+    // A persisted LRCLIB answer is already an instant fallback. Keep it while
+    // Community / Spicy / Unison get their one chance to outrank it.
+    const fallback = lrclibCache.get(key) || getLyricsPersistent(key);
+    if (fallback) rememberPrefetchedLyrics(key, { source: "lrclib", data: fallback });
 
     const controller = new AbortController();
+    if (prefetchAbort) prefetchAbort.abort();
+    prefetchAbort = controller;
     const reqId = ++prefetchSeq;
+    prefetchInFlightKey = key;
+    const stale = () => reqId !== prefetchSeq || controller.signal.aborted;
+    const save = (entry) => {
+      if (stale()) return;
+      rememberPrefetchedLyrics(key, entry);
+    };
+    const attempt = async (label, fn) => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (!stale()) alWarn(`${label} prefetch failed (ignored):`, error);
+        return null;
+      }
+    };
+
     try {
-      let data = null;
-      // Mirror the LRCLIB path of fetchLRCLyrics, but cache instead of rendering.
-      const params = new URLSearchParams();
-      params.set("track_name", next.title);
-      if (next.artist) params.set("artist_name", next.artist);
-      if (Number.isFinite(Number(next.durationMs)) && Number(next.durationMs) > 0) {
-        params.set("duration", String(Math.round(Number(next.durationMs) / 1000)));
-      }
-      const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
-      if (reqId !== prefetchSeq) return;
-      if (response && response.ok && response.data && response.data.syncedLyrics) {
-        data = response.data;
-      } else if (!response || !response.ok || response.status === 404) {
-        const searchParams = new URLSearchParams({
-          q: [next.title, next.artist].filter(Boolean).join(" "),
+      const community = await attempt("Aurora Community", () =>
+        fetchCommunityLyrics(next, key, controller, { prefetch: true })
+      );
+      if (stale()) return;
+      if (community && community.ttml) {
+        save({
+          source: "community",
+          ttml: community.ttml,
+          attribution: community.attribution || null,
+          uploadId: community.uploadId || "",
+          test: community.test === true,
         });
-        const searchResponse = await fetchLrclibJson(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
-          controller.signal
-        );
-        if (reqId !== prefetchSeq) return;
-        if (searchResponse && searchResponse.ok) {
-          data = selectLRCLIBResult(searchResponse.data, next);
-        }
+        return;
       }
-      if (reqId !== prefetchSeq) return;
-      if (!data || !data.syncedLyrics) return;
-      cacheLRCLyrics(key, data);
-      cacheLyricsPersistent(key, data);
+
+      const spicy = await attempt("Spicy", () =>
+        fetchSpicyLyrics(next, key, controller, { prefetch: true })
+      );
+      if (stale()) return;
+      let unison = null;
+      if (spicy && spicy.ttml) {
+        if (spicy.wordByWord === true) {
+          save({
+            source: "spicy",
+            ttml: spicy.ttml,
+            attribution: spicy.attribution || null,
+            songwriters: Array.isArray(spicy.songwriters) ? spicy.songwriters : [],
+          });
+          return;
+        }
+        // The normal resolver gives word-level Unison one chance to replace a
+        // line-level Spicy payload; keep that same rule here.
+        unison = await attempt("Unison", () =>
+          fetchUnisonLyrics(next, key, controller, { prefetch: true })
+        );
+        if (stale()) return;
+        if (unison && unison.wordByWord === true && unison.format === "ttml") {
+          save({
+            source: "unison",
+            format: "ttml",
+            lyrics: unison.lyrics,
+            submitter: unison.submitter || null,
+          });
+          return;
+        }
+        save({
+          source: "spicy",
+          ttml: spicy.ttml,
+          attribution: spicy.attribution || null,
+          songwriters: Array.isArray(spicy.songwriters) ? spicy.songwriters : [],
+        });
+        return;
+      }
+
+      if (!unison) {
+        unison = await attempt("Unison", () =>
+          fetchUnisonLyrics(next, key, controller, { prefetch: true })
+        );
+      }
+      if (stale()) return;
+      if (unison && (unison.format === "ttml" || unison.format === "lrc")) {
+        save({
+          source: "unison",
+          format: unison.format,
+          lyrics: unison.lyrics,
+          submitter: unison.submitter || null,
+        });
+        return;
+      }
+
+      // A persisted LRCLIB row was already installed as the fallback above.
+      if (fallback) return;
+      const data = await attempt("LRCLIB", () =>
+        fetchPrefetchedLrclib(next, key, controller, stale)
+      );
+      if (stale()) return;
+      if (data) save({ source: "lrclib", data });
     } catch (error) {
-      if (error && error.name === "AbortError") return;
-      // Non-fatal: lyrics simply load normally when the track starts.
+      if (!stale() && error && error.name !== "AbortError") {
+        alWarn("next-track lyric prefetch failed (ignored):", error);
+      }
+    } finally {
+      if (reqId === prefetchSeq) {
+        prefetchAbort = null;
+        prefetchInFlightKey = "";
+      }
     }
   }
 
@@ -297,10 +419,15 @@
   function makeSearchResultRow(item, panel, status) {
     const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
     const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
-    const hasSync = !!item.syncedLyrics;
+    // A timed LRCLIB row may carry only a Lyricsfile. Plain-only records also
+    // carry one now, so parse it rather than treating any lyricsfile as synced.
+    const hasLyricsfileLines = lyricsfileHasTimedLines(item);
+    const hasSync = !!item.syncedLyrics || hasLyricsfileLines;
+    const hasWordSync = item.hasWordSync === true && hasLyricsfileLines;
     const hasPlain = !!item.plainLyrics;
     const metaBits = [item.artistName, item.albumName].filter(Boolean);
-    if (!hasSync && hasPlain) metaBits.push("unsynced");
+    if (hasWordSync) metaBits.push("word-synced");
+    else if (!hasSync && hasPlain) metaBits.push("unsynced");
     const meta = h("span", { class: "ym-sl-search-meta", text: metaBits.join(" · ") });
     row.append(name, meta);
     if (hasSync || hasPlain) {
@@ -352,7 +479,7 @@
       // waiting for the next track change.
       refreshFileTabState();
     }
-    const isUnsynced = !item.syncedLyrics && item.plainLyrics;
+    const isUnsynced = !item.syncedLyrics && !lyricsfileHasTimedLines(item) && item.plainLyrics;
     status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (saved for this track)" : ""}.`;
     toggleSearchPanel(false);
   }
@@ -415,15 +542,19 @@
     // A new track starts a fresh lookup; the ad notice reports "Looking…"
     // until one of the sources answers.
     adBreakNoteLookup(key);
-    prefetchNextTrackLyrics();
-    // Also warm the next track's cover so an MV -> audio skip is instant.
+    // Warm the next track's cover so an MV -> audio skip is instant. Lyrics are
+    // prefetched once THIS track has finished loading (below), matching Better
+    // Lyrics and keeping the two lookups from competing.
     prefetchNextTrackArt();
     loadVideoOffsetForTrack(track);
     refreshTrack();
     if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {
       manualLyricsTrackKey = "";
     }
-    if (manualLyricsTrackKey === key) return;
+    if (manualLyricsTrackKey === key) {
+      prefetchNextTrackLyrics();
+      return;
+    }
 
     if (activeTrackAbort) {
       activeTrackAbort.abort();
@@ -450,6 +581,7 @@
         // it (and nothing else claims it once the TRACK changes).
         currentLyricsFromSavedTTML = true;
         refreshFileTabState();
+        prefetchNextTrackLyrics();
         return;
       }
       try {
@@ -462,6 +594,14 @@
 
     manualLyricsIsPermanent = false;
     refreshFileTabState();
-    fetchLRCLyrics(track, key);
+    const lyricsRequest = fetchLRCLyrics(track, key);
+    // Better Lyrics waits for the current lyrics before preloading the next
+    // song. Doing the same here avoids spending bandwidth on the next track
+    // while this one is still resolving.
+    if (lyricsRequest && typeof lyricsRequest.finally === "function") {
+      lyricsRequest.finally(() => {
+        if (key === currentTrackKey) prefetchNextTrackLyrics();
+      }).catch(() => {});
+    }
   }
 

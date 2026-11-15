@@ -516,6 +516,22 @@
     return !!(value && typeof value === "object" && value.manual === true && value.data);
   }
 
+  // LRCLIB now guarantees a Lyricsfile on every record. Auto entries saved
+  // before that change only hold an LRC and would keep word-sync invisible for
+  // recently played tracks; drop them so they are fetched again. Manual picks
+  // are the user's only copy, so they are never pruned here.
+  {
+    let pruned = false;
+    for (const [key, value] of [...persistentLyricsCache]) {
+      if (isManualPickEntry(value)) continue;
+      if (!value || typeof value !== "object" || !value.lyricsfile) {
+        persistentLyricsCache.delete(key);
+        pruned = true;
+      }
+    }
+    if (pruned) persistLyricsCache();
+  }
+
   function unwrapPersistedLyrics(value) {
     return isManualPickEntry(value) ? value.data : value;
   }

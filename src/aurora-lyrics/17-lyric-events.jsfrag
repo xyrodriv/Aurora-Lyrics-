@@ -166,12 +166,20 @@
           username: currentUploader.username || "",
           avatar: currentUploader.avatar || "",
           url: currentUploader.url || "",
+          creditLabel: currentUploader.creditLabel || "",
+          profileLabel: currentUploader.profileLabel || "",
+          level: currentUploader.level || 0,
+          createdAt: currentUploader.createdAt || 0,
         } : null,
         maker: currentMaker ? {
           id: currentMaker.id || "",
           username: currentMaker.username || "",
           avatar: currentMaker.avatar || "",
           url: currentMaker.url || "",
+          creditLabel: currentMaker.creditLabel || "",
+          profileLabel: currentMaker.profileLabel || "",
+          level: currentMaker.level || 0,
+          createdAt: currentMaker.createdAt || 0,
         } : null,
       },
     });
@@ -212,6 +220,7 @@
 
   function buildRendererLines(content) {
     lastRendererContent = content;
+    syncWordSyncQualityNotice();
     // Build the translation plan before the first line exists, so every line
     // finds its slot. Translations arrive later and fill those slots in place.
     // The async work is deliberately detached: a translation failure must never
@@ -219,11 +228,6 @@
     autoTranslateBegin(content).catch(() => {});
     publishLyricLines(content);
     stopScrollGlide();
-    // New song -> the old song's end-of-track credits reveal must not own the
-    // scroll. Its latches survive a rebuild otherwise, and a stale end-of-song
-    // position in the frames around the switch re-arms it, dragging the freshly
-    // recentred panel to the BOTTOM of the new song (AJ, 2026-10-02).
-    cancelCreditsReveal();
     lastScrollTargetLine = -1;
     modelLines = [];
     lineElements = [];
@@ -381,21 +385,16 @@
 
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
-    if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
-      creditsFooterEl = buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content));
-      linesRoot.appendChild(creditsFooterEl);
-    } else {
-      creditsFooterEl = null;
+    if (currentSongwriters.length || currentLyricsfileArtist || currentProvider || currentUploader || currentMaker) {
+      linesRoot.appendChild(buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content)));
     }
     // The Hits header mirrors this attribution; refresh it now rather than
     // waiting for the next 500ms tick.
     if (fsHits) syncFsHitsCredits();
-    // A new track invalidates any in-progress credits reveal: position is about to
-    // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
-    // doing it here avoids a one-frame flash of the previous song parked at bottom.
-    creditsRevealEngaged = false;
-    creditsRevealActive = false;
-    creditsRevealDismissed = false;
+    // The offset panel's sharing controls depend on this provider. It is only
+    // known once the lyrics land, so hide/show Post offset immediately instead
+    // of waiting for the user to move the slider.
+    renderCommunityOffsetUI();
 
     // Re-apply the pause sync marker: the line elements were just rebuilt, so any
     // class on the old nodes is gone.

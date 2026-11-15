@@ -289,16 +289,6 @@
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
-  // QOL #1 (2026-09-28): end-of-track credits reveal. When a SYNCHRONISED track
-  // reaches its final ~1.5s, glide the panel to the bottom so the .ym-sl-credits
-  // block (provider / uploaded-by / made-by) scrolls into view. Static (unsynced)
-  // lyrics already reach the bottom on their own via driveStaticAutoScroll, so
-  // this only engages for synced lyrics.
-  let creditsFooterEl = null;        // the footer element, or null when there are no credits
-  let creditsRevealEngaged = false;  // we are in the end zone and have taken over the scroll
-  let creditsRevealActive = false;   // owns the scroll target on the current frame
-  let creditsRevealDismissed = false;// the user manually scrolled away -> stay out until next track
-  const CREDITS_REVEAL_MS = 1500;    // reveal during the final 1.5s of the track
   let scrollCandidateIndices = [];
   // Loading-skeleton plumbing. `lyricsSkeletonToken` is bumped by every panel
   // reset, which invalidates a skeleton paint still queued on rAF/`setTimeout`.
@@ -312,6 +302,10 @@
   // collide with or abort the current track's lyric request (which uses
   // trackRequestSeq / activeTrackAbort).
   let prefetchSeq = 0;
+  // Final, ready-to-render payload for the upcoming track. fetchLRCLyrics
+  // consumes it before running any source, so a prefetched hit paints without
+  // another network round-trip. Bounded in 15-prefetch-search.
+  let prefetchedLyrics = new Map();
   // Per-track offset slots: one for music-video playback, one for the regular
   // (audio) song. See setVideoOffsetMs / loadVideoOffsetForTrack.
   let offsetVideoMs = 0;
@@ -328,6 +322,11 @@
      never in this object, and is only used for the Undo request. */
   let communityOffsetStatus = null;
   let communityOffsetName = null;
+  let communityOffsetAccount = null;
+  let communityOffsetAccountAvatar = null;
+  let communityOffsetAccountName = null;
+  let communityOffsetIdentity = null;
+  let communityOffsetIdentityListenerAttached = false;
   let communityOffsetPostButton = null;
   let communityOffsetUndoButton = null;
   let communityOffsetReportButton = null;
@@ -379,6 +378,27 @@
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
   let currentSongwriters = [];
+  // Lyricsfile (LRCLIB) metadata for the current set. Kept separate from
+  // songwriters: metadata.artist is the performing artist, not the writers, so
+  // it must not feed the "Written by" line or the fullscreen byline.
+  let currentLyricsfileArtist = "";
+  // True only when the visible lines came from an LRCLIB Lyricsfile with real
+  // per-word timings. Drives the quality notice at the top of the lyrics.
+  let currentWordSyncQualityWarning = false;
+  // Top-of-panel notice for that warning (built in 06-panel-ui). It runs once
+  // per track: five seconds of countdown, then a fade. The key keeps renderer
+  // rebuilds from restarting it while still allowing a new track to show it.
+  let wordSyncQualityNoticeEl = null;
+  let wordSyncQualityNoticeShownFor = "";
+  let wordSyncQualityNoticeFadeTimer = 0;
+  let wordSyncQualityNoticeHideTimer = 0;
+  // Fullscreen writers belong to the track that was on screen when they were
+  // painted. Keep their source array and track boundary separate from the
+  // attribution state so a skip can hide the old names without wiping data the
+  // incoming lyrics fetch is about to use.
+  let fsFullscreenWritersTrackKey = "";
+  let fsFullscreenWritersSourceRef = null;
+  let fsFullscreenWritersStaleRef = null;
   // Attribution for the currently loaded lyrics. `currentProvider` is a display
   // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
   // `currentUploader` / `currentMaker` are the credited people and are only ever
@@ -522,7 +542,7 @@
     // bottom and stops at the first source that has the track. (The user-facing
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
-    sourceOrder: ["spicy", "lrclib"],
+    sourceOrder: ["community", "spicy", "unison", "lrclib"],
     // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
     // content script (not by this add-on) and mirrored into every add-on's
     // settings payload, so the page backdrop, the Now Playing rail and this
@@ -536,7 +556,7 @@
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
   function normalizeSourceOrder(value) {
-    const all = ["spicy", "lrclib"];
+    const all = ["community", "spicy", "unison", "lrclib"];
     const seen = new Set();
     const out = [];
     if (Array.isArray(value)) {

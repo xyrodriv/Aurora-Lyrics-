@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Aurora Lyrics (For YouTube Music)",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Aurora Lyrics brings word by word lyrics, add-ons, and themes to YouTube Music.",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
     "https://music.youtube.com/*",
-    "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page/*",
+    "https://aurora-community-api.mitsyonsp.workers.dev/*",
     "https://lrclib.net/*",
+    "https://unison.boidu.dev/*",
     "https://itunes.apple.com/*",
     "https://api.deezer.com/*",
     "https://musicbrainz.org/*",
@@ -38,13 +39,23 @@
       ],
       "js": [
         "src/content/content.js",
-        "src/content/announcements.js"
+        "src/content/announcements.js",
+        "src/content/maker-identity.js"
       ],
       "css": [
         "src/content/styles.css",
         "src/content/panel.css"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://aurora-lyrics.mitsyonsp.workers.dev/*"
+      ],
+      "js": [
+        "src/content/website-bridge.js"
+      ],
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [

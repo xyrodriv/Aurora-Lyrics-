@@ -18,7 +18,7 @@
 
 const ALLOWED_HOSTS = new Set(["api.deezer.com"]);
 
-const REPORT_HOSTS = new Set(["site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page"]);
+const REPORT_HOSTS = new Set(["aurora-community-api.mitsyonsp.workers.dev"]);
 const REPORT_PATH = "/v1/reports";
 const REPORT_BODY_MAX = 8 * 1024;
 

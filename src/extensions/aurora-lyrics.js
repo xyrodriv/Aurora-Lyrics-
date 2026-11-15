@@ -7,7 +7,7 @@
  * or by Spikerko, and is not affiliated with either. Preserve the upstream
  * license and attribution when distributing adapted builds.
  *
- * Community syncs come from the Spicy Lyrics API and Aurora Community and are
+ * Community syncs come from the Spicy Lyrics API, Aurora Community and Unison, and are
  * credited ON SCREEN wherever lyrics appear (see buildCreditsFooter /
  * buildProviderRow); API responses are cached for at most 30 days.
  *
@@ -34,10 +34,18 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  // Unison — keyless, community-fed synced lyrics keyed by YouTube video id.
+  // Requests go through the content-script proxy, like LRCLIB, so a missing
+  // CORS header cannot strand the request.
+  const UNISON_API = "https://unison.boidu.dev/lyrics";
   // Aurora Community — community TTML and shared offsets, keyed by the exact
   // YouTube video id. TTML uploads are handled by the Discord bot; offsets can
   // be posted from the Sync tab and are reported to the same API.
-  const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
+  const AURORA_COMMUNITY_API = "https://aurora-community-api.mitsyonsp.workers.dev";
+  // Public maker profile pages. The website sends an absolute profile URL with
+  // the signed-in identity; this origin is the fallback for identities stored
+  // before that field existed, whose Discord avatar URL still carries the id.
+  const AURORA_PROFILE_ORIGIN = "https://aurora-lyrics.mitsyonsp.workers.dev";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
   // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
@@ -206,7 +214,13 @@
     return root.children.filter((node) => node.closeEnd != null);
   }
 
-  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd) {
+  function parseTimedSpanNodes(nodes, markup, fallbackStart, fallbackEnd, options = null) {
+    // Background vocals in some TTML exports are wrapped in parentheses as a
+    // visual cue, e.g. "(background line)". The renderer already marks these
+    // lines as background, so the parentheses are redundant chrome. Strip them
+    // here, and only when the caller says this is a background-vocal run:
+    // parentheses in a lead lyric may be part of the words themselves.
+    const stripParentheses = !!(options && options.stripParentheses);
     const words = nodes
       .map((node) => {
         const beginAttr = node.attrs.begin || node.attrs["ttm:begin"] || "";
@@ -231,8 +245,11 @@
               ? endValue
               : (duration ? start + duration : fallbackEnd))
           : fallbackEnd;
+        const rawText = node.text || textOf(node.inner);
         return {
-          text: node.text || textOf(node.inner),
+          text: stripParentheses
+            ? rawText.replace(/[()]/g, "").replace(/\s+/g, " ").trim()
+            : rawText,
           start,
           end,
           // True only when this span carried real timing. Drives the
@@ -522,7 +539,8 @@
             node.children,
             body,
             wrapStart == null ? start : wrapStart,
-            wrapEnd == null ? end : wrapEnd
+            wrapEnd == null ? end : wrapEnd,
+            { stripParentheses: true }
           );
           if (!bgWords.length) return null;
 
@@ -1339,6 +1357,22 @@
     return !!(value && typeof value === "object" && value.manual === true && value.data);
   }
 
+  // LRCLIB now guarantees a Lyricsfile on every record. Auto entries saved
+  // before that change only hold an LRC and would keep word-sync invisible for
+  // recently played tracks; drop them so they are fetched again. Manual picks
+  // are the user's only copy, so they are never pruned here.
+  {
+    let pruned = false;
+    for (const [key, value] of [...persistentLyricsCache]) {
+      if (isManualPickEntry(value)) continue;
+      if (!value || typeof value !== "object" || !value.lyricsfile) {
+        persistentLyricsCache.delete(key);
+        pruned = true;
+      }
+    }
+    if (pruned) persistLyricsCache();
+  }
+
   function unwrapPersistedLyrics(value) {
     return isManualPickEntry(value) ? value.data : value;
   }
@@ -1694,16 +1728,6 @@
   let wpObserver = null;
   let lineScrollEl = null;
   let linesRoot = null;
-  // QOL #1 (2026-09-28): end-of-track credits reveal. When a SYNCHRONISED track
-  // reaches its final ~1.5s, glide the panel to the bottom so the .ym-sl-credits
-  // block (provider / uploaded-by / made-by) scrolls into view. Static (unsynced)
-  // lyrics already reach the bottom on their own via driveStaticAutoScroll, so
-  // this only engages for synced lyrics.
-  let creditsFooterEl = null;        // the footer element, or null when there are no credits
-  let creditsRevealEngaged = false;  // we are in the end zone and have taken over the scroll
-  let creditsRevealActive = false;   // owns the scroll target on the current frame
-  let creditsRevealDismissed = false;// the user manually scrolled away -> stay out until next track
-  const CREDITS_REVEAL_MS = 1500;    // reveal during the final 1.5s of the track
   let scrollCandidateIndices = [];
   // Loading-skeleton plumbing. `lyricsSkeletonToken` is bumped by every panel
   // reset, which invalidates a skeleton paint still queued on rAF/`setTimeout`.
@@ -1717,6 +1741,10 @@
   // collide with or abort the current track's lyric request (which uses
   // trackRequestSeq / activeTrackAbort).
   let prefetchSeq = 0;
+  // Final, ready-to-render payload for the upcoming track. fetchLRCLyrics
+  // consumes it before running any source, so a prefetched hit paints without
+  // another network round-trip. Bounded in 15-prefetch-search.
+  let prefetchedLyrics = new Map();
   // Per-track offset slots: one for music-video playback, one for the regular
   // (audio) song. See setVideoOffsetMs / loadVideoOffsetForTrack.
   let offsetVideoMs = 0;
@@ -1733,6 +1761,11 @@
      never in this object, and is only used for the Undo request. */
   let communityOffsetStatus = null;
   let communityOffsetName = null;
+  let communityOffsetAccount = null;
+  let communityOffsetAccountAvatar = null;
+  let communityOffsetAccountName = null;
+  let communityOffsetIdentity = null;
+  let communityOffsetIdentityListenerAttached = false;
   let communityOffsetPostButton = null;
   let communityOffsetUndoButton = null;
   let communityOffsetReportButton = null;
@@ -1784,6 +1817,27 @@
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
   let currentSongwriters = [];
+  // Lyricsfile (LRCLIB) metadata for the current set. Kept separate from
+  // songwriters: metadata.artist is the performing artist, not the writers, so
+  // it must not feed the "Written by" line or the fullscreen byline.
+  let currentLyricsfileArtist = "";
+  // True only when the visible lines came from an LRCLIB Lyricsfile with real
+  // per-word timings. Drives the quality notice at the top of the lyrics.
+  let currentWordSyncQualityWarning = false;
+  // Top-of-panel notice for that warning (built in 06-panel-ui). It runs once
+  // per track: five seconds of countdown, then a fade. The key keeps renderer
+  // rebuilds from restarting it while still allowing a new track to show it.
+  let wordSyncQualityNoticeEl = null;
+  let wordSyncQualityNoticeShownFor = "";
+  let wordSyncQualityNoticeFadeTimer = 0;
+  let wordSyncQualityNoticeHideTimer = 0;
+  // Fullscreen writers belong to the track that was on screen when they were
+  // painted. Keep their source array and track boundary separate from the
+  // attribution state so a skip can hide the old names without wiping data the
+  // incoming lyrics fetch is about to use.
+  let fsFullscreenWritersTrackKey = "";
+  let fsFullscreenWritersSourceRef = null;
+  let fsFullscreenWritersStaleRef = null;
   // Attribution for the currently loaded lyrics. `currentProvider` is a display
   // name ("Spicy Lyrics", "Apple Music", ...) and is set for EVERY API source.
   // `currentUploader` / `currentMaker` are the credited people and are only ever
@@ -1927,7 +1981,7 @@
     // bottom and stops at the first source that has the track. (The user-facing
     // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
     // as the resolver fallback order.)
-    sourceOrder: ["spicy", "lrclib"],
+    sourceOrder: ["community", "spicy", "unison", "lrclib"],
     // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
     // content script (not by this add-on) and mirrored into every add-on's
     // settings payload, so the page backdrop, the Now Playing rail and this
@@ -1941,7 +1995,7 @@
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
   function normalizeSourceOrder(value) {
-    const all = ["spicy", "lrclib"];
+    const all = ["community", "spicy", "unison", "lrclib"];
     const seen = new Set();
     const out = [];
     if (Array.isArray(value)) {
@@ -2321,6 +2375,10 @@
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       container-type: size;
+      /* Named query container for the credits rail. The panel is already a size
+         container, so naming it costs no extra containment and both lyric
+         renderers (built-in and AMLL) sit inside it. */
+      container-name: ym-sl-credit-rail;
       isolation: isolate;
     }
     /* Page-wide background styling moved to the Dynamic theme. */
@@ -2625,23 +2683,21 @@
     /* Options: a pill beside content.js's song-layout switcher, in the empty
        band above both panels (AJ, 2026-10-26). It replaces the hover-revealed
        row that used to live on the panel's own top edge, where nobody who had
-       not already found it would look. Same shell as the pill next to it, so
-       the pair reads as one control group; the label is SpicyLyrics because
-       this is our chrome, not YouTube's. */
+       not already found it would look. Every metric is the layout button's own
+       (styles.css: .ym-song-layout-btn) so the pair reads as one control group
+       instead of two different systems sitting next to each other. */
     .ym-sl-options-pill {
       display: flex;
       align-items: center;
       gap: 7px;
       height: 28px;
-      padding: 0 10px;
+      padding: 0 8px;
       border: 0;
       border-radius: 9px;
       background: rgba(255, 255, 255, .06);
       box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09);
       color: rgba(255, 255, 255, .72);
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
-        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
-        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font: inherit;
       font-size: 12px;
       font-weight: 500;
       letter-spacing: .01em;
@@ -2828,6 +2884,87 @@
     .ym-sl-community-offset-status[data-state="error"] {
       color: rgba(255,164,150,.92);
     }
+    .ym-sl-community-offset-account {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 38px;
+      box-sizing: border-box;
+      padding: 6px 9px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 9px;
+      background: rgba(255,255,255,.045);
+      color: inherit;
+      text-decoration: none;
+    }
+    /* Only a maker with a profile URL gets the link affordance. The whole row
+       is the hit target, so hovering either the avatar or the username lights
+       up the same link. */
+    .ym-sl-community-offset-account[href] {
+      cursor: pointer;
+      transition: background-color .16s ease, border-color .16s ease;
+    }
+    .ym-sl-community-offset-account[href]:hover {
+      background: rgba(255,255,255,.075);
+      border-color: rgba(255,255,255,.18);
+    }
+    .ym-sl-community-offset-account[href]:focus-visible {
+      outline: 2px solid rgba(63, 224, 197, .72);
+      outline-offset: 2px;
+    }
+    .ym-sl-community-offset-account[href]:hover .ym-sl-community-offset-accountname {
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .ym-sl-community-offset-account[href]:hover .ym-sl-community-offset-avatar {
+      box-shadow: 0 0 0 2px rgba(63, 224, 197, .45);
+    }
+    .ym-sl-community-offset-avatar {
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      width: 28px;
+      height: 28px;
+      overflow: hidden;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 30% 20%, rgba(255,255,255,.2), transparent 45%),
+        linear-gradient(145deg, #8d2a3e, #1d1c2c 76%);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .ym-sl-community-offset-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .ym-sl-community-offset-initial {
+      line-height: 1;
+    }
+    .ym-sl-community-offset-accountcopy {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+    .ym-sl-community-offset-accountname {
+      overflow: hidden;
+      color: rgba(255,255,255,.9);
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-community-offset-accountmeta {
+      color: rgba(63,224,197,.78);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
     .ym-sl-community-offset-name {
       width: 100%;
       box-sizing: border-box;
@@ -2879,6 +3016,7 @@
       opacity: .45;
       cursor: default;
     }
+    .ym-sl-community-offset-account.hidden,
     .ym-sl-community-offset-name.hidden,
     .ym-sl-community-offset-btn.hidden { display: none; }
     /* Divider + section title separate the lyrics controls (track, offset)
@@ -4513,21 +4651,28 @@
       opacity: .38;
     }
     .ym-sl-fs-title-writers {
+      --ym-sl-fs-writers-opacity: 1;
       min-width: 0;
       max-width: 100%;
+      /* Hard edge, no mask: the writer marquee should cut off cleanly instead
+         of dissolving names at either end while it drifts. */
       overflow: hidden;
       white-space: nowrap;
+      transition: opacity .2s ease;
     }
+    .ym-sl-fs-title-writers.is-writers-out { opacity: 0; }
     .ym-sl-fs-title-writers-track {
       display: inline-block;
       white-space: nowrap;
       will-change: transform;
     }
-    .ym-sl-fs-title-writers.is-overflowing {
-      -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px,
-        #000 calc(100% - 16px), transparent 100%);
-      mask-image: linear-gradient(to right, transparent 0, #000 16px,
-        #000 calc(100% - 16px), transparent 100%);
+    .ym-sl-fs-title-writers.is-writers-in,
+    .ym-sl-fs-hits-writers.is-writers-in {
+      animation: ym-sl-fs-writers-in .28s ease both;
+    }
+    @keyframes ym-sl-fs-writers-in {
+      from { opacity: 0; }
+      to { opacity: var(--ym-sl-fs-writers-opacity, 1); }
     }
     .ym-sl-fs-title-writers-track.is-scrolling {
       animation: ym-sl-fs-writers-scroll var(--ym-sl-fs-writers-duration, 22s)
@@ -4760,11 +4905,12 @@
       display: inline-block;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      --ym-sl-fs-writers-opacity: .34;
       display: inline-block;
       flex: 1 1 auto;
       font-size: .66em;
       font-weight: 500;
-      opacity: .45;
+      opacity: .34;
       letter-spacing: 0;
     }
     /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
@@ -5111,6 +5257,13 @@
     @media (prefers-reduced-motion: reduce) {
       .ym-sl-fs-title { animation: none; opacity: 1; transition: none; }
       .ym-sl-fs-title-writers-track.is-scrolling { animation: none; transform: none; }
+      .ym-sl-fs-title-writers { transition: none; }
+      .ym-sl-fs-title-writers.is-writers-in,
+      .ym-sl-fs-hits-writers.is-writers-in {
+        animation: none;
+        opacity: var(--ym-sl-fs-writers-opacity, 1);
+      }
+      .ym-sl-fs-title-writers.is-writers-out { opacity: 0; }
       /* Keep the track-change swap, but make it an instant cut. */
       .ym-sl-fs-title.ym-sl-fs-title-leaving { animation: none; opacity: 0; }
       /* SAME specificity as the cover-art leaving rule (0,6,0) - without this
@@ -6435,6 +6588,34 @@
     .ym-sl-source-chip {
       top: 40px;
     }
+    /* LRCLIB word-by-word quality warning. It owns the top slot for its
+       five-second countdown, then fades out; the timer line needs the extra
+       bottom padding so it never sits on the text. */
+    .ym-sl-lrclib-word-note {
+      top: 10px;
+      max-width: calc(100% - 28px);
+      box-sizing: border-box;
+      padding: 6px 12px 10px;
+      white-space: normal;
+      text-align: center;
+      line-height: 1.35;
+      z-index: 6;
+    }
+    .ym-sl-lrclib-word-note.hidden { display: none; }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-mv-sync-chip:not(.ym-sl-lrclib-word-note) {
+      top: 44px;
+    }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-source-chip {
+      top: 74px;
+    }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-translate-chip {
+      top: 44px;
+    }
+    /* Background mode hides the lyrics chrome; this notice belongs with it. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-lrclib-word-note,
+    #ym-sl-panel.ym-sl-ad-active .ym-sl-lrclib-word-note {
+      display: none;
+    }
     .ym-sl-mv-sync-chip-timer {
       position: absolute;
       left: 12px;
@@ -7198,6 +7379,11 @@
       padding-bottom: 0;
       border-bottom: 0;
     }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-provider {
+      /* The provider row is shorter than the people pill. Centre it on the
+         metadata line so "Provided by" sits level with "Submitted by". */
+      align-self: center;
+    }
     #ym-sl-panel.SpicyRenderer .ym-sl-credit-people {
       flex-direction: row;
       flex-wrap: wrap;
@@ -7385,6 +7571,930 @@
       line-height: 1.4;
       color: rgba(255, 255, 255, .42);
       max-width: 42ch;
+    }
+    /* Unison keeps the shared liner-note rail as a plain dim Better Lyrics red. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison {
+      position: relative;
+      overflow: hidden;
+      background: #8a1420;
+      border: 0;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-brand {
+      position: absolute;
+      left: -36px;
+      top: 50%;
+      width: 190px;
+      height: 190px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .24;
+      filter: blur(20px) saturate(1.1);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 50%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-brand {
+      left: auto;
+      right: -36px;
+    }
+
+    /* Spicy uses the same frosted rail and clipped watermark as Unison, but
+       takes the violet from its mark. Layout stays shared. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy {
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .012) 58%),
+        rgba(46, 27, 72, .28);
+      border-color: rgba(157, 126, 209, .34);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10);
+      -webkit-backdrop-filter: blur(22px) saturate(1.25);
+      backdrop-filter: blur(22px) saturate(1.25);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-brand {
+      position: absolute;
+      left: -36px;
+      top: 50%;
+      width: 190px;
+      height: 190px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .24;
+      filter: blur(20px) saturate(1.1);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 50%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-brand {
+      left: auto;
+      right: -36px;
+    }
+    /* The supplied Spicy banner is the card surface, cropped to fit. No blur
+       and no border tint; Aurora keeps its own ring and is excluded. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy:not(.ym-sl-credits--aurora) {
+      border: 0;
+      background:
+        linear-gradient(180deg, rgba(24, 18, 40, .34), rgba(24, 18, 40, .46)),
+        var(--ym-sl-spicy-banner-image, none) center / cover no-repeat;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    /* Aurora Community reuses Spicy's rail and layout, but its mark is black
+       and red, so the border follows those colours instead of the violet.
+       border-image paints ONLY the 1px frame; a border-box background would
+       tint the whole interior and kill the glass transparency. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora {
+      border-color: transparent;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .012) 58%),
+        rgba(58, 18, 24, .30);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      box-sizing: border-box;
+      padding: 1px;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #e11d2e 0%, #3b070b 48%, #050505 100%);
+      -webkit-mask-image: linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+      -webkit-mask-size: 100% 100%;
+      -webkit-mask-clip: content-box, border-box;
+      -webkit-mask-composite: xor;
+      mask-image: linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+      mask-size: 100% 100%;
+      mask-clip: content-box, border-box;
+      mask-composite: exclude;
+      pointer-events: none;
+      z-index: 3;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora.align-right::before {
+      background: linear-gradient(270deg, #e11d2e 0%, #3b070b 48%, #050505 100%);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora .ym-sl-credit-provider .ym-sl-provider-icon {
+      border-radius: 4px;
+    }
+    /* Apple Music has no contributor rows. The provider mark is the whole
+       headline, so it gets a large rounded square at the far left and the
+       writers become the quiet bottom footnote. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple {
+      position: relative;
+      overflow: hidden;
+      color: #fff;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .14), rgba(255, 255, 255, .035) 58%),
+        rgba(20, 22, 26, .28);
+      border-color: rgba(255, 255, 255, .28);
+      /* No outer shadow: the lyrics player clips at its side gutter, which
+         turned both the white halo and the dark drop shadow into a straight
+         cutoff. Keep only the inset top highlight on the rounded border. */
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14);
+      -webkit-backdrop-filter: blur(22px) saturate(1.1);
+      backdrop-filter: blur(22px) saturate(1.1);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-brand {
+      position: absolute;
+      left: -38px;
+      top: 50%;
+      width: 220px;
+      height: 220px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .13;
+      filter: blur(22px) saturate(1) brightness(1.15);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 26%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-provider {
+      order: 1;
+      align-self: flex-start;
+      margin-right: auto;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-writers {
+      order: 2;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider {
+      flex-wrap: nowrap;
+      gap: 6px;
+      align-items: center;
+      font-size: 17px;
+      white-space: nowrap;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-icon {
+      order: 1;
+      width: 72px;
+      height: 72px;
+      margin-right: 10px;
+      border-radius: 18px;
+      flex: none;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, .14);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-label {
+      order: 2;
+      font-size: 13px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-name {
+      order: 3;
+      font-size: 20px;
+      font-weight: 600;
+      color: #fff;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-names,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .68);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers a {
+      color: inherit;
+    }
+    /* Artist is metadata, so it sits under the provider as a quiet footnote. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-artist {
+      order: 2;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0 0 8px;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple.align-right {
+      text-align: left;
+      justify-content: flex-start;
+      margin-left: 0;
+    }
+    /* LRCLIB has no contributor rows and only its provider name; keep the
+       layout quiet with no card fill and no mark in the lyrics footer. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib {
+      border: 0;
+      padding: 14px 20px 13px;
+      background: transparent;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-icon {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-label {
+      font-size: 12px;
+    }
+    /* Better Lyrics hierarchy for Unison: the source and uploader are the
+       headline row; the songwriters become the quiet footnote underneath. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-people {
+      order: 1;
+      align-self: flex-start;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-provider {
+      position: absolute;
+      top: 18px;
+      right: 22px;
+      left: auto;
+      z-index: 2;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-writers {
+      order: 3;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right > .ym-sl-credit-provider {
+      left: 22px;
+      right: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right > .ym-sl-credit-people {
+      order: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+      font-weight: 600;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-icon {
+      width: 20px;
+      height: 20px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader {
+      position: relative;
+      display: grid;
+      grid-template-columns: 64px minmax(0, max-content);
+      grid-template-rows: 1fr 1fr;
+      column-gap: 10px;
+      row-gap: 2px;
+      align-items: center;
+      width: max-content;
+      max-width: 100%;
+      min-height: 64px;
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link {
+      display: contents;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-name {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: end;
+      max-width: 180px;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 1;
+      grid-row: 1 / span 2;
+      box-sizing: border-box;
+      width: 64px;
+      height: 64px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      transition: filter .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 2;
+      grid-row: 2;
+      align-self: start;
+      position: static;
+      margin: 0;
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .52);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    /* The two text rows sit a hair above the 64px avatar's centre because the
+       name is end-aligned and the label is start-aligned. Nudge the pair as a
+       unit so the block reads centred without moving the badge or date. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      transform: translateY(2px);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+      content: attr(data-level);
+      position: absolute;
+      left: 22px;
+      top: -8px;
+      bottom: auto;
+      width: 19px;
+      height: 19px;
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      border: 2px solid rgba(27, 15, 18, .9);
+      border-radius: 50%;
+      background: #f20c32;
+      color: #fff;
+      font: 700 9px/1 "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      pointer-events: none;
+      z-index: 3;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-provider-date {
+      margin: 0;
+      font-size: 10.5px;
+      line-height: 1.2;
+      letter-spacing: .01em;
+      color: rgba(255, 255, 255, .38);
+      white-space: nowrap;
+      text-align: left;
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-credit-provider {
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-provider-date {
+      position: absolute;
+      right: 22px;
+      bottom: 16px;
+      z-index: 2;
+      text-align: right;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers.align-right > .ym-sl-provider-date {
+      left: 22px;
+      right: auto;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 17 17 7M9 7h8v8' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 18px 18px no-repeat,
+        rgba(6, 10, 14, .42);
+      opacity: 0;
+      transform: translateY(-50%);
+      transition: opacity .18s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader::after {
+      left: auto;
+      right: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+      left: auto;
+      right: 22px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader:has(.ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover)::after {
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover {
+      filter: brightness(.72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-arrow {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-name {
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader {
+      grid-template-columns: minmax(0, max-content) 64px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    /* No portrait: collapse the avatar column and drop the level badge and
+       hover overlay that would otherwise float over empty space. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar {
+      grid-template-columns: minmax(0, max-content);
+      min-height: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar[data-level]::before,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar::after {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people {
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-writers .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .62);
+    }
+    /* Spicy mirrors the Unison hierarchy: provider and people on top, writers
+       as the quiet bottom footnote. Keep these layout rules in step with the
+       Unison block above. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-people {
+      order: 1;
+      align-self: flex-start;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-provider {
+      position: absolute;
+      top: 18px;
+      right: 22px;
+      left: auto;
+      z-index: 2;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-writers {
+      order: 3;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right > .ym-sl-credit-provider {
+      left: 22px;
+      right: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right > .ym-sl-credit-people {
+      order: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+      font-weight: 600;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-icon {
+      width: 20px;
+      height: 20px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader {
+      position: relative;
+      display: grid;
+      grid-template-columns: 64px minmax(0, max-content);
+      grid-template-rows: 1fr 1fr;
+      column-gap: 10px;
+      row-gap: 2px;
+      align-items: center;
+      width: max-content;
+      max-width: 100%;
+      min-height: 64px;
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link {
+      display: contents;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-name {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: end;
+      max-width: 180px;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 1;
+      grid-row: 1 / span 2;
+      box-sizing: border-box;
+      width: 64px;
+      height: 64px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      transition: filter .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 2;
+      grid-row: 2;
+      align-self: start;
+      position: static;
+      margin: 0;
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .52);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      transform: translateY(2px);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 17 17 7M9 7h8v8' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 18px 18px no-repeat,
+        rgba(6, 10, 14, .42);
+      opacity: 0;
+      transform: translateY(-50%);
+      transition: opacity .18s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader::after {
+      left: auto;
+      right: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader:has(.ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover)::after {
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover {
+      filter: brightness(.72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-arrow {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-name {
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader {
+      grid-template-columns: minmax(0, max-content) 64px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people {
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-writers .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .62);
+    }
+    /* Compact credit rail (AJ, 2026-11-15). The wide rail is built around a
+       roomy pane: 64px people avatars, a 72px Apple mark, and a provider pinned
+       to the right. On a small monitor the lyric pane is narrower than those
+       pieces, so the credits collide and the card wraps mid-credit. The query
+       measures the panel instead of the viewport, because YTM's side panel can
+       be narrow even on a wide screen. Every provider keeps its own
+       skin; only geometry, type scale and wrapping change. The hierarchy stays
+       the one in the reference: people left, provider right, writers as the
+       quiet bottom note. */
+    @container ym-sl-credit-rail (max-width: 600px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits {
+        gap: 8px 14px;
+        padding: 12px 14px;
+        margin: 32px 0 16px;
+        border-radius: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-box { gap: 3px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+        border-bottom: 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-provider {
+        order: 2;
+        align-self: flex-start;
+        margin-left: auto;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-people {
+        order: 1;
+        align-self: flex-start;
+        gap: 6px 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
+        font-size: 10px;
+        line-height: 1.2;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits-names {
+        font-size: 12.5px;
+        line-height: 1.3;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers .ym-sl-credits-names {
+        font-size: 14px;
+        line-height: 1.3;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider {
+        gap: 4px;
+        font-size: 12px;
+        flex-wrap: wrap;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-icon {
+        width: 14px;
+        height: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-name { font-size: 13px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-date {
+        font-size: 9.5px;
+        line-height: 1.2;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader {
+        gap: 4px;
+        font-size: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
+        gap: 4px;
+        padding: 1px 7px 1px 2px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-avatar {
+        width: 16px;
+        height: 16px;
+      }
+      /* Unison, Spicy and Aurora share the portrait people block. Shrink the
+         avatar grid as one unit so the level badge, arrow overlay and the two
+         text rows stay aligned to the same 40px circle. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        order: 2;
+        margin-right: 0;
+        margin-left: auto;
+        align-self: flex-start;
+        text-align: left;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        order: 2;
+        margin-right: 0;
+        margin-left: auto;
+        align-self: flex-start;
+        text-align: left;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right > .ym-sl-credit-people {
+        order: 1;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider {
+        gap: 4px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-label,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        font-size: 10px;
+        color: rgba(255, 255, 255, .58);
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-icon {
+        width: 15px;
+        height: 15px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader {
+        grid-template-columns: 40px minmax(0, max-content);
+        column-gap: 8px;
+        row-gap: 1px;
+        min-height: 40px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader {
+        grid-template-columns: minmax(0, max-content) 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar {
+        grid-template-columns: minmax(0, max-content);
+        min-height: 0;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-avatar {
+        width: 40px;
+        height: 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-name {
+        max-width: 150px;
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-name,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        transform: translateY(1px);
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader::after {
+        width: 40px;
+        height: 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+        left: 14px;
+        top: -6px;
+        width: 16px;
+        height: 16px;
+        font-size: 8px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+        left: auto;
+        right: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-provider-date {
+        font-size: 9.5px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).ym-sl-credits--no-writers > .ym-sl-provider-date {
+        right: 14px;
+        bottom: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).ym-sl-credits--no-writers.align-right > .ym-sl-provider-date {
+        left: 14px;
+        right: auto;
+      }
+      /* A source with no writers puts the submitted date straight into the
+         rail. Keep it after the provider instead of letting flex order 0 pull
+         it above the credit it belongs to. */
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits > .ym-sl-provider-date {
+        order: 3;
+        flex: 1 0 100%;
+        margin-top: 2px;
+      }
+      /* Apple and LRCLIB have no people block. Keep the provider as the lead
+         line, but replace the oversized 72px mark with a compact one and let
+         the writers close the card underneath. */
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-provider {
+        order: 1;
+        margin-right: auto;
+        margin-left: 0;
+        align-self: flex-start;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-writers {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+        border: 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-artist {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider {
+        gap: 3px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-icon {
+        width: 44px;
+        height: 44px;
+        margin-right: 7px;
+        border-radius: 11px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 15px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-label {
+        font-size: 9.5px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-names,
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-names {
+        font-size: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib {
+        padding: 10px 12px;
+        border: 0;
+        background: transparent;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-brand {
+        width: 150px;
+        height: 150px;
+        left: -28px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-brand {
+        left: auto;
+        right: -28px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-brand {
+        width: 150px;
+        height: 150px;
+        left: -28px;
+      }
+      /* People across the top; writers and provider share the bottom row.
+         This is deliberate rather than relying on flex wrap: once the provider
+         no longer fits beside the people it used to drop into a lone row in the
+         middle right of the card. A two-row grid keeps it anchored to the
+         bottom-right corner at every compact width. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "people people"
+          "writers provider";
+        align-items: end;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-people {
+        grid-area: people;
+        align-self: start;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-writers {
+        grid-area: writers;
+        align-self: end;
+        padding: 0;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-provider {
+        grid-area: provider;
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        align-self: end;
+        justify-self: end;
+        margin: 0;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-artist {
+        grid-column: 1 / -1;
+      }
+      /* A source with no writers has no bottom-left cell, and its date would
+         otherwise land under the provider. Park it in that empty cell. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-provider-date {
+        grid-column: 1;
+        grid-row: 2;
+        position: static;
+        right: auto;
+        bottom: auto;
+        justify-self: start;
+        align-self: end;
+        text-align: left;
+      }
     }
     tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
     tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
@@ -9020,6 +10130,993 @@
       .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover { transform: none; }
     }
 
+    /* ===== Options, rebuilt as a scrolling card ==========================
+       The add-ons panel's split, reused here: one rail, one scrolling pane,
+       and a single red marker that slides between rows. The shell is fixed
+       size and the pane scrolls; no page height is measured or animated.
+       Scoped to .ym-sl-op2 so the older Options rules cannot leak in. */
+    .ym-sl-options-overlay.ym-sl-op2 {
+      --op-panel: #17171a;
+      --op-panel-top: #1b1b1f;
+      --op-text: rgba(255, 255, 255, .92);
+      --op-body: rgba(255, 255, 255, .85);
+      --op-muted: rgba(255, 255, 255, .55);
+      --op-dim: rgba(255, 255, 255, .4);
+      --op-line: rgba(255, 255, 255, .07);
+      --op-line-strong: rgba(255, 255, 255, .1);
+      --op-surface: rgba(255, 255, 255, .05);
+      --op-surface-hover: rgba(255, 255, 255, .08);
+      --op-red: #e01040;
+      --op-red-soft: #ff4d6a;
+      --op-red-wash: rgba(224, 16, 64, .12);
+      --op-ease: cubic-bezier(.22, 1, .36, 1);
+      --op-ease-reel: cubic-bezier(.32, .72, 0, 1);
+      position: fixed;
+      top: 88px;
+      right: 24px;
+      bottom: auto;
+      left: auto;
+      z-index: 2147483200;
+      display: block;
+      width: min(640px, calc(100vw - 32px));
+      height: min(480px, calc(100vh - 112px));
+      max-width: none;
+      max-height: none;
+      padding: 0;
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: none;
+      color: var(--op-text);
+      font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      transition: opacity .2s ease, visibility 0s linear 0s;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: none;
+      transition: opacity .16s ease, visibility 0s linear .16s;
+    }
+    .ym-sl-options-overlay.ym-sl-op2,
+    .ym-sl-options-overlay.ym-sl-op2 *,
+    .ym-sl-options-overlay.ym-sl-op2 *::before,
+    .ym-sl-options-overlay.ym-sl-op2 *::after {
+      box-sizing: border-box;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 button,
+    .ym-sl-options-overlay.ym-sl-op2 input {
+      font: inherit;
+    }
+
+    .ym-sl-op-shell {
+      display: grid;
+      grid-template-columns: minmax(196px, 220px) minmax(0, 1fr);
+      grid-template-rows: 60px minmax(0, 1fr);
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+      border-radius: 18px;
+      background: linear-gradient(180deg, var(--op-panel-top) 0%, #161619 100%);
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, .08),
+        0 48px 120px -48px rgba(0, 0, 0, .92);
+      color: var(--op-text);
+      opacity: 1;
+      transform: none;
+      transition: transform .34s var(--op-ease), opacity .22s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.hidden .ym-sl-op-shell {
+      opacity: 0;
+      transform: translateY(14px) scale(.985);
+    }
+
+    .ym-sl-op-head {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 18px 0 22px;
+      border-bottom: 1px solid var(--op-line);
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+    }
+    .ym-sl-op-head:active { cursor: grabbing; }
+    .ym-sl-op-brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+    .ym-sl-op-mark {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--op-red-wash);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .18);
+      color: var(--op-red-soft);
+    }
+    .ym-sl-op-mark svg {
+      width: 16px;
+      height: 16px;
+    }
+    .ym-sl-op-brandcopy {
+      display: grid;
+      gap: 1px;
+      min-width: 0;
+    }
+    .ym-sl-op-title {
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+      line-height: 1.25;
+    }
+    .ym-sl-op-close {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--op-muted);
+      cursor: pointer;
+      transition: background .15s ease, color .15s ease, scale .15s ease;
+    }
+    .ym-sl-op-close:hover {
+      background: var(--op-surface-hover);
+      color: #fff;
+    }
+    .ym-sl-op-close:active { scale: .96; }
+    .ym-sl-op-close svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .ym-sl-op-body { display: contents; }
+
+    .ym-sl-op-rail {
+      grid-column: 1;
+      grid-row: 2;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 18px 12px 14px;
+      border-right: 1px solid var(--op-line);
+      background: rgba(255, 255, 255, .018);
+    }
+    .ym-sl-op-railhead {
+      padding: 0 12px 10px;
+      color: var(--op-dim);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .12em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+    .ym-sl-op-tabs {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .ym-sl-op-ind {
+      position: absolute;
+      top: 0;
+      left: 3px;
+      width: 2px;
+      height: 0;
+      /* Square on the pane-facing right edge; the two left corners follow the
+         rail's rounded edge instead of making the whole marker a capsule. */
+      border-radius: 2px 0 0 2px;
+      background: var(--op-red);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s linear;
+    }
+    .ym-sl-op-ind.ready {
+      /* Height snaps; only the glide between rows animates. The rows share one
+         height, so animating height only ever left the marker trailing the tab
+         while a font swap settled. */
+      transition:
+        transform .32s var(--op-ease-reel),
+        opacity .18s linear;
+    }
+    .ym-sl-op-tab {
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr);
+      align-items: center;
+      gap: 11px;
+      width: 100%;
+      padding: 11px 12px 11px 15px;
+      border: 0;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--op-muted);
+      text-align: left;
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+    }
+    .ym-sl-op-tab:hover {
+      background: rgba(255, 255, 255, .035);
+      color: var(--op-text);
+    }
+    .ym-sl-op-tab.is-active {
+      background: var(--op-surface);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .055);
+      color: var(--op-text);
+    }
+    .ym-sl-op-tabicon {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .045);
+      color: var(--op-muted);
+      transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+    }
+    .ym-sl-op-tabicon svg {
+      width: 16px;
+      height: 16px;
+    }
+    .ym-sl-op-tab.is-active .ym-sl-op-tabicon {
+      background: var(--op-red-wash);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .18);
+      color: var(--op-red-soft);
+    }
+    .ym-sl-op-tabcopy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .ym-sl-op-tabcopy strong {
+      overflow: hidden;
+      color: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: -.005em;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-op-tabcopy small {
+      overflow: hidden;
+      color: var(--op-dim);
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-op-tab.is-active .ym-sl-op-tabcopy small { color: var(--op-muted); }
+    .ym-sl-op-railfoot {
+      margin-top: auto;
+      padding: 14px 12px 4px;
+      color: var(--op-dim);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .ym-sl-op-pane {
+      position: relative;
+      grid-column: 2;
+      grid-row: 2;
+      display: flex;
+      min-width: 0;
+      min-height: 0;
+      background: rgba(255, 255, 255, .008);
+    }
+    .ym-sl-op-pane::before,
+    .ym-sl-op-pane::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      z-index: 2;
+      height: 28px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease;
+    }
+    .ym-sl-op-pane::before {
+      top: 0;
+      background: linear-gradient(180deg, #19191c 0%, rgba(25, 25, 28, 0) 100%);
+    }
+    .ym-sl-op-pane::after {
+      bottom: 0;
+      background: linear-gradient(0deg, #161619 0%, rgba(22, 22, 25, 0) 100%);
+    }
+    .ym-sl-op-pane.has-top::before,
+    .ym-sl-op-pane.has-bottom::after { opacity: 1; }
+    .ym-sl-op-scroll {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding: 24px 28px 30px;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .ym-sl-op-scroll::-webkit-scrollbar { display: none; }
+    .ym-sl-op-reel {
+      position: relative;
+      max-width: 640px;
+    }
+    .ym-sl-op-page {
+      display: grid;
+      gap: 18px;
+    }
+    .ym-sl-op-page[hidden] { display: none !important; }
+    /* Chrome can leave the active page inheriting the overlay's hidden
+       visibility after a fast close/open or page swap. The page then keeps
+       display:grid and full height while painting nothing. Re-assert the
+       visible value whenever the overlay is open. */
+    .ym-sl-options-overlay.ym-sl-op2:not(.hidden) .ym-sl-op-page:not([hidden]) {
+      visibility: visible !important;
+    }
+    .ym-sl-op-pagehead {
+      display: grid;
+      gap: 6px;
+      padding: 0 2px;
+    }
+    .ym-sl-op-pagetitle {
+      margin: 0;
+      color: #fff;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -.025em;
+      line-height: 1.15;
+    }
+    .ym-sl-op-pagesub {
+      max-width: 58ch;
+      margin: 0;
+      color: var(--op-muted);
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+    .ym-sl-op-card {
+      display: grid;
+      gap: 13px;
+      padding: 16px 16px 18px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .032);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .065);
+    }
+    .ym-sl-op-cardhead {
+      display: grid;
+      gap: 3px;
+    }
+    .ym-sl-op-cardtitle {
+      margin: 0;
+      color: var(--op-text);
+      font-size: 13.5px;
+      font-weight: 650;
+      letter-spacing: -.005em;
+      line-height: 1.3;
+    }
+    .ym-sl-op-cardcopy {
+      margin: 0;
+      color: var(--op-dim);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset {
+      display: grid;
+      grid-template-columns: auto minmax(80px, 1fr) 64px 52px auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: normal;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+      accent-color: var(--op-red);
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-number {
+      width: 64px;
+      height: 34px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 8px;
+      outline: none;
+      background: rgba(255, 255, 255, .055);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: #fff;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-number:focus {
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .55);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+      min-width: 0;
+      color: var(--op-text);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+      justify-self: end;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--op-red-wash);
+      color: #ff8a9c;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset {
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+    /* The shared-offset controls now live in the same card as the track
+       offset, separated by a rule instead of a second frosted card. */
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-card > .ym-sl-community-offset {
+      margin-top: 1px;
+      padding-top: 16px;
+      border-top: 1px solid var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-head .ym-sl-options-section-title {
+      padding: 0;
+      color: var(--op-dim);
+      font-size: 11px;
+      letter-spacing: .08em;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-badge {
+      padding: 2px 7px;
+      background: rgba(63, 224, 197, .1);
+      color: rgba(63, 224, 197, .9);
+      font-size: 9px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status {
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="shared"],
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="owned"] {
+      color: var(--op-body);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="error"] {
+      color: #ff9a8c;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-account {
+      min-height: 40px;
+      padding: 6px 10px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255,255,255,.04);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-avatar {
+      width: 26px;
+      height: 26px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-accountname {
+      color: var(--op-text);
+      font-size: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-accountmeta {
+      color: var(--op-dim);
+      font-size: 9px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name {
+      width: 100%;
+      height: 36px;
+      padding: 0 11px;
+      border: 0;
+      border-radius: 9px;
+      outline: none;
+      background: rgba(255, 255, 255, .04);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: #fff;
+      font-size: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name::placeholder {
+      color: var(--op-dim);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name:focus-visible {
+      border-color: transparent;
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .55);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn {
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s ease, box-shadow .15s ease, color .15s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn:hover {
+      background: rgba(255, 255, 255, .09);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .18);
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-post {
+      background: rgba(224, 16, 64, .16);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .32);
+      color: #ff9aac;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-post:hover {
+      background: rgba(224, 16, 64, .24);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .46);
+      color: #ffd0d8;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-report {
+      background: rgba(255, 120, 105, .12);
+      box-shadow: inset 0 0 0 1px rgba(255, 120, 105, .2);
+      color: #ffb4a8;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented {
+      display: flex;
+      width: 100%;
+      padding: 3px;
+      border: 0;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, .24);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option {
+      flex: 1 1 0;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 8px;
+      color: var(--op-muted);
+      font-size: 12px;
+      text-align: center;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option:hover {
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option.active {
+      background: rgba(255, 255, 255, .92);
+      color: #141416;
+      font-weight: 650;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+      transition: background .15s ease, box-shadow .15s ease, color .15s ease, transform .12s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:hover {
+      background: rgba(255, 255, 255, .09);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .18);
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:active {
+      transform: scale(.97);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:disabled {
+      opacity: .38;
+      cursor: not-allowed;
+      transform: none;
+    }
+    /* The new button rule is more specific than the old .hidden rules, and it
+       sets display. Without these, Delete saved, Export, the per-song cache
+       action and the cache confirmation could all paint while still marked
+       hidden. Keep every conditional control genuinely out of the layout. */
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-file-note.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-account.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn.hidden {
+      display: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-op-btn-primary {
+      background: var(--op-red);
+      box-shadow: none;
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-op-btn-primary:hover {
+      background: #c80e39;
+      box-shadow: none;
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions:has(.ym-sl-delete-permanent-button.hidden) {
+      grid-template-columns: 1fr;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions .ym-sl-import {
+      width: 100%;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 0;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions .ym-sl-import {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-file-note {
+      padding: 0 2px;
+      color: var(--op-muted);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-song-cache-status.pending {
+      color: var(--op-text);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-song-cache-clear {
+      width: 100%;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-section {
+      gap: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-status {
+      padding: 0 2px;
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-clear {
+      justify-self: start;
+      align-self: flex-start;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm {
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid rgba(224, 16, 64, .28);
+      border-radius: 12px;
+      background: rgba(224, 16, 64, .09);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm-text {
+      color: var(--op-body);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: var(--op-red);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete:hover { background: #c80e39; }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete:disabled {
+      opacity: .55;
+      cursor: default;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-trash-icon {
+      width: 15px;
+      height: 15px;
+      display: block;
+      fill: currentColor;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel {
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .07);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel:hover {
+      background: rgba(255, 255, 255, .1);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel:disabled {
+      opacity: .5;
+      cursor: default;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 button:focus-visible,
+    .ym-sl-options-overlay.ym-sl-op2 input:focus-visible,
+    .ym-sl-options-overlay.ym-sl-op2 [tabindex]:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .38);
+      outline-offset: 2px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-video-offset input[type="range"]:focus-visible {
+      outline-offset: 4px;
+    }
+
+    /* The same shell in PiP: a normal block inside the floating window, with
+       the rail flattened to a row and the pane capped so the window keeps its
+       own scroll. The header is the floating card's drag handle, not useful
+       here, so it goes away. */
+    .ym-sl-options-overlay.ym-sl-op2.ym-sl-options-docked {
+      position: relative !important;
+      inset: auto !important;
+      z-index: auto !important;
+      display: block;
+      width: 100%;
+      max-width: 620px;
+      height: auto;
+      max-height: none;
+      margin: 0 auto 4px;
+      padding: 0;
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: none;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.ym-sl-options-docked.hidden {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-docked .ym-sl-op-shell {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: auto;
+      min-height: 0;
+      max-height: none;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .035);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+    }
+    .ym-sl-options-docked .ym-sl-op-head { display: none; }
+    .ym-sl-options-docked .ym-sl-op-body {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .ym-sl-options-docked .ym-sl-op-rail {
+      display: block;
+      padding: 8px;
+      border-right: 0;
+      border-bottom: 1px solid var(--op-line);
+      background: transparent;
+    }
+    .ym-sl-options-docked .ym-sl-op-railhead,
+    .ym-sl-options-docked .ym-sl-op-railfoot,
+    .ym-sl-options-docked .ym-sl-op-ind { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabs {
+      flex-direction: row;
+      gap: 3px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .ym-sl-options-docked .ym-sl-op-tabs::-webkit-scrollbar { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tab {
+      grid-template-columns: auto;
+      width: auto;
+      min-width: max-content;
+      padding: 7px 10px;
+      border-radius: 8px;
+    }
+    .ym-sl-options-docked .ym-sl-op-tabicon { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabcopy small { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabcopy strong { font-size: 12px; }
+    .ym-sl-options-docked .ym-sl-op-pane {
+      display: block;
+      min-height: 0;
+    }
+    .ym-sl-options-docked .ym-sl-op-pane::before,
+    .ym-sl-options-docked .ym-sl-op-pane::after { display: none; }
+    .ym-sl-options-docked .ym-sl-op-scroll {
+      max-height: 46vh;
+      padding: 16px 14px 18px;
+    }
+    .ym-sl-options-docked .ym-sl-op-reel { max-width: none; }
+    .ym-sl-options-docked .ym-sl-op-pagetitle { font-size: 18px; }
+    .ym-sl-options-docked .ym-sl-op-pagesub { font-size: 11.5px; }
+    .ym-sl-options-docked .ym-sl-op-card {
+      gap: 10px;
+      padding: 12px;
+      border-radius: 11px;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset {
+      grid-template-columns: auto minmax(60px, 1fr) 60px;
+      row-gap: 8px;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+      grid-column: 2;
+      text-align: left;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+      grid-column: 3;
+      justify-self: end;
+    }
+    .ym-sl-options-docked .ym-sl-options-file-actions,
+    .ym-sl-options-docked .ym-sl-export-actions { grid-template-columns: 1fr; }
+
+    @media (max-width: 780px) {
+      .ym-sl-options-overlay.ym-sl-op2 {
+        top: 64px;
+        right: 10px;
+        width: calc(100vw - 20px);
+        height: calc(100vh - 84px);
+        padding: 0;
+      }
+      .ym-sl-op-shell {
+        grid-template-columns: 1fr;
+        grid-template-rows: 60px auto minmax(0, 1fr);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        border-radius: 18px;
+      }
+      .ym-sl-op-head { padding: 0 12px 0 16px; }
+      .ym-sl-op-rail {
+        flex-direction: row;
+        align-items: center;
+        padding: 8px 10px;
+        overflow: hidden;
+        border-right: 0;
+        border-bottom: 1px solid var(--op-line);
+      }
+      .ym-sl-op-railhead,
+      .ym-sl-op-railfoot,
+      .ym-sl-op-ind { display: none; }
+      .ym-sl-op-tabs {
+        flex-direction: row;
+        gap: 4px;
+        width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .ym-sl-op-tabs::-webkit-scrollbar { display: none; }
+      .ym-sl-op-tab {
+        grid-template-columns: 20px auto;
+        gap: 7px;
+        width: auto;
+        min-width: max-content;
+        padding: 7px 10px;
+        border-radius: 9px;
+      }
+      .ym-sl-op-tabicon {
+        width: 20px;
+        height: 20px;
+        border-radius: 6px;
+        background: transparent;
+      }
+      .ym-sl-op-tabicon svg { width: 14px; height: 14px; }
+      .ym-sl-op-tabcopy small { display: none; }
+      .ym-sl-op-tabcopy strong { font-size: 12.5px; }
+      .ym-sl-op-pane {
+        grid-column: 1;
+        grid-row: 3;
+      }
+      .ym-sl-op-scroll { padding: 22px 20px 28px; }
+      .ym-sl-op-pagetitle { font-size: 22px; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset {
+        grid-template-columns: auto minmax(60px, 1fr) 64px;
+        row-gap: 10px;
+      }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+        grid-column: 2;
+        text-align: left;
+      }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+        grid-column: 3;
+        justify-self: end;
+      }
+    }
+    @media (max-width: 480px) {
+      .ym-sl-options-overlay.ym-sl-op2 {
+        top: 56px;
+        right: 8px;
+        width: calc(100vw - 16px);
+        height: calc(100vh - 72px);
+      }
+      .ym-sl-op-shell {
+        grid-template-rows: 58px auto minmax(0, 1fr);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        border-radius: 15px;
+      }
+      .ym-sl-op-scroll { padding: 18px 14px 24px; }
+      .ym-sl-op-page { gap: 14px; }
+      .ym-sl-op-pagetitle { font-size: 20px; }
+      .ym-sl-op-card { padding: 14px; border-radius: 12px; }
+      .ym-sl-op-brand { gap: 9px; }
+      .ym-sl-op-mark { width: 30px; height: 30px; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions,
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-op-shell,
+      .ym-sl-op-close,
+      .ym-sl-op-tab,
+      .ym-sl-op-tabicon,
+      .ym-sl-op-ind,
+      .ym-sl-op-ind.ready,
+      .ym-sl-op-scroll,
+      .ym-sl-options-overlay.ym-sl-op2,
+      .ym-sl-options-overlay.ym-sl-op2.hidden {
+        transition: none;
+      }
+      .ym-sl-options-overlay.ym-sl-op2.hidden .ym-sl-op-shell { transform: none; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:active,
+      .ym-sl-op-close:active { transform: none; }
+    }
+
   `;
 
   /* Options lives beside the song-layout pill in the empty band above the two
@@ -9194,7 +11291,7 @@
     };
     panelEl = h("div", { id: "ym-sl-panel", class: "ym-sl-panel hidden SpicyRenderer" });
     const importButton = h("button", {
-      class: "ym-sl-import",
+      class: "ym-sl-import ym-sl-op-btn ym-sl-op-btn-primary",
       type: "button",
       title: "Import TTML lyrics",
       "aria-label": "Import TTML lyrics",
@@ -9275,8 +11372,9 @@
 
     // Community-shared offset. The first person to post claims the track + mode
     // slot; everyone else gets that value on load. The owner token lives only in
-    // localStorage, so Undo appears on the poster's own browser. There is no
-    // Aurora account: the name is a display label, not an identity.
+    // localStorage, so Undo appears on the poster's own browser. Guests can use
+    // a display label; a signed-in maker's public identity replaces that input
+    // through the website bridge.
     const communityOffsetWrap = h("div", { class: "ym-sl-community-offset" });
     const communityOffsetHead = h("div", { class: "ym-sl-community-offset-head" });
     communityOffsetHead.append(
@@ -9309,6 +11407,27 @@
         }
       } catch (_) {}
     });
+    // An anchor rather than a div: once the maker identity arrives, both the
+    // avatar and the username become one target for the public profile. Without
+    // a profile URL the href is removed again and the row stays inert.
+    communityOffsetAccount = h("a", {
+      class: "ym-sl-community-offset-account hidden",
+    });
+    communityOffsetAccountAvatar = h("span", {
+      class: "ym-sl-community-offset-avatar",
+      "aria-hidden": "true",
+    });
+    const communityOffsetAccountCopy = h("span", {
+      class: "ym-sl-community-offset-accountcopy",
+    });
+    communityOffsetAccountName = h("strong", {
+      class: "ym-sl-community-offset-accountname",
+    });
+    communityOffsetAccountCopy.append(
+      communityOffsetAccountName,
+      h("span", { class: "ym-sl-community-offset-accountmeta", text: "Aurora maker" })
+    );
+    communityOffsetAccount.append(communityOffsetAccountAvatar, communityOffsetAccountCopy);
     communityOffsetPostButton = h("button", {
       class: "ym-sl-community-offset-btn ym-sl-community-offset-post",
       type: "button",
@@ -9334,7 +11453,7 @@
       communityOffsetPostButton, communityOffsetUndoButton, communityOffsetReportButton
     );
     communityOffsetWrap.append(
-      communityOffsetHead, communityOffsetStatus, communityOffsetName, communityOffsetActions
+      communityOffsetHead, communityOffsetStatus, communityOffsetAccount, communityOffsetName, communityOffsetActions
     );
 
     // Options is a pill beside the song-layout switcher, in the empty band
@@ -9359,17 +11478,7 @@
     // purpose: .ym-sl-panel sets container-type: size, which makes the panel a
     // containing block for fixed-position descendants and would trap + clip a
     // nested overlay (the panel also has overflow: hidden).
-    const optionsOverlay = h("div", { class: "ym-sl-options-overlay hidden" });
-    const optionsHeader = h("div", { class: "ym-sl-options-header" });
-    const optionsTitle = h("span", { class: "ym-sl-options-title", text: "Options" });
-    const optionsClose = h("button", {
-      class: "ym-sl-options-close",
-      type: "button",
-      text: "\u00d7",
-      title: "Close options",
-      "aria-label": "Close options",
-    });
-    optionsHeader.append(optionsTitle, optionsClose);
+    const optionsOverlay = h("div", { class: "ym-sl-options-overlay ym-sl-op2 hidden" });
     const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
     const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
@@ -9498,20 +11607,94 @@
     });
     cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    // ---- Options body: TABBED SIDE-RAIL (AJ, 2026-10-19) ------------------------
-    // A vertical tab rail on the LEFT, the selected section's controls on the
-    // RIGHT, one panel visible at a time. Reuses the addon settings panel's clean
-    // spring — opacity + rise + a touch of blur, staggered per child — on open and
-    // on every tab switch.
-    const optionsBody = h("div", { class: "ym-sl-options-body ym-sl-options-tabbed" });
-    const optionsRail = h("div", { class: "ym-sl-options-rail", role: "tablist", "aria-label": "Options sections" });
-    const optionsPanels = h("div", { class: "ym-sl-options-panels" });
-
-    const panelSync = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Sync & timing" }),
-      videoOffsetWrap,
-      communityOffsetWrap
+    // ---- Options body: ADAPTIVE SHELL (AJ, 2026-11-14) -------------------
+    // The add-ons panel's split, reused here: one rail, one scrolling pane,
+    // and a single red marker that slides between rows. The old build stacked
+    // absolutely positioned pages inside a height it measured itself; one missed
+    // measurement left the visible page blank or put its controls under an
+    // invisible sibling. Here only the active page is in flow, so there is
+    // nothing to measure and nothing to overlap.
+    // YouTube Music enforces Trusted Types: assigning SVG markup with innerHTML
+    // throws and aborts buildUI, taking the Options pill and the Lyrics tab with
+    // it. Build the icons as real SVG nodes instead.
+    const OP_SVG_NS = "http://www.w3.org/2000/svg";
+    const opSvgNode = (tag, attrs) => {
+      const node = document.createElementNS(OP_SVG_NS, tag);
+      for (const key in attrs) node.setAttribute(key, attrs[key]);
+      return node;
+    };
+    const opIcon = (draw, className) => {
+      const el = h("span", { class: className, "aria-hidden": "true" });
+      const svg = opSvgNode("svg", {
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.8",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        focusable: "false",
+        "aria-hidden": "true",
+      });
+      draw(svg);
+      el.appendChild(svg);
+      return el;
+    };
+    const OP_ICON = {
+      sliders: (svg) => {
+        svg.appendChild(opSvgNode("path", { d: "M4 7h9M17 7h3M4 17h3M11 17h9" }));
+        svg.appendChild(opSvgNode("circle", { cx: "15", cy: "7", r: "2" }));
+        svg.appendChild(opSvgNode("circle", { cx: "9", cy: "17", r: "2" }));
+      },
+      sync: (svg) => {
+        ["M12 7v5l3 2", "M20 12a8 8 0 1 1-2.34-5.66", "M20 4v4h-4"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      file: (svg) => {
+        ["M7 3h7l4 4v14H7z", "M14 3v5h5", "M9 13h6M9 17h5"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      cache: (svg) => {
+        svg.appendChild(opSvgNode("ellipse", { cx: "12", cy: "6", rx: "7", ry: "3" }));
+        ["M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6", "M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"]
+          .forEach((d) => svg.appendChild(opSvgNode("path", { d })));
+      },
+      close: (svg) => {
+        svg.appendChild(opSvgNode("path", { d: "M6 6l12 12M18 6L6 18", "stroke-width": "2" }));
+      },
+    };
+    const optionPageId = (id) => "ym-sl-op-page-" + id;
+    const optionTabId = (id) => "ym-sl-op-tab-" + id;
+    const optionPageHead = (title, copy) => h("header", { class: "ym-sl-op-pagehead" },
+      h("h2", { class: "ym-sl-op-pagetitle", text: title }),
+      h("p", { class: "ym-sl-op-pagesub", text: copy })
     );
+    const optionCard = (title, copy, ...children) => h("section", { class: "ym-sl-op-card" },
+      title ? h("div", { class: "ym-sl-op-cardhead" },
+        h("h3", { class: "ym-sl-op-cardtitle", text: title }),
+        copy ? h("p", { class: "ym-sl-op-cardcopy", text: copy }) : null
+      ) : null,
+      ...children
+    );
+
+    const panelSync = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("sync"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("sync"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Sync & timing",
+        "Nudge the lyrics into place for this track, then share the fix with everyone."
+      ),
+      optionCard(
+        "Offset",
+        "Nudge the lyrics earlier or later for this track, then post the fix to share it with everyone.",
+        videoOffsetWrap,
+        communityOffsetWrap
+      )
+    );
+
     // Per-SONG cache controls, in the File tab next to the import buttons. The
     // global purge lives in the Cache tab; this one only ever touches the track
     // that is on screen, and it cannot run while that track is playing — see
@@ -9529,152 +11712,360 @@
       if (songCacheClearButton.disabled) return;
       queueSongCacheClear();
     });
-    const panelFile = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Lyrics file" }),
-      importMode,
-      h("div", { class: "ym-sl-options-file-actions" }, deletePermanentButton, importButton),
-      exportActions,
-      fileImportedNote,
-      h("hr", { class: "ym-sl-options-divider" }),
-      songCacheClearButton,
-      songCacheStatus
+    const panelFile = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("file"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("file"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Lyrics file",
+        "Bring your own TTML, export the current sync, or clear this song's lookup."
+      ),
+      optionCard(
+        "Import",
+        "Choose a TTML file and whether it should stay for this session or permanently.",
+        importMode,
+        h("div", { class: "ym-sl-options-file-actions" }, importButton, deletePermanentButton),
+        exportActions,
+        fileImportedNote
+      ),
+      optionCard(
+        "This song's cache",
+        "The cached lookup is dropped only after this track has finished playing.",
+        songCacheStatus,
+        songCacheClearButton
+      )
     );
-    const panelCache = h("div", { class: "ym-sl-options-panel", role: "tabpanel" },
-      h("div", { class: "ym-sl-options-panel-title", text: "Cache" }),
-      cacheSection
+
+    const panelCache = h("section", {
+      class: "ym-sl-op-page",
+      id: optionPageId("cache"),
+      role: "tabpanel",
+      "aria-labelledby": optionTabId("cache"),
+      tabindex: "-1",
+    },
+      optionPageHead(
+        "Cache",
+        "Spicy Lyrics and Aurora Community results are kept for up to 30 days so repeats load instantly."
+      ),
+      optionCard(
+        "Stored results",
+        "Clearing is immediate and cannot be undone.",
+        cacheSection
+      )
     );
 
     const optionSections = [
-      { label: "Sync", panel: panelSync },
-      { label: "File", panel: panelFile },
-      { label: "Cache", panel: panelCache },
+      { id: "sync", label: "Sync & timing", hint: "Offset & community", icon: OP_ICON.sync, panel: panelSync },
+      { id: "file", label: "Lyrics file", hint: "Import & export", icon: OP_ICON.file, panel: panelFile },
+      { id: "cache", label: "Cache", hint: "Stored results", icon: OP_ICON.cache, panel: panelCache },
     ];
-    // Options opens on Sync, the reason the panel exists (offset + pause sync).
+    // Options opens on Sync, the reason the panel exists (offset + community).
     const DEFAULT_OPTION_TAB = 0;
+    let activeOptionIndex = DEFAULT_OPTION_TAB;
+    let optionsSwapFinish = null;
+    let optionsLayoutRaf = 0;
+    let optionsEntrancePending = false;
+    let optionsFocusBefore = null;
 
     const optionsMotionOK = () =>
       !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-    // Panels absolutely overlap inside a fixed-height stack so switching fades the
-    // old panel out, springs the new one in, and animates the container HEIGHT to
-    // the new panel's size — no abrupt jump when a taller tab (e.g. File) opens.
-    let panelsHeightRaf = 0;
-    let panelsHeightEmptyTries = 0;
-    const syncPanelsHeight = () => {
-      const active = optionSections.find((section) => section.panel.classList.contains("active"));
-      if (!active) return;
-      const next = active.panel.offsetHeight;
-      if (next) {
-        panelsHeightEmptyTries = 0;
-        optionsPanels.style.height = Math.ceil(next) + "px";
-      } else if (panelsHeightEmptyTries < 8) {
-        // Not laid out yet (fonts still loading, or measured too early). Retry for a
-        // few frames instead of collapsing the stack to 0 and showing an EMPTY panel
-        // — the intermittent "no content" bug (AJ, 2026-10-19). The CSS min-height
-        // also floors it so it can never fully collapse.
-        panelsHeightEmptyTries++;
-        requestAnimationFrame(syncPanelsHeight);
-      }
-    };
-    const scheduleSyncPanelsHeight = () => {
-      if (panelsHeightRaf) return;
-      panelsHeightRaf = requestAnimationFrame(() => { panelsHeightRaf = 0; syncPanelsHeight(); });
-    };
-    if (window.ResizeObserver) {
-      // Keeps height in sync when a panel's content changes size after it is shown
-      // (cache status text, Export/Saved rows appearing, etc.).
-      const ro = new ResizeObserver(scheduleSyncPanelsHeight);
-      optionSections.forEach((section) => ro.observe(section.panel));
-    }
-    // SpicyLyrics font load reflows line/row heights — resync once it settles.
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(scheduleSyncPanelsHeight).catch(() => {});
-    }
-    window.addEventListener("resize", scheduleSyncPanelsHeight);
-    // Same clean spring the addon settings panel uses (cubic-bezier(.34,1.4,.5,1)):
-    // opacity + rise + a touch of blur, staggered per child. fromLeft slides the
-    // rail in from the left; otherwise rows rise up with a blur.
-    const staggerIn = (container, fromLeft) => {
-      if (!container || !container.children || !optionsMotionOK()) return;
-      Array.from(container.children).forEach((el, i) => {
-        if (!el.animate) return;
-        el.animate(
-          fromLeft
-            ? [{ opacity: 0, transform: "translateX(-16px)" }, { opacity: 1, transform: "none" }]
-            : [{ opacity: 0, transform: "translateY(16px)", filter: "blur(7px)" },
-               { opacity: 1, transform: "none", filter: "blur(0px)" }],
-          { duration: 520, delay: 40 + i * 55, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
-        );
-      });
-    };
+
+    const optionsTabs = h("div", {
+      class: "ym-sl-op-tabs",
+      role: "tablist",
+      "aria-label": "Options sections",
+    });
+    const optionsIndicator = h("span", { class: "ym-sl-op-ind", "aria-hidden": "true" });
+    optionsTabs.appendChild(optionsIndicator);
 
     const optionTabs = optionSections.map((section, index) => {
       const tab = h("button", {
-        class: "ym-sl-options-tab" + (index === DEFAULT_OPTION_TAB ? " active" : ""),
+        class: "ym-sl-op-tab" + (index === DEFAULT_OPTION_TAB ? " is-active" : ""),
         type: "button",
         role: "tab",
+        id: optionTabId(section.id),
+        "aria-controls": optionPageId(section.id),
         "aria-selected": index === DEFAULT_OPTION_TAB ? "true" : "false",
-        text: section.label,
+        tabindex: index === DEFAULT_OPTION_TAB ? "0" : "-1",
+      },
+        opIcon(section.icon, "ym-sl-op-tabicon"),
+        h("span", { class: "ym-sl-op-tabcopy" },
+          h("strong", { text: section.label }),
+          h("small", { text: section.hint })
+        )
+      );
+      tab.addEventListener("click", () => switchOptionTab(index, { focusTab: true }));
+      tab.addEventListener("keydown", (event) => {
+        const key = event.key;
+        let next = null;
+        if (key === "ArrowDown" || key === "ArrowRight") next = (index + 1) % optionSections.length;
+        else if (key === "ArrowUp" || key === "ArrowLeft") next = (index - 1 + optionSections.length) % optionSections.length;
+        else if (key === "Home") next = 0;
+        else if (key === "End") next = optionSections.length - 1;
+        if (next == null) return;
+        event.preventDefault();
+        switchOptionTab(next, { focusTab: true });
       });
-      if (index === DEFAULT_OPTION_TAB) section.panel.classList.add("active");
-      section.panel.inert = index !== DEFAULT_OPTION_TAB;
-      section.panel.setAttribute("aria-hidden", index === DEFAULT_OPTION_TAB ? "false" : "true");
-      optionsPanels.appendChild(section.panel);
-      tab.addEventListener("click", () => {
-        if (tab.classList.contains("active")) return;
-        optionTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
-        tab.classList.add("active");
-        tab.setAttribute("aria-selected", "true");
-        optionSections.forEach((s) => {
-          s.panel.classList.remove("active");
-          s.panel.inert = s !== section;
-          s.panel.setAttribute("aria-hidden", s === section ? "false" : "true");
-        });
-        section.panel.classList.add("active");
-        syncPanelsHeight(); // animate container height to the new panel
-        staggerIn(section.panel, false); // clean spring on the newly shown panel
-      });
-      optionsRail.appendChild(tab);
+      optionsTabs.appendChild(tab);
       return tab;
     });
 
-    optionsBody.append(optionsRail, optionsPanels);
-    optionsOverlay.append(optionsHeader, optionsBody);
-    // Size the stack to the default active panel (rAF so fonts/content settle).
-    scheduleSyncPanelsHeight();
-    // Entrance choreography used by the Options button (below).
+    optionSections.forEach((section, index) => {
+      const active = index === DEFAULT_OPTION_TAB;
+      section.panel.hidden = !active;
+      section.panel.inert = !active;
+      section.panel.setAttribute("aria-hidden", active ? "false" : "true");
+    });
+
+    const optionsReel = h("div", { class: "ym-sl-op-reel" });
+    optionSections.forEach((section) => optionsReel.appendChild(section.panel));
+    const optionsScroll = h("div", { class: "ym-sl-op-scroll", tabindex: "-1" }, optionsReel);
+    const optionsPane = h("main", { class: "ym-sl-op-pane" }, optionsScroll);
+    const optionsRail = h("aside", { class: "ym-sl-op-rail" },
+      h("div", { class: "ym-sl-op-railhead", text: "Settings" }),
+      optionsTabs,
+      h("div", { class: "ym-sl-op-railfoot", text: "Changes save as you go." })
+    );
+    const optionsBody = h("div", { class: "ym-sl-op-body" }, optionsRail, optionsPane);
+
+    const optionsHeading = h("span", { class: "ym-sl-op-title", id: "ym-sl-op-heading", text: "Options" });
+    const optionsShellClose = h("button", {
+      class: "ym-sl-op-close",
+      type: "button",
+      title: "Close options",
+      "aria-label": "Close options",
+    }, opIcon(OP_ICON.close, "ym-sl-op-closesvg"));
+    const optionsShellHead = h("header", { class: "ym-sl-op-head" },
+      h("div", { class: "ym-sl-op-brand" },
+        opIcon(OP_ICON.sliders, "ym-sl-op-mark"),
+        h("div", { class: "ym-sl-op-brandcopy" }, optionsHeading)
+      ),
+      optionsShellClose
+    );
+    const optionsShell = h("section", {
+      class: "ym-sl-op-shell",
+      role: "dialog",
+      "aria-labelledby": "ym-sl-op-heading",
+    }, optionsShellHead, optionsBody);
+
+    function positionOptionIndicator(instant) {
+      const tab = optionTabs[activeOptionIndex];
+      if (!tab) return;
+      if (instant) {
+        optionsIndicator.classList.remove("ready");
+        void optionsIndicator.offsetWidth;
+      }
+      optionsIndicator.style.height = tab.offsetHeight + "px";
+      optionsIndicator.style.transform = "translateY(" + tab.offsetTop + "px)";
+      optionsIndicator.style.opacity = tab.offsetHeight ? "1" : "0";
+      optionsIndicator.classList.add("ready");
+    }
+
+    function syncOptionEdges() {
+      const max = optionsScroll.scrollHeight - optionsScroll.clientHeight;
+      optionsPane.classList.toggle("has-top", optionsScroll.scrollTop > 2);
+      optionsPane.classList.toggle("has-bottom", max > 2 && optionsScroll.scrollTop < max - 2);
+    }
+
+    function settleOptionSwap() {
+      const finish = optionsSwapFinish;
+      optionsSwapFinish = null;
+      if (finish) finish();
+    }
+
+    function reelOptionPages(oldPage, newPage, dir) {
+      const span = Math.max(optionsScroll.clientHeight, 260);
+      const dur = 380;
+      const ease = "cubic-bezier(.32,.72,0,1)";
+      oldPage.style.position = "absolute";
+      oldPage.style.top = "0";
+      oldPage.style.left = "0";
+      oldPage.style.right = "0";
+      oldPage.style.width = "100%";
+      oldPage.style.pointerEvents = "none";
+      newPage.style.position = "absolute";
+      newPage.style.top = "0";
+      newPage.style.left = "0";
+      newPage.style.right = "0";
+      newPage.style.width = "100%";
+      newPage.style.pointerEvents = "none";
+      optionsScroll.style.overflowY = "hidden";
+      const out = oldPage.animate(
+        [{ opacity: 1, transform: "translateY(0px)" },
+         { opacity: 0, transform: "translateY(" + (-span * dir) + "px)" }],
+        { duration: dur, easing: ease }
+      );
+      const inn = newPage.animate(
+        [{ opacity: 0, transform: "translateY(" + (span * dir) + "px)" },
+         { opacity: 1, transform: "translateY(0px)" }],
+        { duration: dur, easing: ease }
+      );
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try { out.cancel(); inn.cancel(); } catch (_) {}
+        oldPage.hidden = true;
+        oldPage.removeAttribute("style");
+        newPage.hidden = false;
+        newPage.removeAttribute("style");
+        optionsScroll.style.overflowY = "";
+        if (optionsSwapFinish === finish) optionsSwapFinish = null;
+        syncOptionEdges();
+      };
+      optionsSwapFinish = finish;
+      out.onfinish = finish;
+      inn.onfinish = finish;
+      window.setTimeout(finish, dur + 90);
+    }
+
+    function switchOptionTab(next, opts) {
+      if (next < 0 || next >= optionSections.length) return;
+      if (next === activeOptionIndex) {
+        if (opts && opts.focusTab) optionTabs[next].focus({ preventScroll: true });
+        return;
+      }
+      settleOptionSwap();
+      const oldIndex = activeOptionIndex;
+      const dir = next > oldIndex ? 1 : -1;
+      const oldPage = optionSections[oldIndex].panel;
+      const newPage = optionSections[next].panel;
+      activeOptionIndex = next;
+      optionTabs.forEach((tab, i) => {
+        const on = i === next;
+        tab.classList.toggle("is-active", on);
+        tab.setAttribute("aria-selected", on ? "true" : "false");
+        tab.tabIndex = on ? 0 : -1;
+      });
+      optionSections.forEach((section, i) => {
+        const on = i === next;
+        section.panel.inert = !on;
+        section.panel.setAttribute("aria-hidden", on ? "false" : "true");
+      });
+      newPage.hidden = false;
+      optionsScroll.scrollTop = 0;
+      positionOptionIndicator(false);
+      if (optionsMotionOK() && typeof oldPage.animate === "function") {
+        reelOptionPages(oldPage, newPage, dir);
+      } else {
+        oldPage.hidden = true;
+        syncOptionEdges();
+      }
+      if (opts && opts.focusTab) {
+        optionTabs[next].focus({ preventScroll: true });
+      }
+    }
+
+    function playOptionEntrance() {
+      if (!optionsMotionOK() || optionsOverlay.classList.contains("ym-sl-options-docked")) return;
+      optionTabs.forEach((tab, i) => {
+        if (!tab.animate) return;
+        tab.animate(
+          [{ opacity: 0, transform: "translateX(-12px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, delay: 30 + i * 45, easing: "cubic-bezier(.34,1.4,.5,1)", fill: "backwards" }
+        );
+      });
+      const page = optionSections[activeOptionIndex].panel;
+      if (page && page.animate) {
+        page.animate(
+          [{ opacity: 0, transform: "translateY(16px)" }, { opacity: 1, transform: "none" }],
+          { duration: 420, delay: 70, easing: "cubic-bezier(.22,1,.36,1)", fill: "backwards" }
+        );
+      }
+    }
+
+    function queueOptionLayout(entrance) {
+      if (entrance) optionsEntrancePending = true;
+      if (optionsLayoutRaf) return;
+      optionsLayoutRaf = requestAnimationFrame(() => {
+        optionsLayoutRaf = 0;
+        if (optionsOverlay.classList.contains("hidden")) return;
+        positionOptionIndicator(true);
+        syncOptionEdges();
+        if (optionsEntrancePending) {
+          optionsEntrancePending = false;
+          playOptionEntrance();
+        }
+      });
+    }
+
+    function openOptionsPanel() {
+      if (!optionsOverlay.classList.contains("hidden")) return;
+      optionsFocusBefore = document.activeElement;
+      settleOptionSwap();
+      optionsOverlay.classList.remove("hidden");
+      refreshFileTabState();
+      optionsScroll.scrollTop = 0;
+      queueOptionLayout(true);
+      requestAnimationFrame(() => {
+        optionTabs[activeOptionIndex].focus({ preventScroll: true });
+      });
+    }
+
+    function closeOptionsPanel() {
+      if (optionsOverlay.classList.contains("hidden")) return;
+      if (optionsOverlay.classList.contains("ym-sl-options-docked")) return;
+      optionsOverlay.classList.add("hidden");
+      if (optionsFocusBefore && optionsFocusBefore.isConnected) {
+        optionsFocusBefore.focus({ preventScroll: true });
+      }
+    }
+
+    optionsOverlay.replaceChildren(optionsShell);
+    makeDraggable(optionsOverlay, optionsShellHead);
     optionsOverlay._staggerOpen = () => {
-      syncPanelsHeight();
-      staggerIn(optionsRail, true);
-      staggerIn(optionSections[DEFAULT_OPTION_TAB].panel, false);
+      if (optionsOverlay.classList.contains("hidden")) return;
+      settleOptionSwap();
+      refreshFileTabState();
+      optionsScroll.scrollTop = 0;
+      queueOptionLayout(true);
+      optionTabs[activeOptionIndex].focus({ preventScroll: true });
     };
-    // The card opens under the button. It used to appear at the viewport's
-    // top-right because that is where its button was; a card that materialises
-    // somewhere else than the click reads as a different feature. Clamped so a
-    // narrow window cannot push it off-screen.
-    function anchorOptionsCard() {
-      const rect = optionsButton.getBoundingClientRect();
-      const width = optionsOverlay.offsetWidth || 430;
-      const height = optionsOverlay.offsetHeight || 320;
-      const left = Math.min(Math.max(12, rect.left - 6), Math.max(12, innerWidth - width - 12));
-      const top = Math.min(Math.max(12, rect.bottom + 10), Math.max(12, innerHeight - height - 12));
-      optionsOverlay.style.left = left + "px";
-      optionsOverlay.style.top = top + "px";
-      optionsOverlay.style.right = "auto";
-      optionsOverlay.style.bottom = "auto";
+    optionsOverlay._exportActions = exportActions;
+    if (window.MutationObserver) {
+      // Other features (fullscreen, PiP) show this overlay by removing the
+      // hidden class themselves. Re-measure on that class change instead of
+      // assuming our own button is the only way in.
+      const optionsVisibilityObserver = new MutationObserver(() => {
+        if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(true);
+      });
+      optionsVisibilityObserver.observe(optionsOverlay, { attributes: true, attributeFilter: ["class"] });
     }
     optionsButton.addEventListener("click", () => {
-      const opening = optionsOverlay.classList.contains("hidden");
-      if (opening) anchorOptionsCard();
-      optionsOverlay.classList.toggle("hidden");
-      if (opening) {
-        refreshFileTabState();
-        if (optionsOverlay._staggerOpen) optionsOverlay._staggerOpen();
+      if (optionsOverlay.classList.contains("hidden")) openOptionsPanel();
+      else closeOptionsPanel();
+    });
+    optionsShellClose.addEventListener("click", closeOptionsPanel);
+    optionsOverlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeOptionsPanel();
       }
     });
-    optionsClose.addEventListener("click", () => optionsOverlay.classList.add("hidden"));
-    optionsOverlay._exportActions = exportActions;
-    makeDraggable(optionsOverlay, optionsHeader);
+    optionsScroll.addEventListener("scroll", syncOptionEdges, { passive: true });
+    window.addEventListener("resize", () => {
+      if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(false);
+    });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => {
+        if (!optionsOverlay.classList.contains("hidden")) queueOptionLayout(false);
+      }).catch(() => {});
+    }
+    if (window.ResizeObserver) {
+      // Sizing the rail marker from a single frame can leave it a few pixels
+      // taller than the active row when Satoshi swaps in after measurement.
+      // Watching the tab stack catches that reflow without reintroducing any
+      // page-height measuring or animation.
+      const optionsTabObserver = new ResizeObserver(() => {
+        if (!optionsOverlay.classList.contains("hidden")) positionOptionIndicator(true);
+      });
+      optionsTabObserver.observe(optionsTabs);
+    }
     document.body.appendChild(optionsOverlay);
+
     const lyricsContainer = h("div", { class: "LyricsContainer" });
     const content = h("div", { class: "LyricsContent offline" });
     const scrollContainer = h("div", {
@@ -9703,6 +12094,19 @@
     adBreakSourceEl = h("div", { class: "ym-sl-ad-source", text: "" });
     adBreakOverlayEl.append(adBreakTitleEl, adBreakSubEl, adBreakSourceEl);
     panelEl.appendChild(adBreakOverlayEl);
+    // Top-of-lyrics notice for LRCLIB's machine-generated word timing (see
+    // loadLRCLyrics). It is a sibling of the lyrics surface rather than a line,
+    // so rebuilding the renderer never drops it. The timer line is restarted by
+    // syncWordSyncQualityNotice each time the notice is shown.
+    wordSyncQualityNoticeEl = h("div", {
+      class: "ym-sl-mv-sync-chip ym-sl-lrclib-word-note hidden",
+      role: "note",
+      "aria-label": "LRCLIB word-by-word timing may be less accurate than hand-synced lyrics",
+    },
+      h("span", { text: "LRCLIB word-by-word timing may be less accurate" }),
+      h("span", { class: "ym-sl-mv-sync-chip-timer", "aria-hidden": "true" })
+    );
+    panelEl.appendChild(wordSyncQualityNoticeEl);
     panelEl.addEventListener("dragover", (event) => {
       event.preventDefault();
       panelEl.classList.add("drag");
@@ -9772,10 +12176,18 @@
     // ORDER MATTERS: our own reparented node first (it is the only candidate
     // once it is outside ytmusic-player), then YTM's containers for the case
     // where we do not own a video yet (the cover -> MV attach path).
+    // ONLY YTM's real player element counts. Other extensions inject their own
+    // <video> inside ytmusic-player: Better Lyrics renders an animated cover in
+    // #song-image, and the old loose selector picked that first because it had
+    // 2160x2160 frames while YTM's own element stayed 0x0 on an audio track.
+    // That put the square cover into the music-video layout and pushed the
+    // controls past the bottom of the screen (AJ, 2026-11-13).
+    const saved = fsSavedVideo && fsSavedVideo.node;
     const video =
-      (fsSavedVideo && fsSavedVideo.node) ||
-      document.querySelector("ytmusic-player video") ||
-      document.querySelector("#movie_player video");
+      (saved && saved.matches("video.html5-main-video") ? saved : null) ||
+      document.querySelector("ytmusic-player video.html5-main-video") ||
+      document.querySelector("ytmusic-player #movie_player video") ||
+      document.querySelector("#movie_player video.html5-main-video");
     // A song with no music video still leaves an empty <video> in the DOM, so
     // only treat it as real media once it actually has frame dimensions. The
     // trace confirms YTM's recycled element drops to 0x0 on an audio-only
@@ -11712,12 +14124,12 @@
 
   function fsHitsSyncLabel() {
     if (staticLyricsActive) return "Static";
-    if (currentLyricsIsTTML) {
-      const wordTimed = modelLines.some((line) => line && !line.DotLine &&
-        line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
-      return wordTimed ? "Syllable" : "Line synced";
-    }
-    return "Line synced";
+    // Word-level timing is no longer TTML-only: LRCLIB's Lyricsfile and Unison
+    // LRC can both produce multiple syllables per line. The model is the source
+    // of truth here, regardless of which provider supplied it.
+    const wordTimed = modelLines.some((line) => line && !line.DotLine &&
+      line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
+    return wordTimed ? "Syllable" : "Line synced";
   }
 
   function fsHitsLineText(line) {
@@ -11755,7 +14167,7 @@
 
   function fsHitsPersonKey(person) {
     return person
-      ? [person.id || "", person.username || "", person.avatar || "", person.url || ""].join("~")
+      ? [person.id || "", person.username || "", person.avatar || "", person.url || "", person.creditLabel || ""].join("~")
       : "";
   }
 
@@ -11768,12 +14180,12 @@
     // the fullscreen writer line live from the same credit state.
     syncFsHitsChips(false);
     syncFsTitleWriters();
-    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const names = fullscreenSongwriters();
     const hasCredits = !!(names.length || currentProvider || currentUploader || currentMaker);
     const clear = () => {
       fsHits.creditsKey = "";
       fsHits.writers.textContent = "";
-      fsHits.writers.classList.remove("has-writers");
+      fsHits.writers.classList.remove("has-writers", "is-writers-in");
       fsHits.bylineRow.classList.remove("has-writers");
       fsHits.people.replaceChildren();
       fsOverlay.classList.remove("ym-sl-fs-hits-has-credits");
@@ -11802,9 +14214,18 @@
       // Writers are inline after the byline: names only, no label and no box.
       const writerNames = footer.querySelector(".ym-sl-credit-writers .ym-sl-credits-names");
       const writerText = writerNames ? writerNames.textContent.trim() : "";
+      const writerChanged = fsHits.writers.textContent !== writerText;
       fsHits.writers.textContent = writerText;
       fsHits.writers.classList.toggle("has-writers", !!writerText);
       fsHits.bylineRow.classList.toggle("has-writers", !!writerText);
+      if (writerChanged) {
+        fsHits.writers.classList.remove("is-writers-in");
+        if (writerText) {
+          fsFullscreenWritersSourceRef = names;
+          void fsHits.writers.offsetWidth;
+          fsHits.writers.classList.add("is-writers-in");
+        }
+      }
       fsHits.creditsKey = key;
       fsOverlay.classList.add("ym-sl-fs-hits-has-credits");
     } catch (_) {
@@ -14004,9 +16425,6 @@
     // to restore on exit. Cannot call setPanel(true) — fsActive is already true.
     fsSavedPanelVisible = panelVisible;
     panelVisible = true;
-    // QOL #1: entering fullscreen cancels the credits reveal (its scroll target
-    // belongs to the main panel; fullscreen uses its own lyrics host).
-    cancelCreditsReveal();
     // Fullscreen takes over the backdrop entirely, so stop the page-wide Kawarp
     // for every track (song or music video) — only one Kawarp ever runs.
     suspendPageKawarp();
@@ -14996,6 +17414,7 @@
         if (artist) inner.appendChild(document.createTextNode(" "));
         inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
       }
+      fsTitleEl.dataset.trackKey = fullscreenTrackKey(track);
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       syncFsTitleWriters();
@@ -15027,13 +17446,51 @@
   // instead of rebuilding the credit. The key prevents the 500ms refresh from
   // restarting the drift animation on every tick.
   let fsTitleWritersKey = "";
+
+  function fullscreenTrackKey(track) {
+    const t = track || getCurrentTrack();
+    return t && t.videoId ? "v:" + t.videoId : getTrackKey(t);
+  }
+
+  // The attribution array is replaced when the next track's lyrics land, not
+  // when the track changes. Until that replacement happens, its contents belong
+  // to the previous song and must not be shown against the new title.
+  function fullscreenSongwriters() {
+    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const key = fullscreenTrackKey();
+    if (key && !fsFullscreenWritersTrackKey) {
+      fsFullscreenWritersTrackKey = key;
+      return names;
+    }
+    if (key && key !== fsFullscreenWritersTrackKey) {
+      fsFullscreenWritersTrackKey = key;
+      fsFullscreenWritersStaleRef = fsFullscreenWritersSourceRef;
+    }
+    if (fsFullscreenWritersStaleRef && currentSongwriters === fsFullscreenWritersStaleRef) return [];
+    fsFullscreenWritersStaleRef = null;
+    return names;
+  }
+
   function syncFsTitleWriters() {
     if (!fsTitleEl) return;
     const byline = fsTitleEl.querySelector(".ym-sl-fs-title-byline");
     const writers = byline && byline.querySelector(".ym-sl-fs-title-writers");
     const track = writers && writers.querySelector(".ym-sl-fs-title-writers-track");
     if (!byline || !writers || !track) return;
-    const text = (Array.isArray(currentSongwriters) ? currentSongwriters : [])
+    // Let the old title finish its leave animation with its own writers. The
+    // new title carries a new track key and gets the cleared/incoming set.
+    const liveKey = fullscreenTrackKey();
+    const paintedKey = fsTitleEl.dataset.trackKey || "";
+    if (paintedKey && liveKey && paintedKey !== liveKey) {
+      const oldWriters = fsTitleEl.querySelector(".ym-sl-fs-title-writers");
+      if (oldWriters) {
+        oldWriters.classList.remove("is-writers-in");
+        oldWriters.classList.add("is-writers-out");
+      }
+      return;
+    }
+    const next = fullscreenSongwriters();
+    const text = next
       .filter((name) => typeof name === "string" && name.trim())
       .map((name) => name.trim())
       .join(", ");
@@ -15041,7 +17498,13 @@
     byline.classList.toggle("has-writers", !!text);
     if (text === fsTitleWritersKey && track.textContent === text) return;
     fsTitleWritersKey = text;
+    if (text) fsFullscreenWritersSourceRef = next;
+    writers.classList.remove("is-writers-in");
     track.textContent = text;
+    if (text) {
+      void writers.offsetWidth;
+      writers.classList.add("is-writers-in");
+    }
     updateFsTitleWritersMarquee();
   }
 
@@ -15234,6 +17697,71 @@
     if (!track || !track.title) return "";
     return [track.artist || "", track.title].join("::").toLowerCase();
   }
+
+  // The website bridge sends only the signed-in maker's public name/avatar,
+  // plus the public profile URL. This is display data for the offset form, not
+  // the website session token.
+  const DISCORD_AVATAR_ID_RE = /^https:\/\/cdn\.discordapp\.com\/avatars\/(\d{6,32})\//i;
+
+  function normalizeMakerProfileUrl(value) {
+    if (typeof value !== "string") return "";
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+      if (url.pathname !== "/community" && url.pathname !== "/community/") return "";
+      if (!url.searchParams.get("maker")) return "";
+      return url.href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // Identities stored before profileUrl existed still carry the Discord user
+  // id inside the avatar path. Recover it so existing makers get the link
+  // without having to visit the website again.
+  function makerProfileFromAvatar(avatar) {
+    const match = DISCORD_AVATAR_ID_RE.exec(avatar || "");
+    if (!match) return "";
+    try {
+      return new URL(`/community?maker=${encodeURIComponent(match[1])}`, AURORA_PROFILE_ORIGIN).href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function normalizeCommunityOffsetIdentity(value) {
+    if (!value || typeof value !== "object") return null;
+    const username = typeof value.username === "string"
+      ? value.username.trim().slice(0, 24)
+      : "";
+    if (!username) return null;
+    const avatar = typeof value.avatar === "string" &&
+      /^https:\/\/cdn\.discordapp\.com\//i.test(value.avatar)
+      ? value.avatar
+      : "";
+    const profileUrl = normalizeMakerProfileUrl(value.profileUrl) || makerProfileFromAvatar(avatar);
+    return { username, avatar, profileUrl };
+  }
+
+  function applyCommunityOffsetIdentity(value) {
+    communityOffsetIdentity = normalizeCommunityOffsetIdentity(value);
+    renderCommunityOffsetUI();
+  }
+
+  function attachCommunityOffsetIdentityListener() {
+    if (communityOffsetIdentityListenerAttached) return;
+    communityOffsetIdentityListenerAttached = true;
+    window.addEventListener("message", (event) => {
+      if (event.origin !== location.origin) return;
+      const data = event.data;
+      if (!data || data.source !== "aurora-maker-identity") return;
+      applyCommunityOffsetIdentity(data.identity);
+    });
+    // The content script may have started before this page script; ask once,
+    // and the content script also announces the stored value on startup.
+    window.postMessage({ type: "aurora-maker-identity-request" }, location.origin);
+  }
+  attachCommunityOffsetIdentityListener();
 
   const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
   const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
@@ -15542,15 +18070,68 @@
     return { response, body };
   }
 
+  function paintCommunityOffsetIdentity() {
+    if (!communityOffsetAccount || !communityOffsetAccountAvatar || !communityOffsetAccountName) return;
+    const identity = communityOffsetIdentity;
+    if (!identity) return;
+    communityOffsetAccountName.textContent = identity.username;
+    const profileUrl = identity.profileUrl || "";
+    if (profileUrl) {
+      communityOffsetAccount.href = profileUrl;
+      communityOffsetAccount.target = "_blank";
+      communityOffsetAccount.rel = "noopener noreferrer";
+      communityOffsetAccount.title = `Open ${identity.username}'s Aurora profile`;
+    } else {
+      communityOffsetAccount.removeAttribute("href");
+      communityOffsetAccount.removeAttribute("target");
+      communityOffsetAccount.removeAttribute("rel");
+      communityOffsetAccount.removeAttribute("title");
+    }
+    communityOffsetAccount.setAttribute(
+      "aria-label",
+      "Posting as " + identity.username + ", Aurora maker" +
+        (profileUrl ? " — open profile" : "")
+    );
+    const avatar = identity.avatar || "";
+    const avatarKey = identity.username + "|" + avatar;
+    if (communityOffsetAccountAvatar.dataset.identity === avatarKey) return;
+    communityOffsetAccountAvatar.dataset.identity = avatarKey;
+    communityOffsetAccountAvatar.replaceChildren();
+    const initial = document.createElement("span");
+    initial.className = "ym-sl-community-offset-initial";
+    initial.textContent = identity.username.charAt(0).toUpperCase() || "?";
+    communityOffsetAccountAvatar.append(initial);
+    if (!avatar) return;
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.referrerPolicy = "no-referrer";
+    image.addEventListener("load", () => { initial.hidden = true; }, { once: true });
+    image.addEventListener("error", () => {
+      image.remove();
+      initial.hidden = false;
+    }, { once: true });
+    image.src = avatar;
+    communityOffsetAccountAvatar.append(image);
+  }
+
   function renderCommunityOffsetUI() {
     if (!communityOffsetStatus || !communityOffsetPostButton) return;
+    paintCommunityOffsetIdentity();
     const track = getCurrentTrack();
     const key = currentTrackKey || getTrackKey(track);
     const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
     const loaded = !!key && communityOffsetTrackKey === key;
     const offset = loaded ? communityOffsetData[activeOffsetMode] : null;
     const owner = !!(offset && communityOffsetTokens[offset.id]);
+    const identity = communityOffsetIdentity;
     const busy = communityOffsetBusy;
+    // Aurora Community lyrics are the canonical shared timing for the track.
+    // A second public offset would compete with them, so this provider can keep
+    // local slider edits but cannot upload. Undo/report stay available when an
+    // older shared offset is already on screen.
+    const localOnly = currentProvider === "Aurora Community";
     const show = (el, visible) => { if (el) el.classList.toggle("hidden", !visible); };
     const statusText = communityOffsetNotice || "";
     const setStatus = (fallback, state) => {
@@ -15565,6 +18146,7 @@
     communityOffsetName.disabled = busy;
 
     if (!track || !key) {
+      show(communityOffsetAccount, false);
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, false);
@@ -15574,6 +18156,7 @@
     }
 
     if (!videoId) {
+      show(communityOffsetAccount, false);
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, false);
@@ -15591,6 +18174,8 @@
         text += " · using " + formatOffset(localMs) + " locally";
       }
       setStatus(text, owner ? "owned" : "shared");
+      // Keep the account row next to an offset this maker posted from here.
+      show(communityOffsetAccount, !!(identity && owner && identity.username === offset.username));
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, owner);
@@ -15599,16 +18184,33 @@
     }
 
     if (communityOffsetLoading) {
-      show(communityOffsetName, true);
-      show(communityOffsetPostButton, true);
+      show(communityOffsetAccount, !localOnly && !!identity);
+      show(communityOffsetName, !localOnly && !identity);
+      show(communityOffsetPostButton, !localOnly);
       show(communityOffsetUndoButton, false);
       show(communityOffsetReportButton, false);
       communityOffsetPostButton.disabled = true;
-      setStatus("Checking for a shared offset…", "none");
+      setStatus(
+        localOnly
+          ? "Aurora Community lyrics use local-only offsets."
+          : "Checking for a shared offset…",
+        "none"
+      );
       return;
     }
 
-    show(communityOffsetName, true);
+    if (localOnly) {
+      show(communityOffsetAccount, false);
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Aurora Community lyrics use local offsets. Uploading is disabled for this track.", "none");
+      return;
+    }
+
+    show(communityOffsetAccount, !!identity);
+    show(communityOffsetName, !identity);
     show(communityOffsetPostButton, true);
     show(communityOffsetUndoButton, false);
     show(communityOffsetReportButton, false);
@@ -15652,6 +18254,7 @@
     renderCommunityOffsetUI();
     if (!videoId) return;
     const url = AURORA_COMMUNITY_API + "/v1/offset?v=" + encodeURIComponent(videoId);
+    alLog(`checking shared offset for ${videoId}…`);
     communityOffsetRequest(url).then(({ response, body }) => {
       if (requestId !== communityOffsetRequestSeq) return;
       if (key !== communityOffsetTrackKey) return;
@@ -15659,10 +18262,14 @@
       communityOffsetLoading = false;
       if (!response.ok || !body || !body.ok) {
         communityOffsetLoadError = true;
+        const detail = body && body.error ? ` (${body.error})` : "";
+        alWarn(`shared offset check failed for ${videoId}: HTTP ${response.status}${detail}.`, url);
         renderCommunityOffsetUI();
         return;
       }
       const offsets = body.data && body.data.offsets;
+      const sharedCount = (offsets && offsets.video ? 1 : 0) + (offsets && offsets.song ? 1 : 0);
+      alLog(`shared offset check for ${videoId}: ${sharedCount ? `${sharedCount} shared offset${sharedCount === 1 ? "" : "s"} found.` : "none found."}`);
       communityOffsetData = {
         video: offsets && offsets.video ? offsets.video : null,
         song: offsets && offsets.song ? offsets.song : null,
@@ -15675,13 +18282,22 @@
       if (requestId !== communityOffsetRequestSeq) return;
       communityOffsetLoading = false;
       communityOffsetLoadError = true;
-      alWarn("community offset lookup failed:", error && error.message);
+      alWarn(
+        `shared offset check failed for ${videoId}: ${error && error.name ? error.name + " — " : ""}${error && error.message ? error.message : error}`,
+        url
+      );
       renderCommunityOffsetUI();
     });
   }
 
   async function postCommunityOffset() {
     if (communityOffsetBusy) return;
+    if (currentProvider === "Aurora Community") {
+      communityOffsetNotice = "Aurora Community lyrics use local-only offsets.";
+      communityOffsetNoticeError = false;
+      renderCommunityOffsetUI();
+      return;
+    }
     const track = getCurrentTrack();
     const key = currentTrackKey || getTrackKey(track);
     if (!track || !track.videoId || !key) {
@@ -15704,7 +18320,9 @@
       renderCommunityOffsetUI();
       return;
     }
-    const username = communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "";
+    const username = communityOffsetIdentity && communityOffsetIdentity.username
+      ? communityOffsetIdentity.username
+      : (communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "");
     communityOffsetBusy = true;
     communityOffsetNotice = "";
     communityOffsetNoticeError = false;
@@ -16214,6 +18832,9 @@
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
     lyricsSkeletonShown = false;
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
+    syncWordSyncQualityNotice();
     stopScrollGlide();
     lastScrollTargetLine = -1;
     // NOTE: the `offline` class is NOT touched here. It is a layout switch
@@ -16556,10 +19177,6 @@
 
   function handleManualScrollIntent() {
     if (!lineScrollEl) return;
-    // QOL #1: a manual scroll during the end-of-track reveal dismisses it so the
-    // panel does not yank back down to the credits while the user is browsing.
-    creditsRevealDismissed = true;
-    creditsRevealActive = false;
     // The user has taken the scroll. Kill the spring outright rather than
     // retargeting: a spring still holding a target would keep pulling against
     // their wheel/touch input, which reads as the panel fighting them.
@@ -16940,16 +19557,15 @@
      seek longer than PLAYHEAD_JUMP_MS) needs the same handling as (1) above,
      and for the same reason: the scroll is stale relative to the playhead.
 
-     At the end of a track the scroll is pinned to the credits, and on the next
+     At the end of a track the scroll sits on the final lines, and on the next
      pass there is no active line at all until the first lyric starts - so the
-     normal line-follow retarget has nothing to aim at and the panel sat on the
-     credits for the whole intro, then glided the entire song height in one
+     normal line-follow retarget has nothing to aim at and the panel sat at the
+     bottom for the whole intro, then glided the entire song height in one
      sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
      Place it NOW, on the line the new position belongs to (the first line when
      the pass starts in an intro), and do not animate: the user did not scroll,
      the track restarted. */
   function restartPlayheadScroll(lyricPositionMs) {
-    cancelCreditsReveal();
     lastScrollTargetLine = -1;
     // A restart is a new pass through the song, so the manual-browse state and
     // its "Jump to current" button do not survive it.
@@ -16965,69 +19581,6 @@
     if (!element) return;
     pendingInstantScroll = true;
     scrollActiveLineIntoView(element, true);
-  }
-
-  // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
-  // its tail. Returns true while the reveal owns the scroll target this frame, so
-  // animate() can skip the normal line-follow retarget and let the credits glide
-  // into view (spring if smoothScrolling is on, else the element's CSS ease).
-  function updateCreditsReveal(positionMs, activeIndex, lyricPositionMs) {
-    // Static lyrics already scroll to the bottom on their own via
-    // driveStaticAutoScroll; pause-pick mode owns the scroll too; and we need a
-    // credits footer and a live scroll container to do anything at all.
-    if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
-      if (!creditsFooterEl) creditsRevealActive = false;
-      return false;
-    }
-    // Hits keeps attribution in the header for both renderers, and the footer
-    // under the last line is hidden there. Do not let that hidden footer drag
-    // the lyrics down at the end of the track.
-    if (fsActive && fsOverlay &&
-        fsOverlay.classList.contains("ym-sl-fs-mode-hits") &&
-        fsOverlay.classList.contains("ym-sl-fs-hits-has-credits")) {
-      creditsRevealEngaged = false;
-      creditsRevealActive = false;
-      return false;
-    }
-    // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not
-    // when it starts being sung — so the credits glide in right as the last lyric
-    // completes. nearEnd is a fallback for the rare case there are credits but no
-    // lyric lines (provider-only), where EndTime compares are meaningless.
-    const lastLine = modelLines.length ? modelLines[modelLines.length - 1] : null;
-    const player = window.YTMod && window.YTMod.player;
-    const durationMs = player && typeof player.getDurationMs === "function"
-      ? Number(player.getDurationMs())
-      : 0;
-    // `finalLineEnded` alone is not safe: in the frames around a track change the
-    // position can still be the PREVIOUS song's end while modelLines already
-    // belongs to the new one, which makes 0 >= anything false but
-    // stalePosition >= newLastLine.EndTime true -- and the reveal then drags the
-    // freshly recentred panel to the bottom of the new song. Require the position
-    // to also be inside the CURRENT song before trusting it (AJ, 2026-10-02).
-    const positionWithinSong = durationMs <= 0 || positionMs <= durationMs + 2000;
-    const finalLineEnded = !!lastLine && positionWithinSong && lyricPositionMs >= lastLine.EndTime;
-    const nearEnd = durationMs > 0 && (durationMs - positionMs) <= CREDITS_REVEAL_MS;
-    if (!finalLineEnded && !nearEnd) {
-      // Left the end zone (new track, seek back, or ended-and-advanced): release
-      // the latches so the reveal can fire again next time the track reaches its
-      // tail. The normal line-follow retarget resumes on the next frame.
-      creditsRevealEngaged = false;
-      creditsRevealDismissed = false;
-      creditsRevealActive = false;
-      return false;
-    }
-    if (creditsRevealDismissed) return false; // user took over -> stay out
-    creditsRevealEngaged = true;
-    creditsRevealActive = true;
-    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
-    setScrollTarget(maxScrollTop, false);
-    return true;
-  }
-
-  function cancelCreditsReveal() {
-    creditsRevealEngaged = false;
-    creditsRevealDismissed = false;
-    creditsRevealActive = false;
   }
 
   // Smoothly follow playback with the native scroll position for static
@@ -17052,6 +19605,324 @@
 
   function parseLrcTimestamp(minutes, seconds) {
     return parseInt(minutes, 10) * 60 + parseFloat(seconds);
+  }
+
+  /* ---- Lyricsfile (LRCLIB word sync) -------------------------------------
+     LRCLIB now returns `lyricsfile`: a small YAML document whose lines may
+     carry `words: [{ text, start_ms, end_ms? }]`. It is not TTML, but it maps
+     cleanly onto the same parsed-line model parseLRC/parseTTML produce, so the
+     renderer does not need a second engine.
+
+     This is intentionally a constrained parser, not a general YAML library:
+     LRCLIB's file uses only mappings, sequences, strings, integers, booleans
+     and the literal `plain` block. Unknown top-level keys are ignored, and
+     malformed entries are skipped rather than aborting the whole track. */
+
+  function yamlUnquote(raw) {
+    const value = String(raw == null ? "" : raw).trim();
+    if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") {
+      return value.slice(1, -1).replace(/''/g, "'");
+    }
+    if (value.length >= 2 && value[0] === '"' && value[value.length - 1] === '"') {
+      try { return JSON.parse(value); } catch (_) {}
+      return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    }
+    return value;
+  }
+
+  function yamlScalar(raw) {
+    const value = String(raw == null ? "" : raw).trim();
+    if (!value || value === "~" || /^null$/i.test(value)) return null;
+    if (/^(true|false)$/i.test(value)) return /^true$/i.test(value);
+    if (/^-?(?:0|[1-9]\d*)$/.test(value)) return Number(value);
+    if (/^-?(?:\d+\.\d*|\.\d+)$/.test(value)) return Number(value);
+    return yamlUnquote(value);
+  }
+
+  function yamlKeyValue(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return null;
+    let quote = "";
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (quote === '"' && ch === "\\" && !escaped) {
+          escaped = true;
+          continue;
+        }
+        if (ch === quote && !escaped) quote = "";
+        escaped = false;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch === ":") {
+        return { key: text.slice(0, i).trim(), value: text.slice(i + 1).trim() };
+      }
+    }
+    return null;
+  }
+
+  function applyYamlLyricsField(target, raw) {
+    const kv = yamlKeyValue(raw);
+    if (!kv || !target) return;
+    if (kv.key === "text") {
+      target.text = String(yamlScalar(kv.value) == null ? "" : yamlScalar(kv.value));
+    } else if (kv.key === "start_ms" || kv.key === "end_ms") {
+      const scalar = yamlScalar(kv.value);
+      const value = Number(scalar);
+      if (scalar !== null && scalar !== "" && Number.isFinite(value)) target[kv.key] = value;
+    }
+  }
+
+  function parseLyricsfileLines(rows, start) {
+    const lines = [];
+    let currentLine = null;
+    let currentWord = null;
+    let lineIndent = null;
+    let inWords = false;
+    let i = start;
+
+    for (; i < rows.length; i++) {
+      const raw = rows[i];
+      if (!raw.trim() || /^\s*#/.test(raw)) continue;
+      const indent = raw.match(/^ */)[0].length;
+      const trimmed = raw.slice(indent);
+      if (indent === 0 && !trimmed.startsWith("-")) break;
+      if (lineIndent == null) {
+        if (!trimmed.startsWith("-")) break;
+        lineIndent = indent;
+      }
+      if (indent < lineIndent) break;
+
+      if (indent === lineIndent && trimmed.startsWith("-")) {
+        currentLine = { text: "", start_ms: null, end_ms: null, words: [] };
+        lines.push(currentLine);
+        currentWord = null;
+        inWords = false;
+        const rest = trimmed.slice(1).trim();
+        if (rest) applyYamlLyricsField(currentLine, rest);
+        continue;
+      }
+      if (!currentLine) continue;
+
+      if (/^words:\s*$/.test(trimmed)) {
+        inWords = true;
+        currentWord = null;
+        continue;
+      }
+      if (inWords && trimmed.startsWith("-")) {
+        currentWord = { text: "", start_ms: null, end_ms: null };
+        currentLine.words.push(currentWord);
+        const rest = trimmed.slice(1).trim();
+        if (rest) applyYamlLyricsField(currentWord, rest);
+        continue;
+      }
+      if (inWords) {
+        if (currentWord) applyYamlLyricsField(currentWord, trimmed);
+      } else {
+        applyYamlLyricsField(currentLine, trimmed);
+      }
+    }
+    return { lines, next: i };
+  }
+
+  function parseLyricsfilePlain(rows, start, marker) {
+    const parts = [];
+    let baseIndent = null;
+    let i = start;
+    for (; i < rows.length; i++) {
+      const raw = rows[i];
+      if (!raw.trim()) {
+        parts.push("");
+        continue;
+      }
+      const indent = raw.match(/^ */)[0].length;
+      if (indent === 0) break;
+      if (baseIndent == null) baseIndent = indent;
+      if (indent < baseIndent) break;
+      parts.push(raw.slice(baseIndent));
+    }
+    let text = parts.join("\n");
+    if (String(marker || "").trim().startsWith("|")) text = text.replace(/\n+$/, "");
+    return { text, next: i };
+  }
+
+  function parseLyricsfileDocument(yaml) {
+    const rows = String(yaml || "")
+      .replace(/^\uFEFF/, "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n");
+    const doc = { version: "", metadata: {}, lines: [], plain: "" };
+    let i = 0;
+    while (i < rows.length) {
+      const raw = rows[i];
+      if (!raw.trim() || /^\s*#/.test(raw)) { i++; continue; }
+      const indent = raw.match(/^ */)[0].length;
+      if (indent !== 0) { i++; continue; }
+      const kv = yamlKeyValue(raw.slice(indent));
+      if (!kv) { i++; continue; }
+      if (kv.key === "version") {
+        doc.version = String(yamlScalar(kv.value) == null ? "" : yamlScalar(kv.value));
+        i++;
+        continue;
+      }
+      if (kv.key === "metadata") {
+        i++;
+        while (i < rows.length) {
+          const row = rows[i];
+          if (!row.trim()) { i++; continue; }
+          const metaIndent = row.match(/^ */)[0].length;
+          if (metaIndent === 0) break;
+          const meta = yamlKeyValue(row.slice(metaIndent));
+          if (meta) doc.metadata[meta.key] = yamlScalar(meta.value);
+          i++;
+        }
+        continue;
+      }
+      if (kv.key === "lines") {
+        const parsed = parseLyricsfileLines(rows, i + 1);
+        doc.lines.push(...parsed.lines);
+        i = parsed.next;
+        continue;
+      }
+      if (kv.key === "plain") {
+        const parsed = parseLyricsfilePlain(rows, i + 1, kv.value);
+        doc.plain = parsed.text;
+        i = parsed.next;
+        continue;
+      }
+      i++;
+    }
+    return doc;
+  }
+
+  function lyricsfileArtistName(yaml) {
+    if (typeof yaml !== "string" || !yaml.trim()) return "";
+    const doc = parseLyricsfileDocument(yaml);
+    const artist = doc && doc.metadata ? doc.metadata.artist : "";
+    if (Array.isArray(artist)) {
+      return artist
+        .map((name) => String(name == null ? "" : name).trim())
+        .filter(Boolean)
+        .join(", ");
+    }
+    return typeof artist === "string" ? artist.trim() : "";
+  }
+
+  function parseLyricsfile(yaml, durationMs) {
+    const doc = parseLyricsfileDocument(yaml);
+    if (!doc || !Array.isArray(doc.lines) || !doc.lines.length) return null;
+    const durationSec = (Number(durationMs) || Number(doc.metadata.duration_ms) || 0) / 1000;
+    const lines = [];
+
+    for (const rawLine of doc.lines) {
+      if (!rawLine) continue;
+      let lineStartMs = rawLine.start_ms == null || rawLine.start_ms === ""
+        ? NaN
+        : Number(rawLine.start_ms);
+      if (!Number.isFinite(lineStartMs) || lineStartMs < 0) {
+        // The spec requires a line start, but a missing one should not discard
+        // otherwise usable word timings.
+        const firstWord = (rawLine.words || []).find((word) => {
+          if (!word || word.start_ms == null || word.start_ms === "") return false;
+          const start = Number(word.start_ms);
+          return Number.isFinite(start) && start >= 0;
+        });
+        if (!firstWord) continue;
+        lineStartMs = Number(firstWord.start_ms);
+      }
+      const start = lineStartMs / 1000;
+      const tokens = [];
+      for (const rawWord of (Array.isArray(rawLine.words) ? rawLine.words : [])) {
+        if (!rawWord) continue;
+        const rawText = String(rawWord.text == null ? "" : rawWord.text);
+        const text = rawText.trim();
+        const wordStartMs = rawWord.start_ms == null || rawWord.start_ms === ""
+          ? NaN
+          : Number(rawWord.start_ms);
+        if (!text || !Number.isFinite(wordStartMs) || wordStartMs < 0) continue;
+        const wordEndMs = rawWord.end_ms == null || rawWord.end_ms === ""
+          ? NaN
+          : Number(rawWord.end_ms);
+        tokens.push({
+          rawText,
+          text,
+          start: wordStartMs / 1000,
+          end: Number.isFinite(wordEndMs) ? wordEndMs / 1000 : 0,
+        });
+      }
+      const text = String(rawLine.text || "").trim() || tokens.map((token) => token.text).join(" ");
+      if (!text && !tokens.length) continue;
+      lines.push({ rawLine, text, start, tokens });
+    }
+    if (!lines.length) return null;
+    lines.sort((a, b) => a.start - b.start);
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const nextStart = lines[index + 1] ? lines[index + 1].start : 0;
+      const explicitEnd = Number(line.rawLine.end_ms) / 1000;
+      let end = Number.isFinite(explicitEnd) && explicitEnd > line.start
+        ? explicitEnd
+        : (nextStart > line.start ? nextStart : (durationSec > line.start ? durationSec : line.start + 4));
+
+      for (let tokenIndex = 0; tokenIndex < line.tokens.length; tokenIndex++) {
+        const token = line.tokens[tokenIndex];
+        const nextToken = line.tokens[tokenIndex + 1];
+        if (!token.end || token.end <= token.start) {
+          token.end = nextToken && nextToken.start > token.start ? nextToken.start : end;
+        }
+        token.end = Math.max(token.start + 0.01, token.end);
+        if (token.end > end) end = token.end;
+      }
+      if (end <= line.start) end = line.start + 4;
+
+      const words = line.tokens.map((token, tokenIndex) => {
+        const previous = line.tokens[tokenIndex - 1];
+        const next = line.tokens[tokenIndex + 1];
+        return {
+          text: token.text,
+          start: Math.max(line.start, token.start),
+          end: Math.max(line.start + 0.01, Math.min(end, token.end)),
+          timed: true,
+          hasSpaceBefore: !!previous && (/\s$/.test(previous.rawText) || /^\s/.test(token.rawText)),
+          isPartOfWord: !!next && !/\s$/.test(token.rawText) && !/^\s/.test(next.rawText),
+          disableLetterAnimation: false,
+        };
+      });
+      if (!words.length) {
+        words.push({
+          text: line.text,
+          start: line.start,
+          end,
+          timed: false,
+          hasSpaceBefore: false,
+          isPartOfWord: false,
+          disableLetterAnimation: true,
+        });
+      }
+      lines[index] = {
+        start: line.start,
+        end,
+        text: line.text,
+        words,
+        background: [],
+        lineTimed: !line.tokens.length,
+        timed: line.tokens.length > 0,
+        positioned: true,
+      };
+    }
+    return lines;
+  }
+
+  function lyricsfileHasTimedLines(data, durationMs) {
+    if (!data || typeof data.lyricsfile !== "string" || !data.lyricsfile.trim()) return false;
+    const ms = Number(durationMs) || Number(data.duration) * 1000;
+    try { return !!parseLyricsfile(data.lyricsfile, ms); } catch (_) { return false; }
   }
 
   function parseLRC(lrc, durationSeconds) {
@@ -17169,6 +20040,8 @@
     const rawXml = String(xml || "");
     // Set again by the caller when this load IS the permanent save (15-prefetch).
     currentLyricsFromSavedTTML = false;
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
     let parsed = parseTTML(rawXml);
     if (!parsed.length) {
       staticLyricsActive = false;
@@ -17226,17 +20099,43 @@
     return applied;
   }
 
-  function loadLRCLyrics(data, durationMs, provider = "LRCLIB") {
+  function loadLRCLyrics(data, durationMs, provider = "LRCLIB", attribution = null) {
     currentLyricsIsTTML = false;
     currentTTMLSource = "none";
     importedTTMLXml = "";
-    currentSongwriters = [];
-    currentUploader = null;
-    currentMaker = null;
+    currentLyricsfileArtist = lyricsfileArtistName(data && data.lyricsfile);
+    currentWordSyncQualityWarning = false;
+    currentSongwriters = attribution && Array.isArray(attribution.songwriters)
+      ? attribution.songwriters
+      : [];
+    currentUploader = attribution && attribution.uploader ? attribution.uploader : null;
+    currentMaker = attribution && attribution.maker ? attribution.maker : null;
     currentCommunityUploadId = "";
     currentCommunityUploadTest = false;
     currentProvider = typeof provider === "string" ? provider : "LRCLIB";
     autoScrollUserPaused = false;
+    // A word-synced LRCLIB record carries a Lyricsfile YAML document. Prefer it
+    // when the API says it has word-level timings; the line-only LRC path below
+    // remains the fallback if the YAML cannot be read. When there is no LRC at
+    // all, the Lyricsfile is also the only synchronized source available.
+    if (data && data.lyricsfile && (data.hasWordSync === true || !data.syncedLyrics)) {
+      const parsedLyricsfile = parseLyricsfile(data.lyricsfile, durationMs);
+      if (parsedLyricsfile && parsedLyricsfile.length) {
+        staticLyricsActive = false;
+        // The warning belongs to actual word-by-word timing, not to every
+        // Lyricsfile: a line-timed document is still line-synced and reads like
+        // any other line-synced lyric.
+        currentWordSyncQualityWarning = currentProvider === "LRCLIB" &&
+          parsedLyricsfile.some((line) => line && line.timed === true);
+        const applied = applyParsedLyrics(parsedLyricsfile);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
+        setTTMLExportVisibility();
+        return applied;
+      }
+      if (data.hasWordSync === true) {
+        alWarn("LRCLIB Lyricsfile could not be parsed; falling back to LRC/plain lyrics.");
+      }
+    }
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
     // Synced lyrics always win when both are present (AJ, 2026-09-18).
@@ -17263,6 +20162,90 @@
     return false;
   }
 
+  function unwrapUnisonResult(data) {
+    if (!data) return null;
+    if (data.success && data.data) return data.data;
+    return data.lyrics ? data : null;
+  }
+
+  function ttmlHasWordTiming(xml) {
+    const lineRe = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+    let line;
+    while ((line = lineRe.exec(String(xml || "")))) {
+      const timedSpans = line[1].match(/<span\b[^>]*\bbegin\s*=\s*["'][^"']+["']/gi);
+      if (timedSpans && timedSpans.length > 1) return true;
+    }
+    return false;
+  }
+
+  function unisonSubmitterCredit(data) {
+    const submitter = data && data.submitter;
+    if (!submitter || typeof submitter !== "object") return null;
+    const keyId = typeof submitter.keyId === "string" ? submitter.keyId.trim() : "";
+    const displayName = typeof submitter.displayName === "string" ? submitter.displayName.trim() : "";
+    if (!keyId && !displayName) return null;
+    const level = Number(submitter.level);
+    const createdAt = Number(data && data.createdAt);
+    return {
+      id: keyId,
+      // The public site uses the same short-key fallback for contributors who
+      // have not set a display name.
+      username: displayName || `${keyId.slice(0, 6)}…${keyId.slice(-6)}`,
+      avatar: typeof submitter.avatarUrl === "string" ? submitter.avatarUrl : "",
+      url: keyId ? `https://unison.boidu.dev/curator/${encodeURIComponent(keyId)}` : "",
+      creditLabel: "Submitted by",
+      profileLabel: "Unison",
+      level: Number.isFinite(level) ? level : 0,
+      createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+    };
+  }
+
+  function normalizeUnisonLyrics(data) {
+    const result = unwrapUnisonResult(data);
+    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
+    const format = String(result.format || "").toLowerCase();
+    const syncType = String(result.syncType || "").toLowerCase();
+    const submitter = unisonSubmitterCredit(result);
+    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics, wordByWord: false, submitter };
+    if (format === "ttml") {
+      // Unison marks word timing as richsync. If the field is missing, inspect
+      // the TTML itself rather than assuming line-level timing.
+      const wordByWord = syncType === "richsync"
+        || (!syncType && ttmlHasWordTiming(result.lyrics));
+      return { format: "ttml", lyrics: result.lyrics, wordByWord, submitter };
+    }
+    // Plain Unison text is not a synced hit. Let LRCLIB try for timed lyrics
+    // before falling back to an unsynced set.
+    if (format === "plain") return null;
+    // A server that omits `format` is only trusted if the body is timestamped.
+    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
+      ? { format: "lrc", lyrics: result.lyrics, wordByWord: false, submitter }
+      : null;
+  }
+
+  async function fetchUnisonLyrics(track, key, controller, options = null) {
+    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
+    const params = new URLSearchParams();
+    if (track.videoId) params.set("v", track.videoId);
+    else {
+      params.set("song", track.title);
+      if (track.artist) params.set("artist", track.artist);
+      if (track.album) params.set("album", track.album);
+      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+        params.set("duration", String(Math.round(track.durationMs / 1000)));
+      }
+    }
+    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
+    // Prefetch resolves a track that is not current yet, so only the abort
+    // signal (not a track-key mismatch) can invalidate it.
+    if (controller.signal.aborted || ((!options || options.prefetch !== true) && key !== currentTrackKey)) return null;
+    if (!response.ok || !response.data) {
+      if (!response.aborted) alWarn(`Unison returned HTTP ${response.status || "error"}; trying the next source.`);
+      return null;
+    }
+    return normalizeUnisonLyrics(response.data);
+  }
+
   function normalizeLookupText(value) {
     return String(value || "")
       .toLowerCase()
@@ -17272,7 +20255,10 @@
 
   function selectLRCLIBResult(results, track) {
     const candidates = Array.isArray(results)
-      ? results.filter((result) => result && result.syncedLyrics)
+      // A synced record can have a Lyricsfile without a separate LRC. Parsing
+      // here also keeps a plain-only record's guaranteed `lyricsfile` field from
+      // being mistaken for a timed result.
+      ? results.filter((result) => result && (result.syncedLyrics || lyricsfileHasTimedLines(result)))
       : [];
     if (!candidates.length) return null;
 
@@ -17292,6 +20278,8 @@
         if (Number.isFinite(wantedDuration) && Number.isFinite(Number(result.duration))) {
           score += Math.max(0, 3 - Math.abs(Number(result.duration) - wantedDuration) / 3);
         }
+        // Prefer the word-synced revision when the same track has both.
+        if (result.hasWordSync === true) score += 2;
         return { result, score };
       })
       .sort((a, b) => b.score - a.score)[0].result;
@@ -17303,7 +20291,10 @@
   // (AJ, 2026-09-18).
   function selectLRCLIBPlainResult(results, track) {
     const candidates = Array.isArray(results)
-      ? results.filter((result) => result && result.plainLyrics && !result.syncedLyrics)
+      ? results.filter((result) => result
+        && result.plainLyrics
+        && !result.syncedLyrics
+        && !lyricsfileHasTimedLines(result))
       : [];
     if (!candidates.length) return null;
 
@@ -17918,11 +20909,13 @@
     return score;
   }
 
-  async function resolveSpotifyIdViaMusicBrainz(track, controller, key) {
+  async function resolveSpotifyIdViaMusicBrainz(track, controller, key, options = null) {
     if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") {
       return { id: null, transient: false };
     }
-    if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+    const prefetching = !!(options && options.prefetch);
+    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
+    if (stale()) return { id: null, transient: false };
     try {
       const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
         cleanSearchTitle(track.title, track.artist),
@@ -17930,7 +20923,7 @@
         track.album,
         track.durationMs
       );
-      if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+      if (stale()) return { id: null, transient: false };
       // status 0 = the host could not reach MusicBrainz at all (the relation
       // lookup reports it that way), so it is a transport failure like 429/5xx,
       // never evidence that the song has no mapping.
@@ -17960,7 +20953,9 @@
     }
   }
 
-  async function resolveSpotifyIdUncached(track, controller, key) {
+  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
+    const prefetching = !!(options && options.prefetch);
+    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
     const title = track && track.title;
     if (!title) {
       alWarn("no track title; Spotify lookup skipped.");
@@ -17971,9 +20966,13 @@
     const album = (track && track.album) || "";
     const titles = listenbrainzTitleVariants(title, artist);
     // Prefer the player bar's already-cleaned title when it says something new.
-    const barTitle = cleanSearchTitle(playerBarTitle(), artist);
-    if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
-      titles.unshift(barTitle);
+    // During prefetch the bar still shows the CURRENT song, so using it would
+    // poison the next track's lookup with the wrong title.
+    if (!prefetching) {
+      const barTitle = cleanSearchTitle(playerBarTitle(), artist);
+      if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
+        titles.unshift(barTitle);
+      }
     }
     const artists = listenbrainzArtistVariants(artist, title);
     // Try the album YTM gave us first, then the loose empty form. YTM's album
@@ -17988,7 +20987,7 @@
     lbLadder: for (const t of titles) {
       for (const a of artists) {
         for (const r of releases) {
-          if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+          if (stale()) return { id: null, transient: false };
           // A 429 elsewhere means the rest of this window is gone. Bail with
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
@@ -18021,7 +21020,7 @@
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
-    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key);
+    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key, options);
     if (musicBrainz.id) return musicBrainz;
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
@@ -18036,7 +21035,8 @@
    * Cached wrapper around the raw lookup. The resolution result is a stable
    * property of the song, so a hit here skips the network entirely.
    */
-  async function resolveSpotifyId(track, controller, key) {
+  async function resolveSpotifyId(track, controller, key, options = null) {
+    const prefetching = !!(options && options.prefetch);
     const cacheKey = spicyCacheKeyFor(track, "");
     // Only HITS are cached. A miss used to be recorded for 12 hours and then
     // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
@@ -18052,7 +21052,7 @@
         return cached.spotifyId;
       }
     }
-    const outcome = await resolveSpotifyIdUncached(track, controller, key);
+    const outcome = await resolveSpotifyIdUncached(track, controller, key, options);
     const resolved = outcome && outcome.id ? outcome.id : null;
     // The lookup can outlive its reason for existing: a manual upload bumps
     // trackRequestSeq, switching tracks rewrites currentTrackKey, clearing the
@@ -18061,7 +21061,7 @@
     // so return it to the caller but never persist it.
     const stale =
       controller.signal.aborted ||
-      key !== currentTrackKey ||
+      (!prefetching && key !== currentTrackKey) ||
       !spicyCache;
     if (cacheKey && !stale && resolved) {
       // A resolved id is durable — give it the full TTL and mark the entry
@@ -18184,6 +21184,7 @@
     if (!body || !Array.isArray(body.Content) || !body.Content.length) return null;
     const fst = (v) => (typeof v === "number" && isFinite(v)) ? v : null;
     const lines = [];
+    let hasWordTiming = false;
     for (const content of body.Content) {
       if (!content) continue;
       const lead = content.Lead;
@@ -18228,6 +21229,7 @@
         const s = fst(syl.StartTime);
         const e = fst(syl.EndTime);
         const timed = s != null && e != null && e > s + 0.001;
+        if (timed) hasWordTiming = true;
         if (i > 0 && !prevWord) parts.push(" ");
         const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
         parts.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
@@ -18245,6 +21247,7 @@
           const s = fst(syl.StartTime);
           const e = fst(syl.EndTime);
           const timed = s != null && e != null && e > s + 0.001;
+          if (timed) hasWordTiming = true;
           if (i > 0 && !prevBgWord) bgInner.push(" ");
           const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
           bgInner.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
@@ -18259,7 +21262,7 @@
     }
     if (!lines.length) return null;
     const ttml = `<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>${lines.join("")}</div></body></tt>`;
-    return { ttml, attribution: parseUploadAttribution(body) };
+    return { ttml, attribution: parseUploadAttribution(body), wordByWord: hasWordTiming };
   }
 
   // ---- Aurora Community (read-only client) ---------------------------------
@@ -18416,7 +21419,7 @@
     };
   }
 
-  async function fetchCommunityLyrics(track, key, controller) {
+  async function fetchCommunityLyrics(track, key, controller, options = null) {
     if (!track || !track.videoId) return null;
     const videoId = String(track.videoId);
     const cached = await getCommunityCacheEntry(videoId);
@@ -18459,7 +21462,7 @@
       alWarn("Aurora Community request failed:", error);
       return null;
     }
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (controller.signal.aborted || ((!options || options.prefetch !== true) && key !== currentTrackKey)) return null;
     if (response.status === 404) {
       setCommunityCacheEntry(videoId, { hit: false }, COMMUNITY_CACHE_NEGATIVE_TTL_MS);
       return null;
@@ -18497,12 +21500,13 @@
     };
   }
 
-  async function fetchSpicyLyrics(track, key, controller) {
+  async function fetchSpicyLyrics(track, key, controller, options = null) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
     if (!track || !track.title) { alWarn("no track title; skipping."); return null; }
+    const prefetching = !!(options && options.prefetch);
     alLog(`resolving for "${track.title}" / "${track.artist || "?"}"…`);
-    const spotifyId = await resolveSpotifyId(track, controller, key);
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    const spotifyId = await resolveSpotifyId(track, controller, key, options);
+    if (controller.signal.aborted || (!prefetching && key !== currentTrackKey)) return null;
     if (!spotifyId) {
       alWarn("no Spotify track id resolved; falling back.");
       return null;
@@ -18516,7 +21520,13 @@
     if (cached) {
       if (cached.ttml) {
         alLog(`served TTML from cache (${spotifyId}).`);
-        return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
+        return {
+          ttml: cached.ttml,
+          attribution: cached.attribution || null,
+          songwriters: cached.songwriters || [],
+          wordByWord: cached.wordByWord === true || ttmlHasWordTiming(cached.ttml),
+          fromCache: true,
+        };
       }
       if (cached.hit === false) {
         alLog(`cached "no sync available" for ${spotifyId}; skipping API.`);
@@ -18560,7 +21570,7 @@
     if (controller.signal.aborted) {
       return bail("request was aborted (a newer track/request superseded it)");
     }
-    if (key !== currentTrackKey) {
+    if (!prefetching && key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
     alLog(`answered HTTP ${response.status} for ${spotifyId}`);
@@ -18610,15 +21620,73 @@
     }
     // Only now — a Body that parsed into a non-empty TTML — is the result
     // trustworthy enough to persist.
+    const wordByWord = parsed.wordByWord === true || ttmlHasWordTiming(parsed.ttml);
     setSpicyCacheEntry(cacheKey, {
       hit: true,
       ttml: parsed.ttml,
       attribution: parsed.attribution || null,
       songwriters: parsed.songwriters || [],
+      wordByWord,
       spotifyId,
     });
-    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    parsed.wordByWord = wordByWord;
+    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId} (${wordByWord ? "word" : "line"}-level); handing to the renderer.`);
     return parsed;
+  }
+
+  // Loads a payload that prefetch already resolved for this exact track. This
+  // is deliberately the only place prefetch data enters the renderer: the
+  // normal source runners and their cache/priority rules are untouched.
+  function applyPrefetchedLyrics(entry, track) {
+    if (!entry) return false;
+    try {
+      if (entry.source === "community") {
+        pendingSpicyCredits = {
+          attribution: entry.attribution || null,
+          songwriters: [],
+          uploadId: entry.uploadId || "",
+          test: entry.test === true,
+        };
+        if (loadTTML(entry.ttml, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "spicy") {
+        pendingSpicyCredits = {
+          attribution: entry.attribution || null,
+          songwriters: Array.isArray(entry.songwriters) ? entry.songwriters : [],
+        };
+        if (loadTTML(entry.ttml, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "unison") {
+        const attribution = {
+          source: "unison",
+          provider: "Unison",
+          uploader: entry.submitter || null,
+          maker: null,
+          songwriters: [],
+        };
+        if (entry.format === "lrc") {
+          return loadLRCLyrics({ syncedLyrics: entry.lyrics }, track.durationMs, "Unison", attribution);
+        }
+        pendingSpicyCredits = { attribution, songwriters: [] };
+        if (loadTTML(entry.lyrics, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "lrclib") {
+        // LRCLIB sets its own attribution; do not let a staged TTML credit leak
+        // into the next external load.
+        pendingSpicyCredits = null;
+        return loadLRCLyrics(entry.data, track.durationMs);
+      }
+    } catch (error) {
+      pendingSpicyCredits = null;
+      alWarn("prefetched lyrics could not be rendered:", error);
+    }
+    return false;
   }
 
   async function fetchLRCLyrics(track, key) {
@@ -18655,6 +21723,20 @@
       removeLyricsPersistent(key);
     }
 
+    /* A next-track prefetch already resolved this exact key. Load its winner
+       before any source runs; the payload was chosen in the same Community ->
+       Spicy -> Unison -> LRCLIB order (including the line-level Spicy hold). */
+    const prefetched = prefetchedLyrics.get(key);
+    if (prefetched) {
+      prefetchedLyrics.delete(key);
+      if (stale()) return;
+      if (applyPrefetchedLyrics(prefetched, track)) {
+        alLog(`prefetched ${prefetched.source} lyrics rendered.`);
+        return;
+      }
+      alWarn("prefetched lyrics could not be rendered; resolving normally.");
+    }
+
     /* One LRCLIB fetch, shared by the lrclib runner. It stays RAW (not a load)
        so the caller can tell a synced result from a plain-only one. */
     const fetchLrclibData = async () => {
@@ -18683,7 +21765,7 @@
         throw error;
       }
       let data = response.ok ? response.data : null;
-      if (!data || !data.syncedLyrics) {
+      if (!data || (!data.syncedLyrics && !data.lyricsfile)) {
         const searchParams = new URLSearchParams({
           q: [track.title, track.artist].filter(Boolean).join(" "),
         });
@@ -18705,19 +21787,48 @@
         data = selectLRCLIBResult(searchResponse.data, track)
           || selectLRCLIBPlainResult(searchResponse.data, track);
       }
-      if (!data || (!data.syncedLyrics && !data.plainLyrics)) return null;
+      if (!data || (!data.syncedLyrics && !data.plainLyrics && !data.lyricsfile)) return null;
       cacheLRCLyrics(key, data);
       cacheLyricsPersistent(key, data);
       return data;
     };
 
     /* Each source is a runner that returns true when it produced lyrics (or
-       when the request went stale). The resolver walks them in the order the
-       user set in the add-on's settings — "Source order" — instead of a
-       hard-coded sequence (AJ, 2026-10-19). Runners never show a terminal
-       "no lyrics" message themselves; the tail of this function does, so a
-       source that misses early cannot flash a message before the next one
-       has had its turn. */
+       when the request went stale). The resolver walks the fixed priority
+       Community -> Spicy -> Unison -> LRCLIB. A line-level Spicy result is
+       held by its runner while Unison gets one chance to supply word-level
+       timing; a line-level or missing Unison result falls back to that exact
+       Spicy payload. Runners never show a terminal "no lyrics" message
+       themselves; the tail of this function does, so a source that misses
+       early cannot flash a message before the next one has had its turn. */
+    let pendingSpicyLineResult = null;
+    const loadSpicyResult = (result) => {
+      pendingSpicyCredits = {
+        attribution: result.attribution || null,
+        songwriters: Array.isArray(result.songwriters) ? result.songwriters : [],
+      };
+      if (loadTTML(result.ttml, "external")) return true;
+      pendingSpicyCredits = null;
+      return false;
+    };
+    const loadPendingSpicy = () => {
+      const result = pendingSpicyLineResult;
+      pendingSpicyLineResult = null;
+      return result ? loadSpicyResult(result) : false;
+    };
+    // Unison credits the person who submitted the sync, not a separate maker.
+    // Its public API exposes the contributor in `submitter`.
+    const unisonCredits = (data) => ({
+      attribution: {
+        source: "unison",
+        provider: "Unison",
+        uploader: data && data.submitter ? data.submitter : null,
+        maker: null,
+        songwriters: [],
+      },
+      songwriters: [],
+    });
+
     const runners = {
       community: async () => {
         try {
@@ -18758,17 +21869,18 @@
             return true;
           }
           if (spicyResult && spicyResult.ttml) {
-            // Attribution + songwriters ride along with the API result; stash them
-            // before loadTTML so the credits footer can render them.
-            pendingSpicyCredits = {
-              attribution: spicyResult.attribution || null,
-              songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
-            };
-            if (loadTTML(spicyResult.ttml, "external")) {
-              alLog("TTML rendered from the Spicy Lyrics API.");
+            // Hold line-level Spicy until Unison has had one chance to supply
+            // word-level timing. A miss or a line-level Unison result falls
+            // back to this exact Spicy payload, not to LRCLIB.
+            if (spicyResult.wordByWord !== true) {
+              pendingSpicyLineResult = spicyResult;
+              alLog("Spicy returned line-level timing; checking Unison for word-level.");
+              return false;
+            }
+            if (loadSpicyResult(spicyResult)) {
+              alLog("word-level TTML rendered from the Spicy Lyrics API.");
               return true;
             }
-            pendingSpicyCredits = null;
             alWarn("API returned TTML we could not parse; trying the next source.");
           } else {
             alWarn("no Spicy TTML for this track; trying the next source.");
@@ -18777,6 +21889,59 @@
           if (error && error.name === "AbortError") return true;
           alWarn("lookup failed; trying the next source:", error);
         }
+        return false;
+      },
+
+      unison: async () => {
+        try {
+          const pendingSpicy = pendingSpicyLineResult;
+          const unisonData = await fetchUnisonLyrics(track, key, controller);
+          if (stale()) return true;
+          const credits = unisonData ? unisonCredits(unisonData) : null;
+
+          // Spicy produced line-level lyrics. Only word-level Unison may replace
+          // it; a line-level, plain or missing Unison result keeps Spicy.
+          if (pendingSpicy && unisonData && unisonData.wordByWord === true && unisonData.format === "ttml") {
+            pendingSpicyCredits = credits;
+            if (loadTTML(unisonData.lyrics, "external")) {
+              pendingSpicyLineResult = null;
+              alLog("word-level TTML rendered from Unison instead of line-level Spicy.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            alWarn("Unison returned word-level TTML we could not parse; keeping Spicy.");
+            return loadPendingSpicy();
+          }
+
+          if (pendingSpicy) {
+            alLog("Unison did not have word-level timing; keeping Spicy line-level lyrics.");
+            return loadPendingSpicy();
+          }
+
+          if (unisonData && unisonData.format === "ttml") {
+            pendingSpicyCredits = credits;
+            if (loadTTML(unisonData.lyrics, "external")) {
+              alLog("TTML rendered from Unison.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            alWarn("Unison returned TTML we could not parse; trying the next source.");
+          }
+          if (unisonData && unisonData.format === "lrc") {
+            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison", credits.attribution)) {
+              alLog("synced lyrics rendered from Unison.");
+              return true;
+            }
+            alWarn("Unison returned LRC that could not be parsed; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          alWarn("Unison lookup failed; trying the next source:", error);
+        }
+        // Never paint a held result from the old track after a track change.
+        if (stale()) return true;
+        // A held Spicy result must not be skipped just because Unison errored.
+        if (pendingSpicyLineResult) return loadPendingSpicy();
         return false;
       },
 
@@ -18798,16 +21963,20 @@
     };
 
     // Fixed source priority: Aurora Community is curated per exact video id and
-    // wins when it has the track; Spicy is the broad fallback, then LRCLIB.
-    // lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25: both are
-    // unmoderated, so a wrong sync was more common than a useful one.
-    const order = ["community", "spicy", "lrclib"];
+    // wins when it has the track. Spicy is next; if it only has line-level
+    // timing, the spicy runner holds it while Unison gets one word-level check.
+    // Unison line-level or a miss falls back to Spicy. LRCLIB is last.
+    // lrc.red was retired on 2026-10-22.
+    const order = ["community", "spicy", "unison", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;
       if (await runner()) return;
       if (stale()) return;
     }
+    // Safety net: if a line-level Spicy result was held and the Unison runner
+    // could not consume it, load it before declaring the track a miss.
+    if (pendingSpicyLineResult && loadPendingSpicy()) return;
     // Every runner missed (or failed) for this track, so there is nothing for
     // the panel to resume with after an ad. Recorded for the ad notice's retry.
     adBreakNoteResult("none", "");
@@ -18839,10 +22008,57 @@
     } catch (_) { /* prefetch must never affect playback */ }
   }
 
-  // Warm the lyric cache for the upcoming track so the song change has no
-  // blank flash. Best-effort only: any failure is swallowed and never touches
-  // the current track's UI. Uses its own prefetchSeq + AbortController so it
-  // cannot abort or race the active track's request.
+  // Warm the NEXT track's resolved winner so the song change paints from memory.
+  // Better Lyrics' order is the model here: wait until the current track has
+  // loaded, resolve the next track once, walk the real source order, and stop at
+  // the first usable payload. Best-effort only: every failure is swallowed and
+  // the normal loader still runs on the track change. Uses its own prefetchSeq +
+  // AbortController so it cannot abort or race the active track's request.
+
+  const PREFETCHED_LYRICS_LIMIT = 6;
+  let prefetchAbort = null;
+  let prefetchInFlightKey = "";
+
+  function rememberPrefetchedLyrics(key, entry) {
+    if (!key || !entry) return;
+    prefetchedLyrics.delete(key);
+    prefetchedLyrics.set(key, entry);
+    while (prefetchedLyrics.size > PREFETCHED_LYRICS_LIMIT) {
+      prefetchedLyrics.delete(prefetchedLyrics.keys().next().value);
+    }
+  }
+
+  async function fetchPrefetchedLrclib(track, key, controller, stale) {
+    const params = new URLSearchParams();
+    params.set("track_name", track.title);
+    if (track.artist) params.set("artist_name", track.artist);
+    if (Number.isFinite(Number(track.durationMs)) && Number(track.durationMs) > 0) {
+      params.set("duration", String(Math.round(Number(track.durationMs) / 1000)));
+    }
+    const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
+    if (stale()) return null;
+    let data = response && response.ok ? response.data : null;
+    if (data && !data.syncedLyrics && !data.plainLyrics && !data.lyricsfile) data = null;
+    if (!data) {
+      if (response && !response.ok && response.status !== 404) return null;
+      const searchParams = new URLSearchParams({
+        q: [track.title, track.artist].filter(Boolean).join(" "),
+      });
+      const searchResponse = await fetchLrclibJson(
+        `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
+        controller.signal
+      );
+      if (stale()) return null;
+      if (!searchResponse || !searchResponse.ok) return null;
+      data = selectLRCLIBResult(searchResponse.data, track)
+        || selectLRCLIBPlainResult(searchResponse.data, track);
+    }
+    if (!data || (!data.syncedLyrics && !data.plainLyrics && !data.lyricsfile)) return null;
+    cacheLRCLyrics(key, data);
+    cacheLyricsPersistent(key, data);
+    return data;
+  }
+
   async function prefetchNextTrackLyrics() {
     const player = window.YTMod && window.YTMod.player;
     if (!player || typeof player.getNextTrack !== "function") return;
@@ -18851,44 +22067,119 @@
     if (!next || !next.title) return;
     const key = getTrackKey(next);
     if (!key || key === currentTrackKey) return;
-    // Already cached (memory or persistent file)? Nothing to do.
-    if (lrclibCache.has(key) || getLyricsPersistent(key)) return;
+    if (prefetchedLyrics.has(key) || prefetchInFlightKey === key) return;
+
+    // A persisted LRCLIB answer is already an instant fallback. Keep it while
+    // Community / Spicy / Unison get their one chance to outrank it.
+    const fallback = lrclibCache.get(key) || getLyricsPersistent(key);
+    if (fallback) rememberPrefetchedLyrics(key, { source: "lrclib", data: fallback });
 
     const controller = new AbortController();
+    if (prefetchAbort) prefetchAbort.abort();
+    prefetchAbort = controller;
     const reqId = ++prefetchSeq;
+    prefetchInFlightKey = key;
+    const stale = () => reqId !== prefetchSeq || controller.signal.aborted;
+    const save = (entry) => {
+      if (stale()) return;
+      rememberPrefetchedLyrics(key, entry);
+    };
+    const attempt = async (label, fn) => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (!stale()) alWarn(`${label} prefetch failed (ignored):`, error);
+        return null;
+      }
+    };
+
     try {
-      let data = null;
-      // Mirror the LRCLIB path of fetchLRCLyrics, but cache instead of rendering.
-      const params = new URLSearchParams();
-      params.set("track_name", next.title);
-      if (next.artist) params.set("artist_name", next.artist);
-      if (Number.isFinite(Number(next.durationMs)) && Number(next.durationMs) > 0) {
-        params.set("duration", String(Math.round(Number(next.durationMs) / 1000)));
-      }
-      const response = await fetchLrclibJson(`${LRCLIB_API}?${params.toString()}`, controller.signal);
-      if (reqId !== prefetchSeq) return;
-      if (response && response.ok && response.data && response.data.syncedLyrics) {
-        data = response.data;
-      } else if (!response || !response.ok || response.status === 404) {
-        const searchParams = new URLSearchParams({
-          q: [next.title, next.artist].filter(Boolean).join(" "),
+      const community = await attempt("Aurora Community", () =>
+        fetchCommunityLyrics(next, key, controller, { prefetch: true })
+      );
+      if (stale()) return;
+      if (community && community.ttml) {
+        save({
+          source: "community",
+          ttml: community.ttml,
+          attribution: community.attribution || null,
+          uploadId: community.uploadId || "",
+          test: community.test === true,
         });
-        const searchResponse = await fetchLrclibJson(
-          `${LRCLIB_SEARCH_API}?${searchParams.toString()}`,
-          controller.signal
-        );
-        if (reqId !== prefetchSeq) return;
-        if (searchResponse && searchResponse.ok) {
-          data = selectLRCLIBResult(searchResponse.data, next);
-        }
+        return;
       }
-      if (reqId !== prefetchSeq) return;
-      if (!data || !data.syncedLyrics) return;
-      cacheLRCLyrics(key, data);
-      cacheLyricsPersistent(key, data);
+
+      const spicy = await attempt("Spicy", () =>
+        fetchSpicyLyrics(next, key, controller, { prefetch: true })
+      );
+      if (stale()) return;
+      let unison = null;
+      if (spicy && spicy.ttml) {
+        if (spicy.wordByWord === true) {
+          save({
+            source: "spicy",
+            ttml: spicy.ttml,
+            attribution: spicy.attribution || null,
+            songwriters: Array.isArray(spicy.songwriters) ? spicy.songwriters : [],
+          });
+          return;
+        }
+        // The normal resolver gives word-level Unison one chance to replace a
+        // line-level Spicy payload; keep that same rule here.
+        unison = await attempt("Unison", () =>
+          fetchUnisonLyrics(next, key, controller, { prefetch: true })
+        );
+        if (stale()) return;
+        if (unison && unison.wordByWord === true && unison.format === "ttml") {
+          save({
+            source: "unison",
+            format: "ttml",
+            lyrics: unison.lyrics,
+            submitter: unison.submitter || null,
+          });
+          return;
+        }
+        save({
+          source: "spicy",
+          ttml: spicy.ttml,
+          attribution: spicy.attribution || null,
+          songwriters: Array.isArray(spicy.songwriters) ? spicy.songwriters : [],
+        });
+        return;
+      }
+
+      if (!unison) {
+        unison = await attempt("Unison", () =>
+          fetchUnisonLyrics(next, key, controller, { prefetch: true })
+        );
+      }
+      if (stale()) return;
+      if (unison && (unison.format === "ttml" || unison.format === "lrc")) {
+        save({
+          source: "unison",
+          format: unison.format,
+          lyrics: unison.lyrics,
+          submitter: unison.submitter || null,
+        });
+        return;
+      }
+
+      // A persisted LRCLIB row was already installed as the fallback above.
+      if (fallback) return;
+      const data = await attempt("LRCLIB", () =>
+        fetchPrefetchedLrclib(next, key, controller, stale)
+      );
+      if (stale()) return;
+      if (data) save({ source: "lrclib", data });
     } catch (error) {
-      if (error && error.name === "AbortError") return;
-      // Non-fatal: lyrics simply load normally when the track starts.
+      if (!stale() && error && error.name !== "AbortError") {
+        alWarn("next-track lyric prefetch failed (ignored):", error);
+      }
+    } finally {
+      if (reqId === prefetchSeq) {
+        prefetchAbort = null;
+        prefetchInFlightKey = "";
+      }
     }
   }
 
@@ -19113,10 +22404,15 @@
   function makeSearchResultRow(item, panel, status) {
     const row = h("button", { class: "ym-sl-search-result", type: "button", role: "option" });
     const name = h("span", { class: "ym-sl-search-name", text: item.trackName || "Unknown track" });
-    const hasSync = !!item.syncedLyrics;
+    // A timed LRCLIB row may carry only a Lyricsfile. Plain-only records also
+    // carry one now, so parse it rather than treating any lyricsfile as synced.
+    const hasLyricsfileLines = lyricsfileHasTimedLines(item);
+    const hasSync = !!item.syncedLyrics || hasLyricsfileLines;
+    const hasWordSync = item.hasWordSync === true && hasLyricsfileLines;
     const hasPlain = !!item.plainLyrics;
     const metaBits = [item.artistName, item.albumName].filter(Boolean);
-    if (!hasSync && hasPlain) metaBits.push("unsynced");
+    if (hasWordSync) metaBits.push("word-synced");
+    else if (!hasSync && hasPlain) metaBits.push("unsynced");
     const meta = h("span", { class: "ym-sl-search-meta", text: metaBits.join(" · ") });
     row.append(name, meta);
     if (hasSync || hasPlain) {
@@ -19168,7 +22464,7 @@
       // waiting for the next track change.
       refreshFileTabState();
     }
-    const isUnsynced = !item.syncedLyrics && item.plainLyrics;
+    const isUnsynced = !item.syncedLyrics && !lyricsfileHasTimedLines(item) && item.plainLyrics;
     status.textContent = `Applied ${isUnsynced ? "unsynced " : ""}lyrics: ${item.trackName || "lyrics"}${remember ? " (saved for this track)" : ""}.`;
     toggleSearchPanel(false);
   }
@@ -19231,15 +22527,19 @@
     // A new track starts a fresh lookup; the ad notice reports "Looking…"
     // until one of the sources answers.
     adBreakNoteLookup(key);
-    prefetchNextTrackLyrics();
-    // Also warm the next track's cover so an MV -> audio skip is instant.
+    // Warm the next track's cover so an MV -> audio skip is instant. Lyrics are
+    // prefetched once THIS track has finished loading (below), matching Better
+    // Lyrics and keeping the two lookups from competing.
     prefetchNextTrackArt();
     loadVideoOffsetForTrack(track);
     refreshTrack();
     if (manualLyricsTrackKey && manualLyricsTrackKey !== key) {
       manualLyricsTrackKey = "";
     }
-    if (manualLyricsTrackKey === key) return;
+    if (manualLyricsTrackKey === key) {
+      prefetchNextTrackLyrics();
+      return;
+    }
 
     if (activeTrackAbort) {
       activeTrackAbort.abort();
@@ -19266,6 +22566,7 @@
         // it (and nothing else claims it once the TRACK changes).
         currentLyricsFromSavedTTML = true;
         refreshFileTabState();
+        prefetchNextTrackLyrics();
         return;
       }
       try {
@@ -19278,7 +22579,15 @@
 
     manualLyricsIsPermanent = false;
     refreshFileTabState();
-    fetchLRCLyrics(track, key);
+    const lyricsRequest = fetchLRCLyrics(track, key);
+    // Better Lyrics waits for the current lyrics before preloading the next
+    // song. Doing the same here avoids spending bandwidth on the next track
+    // while this one is still resolving.
+    if (lyricsRequest && typeof lyricsRequest.finally === "function") {
+      lyricsRequest.finally(() => {
+        if (key === currentTrackKey) prefetchNextTrackLyrics();
+      }).catch(() => {});
+    }
   }
 
   /* ===================== lyric DOM construction ===================== */
@@ -19550,15 +22859,131 @@
     return !!a.username && a.username === b.username;
   }
 
+  const WORD_SYNC_NOTICE_MS = 5000;
+  const WORD_SYNC_NOTICE_FADE_MS = 450;
+
+  function clearWordSyncQualityNoticeTimers() {
+    if (wordSyncQualityNoticeFadeTimer) {
+      clearTimeout(wordSyncQualityNoticeFadeTimer);
+      wordSyncQualityNoticeFadeTimer = 0;
+    }
+    if (wordSyncQualityNoticeHideTimer) {
+      clearTimeout(wordSyncQualityNoticeHideTimer);
+      wordSyncQualityNoticeHideTimer = 0;
+    }
+  }
+
+  function hideWordSyncQualityNotice() {
+    clearWordSyncQualityNoticeTimers();
+    if (panelEl) panelEl.classList.remove("ym-sl-word-sync-warning-active");
+    if (!wordSyncQualityNoticeEl) return;
+    wordSyncQualityNoticeEl.classList.add("hidden");
+    wordSyncQualityNoticeEl.classList.remove("ym-sl-fading");
+  }
+
+  function showWordSyncQualityNotice() {
+    const notice = wordSyncQualityNoticeEl;
+    if (!notice) return;
+    clearWordSyncQualityNoticeTimers();
+    notice.classList.remove("hidden", "ym-sl-fading");
+    if (panelEl) panelEl.classList.add("ym-sl-word-sync-warning-active");
+    // The bar is a one-shot CSS animation on a persistent element, so restart
+    // it explicitly; without the reflow it stays finished on a later track.
+    const timer = notice.querySelector(".ym-sl-mv-sync-chip-timer");
+    if (timer) {
+      timer.style.animation = "none";
+      void timer.offsetWidth;
+      timer.style.removeProperty("animation");
+    }
+    wordSyncQualityNoticeFadeTimer = window.setTimeout(() => {
+      wordSyncQualityNoticeFadeTimer = 0;
+      if (notice !== wordSyncQualityNoticeEl) return;
+      notice.classList.add("ym-sl-fading");
+      wordSyncQualityNoticeHideTimer = window.setTimeout(() => {
+        wordSyncQualityNoticeHideTimer = 0;
+        if (notice !== wordSyncQualityNoticeEl) return;
+        notice.classList.add("hidden");
+        notice.classList.remove("ym-sl-fading");
+        if (panelEl) panelEl.classList.remove("ym-sl-word-sync-warning-active");
+      }, WORD_SYNC_NOTICE_FADE_MS);
+    }, WORD_SYNC_NOTICE_MS);
+  }
+
+  function syncWordSyncQualityNotice() {
+    const active = currentWordSyncQualityWarning === true;
+    if (!active) {
+      wordSyncQualityNoticeShownFor = "";
+      hideWordSyncQualityNotice();
+      return;
+    }
+    if (!wordSyncQualityNoticeEl) return;
+    const key = [currentTrackKey || "", currentProvider || ""].join("\u0001");
+    if (wordSyncQualityNoticeShownFor === key) return;
+    wordSyncQualityNoticeShownFor = key;
+    showWordSyncQualityNotice();
+  }
+
   // Three segments hard against each other: songwriters, provider, and the two
   // people. The rail's radius rounds the outer edges, and hairline dividers do
   // the separating, so there is no gap to read as a fourth empty cell.
   function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
+    const baseAlignRight = !!alignRight;
+    const hasWriters = !!(names && names.length);
+    // Unison keeps the shared rail with its own red skin.
+    if (currentProvider === "Unison") {
+      footer.classList.add("ym-sl-credits--unison");
+      if (!hasWriters) footer.classList.add("ym-sl-credits--no-writers");
+    } else if (currentProvider === "Spicy Lyrics") {
+      footer.classList.add("ym-sl-credits--spicy");
+      if (SCRIPT_URL) {
+        try {
+          footer.style.setProperty(
+            "--ym-sl-spicy-banner-image",
+            `url("${new URL("spicy-lyrics-banner.png", SCRIPT_URL).href}")`
+          );
+        } catch (e) {}
+      }
+    } else if (currentProvider === "Aurora Community") {
+      // Aurora Community deliberately reuses the Spicy rail treatment; the
+      // identity class leaves room for an Aurora-only override later.
+      footer.classList.add("ym-sl-credits--spicy", "ym-sl-credits--aurora");
+      const brand = buildProviderIcon("Aurora Community");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (currentProvider === "Apple Music") {
+      // Apple has no contributor rows, so the provider mark becomes the lead
+      // element and the writers become the footnote.
+      footer.classList.add("ym-sl-credits--apple");
+      const brand = buildProviderIcon("Apple Music");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (currentProvider === "LRCLIB") {
+      // LRCLIB has no contributor rows either: borrow Apple's icon-led layout,
+      // then replace its frosted skin with the flat deep-blue one below.
+      footer.classList.add("ym-sl-credits--apple", "ym-sl-credits--lrclib");
+    }
     // A track that ends on a duet line leaves the reader on the right-hand side.
     // Mirror the credits so the next thing they look at is already in view,
     // instead of a full-width block they have to travel back left for.
-    if (alignRight) footer.classList.add("align-right");
+    if (baseAlignRight) footer.classList.add("align-right");
+    // Lyricsfile metadata names the performing artist, not the writers. It gets
+    // its own label so it can never be mistaken for a songwriting credit.
+    const lyricsfileArtist = typeof currentLyricsfileArtist === "string"
+      ? currentLyricsfileArtist.trim()
+      : "";
+    if (lyricsfileArtist) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-artist" });
+      box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Artist" }));
+      const namesEl = h("div", { class: "ym-sl-credits-names" });
+      namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: lyricsfileArtist }));
+      box.appendChild(namesEl);
+      footer.appendChild(box);
+    }
     if (names && names.length) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-writers" });
       box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written by" }));
@@ -19575,25 +23000,30 @@
     if (currentProvider) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-provider" });
       box.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
+      const submitted = formatCreditDate(currentUploader && currentUploader.createdAt);
+      if (submitted && hasWriters) {
+        box.appendChild(h("span", { class: "ym-sl-provider-date", text: submitted }));
+      }
       footer.appendChild(box);
+      if (submitted && !hasWriters) {
+        footer.appendChild(h("span", { class: "ym-sl-provider-date", text: submitted }));
+      }
     }
     // Uploader and maker share the people group: they are one credit (who put
     // this here), not two separate rows pretending to be different sources.
     if (currentUploader || currentMaker) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-people" });
-      if (currentUploader) {
-        // A self-upload collapses the uploader and maker rows. Carry the maker's
-        // profile URL into the surviving row so the credit is still clickable.
-        const uploader = isSameCreditPerson(currentMaker, currentUploader)
-          ? Object.assign({}, currentUploader, {
-              url: currentUploader.url || currentMaker.url,
-            })
-          : currentUploader;
-        box.appendChild(buildPersonRow("Uploaded by", uploader));
-      }
+      // A self-upload collapses the uploader and maker rows. Carry the maker's
+      // profile URL into the surviving row so the credit is still clickable.
+      const uploader = currentUploader && isSameCreditPerson(currentMaker, currentUploader)
+        ? Object.assign({}, currentUploader, {
+            url: currentUploader.url || currentMaker.url,
+          })
+        : currentUploader;
       if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
         box.appendChild(buildPersonRow("Made by", currentMaker));
       }
+      if (uploader) box.appendChild(buildPersonRow("Uploaded by", uploader));
       footer.appendChild(box);
     }
     return footer;
@@ -19603,6 +23033,8 @@
   // plain text and never conditional on a person existing. A link is the
   // strongest form of that credit: it lets the user check the source.
   const PROVIDER_URLS = {
+    "Spicy Lyrics": "https://spicylyrics.org/",
+    "Unison": "https://unison.boidu.dev/",
     "LRCLIB": "https://lrclib.net/",
   };
   // Sources whose timing is machine-aligned rather than hand-synced get the
@@ -19615,8 +23047,10 @@
   // extension origin without a network request. SCRIPT_URL is the injected
   // script's own URL; the files sit next to it in src/extensions.
   const PROVIDER_ICON_FILES = {
-    "Apple Music": "provider-apple-music.svg",
+    "Apple Music": "provider-apple-music.png",
     "Spicy Lyrics": "provider-spicy-lyrics.png",
+    "Unison": "provider-unison.svg",
+    "Aurora Community": "provider-aurora.png",
     "LRCLIB": "provider-lrclib.png",
   };
   function buildProviderIcon(provider) {
@@ -19721,11 +23155,33 @@
     return svg;
   }
 
+  // Unison's createdAt is Unix seconds; accept milliseconds too so a future
+  // source can hand us either without silently dropping the date.
+  function formatCreditDate(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    const date = new Date(seconds > 1e12 ? seconds : seconds * 1000);
+    if (Number.isNaN(date.getTime())) return "";
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(date);
+    } catch (e) {
+      return "";
+    }
+  }
+
   // "<label> <avatar> <username>" — the whole pill links when the source
   // supplied a profile URL; otherwise it stays plain text so it never looks like
   // a dead link.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
+    const level = Number(uploader && uploader.level);
+    const hasLevel = Number.isFinite(level) && level > 0;
+    if (hasLevel) row.setAttribute("data-level", String(level));
+    if (!uploader || !uploader.avatar) row.classList.add("ym-sl-uploader--no-avatar");
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
 
     const link = h("a", {
@@ -19737,7 +23193,7 @@
       // validated as http(s) at parse time (parseSpicyLyrics attribution).
       target: "_blank",
       rel: "noopener noreferrer",
-      title: uploader.url ? `Open ${uploader.username || "maker"}'s Aurora profile` : "",
+      title: uploader.url ? `Open ${uploader.username || "maker"}'s ${uploader.profileLabel || "Aurora"} profile` : "",
     });
     if (uploader.url) link.href = uploader.url;
 
@@ -19747,7 +23203,10 @@
       img.loading = "lazy";
       img.referrerPolicy = "no-referrer";
       // A dead/blocked avatar must not leave a broken-image glyph in the panel.
-      img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+      img.addEventListener("error", () => {
+        try { img.remove(); } catch (e) {}
+        row.classList.add("ym-sl-uploader--no-avatar");
+      });
       link.appendChild(img);
     }
     link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));
@@ -19931,12 +23390,20 @@
           username: currentUploader.username || "",
           avatar: currentUploader.avatar || "",
           url: currentUploader.url || "",
+          creditLabel: currentUploader.creditLabel || "",
+          profileLabel: currentUploader.profileLabel || "",
+          level: currentUploader.level || 0,
+          createdAt: currentUploader.createdAt || 0,
         } : null,
         maker: currentMaker ? {
           id: currentMaker.id || "",
           username: currentMaker.username || "",
           avatar: currentMaker.avatar || "",
           url: currentMaker.url || "",
+          creditLabel: currentMaker.creditLabel || "",
+          profileLabel: currentMaker.profileLabel || "",
+          level: currentMaker.level || 0,
+          createdAt: currentMaker.createdAt || 0,
         } : null,
       },
     });
@@ -19977,6 +23444,7 @@
 
   function buildRendererLines(content) {
     lastRendererContent = content;
+    syncWordSyncQualityNotice();
     // Build the translation plan before the first line exists, so every line
     // finds its slot. Translations arrive later and fill those slots in place.
     // The async work is deliberately detached: a translation failure must never
@@ -19984,11 +23452,6 @@
     autoTranslateBegin(content).catch(() => {});
     publishLyricLines(content);
     stopScrollGlide();
-    // New song -> the old song's end-of-track credits reveal must not own the
-    // scroll. Its latches survive a rebuild otherwise, and a stale end-of-song
-    // position in the frames around the switch re-arms it, dragging the freshly
-    // recentred panel to the BOTTOM of the new song (AJ, 2026-10-02).
-    cancelCreditsReveal();
     lastScrollTargetLine = -1;
     modelLines = [];
     lineElements = [];
@@ -20146,21 +23609,16 @@
 
     // The provider counts on its own: a non-community source (apple_music,
     // spotify) has no credited people, and the provider must still be shown.
-    if (currentSongwriters.length || currentProvider || currentUploader || currentMaker) {
-      creditsFooterEl = buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content));
-      linesRoot.appendChild(creditsFooterEl);
-    } else {
-      creditsFooterEl = null;
+    if (currentSongwriters.length || currentLyricsfileArtist || currentProvider || currentUploader || currentMaker) {
+      linesRoot.appendChild(buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content)));
     }
     // The Hits header mirrors this attribution; refresh it now rather than
     // waiting for the next 500ms tick.
     if (fsHits) syncFsHitsCredits();
-    // A new track invalidates any in-progress credits reveal: position is about to
-    // reset to ~0, so updateCreditsReveal() would clear the latches anyway, but
-    // doing it here avoids a one-frame flash of the previous song parked at bottom.
-    creditsRevealEngaged = false;
-    creditsRevealActive = false;
-    creditsRevealDismissed = false;
+    // The offset panel's sharing controls depend on this provider. It is only
+    // known once the lyrics land, so hide/show Post offset immediately instead
+    // of waiting for the user to move the slider.
+    renderCommunityOffsetUI();
 
     // Re-apply the pause sync marker: the line elements were just rebuilt, so any
     // class on the old nodes is gone.
@@ -20920,10 +24378,10 @@
       ? Math.max(0, positionMs - offsetForPosition)
       : positionMs;
     // Repeat one (or any real backwards seek) rewinds the song under the panel.
-    // At the end of a track the scroll is pinned to the credits, and the next
+    // At the end of a track the scroll sits on the final lines, and the next
     // pass has NO active line until the first lyric starts, so the normal
-    // line-follow retarget has nothing to aim at — the panel used to sit on the
-    // credits for the whole intro and then sweep the entire song height once
+    // line-follow retarget has nothing to aim at — the panel used to sit at the
+    // bottom for the whole intro and then sweep the entire song height once
     // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
     if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
       restartPlayheadScroll(lyricPositionMs);
@@ -20980,13 +24438,7 @@
     // would be correct for one frame only. It also outranks the lead-line target:
     // while the panel is being re-placed we want the line the user is HEARING,
     // not the one early scroll is aiming at.
-    // QOL #1: when a synced track reaches its final line, the credits reveal owns
-    // the scroll target (gliding to the bottom). While it is active, skip the
-    // normal line-follow retarget so the two do not fight.
-    const creditsReveal = updateCreditsReveal(positionMs, activeIndex, lyricPositionMs);
-    if (creditsReveal) {
-      // credits reveal owns the scroll target this frame
-    } else if (recentreUntilMs > now) {
+    if (recentreUntilMs > now) {
       recentreActiveLineNow();
       lastScrollTargetLine = lastActiveLine;
     } else if (scrollIndex !== lastScrollTargetLine) {
@@ -21486,9 +24938,9 @@
       // at most once per edit session, never on every drag nudge (AJ, 2026-10-19).
       const prevOrder = Array.isArray(currentSettings.sourceOrder)
         ? currentSettings.sourceOrder.join(",") : "";
-      const nextOrder = data.settings && Array.isArray(data.settings.sourceOrder)
-        ? data.settings.sourceOrder.join(",") : prevOrder;
       applySettings(data.settings);
+      const nextOrder = Array.isArray(currentSettings.sourceOrder)
+        ? currentSettings.sourceOrder.join(",") : "";
       if (nextOrder !== prevOrder) reresolveCurrentTrackLyrics();
       return;
     }
@@ -21626,6 +25078,11 @@
     lineElements = [];
     scrollCandidateIndices = [];
     lrclibCache.clear();
+    if (prefetchAbort) {
+      prefetchAbort.abort();
+      prefetchAbort = null;
+    }
+    prefetchedLyrics.clear();
     // The Spicy Lyrics cache lives in chrome.storage, so it outlives teardown.
     // Only the in-memory mirror and its pending writes are page-lifetime state:
     // flush anything queued, then drop the mirror so the next enable re-reads.
@@ -21655,6 +25112,18 @@
       manualScrollReturnTimer = 0;
     }
     currentSongwriters = [];
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
+    if (wordSyncQualityNoticeFadeTimer) {
+      clearTimeout(wordSyncQualityNoticeFadeTimer);
+      wordSyncQualityNoticeFadeTimer = 0;
+    }
+    if (wordSyncQualityNoticeHideTimer) {
+      clearTimeout(wordSyncQualityNoticeHideTimer);
+      wordSyncQualityNoticeHideTimer = 0;
+    }
+    wordSyncQualityNoticeShownFor = "";
+    wordSyncQualityNoticeEl = null;
     panelVisible = false;
     adBreakActive = false;
     adBreakLyricsState = "idle";
@@ -22429,6 +25898,15 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 }
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-uploader + .ym-sl-uploader {
   margin-top: 0 !important;
+}
+/* The shared compact rail sets a 12/14 padding, but this host's credit rule
+   above pins the roomy 16/20 values with !important. Restore the compact card
+   geometry while the engine owns the footnotes. */
+@container ym-sl-credit-rail (max-width: 600px) {
+  #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) {
+    margin: 32px 0 16px !important;
+    padding: 12px 14px !important;
+  }
 }
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {

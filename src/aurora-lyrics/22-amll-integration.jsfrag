@@ -749,6 +749,15 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) .ym-sl-uploader + .ym-sl-uploader {
   margin-top: 0 !important;
 }
+/* The shared compact rail sets a 12/14 padding, but this host's credit rule
+   above pins the roomy 16/20 values with !important. Restore the compact card
+   geometry while the engine owns the footnotes. */
+@container ym-sl-credit-rail (max-width: 600px) {
+  #ym-sl-amll-host :is(.FmKaba_bottomLine .ym-sl-credits, .ym-sl-credits) {
+    margin: 32px 0 16px !important;
+    padding: 12px 14px !important;
+  }
+}
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricMainLine,
 #ym-sl-amll-host .FmKaba_bottomLine .FmKaba_lyricSubLine {
   margin: 0 !important;

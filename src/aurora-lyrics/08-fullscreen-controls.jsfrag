@@ -779,12 +779,12 @@
 
   function fsHitsSyncLabel() {
     if (staticLyricsActive) return "Static";
-    if (currentLyricsIsTTML) {
-      const wordTimed = modelLines.some((line) => line && !line.DotLine &&
-        line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
-      return wordTimed ? "Syllable" : "Line synced";
-    }
-    return "Line synced";
+    // Word-level timing is no longer TTML-only: LRCLIB's Lyricsfile and Unison
+    // LRC can both produce multiple syllables per line. The model is the source
+    // of truth here, regardless of which provider supplied it.
+    const wordTimed = modelLines.some((line) => line && !line.DotLine &&
+      line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
+    return wordTimed ? "Syllable" : "Line synced";
   }
 
   function fsHitsLineText(line) {
@@ -822,7 +822,7 @@
 
   function fsHitsPersonKey(person) {
     return person
-      ? [person.id || "", person.username || "", person.avatar || "", person.url || ""].join("~")
+      ? [person.id || "", person.username || "", person.avatar || "", person.url || "", person.creditLabel || ""].join("~")
       : "";
   }
 
@@ -835,12 +835,12 @@
     // the fullscreen writer line live from the same credit state.
     syncFsHitsChips(false);
     syncFsTitleWriters();
-    const names = Array.isArray(currentSongwriters) ? currentSongwriters : [];
+    const names = fullscreenSongwriters();
     const hasCredits = !!(names.length || currentProvider || currentUploader || currentMaker);
     const clear = () => {
       fsHits.creditsKey = "";
       fsHits.writers.textContent = "";
-      fsHits.writers.classList.remove("has-writers");
+      fsHits.writers.classList.remove("has-writers", "is-writers-in");
       fsHits.bylineRow.classList.remove("has-writers");
       fsHits.people.replaceChildren();
       fsOverlay.classList.remove("ym-sl-fs-hits-has-credits");
@@ -869,9 +869,18 @@
       // Writers are inline after the byline: names only, no label and no box.
       const writerNames = footer.querySelector(".ym-sl-credit-writers .ym-sl-credits-names");
       const writerText = writerNames ? writerNames.textContent.trim() : "";
+      const writerChanged = fsHits.writers.textContent !== writerText;
       fsHits.writers.textContent = writerText;
       fsHits.writers.classList.toggle("has-writers", !!writerText);
       fsHits.bylineRow.classList.toggle("has-writers", !!writerText);
+      if (writerChanged) {
+        fsHits.writers.classList.remove("is-writers-in");
+        if (writerText) {
+          fsFullscreenWritersSourceRef = names;
+          void fsHits.writers.offsetWidth;
+          fsHits.writers.classList.add("is-writers-in");
+        }
+      }
       fsHits.creditsKey = key;
       fsOverlay.classList.add("ym-sl-fs-hits-has-credits");
     } catch (_) {

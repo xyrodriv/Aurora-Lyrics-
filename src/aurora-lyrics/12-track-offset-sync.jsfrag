@@ -29,6 +29,71 @@
     return [track.artist || "", track.title].join("::").toLowerCase();
   }
 
+  // The website bridge sends only the signed-in maker's public name/avatar,
+  // plus the public profile URL. This is display data for the offset form, not
+  // the website session token.
+  const DISCORD_AVATAR_ID_RE = /^https:\/\/cdn\.discordapp\.com\/avatars\/(\d{6,32})\//i;
+
+  function normalizeMakerProfileUrl(value) {
+    if (typeof value !== "string") return "";
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+      if (url.pathname !== "/community" && url.pathname !== "/community/") return "";
+      if (!url.searchParams.get("maker")) return "";
+      return url.href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // Identities stored before profileUrl existed still carry the Discord user
+  // id inside the avatar path. Recover it so existing makers get the link
+  // without having to visit the website again.
+  function makerProfileFromAvatar(avatar) {
+    const match = DISCORD_AVATAR_ID_RE.exec(avatar || "");
+    if (!match) return "";
+    try {
+      return new URL(`/community?maker=${encodeURIComponent(match[1])}`, AURORA_PROFILE_ORIGIN).href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function normalizeCommunityOffsetIdentity(value) {
+    if (!value || typeof value !== "object") return null;
+    const username = typeof value.username === "string"
+      ? value.username.trim().slice(0, 24)
+      : "";
+    if (!username) return null;
+    const avatar = typeof value.avatar === "string" &&
+      /^https:\/\/cdn\.discordapp\.com\//i.test(value.avatar)
+      ? value.avatar
+      : "";
+    const profileUrl = normalizeMakerProfileUrl(value.profileUrl) || makerProfileFromAvatar(avatar);
+    return { username, avatar, profileUrl };
+  }
+
+  function applyCommunityOffsetIdentity(value) {
+    communityOffsetIdentity = normalizeCommunityOffsetIdentity(value);
+    renderCommunityOffsetUI();
+  }
+
+  function attachCommunityOffsetIdentityListener() {
+    if (communityOffsetIdentityListenerAttached) return;
+    communityOffsetIdentityListenerAttached = true;
+    window.addEventListener("message", (event) => {
+      if (event.origin !== location.origin) return;
+      const data = event.data;
+      if (!data || data.source !== "aurora-maker-identity") return;
+      applyCommunityOffsetIdentity(data.identity);
+    });
+    // The content script may have started before this page script; ask once,
+    // and the content script also announces the stored value on startup.
+    window.postMessage({ type: "aurora-maker-identity-request" }, location.origin);
+  }
+  attachCommunityOffsetIdentityListener();
+
   const OFFSET_STORAGE_KEY = "better_lyrics_offsets_v2";
   const VIDEO_OFFSET_STORAGE_KEY = "better_lyrics_video_offsets_v1"; // legacy, migrated on load
   const VIDEO_OFFSET_LIMIT = 100;
@@ -336,15 +401,68 @@
     return { response, body };
   }
 
+  function paintCommunityOffsetIdentity() {
+    if (!communityOffsetAccount || !communityOffsetAccountAvatar || !communityOffsetAccountName) return;
+    const identity = communityOffsetIdentity;
+    if (!identity) return;
+    communityOffsetAccountName.textContent = identity.username;
+    const profileUrl = identity.profileUrl || "";
+    if (profileUrl) {
+      communityOffsetAccount.href = profileUrl;
+      communityOffsetAccount.target = "_blank";
+      communityOffsetAccount.rel = "noopener noreferrer";
+      communityOffsetAccount.title = `Open ${identity.username}'s Aurora profile`;
+    } else {
+      communityOffsetAccount.removeAttribute("href");
+      communityOffsetAccount.removeAttribute("target");
+      communityOffsetAccount.removeAttribute("rel");
+      communityOffsetAccount.removeAttribute("title");
+    }
+    communityOffsetAccount.setAttribute(
+      "aria-label",
+      "Posting as " + identity.username + ", Aurora maker" +
+        (profileUrl ? " — open profile" : "")
+    );
+    const avatar = identity.avatar || "";
+    const avatarKey = identity.username + "|" + avatar;
+    if (communityOffsetAccountAvatar.dataset.identity === avatarKey) return;
+    communityOffsetAccountAvatar.dataset.identity = avatarKey;
+    communityOffsetAccountAvatar.replaceChildren();
+    const initial = document.createElement("span");
+    initial.className = "ym-sl-community-offset-initial";
+    initial.textContent = identity.username.charAt(0).toUpperCase() || "?";
+    communityOffsetAccountAvatar.append(initial);
+    if (!avatar) return;
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.referrerPolicy = "no-referrer";
+    image.addEventListener("load", () => { initial.hidden = true; }, { once: true });
+    image.addEventListener("error", () => {
+      image.remove();
+      initial.hidden = false;
+    }, { once: true });
+    image.src = avatar;
+    communityOffsetAccountAvatar.append(image);
+  }
+
   function renderCommunityOffsetUI() {
     if (!communityOffsetStatus || !communityOffsetPostButton) return;
+    paintCommunityOffsetIdentity();
     const track = getCurrentTrack();
     const key = currentTrackKey || getTrackKey(track);
     const videoId = track && typeof track.videoId === "string" ? track.videoId : "";
     const loaded = !!key && communityOffsetTrackKey === key;
     const offset = loaded ? communityOffsetData[activeOffsetMode] : null;
     const owner = !!(offset && communityOffsetTokens[offset.id]);
+    const identity = communityOffsetIdentity;
     const busy = communityOffsetBusy;
+    // Aurora Community lyrics are the canonical shared timing for the track.
+    // A second public offset would compete with them, so this provider can keep
+    // local slider edits but cannot upload. Undo/report stay available when an
+    // older shared offset is already on screen.
+    const localOnly = currentProvider === "Aurora Community";
     const show = (el, visible) => { if (el) el.classList.toggle("hidden", !visible); };
     const statusText = communityOffsetNotice || "";
     const setStatus = (fallback, state) => {
@@ -359,6 +477,7 @@
     communityOffsetName.disabled = busy;
 
     if (!track || !key) {
+      show(communityOffsetAccount, false);
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, false);
@@ -368,6 +487,7 @@
     }
 
     if (!videoId) {
+      show(communityOffsetAccount, false);
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, false);
@@ -385,6 +505,8 @@
         text += " · using " + formatOffset(localMs) + " locally";
       }
       setStatus(text, owner ? "owned" : "shared");
+      // Keep the account row next to an offset this maker posted from here.
+      show(communityOffsetAccount, !!(identity && owner && identity.username === offset.username));
       show(communityOffsetName, false);
       show(communityOffsetPostButton, false);
       show(communityOffsetUndoButton, owner);
@@ -393,16 +515,33 @@
     }
 
     if (communityOffsetLoading) {
-      show(communityOffsetName, true);
-      show(communityOffsetPostButton, true);
+      show(communityOffsetAccount, !localOnly && !!identity);
+      show(communityOffsetName, !localOnly && !identity);
+      show(communityOffsetPostButton, !localOnly);
       show(communityOffsetUndoButton, false);
       show(communityOffsetReportButton, false);
       communityOffsetPostButton.disabled = true;
-      setStatus("Checking for a shared offset…", "none");
+      setStatus(
+        localOnly
+          ? "Aurora Community lyrics use local-only offsets."
+          : "Checking for a shared offset…",
+        "none"
+      );
       return;
     }
 
-    show(communityOffsetName, true);
+    if (localOnly) {
+      show(communityOffsetAccount, false);
+      show(communityOffsetName, false);
+      show(communityOffsetPostButton, false);
+      show(communityOffsetUndoButton, false);
+      show(communityOffsetReportButton, false);
+      setStatus("Aurora Community lyrics use local offsets. Uploading is disabled for this track.", "none");
+      return;
+    }
+
+    show(communityOffsetAccount, !!identity);
+    show(communityOffsetName, !identity);
     show(communityOffsetPostButton, true);
     show(communityOffsetUndoButton, false);
     show(communityOffsetReportButton, false);
@@ -446,6 +585,7 @@
     renderCommunityOffsetUI();
     if (!videoId) return;
     const url = AURORA_COMMUNITY_API + "/v1/offset?v=" + encodeURIComponent(videoId);
+    alLog(`checking shared offset for ${videoId}…`);
     communityOffsetRequest(url).then(({ response, body }) => {
       if (requestId !== communityOffsetRequestSeq) return;
       if (key !== communityOffsetTrackKey) return;
@@ -453,10 +593,14 @@
       communityOffsetLoading = false;
       if (!response.ok || !body || !body.ok) {
         communityOffsetLoadError = true;
+        const detail = body && body.error ? ` (${body.error})` : "";
+        alWarn(`shared offset check failed for ${videoId}: HTTP ${response.status}${detail}.`, url);
         renderCommunityOffsetUI();
         return;
       }
       const offsets = body.data && body.data.offsets;
+      const sharedCount = (offsets && offsets.video ? 1 : 0) + (offsets && offsets.song ? 1 : 0);
+      alLog(`shared offset check for ${videoId}: ${sharedCount ? `${sharedCount} shared offset${sharedCount === 1 ? "" : "s"} found.` : "none found."}`);
       communityOffsetData = {
         video: offsets && offsets.video ? offsets.video : null,
         song: offsets && offsets.song ? offsets.song : null,
@@ -469,13 +613,22 @@
       if (requestId !== communityOffsetRequestSeq) return;
       communityOffsetLoading = false;
       communityOffsetLoadError = true;
-      alWarn("community offset lookup failed:", error && error.message);
+      alWarn(
+        `shared offset check failed for ${videoId}: ${error && error.name ? error.name + " — " : ""}${error && error.message ? error.message : error}`,
+        url
+      );
       renderCommunityOffsetUI();
     });
   }
 
   async function postCommunityOffset() {
     if (communityOffsetBusy) return;
+    if (currentProvider === "Aurora Community") {
+      communityOffsetNotice = "Aurora Community lyrics use local-only offsets.";
+      communityOffsetNoticeError = false;
+      renderCommunityOffsetUI();
+      return;
+    }
     const track = getCurrentTrack();
     const key = currentTrackKey || getTrackKey(track);
     if (!track || !track.videoId || !key) {
@@ -498,7 +651,9 @@
       renderCommunityOffsetUI();
       return;
     }
-    const username = communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "";
+    const username = communityOffsetIdentity && communityOffsetIdentity.username
+      ? communityOffsetIdentity.username
+      : (communityOffsetName ? communityOffsetName.value.trim().slice(0, 24) : "");
     communityOffsetBusy = true;
     communityOffsetNotice = "";
     communityOffsetNoticeError = false;
@@ -1008,6 +1163,9 @@
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
     lyricsSkeletonShown = false;
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
+    syncWordSyncQualityNotice();
     stopScrollGlide();
     lastScrollTargetLine = -1;
     // NOTE: the `offline` class is NOT touched here. It is a layout switch

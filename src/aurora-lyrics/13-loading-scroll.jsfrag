@@ -150,10 +150,6 @@
 
   function handleManualScrollIntent() {
     if (!lineScrollEl) return;
-    // QOL #1: a manual scroll during the end-of-track reveal dismisses it so the
-    // panel does not yank back down to the credits while the user is browsing.
-    creditsRevealDismissed = true;
-    creditsRevealActive = false;
     // The user has taken the scroll. Kill the spring outright rather than
     // retargeting: a spring still holding a target would keep pulling against
     // their wheel/touch input, which reads as the panel fighting them.
@@ -534,16 +530,15 @@
      seek longer than PLAYHEAD_JUMP_MS) needs the same handling as (1) above,
      and for the same reason: the scroll is stale relative to the playhead.
 
-     At the end of a track the scroll is pinned to the credits, and on the next
+     At the end of a track the scroll sits on the final lines, and on the next
      pass there is no active line at all until the first lyric starts - so the
-     normal line-follow retarget has nothing to aim at and the panel sat on the
-     credits for the whole intro, then glided the entire song height in one
+     normal line-follow retarget has nothing to aim at and the panel sat at the
+     bottom for the whole intro, then glided the entire song height in one
      sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
      Place it NOW, on the line the new position belongs to (the first line when
      the pass starts in an intro), and do not animate: the user did not scroll,
      the track restarted. */
   function restartPlayheadScroll(lyricPositionMs) {
-    cancelCreditsReveal();
     lastScrollTargetLine = -1;
     // A restart is a new pass through the song, so the manual-browse state and
     // its "Jump to current" button do not survive it.
@@ -559,69 +554,6 @@
     if (!element) return;
     pendingInstantScroll = true;
     scrollActiveLineIntoView(element, true);
-  }
-
-  // QOL #1 (2026-09-28): reveal the credits block when a SYNCHRONISED track hits
-  // its tail. Returns true while the reveal owns the scroll target this frame, so
-  // animate() can skip the normal line-follow retarget and let the credits glide
-  // into view (spring if smoothScrolling is on, else the element's CSS ease).
-  function updateCreditsReveal(positionMs, activeIndex, lyricPositionMs) {
-    // Static lyrics already scroll to the bottom on their own via
-    // driveStaticAutoScroll; pause-pick mode owns the scroll too; and we need a
-    // credits footer and a live scroll container to do anything at all.
-    if (staticLyricsActive || pausePickMode || !creditsFooterEl || !lineScrollEl) {
-      if (!creditsFooterEl) creditsRevealActive = false;
-      return false;
-    }
-    // Hits keeps attribution in the header for both renderers, and the footer
-    // under the last line is hidden there. Do not let that hidden footer drag
-    // the lyrics down at the end of the track.
-    if (fsActive && fsOverlay &&
-        fsOverlay.classList.contains("ym-sl-fs-mode-hits") &&
-        fsOverlay.classList.contains("ym-sl-fs-hits-has-credits")) {
-      creditsRevealEngaged = false;
-      creditsRevealActive = false;
-      return false;
-    }
-    // Reveal when the FINAL line has just FINISHED (its EndTime has passed), not
-    // when it starts being sung — so the credits glide in right as the last lyric
-    // completes. nearEnd is a fallback for the rare case there are credits but no
-    // lyric lines (provider-only), where EndTime compares are meaningless.
-    const lastLine = modelLines.length ? modelLines[modelLines.length - 1] : null;
-    const player = window.YTMod && window.YTMod.player;
-    const durationMs = player && typeof player.getDurationMs === "function"
-      ? Number(player.getDurationMs())
-      : 0;
-    // `finalLineEnded` alone is not safe: in the frames around a track change the
-    // position can still be the PREVIOUS song's end while modelLines already
-    // belongs to the new one, which makes 0 >= anything false but
-    // stalePosition >= newLastLine.EndTime true -- and the reveal then drags the
-    // freshly recentred panel to the bottom of the new song. Require the position
-    // to also be inside the CURRENT song before trusting it (AJ, 2026-10-02).
-    const positionWithinSong = durationMs <= 0 || positionMs <= durationMs + 2000;
-    const finalLineEnded = !!lastLine && positionWithinSong && lyricPositionMs >= lastLine.EndTime;
-    const nearEnd = durationMs > 0 && (durationMs - positionMs) <= CREDITS_REVEAL_MS;
-    if (!finalLineEnded && !nearEnd) {
-      // Left the end zone (new track, seek back, or ended-and-advanced): release
-      // the latches so the reveal can fire again next time the track reaches its
-      // tail. The normal line-follow retarget resumes on the next frame.
-      creditsRevealEngaged = false;
-      creditsRevealDismissed = false;
-      creditsRevealActive = false;
-      return false;
-    }
-    if (creditsRevealDismissed) return false; // user took over -> stay out
-    creditsRevealEngaged = true;
-    creditsRevealActive = true;
-    const maxScrollTop = Math.max(0, lineScrollEl.scrollHeight - lineScrollEl.clientHeight);
-    setScrollTarget(maxScrollTop, false);
-    return true;
-  }
-
-  function cancelCreditsReveal() {
-    creditsRevealEngaged = false;
-    creditsRevealDismissed = false;
-    creditsRevealActive = false;
   }
 
   // Smoothly follow playback with the native scroll position for static
@@ -646,6 +578,324 @@
 
   function parseLrcTimestamp(minutes, seconds) {
     return parseInt(minutes, 10) * 60 + parseFloat(seconds);
+  }
+
+  /* ---- Lyricsfile (LRCLIB word sync) -------------------------------------
+     LRCLIB now returns `lyricsfile`: a small YAML document whose lines may
+     carry `words: [{ text, start_ms, end_ms? }]`. It is not TTML, but it maps
+     cleanly onto the same parsed-line model parseLRC/parseTTML produce, so the
+     renderer does not need a second engine.
+
+     This is intentionally a constrained parser, not a general YAML library:
+     LRCLIB's file uses only mappings, sequences, strings, integers, booleans
+     and the literal `plain` block. Unknown top-level keys are ignored, and
+     malformed entries are skipped rather than aborting the whole track. */
+
+  function yamlUnquote(raw) {
+    const value = String(raw == null ? "" : raw).trim();
+    if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") {
+      return value.slice(1, -1).replace(/''/g, "'");
+    }
+    if (value.length >= 2 && value[0] === '"' && value[value.length - 1] === '"') {
+      try { return JSON.parse(value); } catch (_) {}
+      return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    }
+    return value;
+  }
+
+  function yamlScalar(raw) {
+    const value = String(raw == null ? "" : raw).trim();
+    if (!value || value === "~" || /^null$/i.test(value)) return null;
+    if (/^(true|false)$/i.test(value)) return /^true$/i.test(value);
+    if (/^-?(?:0|[1-9]\d*)$/.test(value)) return Number(value);
+    if (/^-?(?:\d+\.\d*|\.\d+)$/.test(value)) return Number(value);
+    return yamlUnquote(value);
+  }
+
+  function yamlKeyValue(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return null;
+    let quote = "";
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (quote === '"' && ch === "\\" && !escaped) {
+          escaped = true;
+          continue;
+        }
+        if (ch === quote && !escaped) quote = "";
+        escaped = false;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch === ":") {
+        return { key: text.slice(0, i).trim(), value: text.slice(i + 1).trim() };
+      }
+    }
+    return null;
+  }
+
+  function applyYamlLyricsField(target, raw) {
+    const kv = yamlKeyValue(raw);
+    if (!kv || !target) return;
+    if (kv.key === "text") {
+      target.text = String(yamlScalar(kv.value) == null ? "" : yamlScalar(kv.value));
+    } else if (kv.key === "start_ms" || kv.key === "end_ms") {
+      const scalar = yamlScalar(kv.value);
+      const value = Number(scalar);
+      if (scalar !== null && scalar !== "" && Number.isFinite(value)) target[kv.key] = value;
+    }
+  }
+
+  function parseLyricsfileLines(rows, start) {
+    const lines = [];
+    let currentLine = null;
+    let currentWord = null;
+    let lineIndent = null;
+    let inWords = false;
+    let i = start;
+
+    for (; i < rows.length; i++) {
+      const raw = rows[i];
+      if (!raw.trim() || /^\s*#/.test(raw)) continue;
+      const indent = raw.match(/^ */)[0].length;
+      const trimmed = raw.slice(indent);
+      if (indent === 0 && !trimmed.startsWith("-")) break;
+      if (lineIndent == null) {
+        if (!trimmed.startsWith("-")) break;
+        lineIndent = indent;
+      }
+      if (indent < lineIndent) break;
+
+      if (indent === lineIndent && trimmed.startsWith("-")) {
+        currentLine = { text: "", start_ms: null, end_ms: null, words: [] };
+        lines.push(currentLine);
+        currentWord = null;
+        inWords = false;
+        const rest = trimmed.slice(1).trim();
+        if (rest) applyYamlLyricsField(currentLine, rest);
+        continue;
+      }
+      if (!currentLine) continue;
+
+      if (/^words:\s*$/.test(trimmed)) {
+        inWords = true;
+        currentWord = null;
+        continue;
+      }
+      if (inWords && trimmed.startsWith("-")) {
+        currentWord = { text: "", start_ms: null, end_ms: null };
+        currentLine.words.push(currentWord);
+        const rest = trimmed.slice(1).trim();
+        if (rest) applyYamlLyricsField(currentWord, rest);
+        continue;
+      }
+      if (inWords) {
+        if (currentWord) applyYamlLyricsField(currentWord, trimmed);
+      } else {
+        applyYamlLyricsField(currentLine, trimmed);
+      }
+    }
+    return { lines, next: i };
+  }
+
+  function parseLyricsfilePlain(rows, start, marker) {
+    const parts = [];
+    let baseIndent = null;
+    let i = start;
+    for (; i < rows.length; i++) {
+      const raw = rows[i];
+      if (!raw.trim()) {
+        parts.push("");
+        continue;
+      }
+      const indent = raw.match(/^ */)[0].length;
+      if (indent === 0) break;
+      if (baseIndent == null) baseIndent = indent;
+      if (indent < baseIndent) break;
+      parts.push(raw.slice(baseIndent));
+    }
+    let text = parts.join("\n");
+    if (String(marker || "").trim().startsWith("|")) text = text.replace(/\n+$/, "");
+    return { text, next: i };
+  }
+
+  function parseLyricsfileDocument(yaml) {
+    const rows = String(yaml || "")
+      .replace(/^\uFEFF/, "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n");
+    const doc = { version: "", metadata: {}, lines: [], plain: "" };
+    let i = 0;
+    while (i < rows.length) {
+      const raw = rows[i];
+      if (!raw.trim() || /^\s*#/.test(raw)) { i++; continue; }
+      const indent = raw.match(/^ */)[0].length;
+      if (indent !== 0) { i++; continue; }
+      const kv = yamlKeyValue(raw.slice(indent));
+      if (!kv) { i++; continue; }
+      if (kv.key === "version") {
+        doc.version = String(yamlScalar(kv.value) == null ? "" : yamlScalar(kv.value));
+        i++;
+        continue;
+      }
+      if (kv.key === "metadata") {
+        i++;
+        while (i < rows.length) {
+          const row = rows[i];
+          if (!row.trim()) { i++; continue; }
+          const metaIndent = row.match(/^ */)[0].length;
+          if (metaIndent === 0) break;
+          const meta = yamlKeyValue(row.slice(metaIndent));
+          if (meta) doc.metadata[meta.key] = yamlScalar(meta.value);
+          i++;
+        }
+        continue;
+      }
+      if (kv.key === "lines") {
+        const parsed = parseLyricsfileLines(rows, i + 1);
+        doc.lines.push(...parsed.lines);
+        i = parsed.next;
+        continue;
+      }
+      if (kv.key === "plain") {
+        const parsed = parseLyricsfilePlain(rows, i + 1, kv.value);
+        doc.plain = parsed.text;
+        i = parsed.next;
+        continue;
+      }
+      i++;
+    }
+    return doc;
+  }
+
+  function lyricsfileArtistName(yaml) {
+    if (typeof yaml !== "string" || !yaml.trim()) return "";
+    const doc = parseLyricsfileDocument(yaml);
+    const artist = doc && doc.metadata ? doc.metadata.artist : "";
+    if (Array.isArray(artist)) {
+      return artist
+        .map((name) => String(name == null ? "" : name).trim())
+        .filter(Boolean)
+        .join(", ");
+    }
+    return typeof artist === "string" ? artist.trim() : "";
+  }
+
+  function parseLyricsfile(yaml, durationMs) {
+    const doc = parseLyricsfileDocument(yaml);
+    if (!doc || !Array.isArray(doc.lines) || !doc.lines.length) return null;
+    const durationSec = (Number(durationMs) || Number(doc.metadata.duration_ms) || 0) / 1000;
+    const lines = [];
+
+    for (const rawLine of doc.lines) {
+      if (!rawLine) continue;
+      let lineStartMs = rawLine.start_ms == null || rawLine.start_ms === ""
+        ? NaN
+        : Number(rawLine.start_ms);
+      if (!Number.isFinite(lineStartMs) || lineStartMs < 0) {
+        // The spec requires a line start, but a missing one should not discard
+        // otherwise usable word timings.
+        const firstWord = (rawLine.words || []).find((word) => {
+          if (!word || word.start_ms == null || word.start_ms === "") return false;
+          const start = Number(word.start_ms);
+          return Number.isFinite(start) && start >= 0;
+        });
+        if (!firstWord) continue;
+        lineStartMs = Number(firstWord.start_ms);
+      }
+      const start = lineStartMs / 1000;
+      const tokens = [];
+      for (const rawWord of (Array.isArray(rawLine.words) ? rawLine.words : [])) {
+        if (!rawWord) continue;
+        const rawText = String(rawWord.text == null ? "" : rawWord.text);
+        const text = rawText.trim();
+        const wordStartMs = rawWord.start_ms == null || rawWord.start_ms === ""
+          ? NaN
+          : Number(rawWord.start_ms);
+        if (!text || !Number.isFinite(wordStartMs) || wordStartMs < 0) continue;
+        const wordEndMs = rawWord.end_ms == null || rawWord.end_ms === ""
+          ? NaN
+          : Number(rawWord.end_ms);
+        tokens.push({
+          rawText,
+          text,
+          start: wordStartMs / 1000,
+          end: Number.isFinite(wordEndMs) ? wordEndMs / 1000 : 0,
+        });
+      }
+      const text = String(rawLine.text || "").trim() || tokens.map((token) => token.text).join(" ");
+      if (!text && !tokens.length) continue;
+      lines.push({ rawLine, text, start, tokens });
+    }
+    if (!lines.length) return null;
+    lines.sort((a, b) => a.start - b.start);
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const nextStart = lines[index + 1] ? lines[index + 1].start : 0;
+      const explicitEnd = Number(line.rawLine.end_ms) / 1000;
+      let end = Number.isFinite(explicitEnd) && explicitEnd > line.start
+        ? explicitEnd
+        : (nextStart > line.start ? nextStart : (durationSec > line.start ? durationSec : line.start + 4));
+
+      for (let tokenIndex = 0; tokenIndex < line.tokens.length; tokenIndex++) {
+        const token = line.tokens[tokenIndex];
+        const nextToken = line.tokens[tokenIndex + 1];
+        if (!token.end || token.end <= token.start) {
+          token.end = nextToken && nextToken.start > token.start ? nextToken.start : end;
+        }
+        token.end = Math.max(token.start + 0.01, token.end);
+        if (token.end > end) end = token.end;
+      }
+      if (end <= line.start) end = line.start + 4;
+
+      const words = line.tokens.map((token, tokenIndex) => {
+        const previous = line.tokens[tokenIndex - 1];
+        const next = line.tokens[tokenIndex + 1];
+        return {
+          text: token.text,
+          start: Math.max(line.start, token.start),
+          end: Math.max(line.start + 0.01, Math.min(end, token.end)),
+          timed: true,
+          hasSpaceBefore: !!previous && (/\s$/.test(previous.rawText) || /^\s/.test(token.rawText)),
+          isPartOfWord: !!next && !/\s$/.test(token.rawText) && !/^\s/.test(next.rawText),
+          disableLetterAnimation: false,
+        };
+      });
+      if (!words.length) {
+        words.push({
+          text: line.text,
+          start: line.start,
+          end,
+          timed: false,
+          hasSpaceBefore: false,
+          isPartOfWord: false,
+          disableLetterAnimation: true,
+        });
+      }
+      lines[index] = {
+        start: line.start,
+        end,
+        text: line.text,
+        words,
+        background: [],
+        lineTimed: !line.tokens.length,
+        timed: line.tokens.length > 0,
+        positioned: true,
+      };
+    }
+    return lines;
+  }
+
+  function lyricsfileHasTimedLines(data, durationMs) {
+    if (!data || typeof data.lyricsfile !== "string" || !data.lyricsfile.trim()) return false;
+    const ms = Number(durationMs) || Number(data.duration) * 1000;
+    try { return !!parseLyricsfile(data.lyricsfile, ms); } catch (_) { return false; }
   }
 
   function parseLRC(lrc, durationSeconds) {
@@ -763,6 +1013,8 @@
     const rawXml = String(xml || "");
     // Set again by the caller when this load IS the permanent save (15-prefetch).
     currentLyricsFromSavedTTML = false;
+    currentLyricsfileArtist = "";
+    currentWordSyncQualityWarning = false;
     let parsed = parseTTML(rawXml);
     if (!parsed.length) {
       staticLyricsActive = false;
@@ -820,17 +1072,43 @@
     return applied;
   }
 
-  function loadLRCLyrics(data, durationMs, provider = "LRCLIB") {
+  function loadLRCLyrics(data, durationMs, provider = "LRCLIB", attribution = null) {
     currentLyricsIsTTML = false;
     currentTTMLSource = "none";
     importedTTMLXml = "";
-    currentSongwriters = [];
-    currentUploader = null;
-    currentMaker = null;
+    currentLyricsfileArtist = lyricsfileArtistName(data && data.lyricsfile);
+    currentWordSyncQualityWarning = false;
+    currentSongwriters = attribution && Array.isArray(attribution.songwriters)
+      ? attribution.songwriters
+      : [];
+    currentUploader = attribution && attribution.uploader ? attribution.uploader : null;
+    currentMaker = attribution && attribution.maker ? attribution.maker : null;
     currentCommunityUploadId = "";
     currentCommunityUploadTest = false;
     currentProvider = typeof provider === "string" ? provider : "LRCLIB";
     autoScrollUserPaused = false;
+    // A word-synced LRCLIB record carries a Lyricsfile YAML document. Prefer it
+    // when the API says it has word-level timings; the line-only LRC path below
+    // remains the fallback if the YAML cannot be read. When there is no LRC at
+    // all, the Lyricsfile is also the only synchronized source available.
+    if (data && data.lyricsfile && (data.hasWordSync === true || !data.syncedLyrics)) {
+      const parsedLyricsfile = parseLyricsfile(data.lyricsfile, durationMs);
+      if (parsedLyricsfile && parsedLyricsfile.length) {
+        staticLyricsActive = false;
+        // The warning belongs to actual word-by-word timing, not to every
+        // Lyricsfile: a line-timed document is still line-synced and reads like
+        // any other line-synced lyric.
+        currentWordSyncQualityWarning = currentProvider === "LRCLIB" &&
+          parsedLyricsfile.some((line) => line && line.timed === true);
+        const applied = applyParsedLyrics(parsedLyricsfile);
+        adBreakNoteResult(applied ? "found" : "none", currentProvider);
+        setTTMLExportVisibility();
+        return applied;
+      }
+      if (data.hasWordSync === true) {
+        alWarn("LRCLIB Lyricsfile could not be parsed; falling back to LRC/plain lyrics.");
+      }
+    }
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
     // Synced lyrics always win when both are present (AJ, 2026-09-18).
@@ -857,6 +1135,90 @@
     return false;
   }
 
+  function unwrapUnisonResult(data) {
+    if (!data) return null;
+    if (data.success && data.data) return data.data;
+    return data.lyrics ? data : null;
+  }
+
+  function ttmlHasWordTiming(xml) {
+    const lineRe = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+    let line;
+    while ((line = lineRe.exec(String(xml || "")))) {
+      const timedSpans = line[1].match(/<span\b[^>]*\bbegin\s*=\s*["'][^"']+["']/gi);
+      if (timedSpans && timedSpans.length > 1) return true;
+    }
+    return false;
+  }
+
+  function unisonSubmitterCredit(data) {
+    const submitter = data && data.submitter;
+    if (!submitter || typeof submitter !== "object") return null;
+    const keyId = typeof submitter.keyId === "string" ? submitter.keyId.trim() : "";
+    const displayName = typeof submitter.displayName === "string" ? submitter.displayName.trim() : "";
+    if (!keyId && !displayName) return null;
+    const level = Number(submitter.level);
+    const createdAt = Number(data && data.createdAt);
+    return {
+      id: keyId,
+      // The public site uses the same short-key fallback for contributors who
+      // have not set a display name.
+      username: displayName || `${keyId.slice(0, 6)}…${keyId.slice(-6)}`,
+      avatar: typeof submitter.avatarUrl === "string" ? submitter.avatarUrl : "",
+      url: keyId ? `https://unison.boidu.dev/curator/${encodeURIComponent(keyId)}` : "",
+      creditLabel: "Submitted by",
+      profileLabel: "Unison",
+      level: Number.isFinite(level) ? level : 0,
+      createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+    };
+  }
+
+  function normalizeUnisonLyrics(data) {
+    const result = unwrapUnisonResult(data);
+    if (!result || typeof result.lyrics !== "string" || !result.lyrics.trim()) return null;
+    const format = String(result.format || "").toLowerCase();
+    const syncType = String(result.syncType || "").toLowerCase();
+    const submitter = unisonSubmitterCredit(result);
+    if (format === "lrc") return { format: "lrc", lyrics: result.lyrics, wordByWord: false, submitter };
+    if (format === "ttml") {
+      // Unison marks word timing as richsync. If the field is missing, inspect
+      // the TTML itself rather than assuming line-level timing.
+      const wordByWord = syncType === "richsync"
+        || (!syncType && ttmlHasWordTiming(result.lyrics));
+      return { format: "ttml", lyrics: result.lyrics, wordByWord, submitter };
+    }
+    // Plain Unison text is not a synced hit. Let LRCLIB try for timed lyrics
+    // before falling back to an unsynced set.
+    if (format === "plain") return null;
+    // A server that omits `format` is only trusted if the body is timestamped.
+    return /\[\d{1,3}:\d{2}(?:\.\d+)?\]/.test(result.lyrics)
+      ? { format: "lrc", lyrics: result.lyrics, wordByWord: false, submitter }
+      : null;
+  }
+
+  async function fetchUnisonLyrics(track, key, controller, options = null) {
+    if (!window.YTMod || typeof window.YTMod.fetchUnison !== "function") return null;
+    const params = new URLSearchParams();
+    if (track.videoId) params.set("v", track.videoId);
+    else {
+      params.set("song", track.title);
+      if (track.artist) params.set("artist", track.artist);
+      if (track.album) params.set("album", track.album);
+      if (Number.isFinite(track.durationMs) && track.durationMs > 0) {
+        params.set("duration", String(Math.round(track.durationMs / 1000)));
+      }
+    }
+    const response = await window.YTMod.fetchUnison(`${UNISON_API}?${params.toString()}`);
+    // Prefetch resolves a track that is not current yet, so only the abort
+    // signal (not a track-key mismatch) can invalidate it.
+    if (controller.signal.aborted || ((!options || options.prefetch !== true) && key !== currentTrackKey)) return null;
+    if (!response.ok || !response.data) {
+      if (!response.aborted) alWarn(`Unison returned HTTP ${response.status || "error"}; trying the next source.`);
+      return null;
+    }
+    return normalizeUnisonLyrics(response.data);
+  }
+
   function normalizeLookupText(value) {
     return String(value || "")
       .toLowerCase()
@@ -866,7 +1228,10 @@
 
   function selectLRCLIBResult(results, track) {
     const candidates = Array.isArray(results)
-      ? results.filter((result) => result && result.syncedLyrics)
+      // A synced record can have a Lyricsfile without a separate LRC. Parsing
+      // here also keeps a plain-only record's guaranteed `lyricsfile` field from
+      // being mistaken for a timed result.
+      ? results.filter((result) => result && (result.syncedLyrics || lyricsfileHasTimedLines(result)))
       : [];
     if (!candidates.length) return null;
 
@@ -886,6 +1251,8 @@
         if (Number.isFinite(wantedDuration) && Number.isFinite(Number(result.duration))) {
           score += Math.max(0, 3 - Math.abs(Number(result.duration) - wantedDuration) / 3);
         }
+        // Prefer the word-synced revision when the same track has both.
+        if (result.hasWordSync === true) score += 2;
         return { result, score };
       })
       .sort((a, b) => b.score - a.score)[0].result;
@@ -897,7 +1264,10 @@
   // (AJ, 2026-09-18).
   function selectLRCLIBPlainResult(results, track) {
     const candidates = Array.isArray(results)
-      ? results.filter((result) => result && result.plainLyrics && !result.syncedLyrics)
+      ? results.filter((result) => result
+        && result.plainLyrics
+        && !result.syncedLyrics
+        && !lyricsfileHasTimedLines(result))
       : [];
     if (!candidates.length) return null;
 

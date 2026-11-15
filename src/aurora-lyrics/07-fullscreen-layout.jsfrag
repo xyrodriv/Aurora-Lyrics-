@@ -13,10 +13,18 @@
     // ORDER MATTERS: our own reparented node first (it is the only candidate
     // once it is outside ytmusic-player), then YTM's containers for the case
     // where we do not own a video yet (the cover -> MV attach path).
+    // ONLY YTM's real player element counts. Other extensions inject their own
+    // <video> inside ytmusic-player: Better Lyrics renders an animated cover in
+    // #song-image, and the old loose selector picked that first because it had
+    // 2160x2160 frames while YTM's own element stayed 0x0 on an audio track.
+    // That put the square cover into the music-video layout and pushed the
+    // controls past the bottom of the screen (AJ, 2026-11-13).
+    const saved = fsSavedVideo && fsSavedVideo.node;
     const video =
-      (fsSavedVideo && fsSavedVideo.node) ||
-      document.querySelector("ytmusic-player video") ||
-      document.querySelector("#movie_player video");
+      (saved && saved.matches("video.html5-main-video") ? saved : null) ||
+      document.querySelector("ytmusic-player video.html5-main-video") ||
+      document.querySelector("ytmusic-player #movie_player video") ||
+      document.querySelector("#movie_player video.html5-main-video");
     // A song with no music video still leaves an empty <video> in the DOM, so
     // only treat it as real media once it actually has frame dimensions. The
     // trace confirms YTM's recycled element drops to 0x0 on an audio-only

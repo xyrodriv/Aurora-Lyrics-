@@ -92,6 +92,22 @@
       .sort((a, b) => (Number(b.width) || 0) - (Number(a.width) || 0));
     return usable[0] ? usable[0].url : "";
   }
+
+  // YouTube renderer text is either { simpleText } or { runs: [{ text }] }.
+  function rendererText(node) {
+    if (!node) return "";
+    if (typeof node.simpleText === "string") return node.simpleText.trim();
+    if (Array.isArray(node.runs)) return node.runs.map((run) => (run && run.text) || "").join("").trim();
+    return "";
+  }
+
+  function rendererDurationMs(renderer) {
+    if (!renderer) return 0;
+    const seconds = Number(renderer.lengthSeconds);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+    const match = /^(\d+):([0-5]\d)$/.exec(rendererText(renderer.lengthText));
+    return match ? (Number(match[1]) * 60 + Number(match[2])) * 1000 : 0;
+  }
   // Normalize a slider value/max (seconds vs already-ms) to milliseconds.
   function sliderToMs(slider) {
     const val = parseFloat(slider.value);
@@ -404,6 +420,44 @@
     // fallback scrapes the YTM queue panel DOM, which is fragile across UI
     // updates, so it is wrapped in try/catch and may return null.
     getNextTrack() {
+      // The queue model is the real playback order. playerResponse.upcoming is
+      // only the autoplay recommendation after the queue runs out, so prefer
+      // the queue when it exists. This is the same source the Next Up add-on
+      // reads from ytmusic-player-queue.data.
+      try {
+        const host = $("ytmusic-player-queue");
+        const data = host && host.data;
+        if (Array.isArray(data) && data.length) {
+          const list = data
+            .map((entry) => entry && entry.playlistPanelVideoRenderer)
+            .filter(Boolean);
+          let idx = list.findIndex((item) => item.selected === true);
+          if (idx < 0) {
+            const current = playerResponseVideo(playerResponse());
+            const currentId = current && current.videoId;
+            if (currentId) idx = list.findIndex((item) => item.videoId === currentId);
+          }
+          if (idx >= 0 && idx + 1 < list.length) {
+            const item = list[idx + 1];
+            const rawTitle = rendererText(item.title);
+            const artist = cleanArtist(rendererText(item.shortBylineText || item.longBylineText));
+            const title = rawTitle ? cleanTrackTitle(rawTitle, artist) : "";
+            if (title) {
+              return {
+                videoId: item.videoId ? String(item.videoId) : "",
+                title,
+                artist,
+                durationMs: rendererDurationMs(item),
+                // Carried so the fullscreen pane can PRELOAD the next cover while
+                // the current track is still playing — an MV -> audio skip then
+                // has a decoded image ready instead of showing an empty pane
+                // (AJ, 2026-10-20). Best-effort: absent on some queue shapes.
+                artworkUrl: pickArtworkUrl(item.thumbnail && item.thumbnail.thumbnails),
+              };
+            }
+          }
+        }
+      } catch (e) {}
       try {
         const resp = playerResponse();
         const up = resp && resp.upcoming;
@@ -411,14 +465,13 @@
         if (Array.isArray(up)) item = up[0];
         else if (up && typeof up === "object") item = up.nextVideo || up;
         if (item && item.videoId) {
-          const title = item.title && typeof item.title === "object" && item.title.runs
-            ? item.title.runs.map((r) => r.text).join("")
-            : (item.title || "");
-          const artistRaw = item.author || (item.longBylineText && item.longBylineText.runs && item.longBylineText.runs.map((r) => r.text).join(""));
+          const title = rendererText(item.title) || (item.title && typeof item.title === "string" ? item.title : "");
+          const artistRaw = item.author || rendererText(item.longBylineText || item.shortBylineText);
           return {
             videoId: String(item.videoId),
             title: cleanTrackTitle(title, ""),
             artist: cleanArtist(artistRaw || ""),
+            durationMs: rendererDurationMs(item),
             // Carried so the fullscreen pane can PRELOAD the next cover while the
             // current track is still playing — an MV -> audio skip then has a
             // decoded image ready instead of showing an empty pane (AJ,
@@ -428,20 +481,28 @@
         }
       } catch (e) {}
       try {
-        const queueItem = $(
-          "ytmusic-player-queue-item:not([hidden])"
-        ) || $("ytmusic-queue ytmusic-player-queue-item:not([hidden])");
-        if (queueItem) {
-          const titleEl = $(".title", queueItem) || $(".song-title", queueItem);
-          const artistEl = $(".subtitle", queueItem) || $(".byline", queueItem);
-          const title = titleEl && titleEl.textContent ? titleEl.textContent.trim() : "";
-          const artist = artistEl && artistEl.textContent ? cleanArtist(artistEl.textContent.trim()) : "";
-          if (title) {
-            return {
-              videoId: queueItem.getAttribute("video-id") || "",
-              title: cleanTrackTitle(title, artist),
-              artist,
-            };
+        const rows = $$("ytmusic-player-queue-item:not([hidden])");
+        if (rows.length) {
+          let idx = rows.findIndex((row) => row.hasAttribute("selected") || row.selected === true);
+          if (idx < 0) idx = 0;
+          const next = rows[idx + 1];
+          if (next) {
+            // The real row uses .song-title / .byline; .title/.subtitle never
+            // existed here (see next-up.js).
+            const titleEl = $(".song-title", next) || $(".title", next) || $("yt-formatted-string", next);
+            const artistEl = $(".byline", next) || $(".subtitle", next);
+            const title = titleEl && titleEl.textContent ? titleEl.textContent.trim() : "";
+            const artist = artistEl && artistEl.textContent ? cleanArtist(artistEl.textContent.trim()) : "";
+            if (title) {
+              const img = $("yt-img-shadow.thumbnail img", next) || $("img", next);
+              return {
+                videoId: next.getAttribute("video-id") || "",
+                title: cleanTrackTitle(title, artist),
+                artist,
+                durationMs: rendererDurationMs({ lengthText: { simpleText: (($(".duration", next) || {}).textContent || "").trim() } }),
+                artworkUrl: (img && (img.currentSrc || img.src)) || "",
+              };
+            }
           }
         }
       } catch (e) {}
@@ -968,6 +1029,7 @@
     getCommunityCache: () => cmd("getCommunityCache"),
     setCommunityCache: (cache) => cmd("setCommunityCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
+    fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
     // Deezer track search — the ISRC source for lrc.red (YTM exposes none).

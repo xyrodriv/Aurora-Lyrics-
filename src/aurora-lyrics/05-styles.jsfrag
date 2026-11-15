@@ -23,6 +23,10 @@
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
       container-type: size;
+      /* Named query container for the credits rail. The panel is already a size
+         container, so naming it costs no extra containment and both lyric
+         renderers (built-in and AMLL) sit inside it. */
+      container-name: ym-sl-credit-rail;
       isolation: isolate;
     }
     /* Page-wide background styling moved to the Dynamic theme. */
@@ -327,23 +331,21 @@
     /* Options: a pill beside content.js's song-layout switcher, in the empty
        band above both panels (AJ, 2026-10-26). It replaces the hover-revealed
        row that used to live on the panel's own top edge, where nobody who had
-       not already found it would look. Same shell as the pill next to it, so
-       the pair reads as one control group; the label is SpicyLyrics because
-       this is our chrome, not YouTube's. */
+       not already found it would look. Every metric is the layout button's own
+       (styles.css: .ym-song-layout-btn) so the pair reads as one control group
+       instead of two different systems sitting next to each other. */
     .ym-sl-options-pill {
       display: flex;
       align-items: center;
       gap: 7px;
       height: 28px;
-      padding: 0 10px;
+      padding: 0 8px;
       border: 0;
       border-radius: 9px;
       background: rgba(255, 255, 255, .06);
       box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09);
       color: rgba(255, 255, 255, .72);
-      font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
-        "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
-        BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+      font: inherit;
       font-size: 12px;
       font-weight: 500;
       letter-spacing: .01em;
@@ -530,6 +532,87 @@
     .ym-sl-community-offset-status[data-state="error"] {
       color: rgba(255,164,150,.92);
     }
+    .ym-sl-community-offset-account {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 38px;
+      box-sizing: border-box;
+      padding: 6px 9px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 9px;
+      background: rgba(255,255,255,.045);
+      color: inherit;
+      text-decoration: none;
+    }
+    /* Only a maker with a profile URL gets the link affordance. The whole row
+       is the hit target, so hovering either the avatar or the username lights
+       up the same link. */
+    .ym-sl-community-offset-account[href] {
+      cursor: pointer;
+      transition: background-color .16s ease, border-color .16s ease;
+    }
+    .ym-sl-community-offset-account[href]:hover {
+      background: rgba(255,255,255,.075);
+      border-color: rgba(255,255,255,.18);
+    }
+    .ym-sl-community-offset-account[href]:focus-visible {
+      outline: 2px solid rgba(63, 224, 197, .72);
+      outline-offset: 2px;
+    }
+    .ym-sl-community-offset-account[href]:hover .ym-sl-community-offset-accountname {
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .ym-sl-community-offset-account[href]:hover .ym-sl-community-offset-avatar {
+      box-shadow: 0 0 0 2px rgba(63, 224, 197, .45);
+    }
+    .ym-sl-community-offset-avatar {
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      width: 28px;
+      height: 28px;
+      overflow: hidden;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 30% 20%, rgba(255,255,255,.2), transparent 45%),
+        linear-gradient(145deg, #8d2a3e, #1d1c2c 76%);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .ym-sl-community-offset-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .ym-sl-community-offset-initial {
+      line-height: 1;
+    }
+    .ym-sl-community-offset-accountcopy {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+    .ym-sl-community-offset-accountname {
+      overflow: hidden;
+      color: rgba(255,255,255,.9);
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-community-offset-accountmeta {
+      color: rgba(63,224,197,.78);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
     .ym-sl-community-offset-name {
       width: 100%;
       box-sizing: border-box;
@@ -581,6 +664,7 @@
       opacity: .45;
       cursor: default;
     }
+    .ym-sl-community-offset-account.hidden,
     .ym-sl-community-offset-name.hidden,
     .ym-sl-community-offset-btn.hidden { display: none; }
     /* Divider + section title separate the lyrics controls (track, offset)
@@ -2215,21 +2299,28 @@
       opacity: .38;
     }
     .ym-sl-fs-title-writers {
+      --ym-sl-fs-writers-opacity: 1;
       min-width: 0;
       max-width: 100%;
+      /* Hard edge, no mask: the writer marquee should cut off cleanly instead
+         of dissolving names at either end while it drifts. */
       overflow: hidden;
       white-space: nowrap;
+      transition: opacity .2s ease;
     }
+    .ym-sl-fs-title-writers.is-writers-out { opacity: 0; }
     .ym-sl-fs-title-writers-track {
       display: inline-block;
       white-space: nowrap;
       will-change: transform;
     }
-    .ym-sl-fs-title-writers.is-overflowing {
-      -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px,
-        #000 calc(100% - 16px), transparent 100%);
-      mask-image: linear-gradient(to right, transparent 0, #000 16px,
-        #000 calc(100% - 16px), transparent 100%);
+    .ym-sl-fs-title-writers.is-writers-in,
+    .ym-sl-fs-hits-writers.is-writers-in {
+      animation: ym-sl-fs-writers-in .28s ease both;
+    }
+    @keyframes ym-sl-fs-writers-in {
+      from { opacity: 0; }
+      to { opacity: var(--ym-sl-fs-writers-opacity, 1); }
     }
     .ym-sl-fs-title-writers-track.is-scrolling {
       animation: ym-sl-fs-writers-scroll var(--ym-sl-fs-writers-duration, 22s)
@@ -2462,11 +2553,12 @@
       display: inline-block;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      --ym-sl-fs-writers-opacity: .34;
       display: inline-block;
       flex: 1 1 auto;
       font-size: .66em;
       font-weight: 500;
-      opacity: .45;
+      opacity: .34;
       letter-spacing: 0;
     }
     /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
@@ -2813,6 +2905,13 @@
     @media (prefers-reduced-motion: reduce) {
       .ym-sl-fs-title { animation: none; opacity: 1; transition: none; }
       .ym-sl-fs-title-writers-track.is-scrolling { animation: none; transform: none; }
+      .ym-sl-fs-title-writers { transition: none; }
+      .ym-sl-fs-title-writers.is-writers-in,
+      .ym-sl-fs-hits-writers.is-writers-in {
+        animation: none;
+        opacity: var(--ym-sl-fs-writers-opacity, 1);
+      }
+      .ym-sl-fs-title-writers.is-writers-out { opacity: 0; }
       /* Keep the track-change swap, but make it an instant cut. */
       .ym-sl-fs-title.ym-sl-fs-title-leaving { animation: none; opacity: 0; }
       /* SAME specificity as the cover-art leaving rule (0,6,0) - without this
@@ -4137,6 +4236,34 @@
     .ym-sl-source-chip {
       top: 40px;
     }
+    /* LRCLIB word-by-word quality warning. It owns the top slot for its
+       five-second countdown, then fades out; the timer line needs the extra
+       bottom padding so it never sits on the text. */
+    .ym-sl-lrclib-word-note {
+      top: 10px;
+      max-width: calc(100% - 28px);
+      box-sizing: border-box;
+      padding: 6px 12px 10px;
+      white-space: normal;
+      text-align: center;
+      line-height: 1.35;
+      z-index: 6;
+    }
+    .ym-sl-lrclib-word-note.hidden { display: none; }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-mv-sync-chip:not(.ym-sl-lrclib-word-note) {
+      top: 44px;
+    }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-source-chip {
+      top: 74px;
+    }
+    #ym-sl-panel.ym-sl-word-sync-warning-active .ym-sl-translate-chip {
+      top: 44px;
+    }
+    /* Background mode hides the lyrics chrome; this notice belongs with it. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-lrclib-word-note,
+    #ym-sl-panel.ym-sl-ad-active .ym-sl-lrclib-word-note {
+      display: none;
+    }
     .ym-sl-mv-sync-chip-timer {
       position: absolute;
       left: 12px;
@@ -4900,6 +5027,11 @@
       padding-bottom: 0;
       border-bottom: 0;
     }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credit-provider {
+      /* The provider row is shorter than the people pill. Centre it on the
+         metadata line so "Provided by" sits level with "Submitted by". */
+      align-self: center;
+    }
     #ym-sl-panel.SpicyRenderer .ym-sl-credit-people {
       flex-direction: row;
       flex-wrap: wrap;
@@ -5087,6 +5219,930 @@
       line-height: 1.4;
       color: rgba(255, 255, 255, .42);
       max-width: 42ch;
+    }
+    /* Unison keeps the shared liner-note rail as a plain dim Better Lyrics red. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison {
+      position: relative;
+      overflow: hidden;
+      background: #8a1420;
+      border: 0;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-brand {
+      position: absolute;
+      left: -36px;
+      top: 50%;
+      width: 190px;
+      height: 190px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .24;
+      filter: blur(20px) saturate(1.1);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 50%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-brand {
+      left: auto;
+      right: -36px;
+    }
+
+    /* Spicy uses the same frosted rail and clipped watermark as Unison, but
+       takes the violet from its mark. Layout stays shared. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy {
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .012) 58%),
+        rgba(46, 27, 72, .28);
+      border-color: rgba(157, 126, 209, .34);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10);
+      -webkit-backdrop-filter: blur(22px) saturate(1.25);
+      backdrop-filter: blur(22px) saturate(1.25);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-brand {
+      position: absolute;
+      left: -36px;
+      top: 50%;
+      width: 190px;
+      height: 190px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .24;
+      filter: blur(20px) saturate(1.1);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 50%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-brand {
+      left: auto;
+      right: -36px;
+    }
+    /* The supplied Spicy banner is the card surface, cropped to fit. No blur
+       and no border tint; Aurora keeps its own ring and is excluded. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy:not(.ym-sl-credits--aurora) {
+      border: 0;
+      background:
+        linear-gradient(180deg, rgba(24, 18, 40, .34), rgba(24, 18, 40, .46)),
+        var(--ym-sl-spicy-banner-image, none) center / cover no-repeat;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    /* Aurora Community reuses Spicy's rail and layout, but its mark is black
+       and red, so the border follows those colours instead of the violet.
+       border-image paints ONLY the 1px frame; a border-box background would
+       tint the whole interior and kill the glass transparency. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora {
+      border-color: transparent;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .012) 58%),
+        rgba(58, 18, 24, .30);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      box-sizing: border-box;
+      padding: 1px;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #e11d2e 0%, #3b070b 48%, #050505 100%);
+      -webkit-mask-image: linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+      -webkit-mask-size: 100% 100%;
+      -webkit-mask-clip: content-box, border-box;
+      -webkit-mask-composite: xor;
+      mask-image: linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+      mask-size: 100% 100%;
+      mask-clip: content-box, border-box;
+      mask-composite: exclude;
+      pointer-events: none;
+      z-index: 3;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora.align-right::before {
+      background: linear-gradient(270deg, #e11d2e 0%, #3b070b 48%, #050505 100%);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora .ym-sl-credit-provider .ym-sl-provider-icon {
+      border-radius: 4px;
+    }
+    /* Apple Music has no contributor rows. The provider mark is the whole
+       headline, so it gets a large rounded square at the far left and the
+       writers become the quiet bottom footnote. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple {
+      position: relative;
+      overflow: hidden;
+      color: #fff;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .14), rgba(255, 255, 255, .035) 58%),
+        rgba(20, 22, 26, .28);
+      border-color: rgba(255, 255, 255, .28);
+      /* No outer shadow: the lyrics player clips at its side gutter, which
+         turned both the white halo and the dark drop shadow into a straight
+         cutoff. Keep only the inset top highlight on the rounded border. */
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14);
+      -webkit-backdrop-filter: blur(22px) saturate(1.1);
+      backdrop-filter: blur(22px) saturate(1.1);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-box {
+      position: relative;
+      z-index: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-brand {
+      position: absolute;
+      left: -38px;
+      top: 50%;
+      width: 220px;
+      height: 220px;
+      flex: none;
+      object-fit: contain;
+      transform: translateY(-50%);
+      opacity: .13;
+      filter: blur(22px) saturate(1) brightness(1.15);
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000 42%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      border-radius: 26%;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-provider {
+      order: 1;
+      align-self: flex-start;
+      margin-right: auto;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-writers {
+      order: 2;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider {
+      flex-wrap: nowrap;
+      gap: 6px;
+      align-items: center;
+      font-size: 17px;
+      white-space: nowrap;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-icon {
+      order: 1;
+      width: 72px;
+      height: 72px;
+      margin-right: 10px;
+      border-radius: 18px;
+      flex: none;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, .14);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-label {
+      order: 2;
+      font-size: 13px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-name {
+      order: 3;
+      font-size: 20px;
+      font-weight: 600;
+      color: #fff;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-names,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .68);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers a {
+      color: inherit;
+    }
+    /* Artist is metadata, so it sits under the provider as a quiet footnote. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-artist {
+      order: 2;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0 0 8px;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple.align-right {
+      text-align: left;
+      justify-content: flex-start;
+      margin-left: 0;
+    }
+    /* LRCLIB has no contributor rows and only its provider name; keep the
+       layout quiet with no card fill and no mark in the lyrics footer. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib {
+      border: 0;
+      padding: 14px 20px 13px;
+      background: transparent;
+      box-shadow: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-icon {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-label {
+      font-size: 12px;
+    }
+    /* Better Lyrics hierarchy for Unison: the source and uploader are the
+       headline row; the songwriters become the quiet footnote underneath. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-people {
+      order: 1;
+      align-self: flex-start;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-provider {
+      position: absolute;
+      top: 18px;
+      right: 22px;
+      left: auto;
+      z-index: 2;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison > .ym-sl-credit-writers {
+      order: 3;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right > .ym-sl-credit-provider {
+      left: 22px;
+      right: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right > .ym-sl-credit-people {
+      order: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+      font-weight: 600;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-provider .ym-sl-provider-icon {
+      width: 20px;
+      height: 20px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader {
+      position: relative;
+      display: grid;
+      grid-template-columns: 64px minmax(0, max-content);
+      grid-template-rows: 1fr 1fr;
+      column-gap: 10px;
+      row-gap: 2px;
+      align-items: center;
+      width: max-content;
+      max-width: 100%;
+      min-height: 64px;
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link {
+      display: contents;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-name {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: end;
+      max-width: 180px;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 1;
+      grid-row: 1 / span 2;
+      box-sizing: border-box;
+      width: 64px;
+      height: 64px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      transition: filter .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 2;
+      grid-row: 2;
+      align-self: start;
+      position: static;
+      margin: 0;
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .52);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    /* The two text rows sit a hair above the 64px avatar's centre because the
+       name is end-aligned and the label is start-aligned. Nudge the pair as a
+       unit so the block reads centred without moving the badge or date. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-label {
+      transform: translateY(2px);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+      content: attr(data-level);
+      position: absolute;
+      left: 22px;
+      top: -8px;
+      bottom: auto;
+      width: 19px;
+      height: 19px;
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      border: 2px solid rgba(27, 15, 18, .9);
+      border-radius: 50%;
+      background: #f20c32;
+      color: #fff;
+      font: 700 9px/1 "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      pointer-events: none;
+      z-index: 3;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-provider-date {
+      margin: 0;
+      font-size: 10.5px;
+      line-height: 1.2;
+      letter-spacing: .01em;
+      color: rgba(255, 255, 255, .38);
+      white-space: nowrap;
+      text-align: left;
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-credit-provider {
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-provider-date {
+      position: absolute;
+      right: 22px;
+      bottom: 16px;
+      z-index: 2;
+      text-align: right;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers.align-right > .ym-sl-provider-date {
+      left: 22px;
+      right: auto;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 17 17 7M9 7h8v8' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 18px 18px no-repeat,
+        rgba(6, 10, 14, .42);
+      opacity: 0;
+      transform: translateY(-50%);
+      transition: opacity .18s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader::after {
+      left: auto;
+      right: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+      left: auto;
+      right: 22px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader:has(.ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover)::after {
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover {
+      filter: brightness(.72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-arrow {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-name {
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader {
+      grid-template-columns: minmax(0, max-content) 64px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    /* No portrait: collapse the avatar column and drop the level badge and
+       hover overlay that would otherwise float over empty space. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar {
+      grid-template-columns: minmax(0, max-content);
+      min-height: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar[data-level]::before,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar::after {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.align-right .ym-sl-credit-people {
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-writers .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .62);
+    }
+    /* Spicy mirrors the Unison hierarchy: provider and people on top, writers
+       as the quiet bottom footnote. Keep these layout rules in step with the
+       Unison block above. */
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-people {
+      order: 1;
+      align-self: flex-start;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-provider {
+      position: absolute;
+      top: 18px;
+      right: 22px;
+      left: auto;
+      z-index: 2;
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy > .ym-sl-credit-writers {
+      order: 3;
+      flex: 1 0 100%;
+      gap: 3px;
+      padding: 0;
+      border: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right > .ym-sl-credit-provider {
+      left: 22px;
+      right: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right > .ym-sl-credit-people {
+      order: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider {
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-label,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .62);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-name {
+      font-size: 17px;
+      font-weight: 600;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-provider .ym-sl-provider-icon {
+      width: 20px;
+      height: 20px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader {
+      position: relative;
+      display: grid;
+      grid-template-columns: 64px minmax(0, max-content);
+      grid-template-rows: 1fr 1fr;
+      column-gap: 10px;
+      row-gap: 2px;
+      align-items: center;
+      width: max-content;
+      max-width: 100%;
+      min-height: 64px;
+      font-size: 17px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link {
+      display: contents;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-name {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: end;
+      max-width: 180px;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 1;
+      grid-row: 1 / span 2;
+      box-sizing: border-box;
+      width: 64px;
+      height: 64px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      transition: filter .18s ease;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 2;
+      grid-row: 2;
+      align-self: start;
+      position: static;
+      margin: 0;
+      font-size: 12.5px;
+      color: rgba(255, 255, 255, .52);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-label {
+      transform: translateY(2px);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 17 17 7M9 7h8v8' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 18px 18px no-repeat,
+        rgba(6, 10, 14, .42);
+      opacity: 0;
+      transform: translateY(-50%);
+      transition: opacity .18s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader::after {
+      left: auto;
+      right: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader:has(.ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover)::after {
+      opacity: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar:hover {
+      filter: brightness(.72);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-arrow {
+      display: none;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-avatar,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-people .ym-sl-uploader-link:not(.no-link) .ym-sl-uploader-name {
+      cursor: pointer;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader {
+      grid-template-columns: minmax(0, max-content) 64px;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-avatar {
+      grid-column: 2;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-name,
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people .ym-sl-uploader-label {
+      grid-column: 1;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy.align-right .ym-sl-credit-people {
+      text-align: left;
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-writers .ym-sl-credits-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, .48);
+    }
+    #ym-sl-panel.SpicyRenderer .ym-sl-credits--spicy .ym-sl-credit-writers .ym-sl-credits-names {
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, .62);
+    }
+    /* Compact credit rail (AJ, 2026-11-15). The wide rail is built around a
+       roomy pane: 64px people avatars, a 72px Apple mark, and a provider pinned
+       to the right. On a small monitor the lyric pane is narrower than those
+       pieces, so the credits collide and the card wraps mid-credit. The query
+       measures the panel instead of the viewport, because YTM's side panel can
+       be narrow even on a wide screen. Every provider keeps its own
+       skin; only geometry, type scale and wrapping change. The hierarchy stays
+       the one in the reference: people left, provider right, writers as the
+       quiet bottom note. */
+    @container ym-sl-credit-rail (max-width: 600px) {
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits {
+        gap: 8px 14px;
+        padding: 12px 14px;
+        margin: 32px 0 16px;
+        border-radius: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-box { gap: 3px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+        border-bottom: 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-provider {
+        order: 2;
+        align-self: flex-start;
+        margin-left: auto;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-people {
+        order: 1;
+        align-self: flex-start;
+        gap: 6px 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-label {
+        font-size: 10px;
+        line-height: 1.2;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits-names {
+        font-size: 12.5px;
+        line-height: 1.3;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credit-writers .ym-sl-credits-names {
+        font-size: 14px;
+        line-height: 1.3;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider {
+        gap: 4px;
+        font-size: 12px;
+        flex-wrap: wrap;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-icon {
+        width: 14px;
+        height: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-name { font-size: 13px; }
+      #ym-sl-panel.SpicyRenderer .ym-sl-provider-date {
+        font-size: 9.5px;
+        line-height: 1.2;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader {
+        gap: 4px;
+        font-size: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
+        gap: 4px;
+        padding: 1px 7px 1px 2px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-uploader-avatar {
+        width: 16px;
+        height: 16px;
+      }
+      /* Unison, Spicy and Aurora share the portrait people block. Shrink the
+         avatar grid as one unit so the level badge, arrow overlay and the two
+         text rows stay aligned to the same 40px circle. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        order: 2;
+        margin-right: 0;
+        margin-left: auto;
+        align-self: flex-start;
+        text-align: left;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        order: 2;
+        margin-right: 0;
+        margin-left: auto;
+        align-self: flex-start;
+        text-align: left;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--unison.ym-sl-credits--no-writers > .ym-sl-credit-provider {
+        position: static;
+        top: auto;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right > .ym-sl-credit-people {
+        order: 1;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider {
+        gap: 4px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-label,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        font-size: 10px;
+        color: rgba(255, 255, 255, .58);
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-provider .ym-sl-provider-icon {
+        width: 15px;
+        height: 15px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader {
+        grid-template-columns: 40px minmax(0, max-content);
+        column-gap: 8px;
+        row-gap: 1px;
+        min-height: 40px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader {
+        grid-template-columns: minmax(0, max-content) 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader.ym-sl-uploader--no-avatar {
+        grid-template-columns: minmax(0, max-content);
+        min-height: 0;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-avatar {
+        width: 40px;
+        height: 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-name {
+        max-width: 150px;
+        font-size: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-name,
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader-label {
+        transform: translateY(1px);
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader::after {
+        width: 40px;
+        height: 40px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+        left: 14px;
+        top: -6px;
+        width: 16px;
+        height: 16px;
+        font-size: 8px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-people .ym-sl-uploader[data-level]::before {
+        left: auto;
+        right: 14px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-provider-date {
+        font-size: 9.5px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).ym-sl-credits--no-writers > .ym-sl-provider-date {
+        right: 14px;
+        bottom: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).ym-sl-credits--no-writers.align-right > .ym-sl-provider-date {
+        left: 14px;
+        right: auto;
+      }
+      /* A source with no writers puts the submitted date straight into the
+         rail. Keep it after the provider instead of letting flex order 0 pull
+         it above the credit it belongs to. */
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits > .ym-sl-provider-date {
+        order: 3;
+        flex: 1 0 100%;
+        margin-top: 2px;
+      }
+      /* Apple and LRCLIB have no people block. Keep the provider as the lead
+         line, but replace the oversized 72px mark with a compact one and let
+         the writers close the card underneath. */
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-provider {
+        order: 1;
+        margin-right: auto;
+        margin-left: 0;
+        align-self: flex-start;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-writers {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+        border: 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple > .ym-sl-credit-artist {
+        order: 3;
+        flex: 1 0 100%;
+        padding: 8px 0 0;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider {
+        gap: 3px;
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-icon {
+        width: 44px;
+        height: 44px;
+        margin-right: 7px;
+        border-radius: 11px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 15px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-label,
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-label {
+        font-size: 9.5px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-writers .ym-sl-credits-names,
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-artist .ym-sl-credits-names {
+        font-size: 12px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib {
+        padding: 10px 12px;
+        border: 0;
+        background: transparent;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-name {
+        font-size: 13px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--lrclib .ym-sl-credit-provider .ym-sl-provider-label {
+        font-size: 10px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) .ym-sl-credit-brand {
+        width: 150px;
+        height: 150px;
+        left: -28px;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison).align-right .ym-sl-credit-brand {
+        left: auto;
+        right: -28px;
+      }
+      #ym-sl-panel.SpicyRenderer .ym-sl-credits--apple .ym-sl-credit-brand {
+        width: 150px;
+        height: 150px;
+        left: -28px;
+      }
+      /* People across the top; writers and provider share the bottom row.
+         This is deliberate rather than relying on flex wrap: once the provider
+         no longer fits beside the people it used to drop into a lone row in the
+         middle right of the card. A two-row grid keeps it anchored to the
+         bottom-right corner at every compact width. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "people people"
+          "writers provider";
+        align-items: end;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-people {
+        grid-area: people;
+        align-self: start;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-writers {
+        grid-area: writers;
+        align-self: end;
+        padding: 0;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-provider {
+        grid-area: provider;
+        position: static;
+        top: auto;
+        right: auto;
+        left: auto;
+        align-self: end;
+        justify-self: end;
+        margin: 0;
+        transform: none;
+      }
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-credit-artist {
+        grid-column: 1 / -1;
+      }
+      /* A source with no writers has no bottom-left cell, and its date would
+         otherwise land under the provider. Park it in that empty cell. */
+      #ym-sl-panel.SpicyRenderer :is(.ym-sl-credits--spicy, .ym-sl-credits--unison) > .ym-sl-provider-date {
+        grid-column: 1;
+        grid-row: 2;
+        position: static;
+        right: auto;
+        bottom: auto;
+        justify-self: start;
+        align-self: end;
+        text-align: left;
+      }
     }
     tp-yt-paper-tab.ym-sl-tab { position: relative; cursor: pointer; }
     tp-yt-paper-tab.ym-sl-tab .tab-content { pointer-events: none; }
@@ -6720,6 +7776,993 @@
       .ym-sl-fs-hits-credits .ym-sl-uploader-link { transition: none; }
       .ym-sl-fs-hits-people .ym-sl-uploader.ym-sl-fs-hits-chip:hover,
       .ym-sl-fs-hits-credits .ym-sl-uploader-link:hover { transform: none; }
+    }
+
+    /* ===== Options, rebuilt as a scrolling card ==========================
+       The add-ons panel's split, reused here: one rail, one scrolling pane,
+       and a single red marker that slides between rows. The shell is fixed
+       size and the pane scrolls; no page height is measured or animated.
+       Scoped to .ym-sl-op2 so the older Options rules cannot leak in. */
+    .ym-sl-options-overlay.ym-sl-op2 {
+      --op-panel: #17171a;
+      --op-panel-top: #1b1b1f;
+      --op-text: rgba(255, 255, 255, .92);
+      --op-body: rgba(255, 255, 255, .85);
+      --op-muted: rgba(255, 255, 255, .55);
+      --op-dim: rgba(255, 255, 255, .4);
+      --op-line: rgba(255, 255, 255, .07);
+      --op-line-strong: rgba(255, 255, 255, .1);
+      --op-surface: rgba(255, 255, 255, .05);
+      --op-surface-hover: rgba(255, 255, 255, .08);
+      --op-red: #e01040;
+      --op-red-soft: #ff4d6a;
+      --op-red-wash: rgba(224, 16, 64, .12);
+      --op-ease: cubic-bezier(.22, 1, .36, 1);
+      --op-ease-reel: cubic-bezier(.32, .72, 0, 1);
+      position: fixed;
+      top: 88px;
+      right: 24px;
+      bottom: auto;
+      left: auto;
+      z-index: 2147483200;
+      display: block;
+      width: min(640px, calc(100vw - 32px));
+      height: min(480px, calc(100vh - 112px));
+      max-width: none;
+      max-height: none;
+      padding: 0;
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: none;
+      color: var(--op-text);
+      font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      transition: opacity .2s ease, visibility 0s linear 0s;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: none;
+      transition: opacity .16s ease, visibility 0s linear .16s;
+    }
+    .ym-sl-options-overlay.ym-sl-op2,
+    .ym-sl-options-overlay.ym-sl-op2 *,
+    .ym-sl-options-overlay.ym-sl-op2 *::before,
+    .ym-sl-options-overlay.ym-sl-op2 *::after {
+      box-sizing: border-box;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 button,
+    .ym-sl-options-overlay.ym-sl-op2 input {
+      font: inherit;
+    }
+
+    .ym-sl-op-shell {
+      display: grid;
+      grid-template-columns: minmax(196px, 220px) minmax(0, 1fr);
+      grid-template-rows: 60px minmax(0, 1fr);
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+      border-radius: 18px;
+      background: linear-gradient(180deg, var(--op-panel-top) 0%, #161619 100%);
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, .08),
+        0 48px 120px -48px rgba(0, 0, 0, .92);
+      color: var(--op-text);
+      opacity: 1;
+      transform: none;
+      transition: transform .34s var(--op-ease), opacity .22s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.hidden .ym-sl-op-shell {
+      opacity: 0;
+      transform: translateY(14px) scale(.985);
+    }
+
+    .ym-sl-op-head {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 18px 0 22px;
+      border-bottom: 1px solid var(--op-line);
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+    }
+    .ym-sl-op-head:active { cursor: grabbing; }
+    .ym-sl-op-brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+    .ym-sl-op-mark {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--op-red-wash);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .18);
+      color: var(--op-red-soft);
+    }
+    .ym-sl-op-mark svg {
+      width: 16px;
+      height: 16px;
+    }
+    .ym-sl-op-brandcopy {
+      display: grid;
+      gap: 1px;
+      min-width: 0;
+    }
+    .ym-sl-op-title {
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+      line-height: 1.25;
+    }
+    .ym-sl-op-close {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--op-muted);
+      cursor: pointer;
+      transition: background .15s ease, color .15s ease, scale .15s ease;
+    }
+    .ym-sl-op-close:hover {
+      background: var(--op-surface-hover);
+      color: #fff;
+    }
+    .ym-sl-op-close:active { scale: .96; }
+    .ym-sl-op-close svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .ym-sl-op-body { display: contents; }
+
+    .ym-sl-op-rail {
+      grid-column: 1;
+      grid-row: 2;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 18px 12px 14px;
+      border-right: 1px solid var(--op-line);
+      background: rgba(255, 255, 255, .018);
+    }
+    .ym-sl-op-railhead {
+      padding: 0 12px 10px;
+      color: var(--op-dim);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .12em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+    .ym-sl-op-tabs {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .ym-sl-op-ind {
+      position: absolute;
+      top: 0;
+      left: 3px;
+      width: 2px;
+      height: 0;
+      /* Square on the pane-facing right edge; the two left corners follow the
+         rail's rounded edge instead of making the whole marker a capsule. */
+      border-radius: 2px 0 0 2px;
+      background: var(--op-red);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s linear;
+    }
+    .ym-sl-op-ind.ready {
+      /* Height snaps; only the glide between rows animates. The rows share one
+         height, so animating height only ever left the marker trailing the tab
+         while a font swap settled. */
+      transition:
+        transform .32s var(--op-ease-reel),
+        opacity .18s linear;
+    }
+    .ym-sl-op-tab {
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr);
+      align-items: center;
+      gap: 11px;
+      width: 100%;
+      padding: 11px 12px 11px 15px;
+      border: 0;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--op-muted);
+      text-align: left;
+      cursor: pointer;
+      transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+    }
+    .ym-sl-op-tab:hover {
+      background: rgba(255, 255, 255, .035);
+      color: var(--op-text);
+    }
+    .ym-sl-op-tab.is-active {
+      background: var(--op-surface);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .055);
+      color: var(--op-text);
+    }
+    .ym-sl-op-tabicon {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .045);
+      color: var(--op-muted);
+      transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+    }
+    .ym-sl-op-tabicon svg {
+      width: 16px;
+      height: 16px;
+    }
+    .ym-sl-op-tab.is-active .ym-sl-op-tabicon {
+      background: var(--op-red-wash);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .18);
+      color: var(--op-red-soft);
+    }
+    .ym-sl-op-tabcopy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .ym-sl-op-tabcopy strong {
+      overflow: hidden;
+      color: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: -.005em;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-op-tabcopy small {
+      overflow: hidden;
+      color: var(--op-dim);
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ym-sl-op-tab.is-active .ym-sl-op-tabcopy small { color: var(--op-muted); }
+    .ym-sl-op-railfoot {
+      margin-top: auto;
+      padding: 14px 12px 4px;
+      color: var(--op-dim);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .ym-sl-op-pane {
+      position: relative;
+      grid-column: 2;
+      grid-row: 2;
+      display: flex;
+      min-width: 0;
+      min-height: 0;
+      background: rgba(255, 255, 255, .008);
+    }
+    .ym-sl-op-pane::before,
+    .ym-sl-op-pane::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      z-index: 2;
+      height: 28px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease;
+    }
+    .ym-sl-op-pane::before {
+      top: 0;
+      background: linear-gradient(180deg, #19191c 0%, rgba(25, 25, 28, 0) 100%);
+    }
+    .ym-sl-op-pane::after {
+      bottom: 0;
+      background: linear-gradient(0deg, #161619 0%, rgba(22, 22, 25, 0) 100%);
+    }
+    .ym-sl-op-pane.has-top::before,
+    .ym-sl-op-pane.has-bottom::after { opacity: 1; }
+    .ym-sl-op-scroll {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding: 24px 28px 30px;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .ym-sl-op-scroll::-webkit-scrollbar { display: none; }
+    .ym-sl-op-reel {
+      position: relative;
+      max-width: 640px;
+    }
+    .ym-sl-op-page {
+      display: grid;
+      gap: 18px;
+    }
+    .ym-sl-op-page[hidden] { display: none !important; }
+    /* Chrome can leave the active page inheriting the overlay's hidden
+       visibility after a fast close/open or page swap. The page then keeps
+       display:grid and full height while painting nothing. Re-assert the
+       visible value whenever the overlay is open. */
+    .ym-sl-options-overlay.ym-sl-op2:not(.hidden) .ym-sl-op-page:not([hidden]) {
+      visibility: visible !important;
+    }
+    .ym-sl-op-pagehead {
+      display: grid;
+      gap: 6px;
+      padding: 0 2px;
+    }
+    .ym-sl-op-pagetitle {
+      margin: 0;
+      color: #fff;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -.025em;
+      line-height: 1.15;
+    }
+    .ym-sl-op-pagesub {
+      max-width: 58ch;
+      margin: 0;
+      color: var(--op-muted);
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+    .ym-sl-op-card {
+      display: grid;
+      gap: 13px;
+      padding: 16px 16px 18px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .032);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .065);
+    }
+    .ym-sl-op-cardhead {
+      display: grid;
+      gap: 3px;
+    }
+    .ym-sl-op-cardtitle {
+      margin: 0;
+      color: var(--op-text);
+      font-size: 13.5px;
+      font-weight: 650;
+      letter-spacing: -.005em;
+      line-height: 1.3;
+    }
+    .ym-sl-op-cardcopy {
+      margin: 0;
+      color: var(--op-dim);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset {
+      display: grid;
+      grid-template-columns: auto minmax(80px, 1fr) 64px 52px auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: normal;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset input[type="range"] {
+      width: 100%;
+      min-width: 0;
+      accent-color: var(--op-red);
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-number {
+      width: 64px;
+      height: 34px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 8px;
+      outline: none;
+      background: rgba(255, 255, 255, .055);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: #fff;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-number:focus {
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .55);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+      min-width: 0;
+      color: var(--op-text);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+      justify-self: end;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--op-red-wash);
+      color: #ff8a9c;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset {
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+    /* The shared-offset controls now live in the same card as the track
+       offset, separated by a rule instead of a second frosted card. */
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-card > .ym-sl-community-offset {
+      margin-top: 1px;
+      padding-top: 16px;
+      border-top: 1px solid var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-head .ym-sl-options-section-title {
+      padding: 0;
+      color: var(--op-dim);
+      font-size: 11px;
+      letter-spacing: .08em;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-badge {
+      padding: 2px 7px;
+      background: rgba(63, 224, 197, .1);
+      color: rgba(63, 224, 197, .9);
+      font-size: 9px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status {
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="shared"],
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="owned"] {
+      color: var(--op-body);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-status[data-state="error"] {
+      color: #ff9a8c;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-account {
+      min-height: 40px;
+      padding: 6px 10px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255,255,255,.04);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-avatar {
+      width: 26px;
+      height: 26px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-accountname {
+      color: var(--op-text);
+      font-size: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-accountmeta {
+      color: var(--op-dim);
+      font-size: 9px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name {
+      width: 100%;
+      height: 36px;
+      padding: 0 11px;
+      border: 0;
+      border-radius: 9px;
+      outline: none;
+      background: rgba(255, 255, 255, .04);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: #fff;
+      font-size: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name::placeholder {
+      color: var(--op-dim);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name:focus-visible {
+      border-color: transparent;
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .55);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn {
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s ease, box-shadow .15s ease, color .15s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn:hover {
+      background: rgba(255, 255, 255, .09);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .18);
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-post {
+      background: rgba(224, 16, 64, .16);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .32);
+      color: #ff9aac;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-post:hover {
+      background: rgba(224, 16, 64, .24);
+      box-shadow: inset 0 0 0 1px rgba(224, 16, 64, .46);
+      color: #ffd0d8;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-report {
+      background: rgba(255, 120, 105, .12);
+      box-shadow: inset 0 0 0 1px rgba(255, 120, 105, .2);
+      color: #ffb4a8;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented {
+      display: flex;
+      width: 100%;
+      padding: 3px;
+      border: 0;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, .24);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option {
+      flex: 1 1 0;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 8px;
+      color: var(--op-muted);
+      font-size: 12px;
+      text-align: center;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option:hover {
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-segmented-option.active {
+      background: rgba(255, 255, 255, .92);
+      color: #141416;
+      font-weight: 650;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+      transition: background .15s ease, box-shadow .15s ease, color .15s ease, transform .12s ease;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:hover {
+      background: rgba(255, 255, 255, .09);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .18);
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:active {
+      transform: scale(.97);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:disabled {
+      opacity: .38;
+      cursor: not-allowed;
+      transform: none;
+    }
+    /* The new button rule is more specific than the old .hidden rules, and it
+       sets display. Without these, Delete saved, Export, the per-song cache
+       action and the cache confirmation could all paint while still marked
+       hidden. Keep every conditional control genuinely out of the layout. */
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-file-note.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-account.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-name.hidden,
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-community-offset-btn.hidden {
+      display: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-op-btn-primary {
+      background: var(--op-red);
+      box-shadow: none;
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-op-btn-primary:hover {
+      background: #c80e39;
+      box-shadow: none;
+      color: #fff;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions:has(.ym-sl-delete-permanent-button.hidden) {
+      grid-template-columns: 1fr;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions .ym-sl-import {
+      width: 100%;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 0;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions .ym-sl-import {
+      width: 100%;
+      min-width: 0;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-file-note {
+      padding: 0 2px;
+      color: var(--op-muted);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-song-cache-status.pending {
+      color: var(--op-text);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-song-cache-clear {
+      width: 100%;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-section {
+      gap: 12px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-status {
+      padding: 0 2px;
+      color: var(--op-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-clear {
+      justify-self: start;
+      align-self: flex-start;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm {
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid rgba(224, 16, 64, .28);
+      border-radius: 12px;
+      background: rgba(224, 16, 64, .09);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm-text {
+      color: var(--op-body);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-confirm-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: var(--op-red);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete:hover { background: #c80e39; }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-delete:disabled {
+      opacity: .55;
+      cursor: default;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-trash-icon {
+      width: 15px;
+      height: 15px;
+      display: block;
+      fill: currentColor;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel {
+      min-height: 34px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .07);
+      box-shadow: inset 0 0 0 1px var(--op-line);
+      color: var(--op-text);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel:hover {
+      background: rgba(255, 255, 255, .1);
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-cache-cancel:disabled {
+      opacity: .5;
+      cursor: default;
+    }
+
+    .ym-sl-options-overlay.ym-sl-op2 button:focus-visible,
+    .ym-sl-options-overlay.ym-sl-op2 input:focus-visible,
+    .ym-sl-options-overlay.ym-sl-op2 [tabindex]:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .38);
+      outline-offset: 2px;
+    }
+    .ym-sl-options-overlay.ym-sl-op2 .ym-sl-video-offset input[type="range"]:focus-visible {
+      outline-offset: 4px;
+    }
+
+    /* The same shell in PiP: a normal block inside the floating window, with
+       the rail flattened to a row and the pane capped so the window keeps its
+       own scroll. The header is the floating card's drag handle, not useful
+       here, so it goes away. */
+    .ym-sl-options-overlay.ym-sl-op2.ym-sl-options-docked {
+      position: relative !important;
+      inset: auto !important;
+      z-index: auto !important;
+      display: block;
+      width: 100%;
+      max-width: 620px;
+      height: auto;
+      max-height: none;
+      margin: 0 auto 4px;
+      padding: 0;
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: none;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-overlay.ym-sl-op2.ym-sl-options-docked.hidden {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none !important;
+    }
+    .ym-sl-options-docked .ym-sl-op-shell {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: auto;
+      min-height: 0;
+      max-height: none;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, .035);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+    }
+    .ym-sl-options-docked .ym-sl-op-head { display: none; }
+    .ym-sl-options-docked .ym-sl-op-body {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .ym-sl-options-docked .ym-sl-op-rail {
+      display: block;
+      padding: 8px;
+      border-right: 0;
+      border-bottom: 1px solid var(--op-line);
+      background: transparent;
+    }
+    .ym-sl-options-docked .ym-sl-op-railhead,
+    .ym-sl-options-docked .ym-sl-op-railfoot,
+    .ym-sl-options-docked .ym-sl-op-ind { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabs {
+      flex-direction: row;
+      gap: 3px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .ym-sl-options-docked .ym-sl-op-tabs::-webkit-scrollbar { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tab {
+      grid-template-columns: auto;
+      width: auto;
+      min-width: max-content;
+      padding: 7px 10px;
+      border-radius: 8px;
+    }
+    .ym-sl-options-docked .ym-sl-op-tabicon { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabcopy small { display: none; }
+    .ym-sl-options-docked .ym-sl-op-tabcopy strong { font-size: 12px; }
+    .ym-sl-options-docked .ym-sl-op-pane {
+      display: block;
+      min-height: 0;
+    }
+    .ym-sl-options-docked .ym-sl-op-pane::before,
+    .ym-sl-options-docked .ym-sl-op-pane::after { display: none; }
+    .ym-sl-options-docked .ym-sl-op-scroll {
+      max-height: 46vh;
+      padding: 16px 14px 18px;
+    }
+    .ym-sl-options-docked .ym-sl-op-reel { max-width: none; }
+    .ym-sl-options-docked .ym-sl-op-pagetitle { font-size: 18px; }
+    .ym-sl-options-docked .ym-sl-op-pagesub { font-size: 11.5px; }
+    .ym-sl-options-docked .ym-sl-op-card {
+      gap: 10px;
+      padding: 12px;
+      border-radius: 11px;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset {
+      grid-template-columns: auto minmax(60px, 1fr) 60px;
+      row-gap: 8px;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+      grid-column: 2;
+      text-align: left;
+    }
+    .ym-sl-options-docked .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+      grid-column: 3;
+      justify-self: end;
+    }
+    .ym-sl-options-docked .ym-sl-options-file-actions,
+    .ym-sl-options-docked .ym-sl-export-actions { grid-template-columns: 1fr; }
+
+    @media (max-width: 780px) {
+      .ym-sl-options-overlay.ym-sl-op2 {
+        top: 64px;
+        right: 10px;
+        width: calc(100vw - 20px);
+        height: calc(100vh - 84px);
+        padding: 0;
+      }
+      .ym-sl-op-shell {
+        grid-template-columns: 1fr;
+        grid-template-rows: 60px auto minmax(0, 1fr);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        border-radius: 18px;
+      }
+      .ym-sl-op-head { padding: 0 12px 0 16px; }
+      .ym-sl-op-rail {
+        flex-direction: row;
+        align-items: center;
+        padding: 8px 10px;
+        overflow: hidden;
+        border-right: 0;
+        border-bottom: 1px solid var(--op-line);
+      }
+      .ym-sl-op-railhead,
+      .ym-sl-op-railfoot,
+      .ym-sl-op-ind { display: none; }
+      .ym-sl-op-tabs {
+        flex-direction: row;
+        gap: 4px;
+        width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .ym-sl-op-tabs::-webkit-scrollbar { display: none; }
+      .ym-sl-op-tab {
+        grid-template-columns: 20px auto;
+        gap: 7px;
+        width: auto;
+        min-width: max-content;
+        padding: 7px 10px;
+        border-radius: 9px;
+      }
+      .ym-sl-op-tabicon {
+        width: 20px;
+        height: 20px;
+        border-radius: 6px;
+        background: transparent;
+      }
+      .ym-sl-op-tabicon svg { width: 14px; height: 14px; }
+      .ym-sl-op-tabcopy small { display: none; }
+      .ym-sl-op-tabcopy strong { font-size: 12.5px; }
+      .ym-sl-op-pane {
+        grid-column: 1;
+        grid-row: 3;
+      }
+      .ym-sl-op-scroll { padding: 22px 20px 28px; }
+      .ym-sl-op-pagetitle { font-size: 22px; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset {
+        grid-template-columns: auto minmax(60px, 1fr) 64px;
+        row-gap: 10px;
+      }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-video-offset-value {
+        grid-column: 2;
+        text-align: left;
+      }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-video-offset .ym-sl-offset-applied {
+        grid-column: 3;
+        justify-self: end;
+      }
+    }
+    @media (max-width: 480px) {
+      .ym-sl-options-overlay.ym-sl-op2 {
+        top: 56px;
+        right: 8px;
+        width: calc(100vw - 16px);
+        height: calc(100vh - 72px);
+      }
+      .ym-sl-op-shell {
+        grid-template-rows: 58px auto minmax(0, 1fr);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        border-radius: 15px;
+      }
+      .ym-sl-op-scroll { padding: 18px 14px 24px; }
+      .ym-sl-op-page { gap: 14px; }
+      .ym-sl-op-pagetitle { font-size: 20px; }
+      .ym-sl-op-card { padding: 14px; border-radius: 12px; }
+      .ym-sl-op-brand { gap: 9px; }
+      .ym-sl-op-mark { width: 30px; height: 30px; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-options-file-actions,
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-export-actions { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-op-shell,
+      .ym-sl-op-close,
+      .ym-sl-op-tab,
+      .ym-sl-op-tabicon,
+      .ym-sl-op-ind,
+      .ym-sl-op-ind.ready,
+      .ym-sl-op-scroll,
+      .ym-sl-options-overlay.ym-sl-op2,
+      .ym-sl-options-overlay.ym-sl-op2.hidden {
+        transition: none;
+      }
+      .ym-sl-options-overlay.ym-sl-op2.hidden .ym-sl-op-shell { transform: none; }
+      .ym-sl-options-overlay.ym-sl-op2 .ym-sl-op-page .ym-sl-import:active,
+      .ym-sl-op-close:active { transform: none; }
     }
 
   `;

@@ -592,11 +592,13 @@
     return score;
   }
 
-  async function resolveSpotifyIdViaMusicBrainz(track, controller, key) {
+  async function resolveSpotifyIdViaMusicBrainz(track, controller, key, options = null) {
     if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") {
       return { id: null, transient: false };
     }
-    if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+    const prefetching = !!(options && options.prefetch);
+    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
+    if (stale()) return { id: null, transient: false };
     try {
       const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
         cleanSearchTitle(track.title, track.artist),
@@ -604,7 +606,7 @@
         track.album,
         track.durationMs
       );
-      if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+      if (stale()) return { id: null, transient: false };
       // status 0 = the host could not reach MusicBrainz at all (the relation
       // lookup reports it that way), so it is a transport failure like 429/5xx,
       // never evidence that the song has no mapping.
@@ -634,7 +636,9 @@
     }
   }
 
-  async function resolveSpotifyIdUncached(track, controller, key) {
+  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
+    const prefetching = !!(options && options.prefetch);
+    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
     const title = track && track.title;
     if (!title) {
       alWarn("no track title; Spotify lookup skipped.");
@@ -645,9 +649,13 @@
     const album = (track && track.album) || "";
     const titles = listenbrainzTitleVariants(title, artist);
     // Prefer the player bar's already-cleaned title when it says something new.
-    const barTitle = cleanSearchTitle(playerBarTitle(), artist);
-    if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
-      titles.unshift(barTitle);
+    // During prefetch the bar still shows the CURRENT song, so using it would
+    // poison the next track's lookup with the wrong title.
+    if (!prefetching) {
+      const barTitle = cleanSearchTitle(playerBarTitle(), artist);
+      if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
+        titles.unshift(barTitle);
+      }
     }
     const artists = listenbrainzArtistVariants(artist, title);
     // Try the album YTM gave us first, then the loose empty form. YTM's album
@@ -662,7 +670,7 @@
     lbLadder: for (const t of titles) {
       for (const a of artists) {
         for (const r of releases) {
-          if (controller.signal.aborted || key !== currentTrackKey) return { id: null, transient: false };
+          if (stale()) return { id: null, transient: false };
           // A 429 elsewhere means the rest of this window is gone. Bail with
           // `transient` rather than spending the remaining budget on calls that
           // cannot succeed.
@@ -695,7 +703,7 @@
     // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
     // behind ListenBrainz: it is slower and rate-limited, but it covers some
     // recordings whose direct ListenBrainz -> Spotify mapping is missing.
-    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key);
+    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key, options);
     if (musicBrainz.id) return musicBrainz;
     // Every mapping layer failed at the transport level, so we have no evidence
     // that the song is genuinely unresolvable. Do not negative-cache that.
@@ -710,7 +718,8 @@
    * Cached wrapper around the raw lookup. The resolution result is a stable
    * property of the song, so a hit here skips the network entirely.
    */
-  async function resolveSpotifyId(track, controller, key) {
+  async function resolveSpotifyId(track, controller, key, options = null) {
+    const prefetching = !!(options && options.prefetch);
     const cacheKey = spicyCacheKeyFor(track, "");
     // Only HITS are cached. A miss used to be recorded for 12 hours and then
     // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
@@ -726,7 +735,7 @@
         return cached.spotifyId;
       }
     }
-    const outcome = await resolveSpotifyIdUncached(track, controller, key);
+    const outcome = await resolveSpotifyIdUncached(track, controller, key, options);
     const resolved = outcome && outcome.id ? outcome.id : null;
     // The lookup can outlive its reason for existing: a manual upload bumps
     // trackRequestSeq, switching tracks rewrites currentTrackKey, clearing the
@@ -735,7 +744,7 @@
     // so return it to the caller but never persist it.
     const stale =
       controller.signal.aborted ||
-      key !== currentTrackKey ||
+      (!prefetching && key !== currentTrackKey) ||
       !spicyCache;
     if (cacheKey && !stale && resolved) {
       // A resolved id is durable — give it the full TTL and mark the entry
@@ -858,6 +867,7 @@
     if (!body || !Array.isArray(body.Content) || !body.Content.length) return null;
     const fst = (v) => (typeof v === "number" && isFinite(v)) ? v : null;
     const lines = [];
+    let hasWordTiming = false;
     for (const content of body.Content) {
       if (!content) continue;
       const lead = content.Lead;
@@ -902,6 +912,7 @@
         const s = fst(syl.StartTime);
         const e = fst(syl.EndTime);
         const timed = s != null && e != null && e > s + 0.001;
+        if (timed) hasWordTiming = true;
         if (i > 0 && !prevWord) parts.push(" ");
         const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
         parts.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
@@ -919,6 +930,7 @@
           const s = fst(syl.StartTime);
           const e = fst(syl.EndTime);
           const timed = s != null && e != null && e > s + 0.001;
+          if (timed) hasWordTiming = true;
           if (i > 0 && !prevBgWord) bgInner.push(" ");
           const timing = timed ? ` begin="${s}s" end="${e}s"` : "";
           bgInner.push(`<span${timing}>${escapeSpicyText(text)}</span>`);
@@ -933,7 +945,7 @@
     }
     if (!lines.length) return null;
     const ttml = `<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>${lines.join("")}</div></body></tt>`;
-    return { ttml, attribution: parseUploadAttribution(body) };
+    return { ttml, attribution: parseUploadAttribution(body), wordByWord: hasWordTiming };
   }
 
   // ---- Aurora Community (read-only client) ---------------------------------
@@ -1090,7 +1102,7 @@
     };
   }
 
-  async function fetchCommunityLyrics(track, key, controller) {
+  async function fetchCommunityLyrics(track, key, controller, options = null) {
     if (!track || !track.videoId) return null;
     const videoId = String(track.videoId);
     const cached = await getCommunityCacheEntry(videoId);
@@ -1133,7 +1145,7 @@
       alWarn("Aurora Community request failed:", error);
       return null;
     }
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    if (controller.signal.aborted || ((!options || options.prefetch !== true) && key !== currentTrackKey)) return null;
     if (response.status === 404) {
       setCommunityCacheEntry(videoId, { hit: false }, COMMUNITY_CACHE_NEGATIVE_TTL_MS);
       return null;
@@ -1171,12 +1183,13 @@
     };
   }
 
-  async function fetchSpicyLyrics(track, key, controller) {
+  async function fetchSpicyLyrics(track, key, controller, options = null) {
     if (!SPICY_LYRICS_PUBLISHABLE_KEY) return null;
     if (!track || !track.title) { alWarn("no track title; skipping."); return null; }
+    const prefetching = !!(options && options.prefetch);
     alLog(`resolving for "${track.title}" / "${track.artist || "?"}"…`);
-    const spotifyId = await resolveSpotifyId(track, controller, key);
-    if (controller.signal.aborted || key !== currentTrackKey) return null;
+    const spotifyId = await resolveSpotifyId(track, controller, key, options);
+    if (controller.signal.aborted || (!prefetching && key !== currentTrackKey)) return null;
     if (!spotifyId) {
       alWarn("no Spotify track id resolved; falling back.");
       return null;
@@ -1190,7 +1203,13 @@
     if (cached) {
       if (cached.ttml) {
         alLog(`served TTML from cache (${spotifyId}).`);
-        return { ttml: cached.ttml, attribution: cached.attribution || null, songwriters: cached.songwriters || [], fromCache: true };
+        return {
+          ttml: cached.ttml,
+          attribution: cached.attribution || null,
+          songwriters: cached.songwriters || [],
+          wordByWord: cached.wordByWord === true || ttmlHasWordTiming(cached.ttml),
+          fromCache: true,
+        };
       }
       if (cached.hit === false) {
         alLog(`cached "no sync available" for ${spotifyId}; skipping API.`);
@@ -1234,7 +1253,7 @@
     if (controller.signal.aborted) {
       return bail("request was aborted (a newer track/request superseded it)");
     }
-    if (key !== currentTrackKey) {
+    if (!prefetching && key !== currentTrackKey) {
       return bail(`track key moved (\`${key}\` -> \`${currentTrackKey}\`)`);
     }
     alLog(`answered HTTP ${response.status} for ${spotifyId}`);
@@ -1284,15 +1303,73 @@
     }
     // Only now — a Body that parsed into a non-empty TTML — is the result
     // trustworthy enough to persist.
+    const wordByWord = parsed.wordByWord === true || ttmlHasWordTiming(parsed.ttml);
     setSpicyCacheEntry(cacheKey, {
       hit: true,
       ttml: parsed.ttml,
       attribution: parsed.attribution || null,
       songwriters: parsed.songwriters || [],
+      wordByWord,
       spotifyId,
     });
-    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId}; handing to the renderer.`);
+    parsed.wordByWord = wordByWord;
+    alLog(`parsed ${parsed.ttml.length}-byte TTML for ${spotifyId} (${wordByWord ? "word" : "line"}-level); handing to the renderer.`);
     return parsed;
+  }
+
+  // Loads a payload that prefetch already resolved for this exact track. This
+  // is deliberately the only place prefetch data enters the renderer: the
+  // normal source runners and their cache/priority rules are untouched.
+  function applyPrefetchedLyrics(entry, track) {
+    if (!entry) return false;
+    try {
+      if (entry.source === "community") {
+        pendingSpicyCredits = {
+          attribution: entry.attribution || null,
+          songwriters: [],
+          uploadId: entry.uploadId || "",
+          test: entry.test === true,
+        };
+        if (loadTTML(entry.ttml, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "spicy") {
+        pendingSpicyCredits = {
+          attribution: entry.attribution || null,
+          songwriters: Array.isArray(entry.songwriters) ? entry.songwriters : [],
+        };
+        if (loadTTML(entry.ttml, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "unison") {
+        const attribution = {
+          source: "unison",
+          provider: "Unison",
+          uploader: entry.submitter || null,
+          maker: null,
+          songwriters: [],
+        };
+        if (entry.format === "lrc") {
+          return loadLRCLyrics({ syncedLyrics: entry.lyrics }, track.durationMs, "Unison", attribution);
+        }
+        pendingSpicyCredits = { attribution, songwriters: [] };
+        if (loadTTML(entry.lyrics, "external")) return true;
+        pendingSpicyCredits = null;
+        return false;
+      }
+      if (entry.source === "lrclib") {
+        // LRCLIB sets its own attribution; do not let a staged TTML credit leak
+        // into the next external load.
+        pendingSpicyCredits = null;
+        return loadLRCLyrics(entry.data, track.durationMs);
+      }
+    } catch (error) {
+      pendingSpicyCredits = null;
+      alWarn("prefetched lyrics could not be rendered:", error);
+    }
+    return false;
   }
 
   async function fetchLRCLyrics(track, key) {
@@ -1329,6 +1406,20 @@
       removeLyricsPersistent(key);
     }
 
+    /* A next-track prefetch already resolved this exact key. Load its winner
+       before any source runs; the payload was chosen in the same Community ->
+       Spicy -> Unison -> LRCLIB order (including the line-level Spicy hold). */
+    const prefetched = prefetchedLyrics.get(key);
+    if (prefetched) {
+      prefetchedLyrics.delete(key);
+      if (stale()) return;
+      if (applyPrefetchedLyrics(prefetched, track)) {
+        alLog(`prefetched ${prefetched.source} lyrics rendered.`);
+        return;
+      }
+      alWarn("prefetched lyrics could not be rendered; resolving normally.");
+    }
+
     /* One LRCLIB fetch, shared by the lrclib runner. It stays RAW (not a load)
        so the caller can tell a synced result from a plain-only one. */
     const fetchLrclibData = async () => {
@@ -1357,7 +1448,7 @@
         throw error;
       }
       let data = response.ok ? response.data : null;
-      if (!data || !data.syncedLyrics) {
+      if (!data || (!data.syncedLyrics && !data.lyricsfile)) {
         const searchParams = new URLSearchParams({
           q: [track.title, track.artist].filter(Boolean).join(" "),
         });
@@ -1379,19 +1470,48 @@
         data = selectLRCLIBResult(searchResponse.data, track)
           || selectLRCLIBPlainResult(searchResponse.data, track);
       }
-      if (!data || (!data.syncedLyrics && !data.plainLyrics)) return null;
+      if (!data || (!data.syncedLyrics && !data.plainLyrics && !data.lyricsfile)) return null;
       cacheLRCLyrics(key, data);
       cacheLyricsPersistent(key, data);
       return data;
     };
 
     /* Each source is a runner that returns true when it produced lyrics (or
-       when the request went stale). The resolver walks them in the order the
-       user set in the add-on's settings — "Source order" — instead of a
-       hard-coded sequence (AJ, 2026-10-19). Runners never show a terminal
-       "no lyrics" message themselves; the tail of this function does, so a
-       source that misses early cannot flash a message before the next one
-       has had its turn. */
+       when the request went stale). The resolver walks the fixed priority
+       Community -> Spicy -> Unison -> LRCLIB. A line-level Spicy result is
+       held by its runner while Unison gets one chance to supply word-level
+       timing; a line-level or missing Unison result falls back to that exact
+       Spicy payload. Runners never show a terminal "no lyrics" message
+       themselves; the tail of this function does, so a source that misses
+       early cannot flash a message before the next one has had its turn. */
+    let pendingSpicyLineResult = null;
+    const loadSpicyResult = (result) => {
+      pendingSpicyCredits = {
+        attribution: result.attribution || null,
+        songwriters: Array.isArray(result.songwriters) ? result.songwriters : [],
+      };
+      if (loadTTML(result.ttml, "external")) return true;
+      pendingSpicyCredits = null;
+      return false;
+    };
+    const loadPendingSpicy = () => {
+      const result = pendingSpicyLineResult;
+      pendingSpicyLineResult = null;
+      return result ? loadSpicyResult(result) : false;
+    };
+    // Unison credits the person who submitted the sync, not a separate maker.
+    // Its public API exposes the contributor in `submitter`.
+    const unisonCredits = (data) => ({
+      attribution: {
+        source: "unison",
+        provider: "Unison",
+        uploader: data && data.submitter ? data.submitter : null,
+        maker: null,
+        songwriters: [],
+      },
+      songwriters: [],
+    });
+
     const runners = {
       community: async () => {
         try {
@@ -1432,17 +1552,18 @@
             return true;
           }
           if (spicyResult && spicyResult.ttml) {
-            // Attribution + songwriters ride along with the API result; stash them
-            // before loadTTML so the credits footer can render them.
-            pendingSpicyCredits = {
-              attribution: spicyResult.attribution || null,
-              songwriters: Array.isArray(spicyResult.songwriters) ? spicyResult.songwriters : [],
-            };
-            if (loadTTML(spicyResult.ttml, "external")) {
-              alLog("TTML rendered from the Spicy Lyrics API.");
+            // Hold line-level Spicy until Unison has had one chance to supply
+            // word-level timing. A miss or a line-level Unison result falls
+            // back to this exact Spicy payload, not to LRCLIB.
+            if (spicyResult.wordByWord !== true) {
+              pendingSpicyLineResult = spicyResult;
+              alLog("Spicy returned line-level timing; checking Unison for word-level.");
+              return false;
+            }
+            if (loadSpicyResult(spicyResult)) {
+              alLog("word-level TTML rendered from the Spicy Lyrics API.");
               return true;
             }
-            pendingSpicyCredits = null;
             alWarn("API returned TTML we could not parse; trying the next source.");
           } else {
             alWarn("no Spicy TTML for this track; trying the next source.");
@@ -1451,6 +1572,59 @@
           if (error && error.name === "AbortError") return true;
           alWarn("lookup failed; trying the next source:", error);
         }
+        return false;
+      },
+
+      unison: async () => {
+        try {
+          const pendingSpicy = pendingSpicyLineResult;
+          const unisonData = await fetchUnisonLyrics(track, key, controller);
+          if (stale()) return true;
+          const credits = unisonData ? unisonCredits(unisonData) : null;
+
+          // Spicy produced line-level lyrics. Only word-level Unison may replace
+          // it; a line-level, plain or missing Unison result keeps Spicy.
+          if (pendingSpicy && unisonData && unisonData.wordByWord === true && unisonData.format === "ttml") {
+            pendingSpicyCredits = credits;
+            if (loadTTML(unisonData.lyrics, "external")) {
+              pendingSpicyLineResult = null;
+              alLog("word-level TTML rendered from Unison instead of line-level Spicy.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            alWarn("Unison returned word-level TTML we could not parse; keeping Spicy.");
+            return loadPendingSpicy();
+          }
+
+          if (pendingSpicy) {
+            alLog("Unison did not have word-level timing; keeping Spicy line-level lyrics.");
+            return loadPendingSpicy();
+          }
+
+          if (unisonData && unisonData.format === "ttml") {
+            pendingSpicyCredits = credits;
+            if (loadTTML(unisonData.lyrics, "external")) {
+              alLog("TTML rendered from Unison.");
+              return true;
+            }
+            pendingSpicyCredits = null;
+            alWarn("Unison returned TTML we could not parse; trying the next source.");
+          }
+          if (unisonData && unisonData.format === "lrc") {
+            if (loadLRCLyrics({ syncedLyrics: unisonData.lyrics }, track.durationMs, "Unison", credits.attribution)) {
+              alLog("synced lyrics rendered from Unison.");
+              return true;
+            }
+            alWarn("Unison returned LRC that could not be parsed; trying the next source.");
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") return true;
+          alWarn("Unison lookup failed; trying the next source:", error);
+        }
+        // Never paint a held result from the old track after a track change.
+        if (stale()) return true;
+        // A held Spicy result must not be skipped just because Unison errored.
+        if (pendingSpicyLineResult) return loadPendingSpicy();
         return false;
       },
 
@@ -1472,16 +1646,20 @@
     };
 
     // Fixed source priority: Aurora Community is curated per exact video id and
-    // wins when it has the track; Spicy is the broad fallback, then LRCLIB.
-    // lrc.red was retired (AJ, 2026-10-22) and Unison on 2026-10-25: both are
-    // unmoderated, so a wrong sync was more common than a useful one.
-    const order = ["community", "spicy", "lrclib"];
+    // wins when it has the track. Spicy is next; if it only has line-level
+    // timing, the spicy runner holds it while Unison gets one word-level check.
+    // Unison line-level or a miss falls back to Spicy. LRCLIB is last.
+    // lrc.red was retired on 2026-10-22.
+    const order = ["community", "spicy", "unison", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
       if (!runner) continue;
       if (await runner()) return;
       if (stale()) return;
     }
+    // Safety net: if a line-level Spicy result was held and the Unison runner
+    // could not consume it, load it before declaring the track a miss.
+    if (pendingSpicyLineResult && loadPendingSpicy()) return;
     // Every runner missed (or failed) for this track, so there is nothing for
     // the panel to resume with after an ad. Recorded for the ad notice's retry.
     adBreakNoteResult("none", "");

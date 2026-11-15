@@ -7,7 +7,7 @@
  * or by Spikerko, and is not affiliated with either. Preserve the upstream
  * license and attribution when distributing adapted builds.
  *
- * Community syncs come from the Spicy Lyrics API and Aurora Community and are
+ * Community syncs come from the Spicy Lyrics API, Aurora Community and Unison, and are
  * credited ON SCREEN wherever lyrics appear (see buildCreditsFooter /
  * buildProviderRow); API responses are cached for at most 30 days.
  *
@@ -34,10 +34,18 @@
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
+  // Unison — keyless, community-fed synced lyrics keyed by YouTube video id.
+  // Requests go through the content-script proxy, like LRCLIB, so a missing
+  // CORS header cannot strand the request.
+  const UNISON_API = "https://unison.boidu.dev/lyrics";
   // Aurora Community — community TTML and shared offsets, keyed by the exact
   // YouTube video id. TTML uploads are handled by the Discord bot; offsets can
   // be posted from the Sync tab and are reported to the same API.
-  const AURORA_COMMUNITY_API = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page";
+  const AURORA_COMMUNITY_API = "https://aurora-community-api.mitsyonsp.workers.dev";
+  // Public maker profile pages. The website sends an absolute profile URL with
+  // the signed-in identity; this origin is the fallback for identities stored
+  // before that field existed, whose Discord avatar URL still carries the id.
+  const AURORA_PROFILE_ORIGIN = "https://aurora-lyrics.mitsyonsp.workers.dev";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
   // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
   // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording

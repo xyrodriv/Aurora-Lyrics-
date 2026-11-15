@@ -467,10 +467,10 @@
       ? Math.max(0, positionMs - offsetForPosition)
       : positionMs;
     // Repeat one (or any real backwards seek) rewinds the song under the panel.
-    // At the end of a track the scroll is pinned to the credits, and the next
+    // At the end of a track the scroll sits on the final lines, and the next
     // pass has NO active line until the first lyric starts, so the normal
-    // line-follow retarget has nothing to aim at — the panel used to sit on the
-    // credits for the whole intro and then sweep the entire song height once
+    // line-follow retarget has nothing to aim at — the panel used to sit at the
+    // bottom for the whole intro and then sweep the entire song height once
     // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
     if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
       restartPlayheadScroll(lyricPositionMs);
@@ -527,13 +527,7 @@
     // would be correct for one frame only. It also outranks the lead-line target:
     // while the panel is being re-placed we want the line the user is HEARING,
     // not the one early scroll is aiming at.
-    // QOL #1: when a synced track reaches its final line, the credits reveal owns
-    // the scroll target (gliding to the bottom). While it is active, skip the
-    // normal line-follow retarget so the two do not fight.
-    const creditsReveal = updateCreditsReveal(positionMs, activeIndex, lyricPositionMs);
-    if (creditsReveal) {
-      // credits reveal owns the scroll target this frame
-    } else if (recentreUntilMs > now) {
+    if (recentreUntilMs > now) {
       recentreActiveLineNow();
       lastScrollTargetLine = lastActiveLine;
     } else if (scrollIndex !== lastScrollTargetLine) {

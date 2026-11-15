@@ -267,15 +267,131 @@
     return !!a.username && a.username === b.username;
   }
 
+  const WORD_SYNC_NOTICE_MS = 5000;
+  const WORD_SYNC_NOTICE_FADE_MS = 450;
+
+  function clearWordSyncQualityNoticeTimers() {
+    if (wordSyncQualityNoticeFadeTimer) {
+      clearTimeout(wordSyncQualityNoticeFadeTimer);
+      wordSyncQualityNoticeFadeTimer = 0;
+    }
+    if (wordSyncQualityNoticeHideTimer) {
+      clearTimeout(wordSyncQualityNoticeHideTimer);
+      wordSyncQualityNoticeHideTimer = 0;
+    }
+  }
+
+  function hideWordSyncQualityNotice() {
+    clearWordSyncQualityNoticeTimers();
+    if (panelEl) panelEl.classList.remove("ym-sl-word-sync-warning-active");
+    if (!wordSyncQualityNoticeEl) return;
+    wordSyncQualityNoticeEl.classList.add("hidden");
+    wordSyncQualityNoticeEl.classList.remove("ym-sl-fading");
+  }
+
+  function showWordSyncQualityNotice() {
+    const notice = wordSyncQualityNoticeEl;
+    if (!notice) return;
+    clearWordSyncQualityNoticeTimers();
+    notice.classList.remove("hidden", "ym-sl-fading");
+    if (panelEl) panelEl.classList.add("ym-sl-word-sync-warning-active");
+    // The bar is a one-shot CSS animation on a persistent element, so restart
+    // it explicitly; without the reflow it stays finished on a later track.
+    const timer = notice.querySelector(".ym-sl-mv-sync-chip-timer");
+    if (timer) {
+      timer.style.animation = "none";
+      void timer.offsetWidth;
+      timer.style.removeProperty("animation");
+    }
+    wordSyncQualityNoticeFadeTimer = window.setTimeout(() => {
+      wordSyncQualityNoticeFadeTimer = 0;
+      if (notice !== wordSyncQualityNoticeEl) return;
+      notice.classList.add("ym-sl-fading");
+      wordSyncQualityNoticeHideTimer = window.setTimeout(() => {
+        wordSyncQualityNoticeHideTimer = 0;
+        if (notice !== wordSyncQualityNoticeEl) return;
+        notice.classList.add("hidden");
+        notice.classList.remove("ym-sl-fading");
+        if (panelEl) panelEl.classList.remove("ym-sl-word-sync-warning-active");
+      }, WORD_SYNC_NOTICE_FADE_MS);
+    }, WORD_SYNC_NOTICE_MS);
+  }
+
+  function syncWordSyncQualityNotice() {
+    const active = currentWordSyncQualityWarning === true;
+    if (!active) {
+      wordSyncQualityNoticeShownFor = "";
+      hideWordSyncQualityNotice();
+      return;
+    }
+    if (!wordSyncQualityNoticeEl) return;
+    const key = [currentTrackKey || "", currentProvider || ""].join("\u0001");
+    if (wordSyncQualityNoticeShownFor === key) return;
+    wordSyncQualityNoticeShownFor = key;
+    showWordSyncQualityNotice();
+  }
+
   // Three segments hard against each other: songwriters, provider, and the two
   // people. The rail's radius rounds the outer edges, and hairline dividers do
   // the separating, so there is no gap to read as a fourth empty cell.
   function buildCreditsFooter(names, alignRight) {
     const footer = h("div", { class: "ym-sl-credits" });
+    const baseAlignRight = !!alignRight;
+    const hasWriters = !!(names && names.length);
+    // Unison keeps the shared rail with its own red skin.
+    if (currentProvider === "Unison") {
+      footer.classList.add("ym-sl-credits--unison");
+      if (!hasWriters) footer.classList.add("ym-sl-credits--no-writers");
+    } else if (currentProvider === "Spicy Lyrics") {
+      footer.classList.add("ym-sl-credits--spicy");
+      if (SCRIPT_URL) {
+        try {
+          footer.style.setProperty(
+            "--ym-sl-spicy-banner-image",
+            `url("${new URL("spicy-lyrics-banner.png", SCRIPT_URL).href}")`
+          );
+        } catch (e) {}
+      }
+    } else if (currentProvider === "Aurora Community") {
+      // Aurora Community deliberately reuses the Spicy rail treatment; the
+      // identity class leaves room for an Aurora-only override later.
+      footer.classList.add("ym-sl-credits--spicy", "ym-sl-credits--aurora");
+      const brand = buildProviderIcon("Aurora Community");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (currentProvider === "Apple Music") {
+      // Apple has no contributor rows, so the provider mark becomes the lead
+      // element and the writers become the footnote.
+      footer.classList.add("ym-sl-credits--apple");
+      const brand = buildProviderIcon("Apple Music");
+      if (brand) {
+        brand.classList.add("ym-sl-credit-brand");
+        footer.appendChild(brand);
+      }
+    } else if (currentProvider === "LRCLIB") {
+      // LRCLIB has no contributor rows either: borrow Apple's icon-led layout,
+      // then replace its frosted skin with the flat deep-blue one below.
+      footer.classList.add("ym-sl-credits--apple", "ym-sl-credits--lrclib");
+    }
     // A track that ends on a duet line leaves the reader on the right-hand side.
     // Mirror the credits so the next thing they look at is already in view,
     // instead of a full-width block they have to travel back left for.
-    if (alignRight) footer.classList.add("align-right");
+    if (baseAlignRight) footer.classList.add("align-right");
+    // Lyricsfile metadata names the performing artist, not the writers. It gets
+    // its own label so it can never be mistaken for a songwriting credit.
+    const lyricsfileArtist = typeof currentLyricsfileArtist === "string"
+      ? currentLyricsfileArtist.trim()
+      : "";
+    if (lyricsfileArtist) {
+      const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-artist" });
+      box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Artist" }));
+      const namesEl = h("div", { class: "ym-sl-credits-names" });
+      namesEl.appendChild(h("span", { class: "ym-sl-credits-name", text: lyricsfileArtist }));
+      box.appendChild(namesEl);
+      footer.appendChild(box);
+    }
     if (names && names.length) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-writers" });
       box.appendChild(h("div", { class: "ym-sl-credits-label", text: "Written by" }));
@@ -292,25 +408,30 @@
     if (currentProvider) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-provider" });
       box.appendChild(buildProviderRow(currentProvider, staticLyricsActive));
+      const submitted = formatCreditDate(currentUploader && currentUploader.createdAt);
+      if (submitted && hasWriters) {
+        box.appendChild(h("span", { class: "ym-sl-provider-date", text: submitted }));
+      }
       footer.appendChild(box);
+      if (submitted && !hasWriters) {
+        footer.appendChild(h("span", { class: "ym-sl-provider-date", text: submitted }));
+      }
     }
     // Uploader and maker share the people group: they are one credit (who put
     // this here), not two separate rows pretending to be different sources.
     if (currentUploader || currentMaker) {
       const box = h("div", { class: "ym-sl-credit-box ym-sl-credit-people" });
-      if (currentUploader) {
-        // A self-upload collapses the uploader and maker rows. Carry the maker's
-        // profile URL into the surviving row so the credit is still clickable.
-        const uploader = isSameCreditPerson(currentMaker, currentUploader)
-          ? Object.assign({}, currentUploader, {
-              url: currentUploader.url || currentMaker.url,
-            })
-          : currentUploader;
-        box.appendChild(buildPersonRow("Uploaded by", uploader));
-      }
+      // A self-upload collapses the uploader and maker rows. Carry the maker's
+      // profile URL into the surviving row so the credit is still clickable.
+      const uploader = currentUploader && isSameCreditPerson(currentMaker, currentUploader)
+        ? Object.assign({}, currentUploader, {
+            url: currentUploader.url || currentMaker.url,
+          })
+        : currentUploader;
       if (currentMaker && !isSameCreditPerson(currentMaker, currentUploader)) {
         box.appendChild(buildPersonRow("Made by", currentMaker));
       }
+      if (uploader) box.appendChild(buildPersonRow("Uploaded by", uploader));
       footer.appendChild(box);
     }
     return footer;
@@ -320,6 +441,8 @@
   // plain text and never conditional on a person existing. A link is the
   // strongest form of that credit: it lets the user check the source.
   const PROVIDER_URLS = {
+    "Spicy Lyrics": "https://spicylyrics.org/",
+    "Unison": "https://unison.boidu.dev/",
     "LRCLIB": "https://lrclib.net/",
   };
   // Sources whose timing is machine-aligned rather than hand-synced get the
@@ -332,8 +455,10 @@
   // extension origin without a network request. SCRIPT_URL is the injected
   // script's own URL; the files sit next to it in src/extensions.
   const PROVIDER_ICON_FILES = {
-    "Apple Music": "provider-apple-music.svg",
+    "Apple Music": "provider-apple-music.png",
     "Spicy Lyrics": "provider-spicy-lyrics.png",
+    "Unison": "provider-unison.svg",
+    "Aurora Community": "provider-aurora.png",
     "LRCLIB": "provider-lrclib.png",
   };
   function buildProviderIcon(provider) {
@@ -438,11 +563,33 @@
     return svg;
   }
 
+  // Unison's createdAt is Unix seconds; accept milliseconds too so a future
+  // source can hand us either without silently dropping the date.
+  function formatCreditDate(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    const date = new Date(seconds > 1e12 ? seconds : seconds * 1000);
+    if (Number.isNaN(date.getTime())) return "";
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(date);
+    } catch (e) {
+      return "";
+    }
+  }
+
   // "<label> <avatar> <username>" — the whole pill links when the source
   // supplied a profile URL; otherwise it stays plain text so it never looks like
   // a dead link.
   function buildPersonRow(label, uploader) {
     const row = h("div", { class: "ym-sl-uploader" });
+    const level = Number(uploader && uploader.level);
+    const hasLevel = Number.isFinite(level) && level > 0;
+    if (hasLevel) row.setAttribute("data-level", String(level));
+    if (!uploader || !uploader.avatar) row.classList.add("ym-sl-uploader--no-avatar");
     row.appendChild(h("span", { class: "ym-sl-uploader-label", text: label }));
 
     const link = h("a", {
@@ -454,7 +601,7 @@
       // validated as http(s) at parse time (parseSpicyLyrics attribution).
       target: "_blank",
       rel: "noopener noreferrer",
-      title: uploader.url ? `Open ${uploader.username || "maker"}'s Aurora profile` : "",
+      title: uploader.url ? `Open ${uploader.username || "maker"}'s ${uploader.profileLabel || "Aurora"} profile` : "",
     });
     if (uploader.url) link.href = uploader.url;
 
@@ -464,7 +611,10 @@
       img.loading = "lazy";
       img.referrerPolicy = "no-referrer";
       // A dead/blocked avatar must not leave a broken-image glyph in the panel.
-      img.addEventListener("error", () => { try { img.remove(); } catch (e) {} });
+      img.addEventListener("error", () => {
+        try { img.remove(); } catch (e) {}
+        row.classList.add("ym-sl-uploader--no-avatar");
+      });
       link.appendChild(img);
     }
     link.appendChild(h("span", { class: "ym-sl-uploader-name", text: uploader.username }));

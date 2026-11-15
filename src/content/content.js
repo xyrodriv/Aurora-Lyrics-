@@ -507,6 +507,16 @@
   });
   const LRCLIB_ORIGIN = "https://lrclib.net";
   const LRCLIB_PATHS = new Set(["/api/get", "/api/search"]);
+  const LRCLIB_CLIENT = (() => {
+    try {
+      const version = chrome.runtime.getManifest().version;
+      return version ? `Aurora Lyrics v${version}` : "Aurora Lyrics";
+    } catch (_) {
+      return "Aurora Lyrics";
+    }
+  })();
+  const UNISON_ORIGIN = "https://unison.boidu.dev";
+  const UNISON_PATHS = new Set(["/lyrics"]);
   const MUSICBRAINZ_ORIGIN = "https://musicbrainz.org";
   // MusicBrainz asks clients to keep request volume low. The resolver calls
   // this only after ListenBrainz misses, and this gate makes the fallback
@@ -517,6 +527,21 @@
     const url = new URL(String(rawUrl || ""));
     if (url.origin !== LRCLIB_ORIGIN || !LRCLIB_PATHS.has(url.pathname)) {
       throw new Error("Unsupported LRCLIB endpoint.");
+    }
+    const response = await fetch(url.href, {
+      headers: { Accept: "application/json", "X-User-Agent": LRCLIB_CLIENT },
+      credentials: "omit",
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+      data: response.ok ? await response.json() : null,
+    };
+  };
+  const fetchUnison = async (rawUrl) => {
+    const url = new URL(String(rawUrl || ""));
+    if (url.origin !== UNISON_ORIGIN || !UNISON_PATHS.has(url.pathname)) {
+      throw new Error("Unsupported Unison endpoint.");
     }
     const response = await fetch(url.href, {
       headers: { Accept: "application/json" },
@@ -1024,10 +1049,9 @@
         // the offset at its -80px default, so a value stored while the slider
         // existed cannot keep shifting the lyrics with no UI left to undo it.
         // NOTE: "Where lyrics come from" (source reordering) was removed (AJ,
-        // 2026-10-19). The resolver now uses a fixed priority — Spicy Lyrics wins
-        // when it has the track, LRCLIB as the fallback — so there is no
-        // user-facing reordering. lrc.red was retired entirely on 2026-10-22,
-        // and Unison on 2026-10-25.
+        // 2026-10-19). The resolver now uses a fixed priority: Aurora Community,
+        // then Spicy Lyrics, then Unison, with LRCLIB last. lrc.red was retired
+        // entirely on 2026-10-22.
       ],
     },
     {
@@ -2190,7 +2214,7 @@
      Discord bot token stays on the server — it is never in the extension.
      Nothing identifying is sent: add-on, version, what broke, and the words
      typed in the box. */
-  const REPORTS_URL = "https://site-5aa52a9653ee459eaa8c6b433dad2937.freebuff.page/v1/reports";
+  const REPORTS_URL = "https://aurora-community-api.mitsyonsp.workers.dev/v1/reports";
   const REPORT_ERROR_TEXT = "Couldn't send. Check your connection and try again.";
   function reportRequestId() {
     try {
@@ -3684,6 +3708,7 @@
           case "getCommunityCache": r = await getCommunityCache(); break;
           case "setCommunityCache": await setCommunityCache(args[0]); r = true; break;
           case "fetchLRCLIB": r = await fetchLRCLIB(args[0]); break;
+          case "fetchUnison": r = await fetchUnison(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
             break;
@@ -3876,6 +3901,15 @@
     MusicBrainz: "ym-mk-lnk-mb",
     ListenBrainz: "ym-mk-lnk-lb",
   };
+  // The provider marks the lyrics panel can credit, shown together on the
+  // Aurora Lyrics detail page in the add-ons panel.
+  const MK_PROVIDERS = [
+    ["Apple Music", "provider-apple-music.png"],
+    ["Unison", "provider-unison.svg"],
+    ["Spicy Lyrics", "provider-spicy-lyrics.png"],
+    ["Aurora Community", "provider-aurora.png"],
+    ["LRCLIB", "provider-lrclib.png"],
+  ];
   const MK_CHECK = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
   const MK_HOME = "M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z";
   const MK_PLUS = "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z";
@@ -4429,6 +4463,30 @@
     return box;
   }
 
+  function mkProviderStrip() {
+    const row = h("div", { class: "ym-mk-providers" });
+    row.appendChild(h("span", { class: "ym-mk-providers-label", text: "Lyrics from" }));
+    const marks = h("div", { class: "ym-mk-provider-marks" });
+    MK_PROVIDERS.forEach(([label, file]) => {
+      let src = "";
+      try { src = chrome.runtime.getURL("src/extensions/" + file); } catch (_) { return; }
+      const mark = h("img", {
+        class: "ym-mk-provider-mark",
+        src,
+        alt: label,
+        title: label,
+        width: "22",
+        height: "22",
+        loading: "lazy",
+        decoding: "async",
+      });
+      mark.addEventListener("error", () => { try { mark.remove(); } catch (e) {} });
+      marks.appendChild(mark);
+    });
+    row.appendChild(marks);
+    return row;
+  }
+
   // Change the label AND morph the width in the same beat, so the button never
   // jumps between "Uninstall" and "Uninstalling…".
   function mkBtnLabel(btn, text) {
@@ -4844,7 +4902,7 @@
   }
 
   /* ===== Aurora Lyrics: grouped sub-rail (AJ, 2026-10-21) =================
-     This add-on has 19 settings and read as one endless column. They are split
+     This add-on has 20 settings and read as one endless column. They are split
      into groups and the pane gains a second, smaller rail.
      ⭐ The rows are the SAME NODES the generic builder already made — they are
      MOVED, never rebuilt — so every control keeps its listener, its childOf
@@ -6851,6 +6909,7 @@
     // gone — the design has neither.
     wrap.appendChild(mkActions(ext, installed));
     wrap.appendChild(h("p", { class: "ym-mk-lead", text: ext.description || "" }));
+    if (ext.id === "ytmod-spicy-lyrics") wrap.appendChild(mkProviderStrip());
     // Attach what is already built BEFORE awaiting the settings. The settings
     // builder is async; while it ran, the pane sat empty — that is the stall in
     // the middle of a swap. The settings row simply appears below when ready.
