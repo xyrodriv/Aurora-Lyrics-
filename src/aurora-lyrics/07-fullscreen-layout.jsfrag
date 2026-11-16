@@ -460,6 +460,12 @@
     side: "Video + Lyrics",
     background: "Video Background",
   };
+  // The side composition means two different things depending on the track.
+  // A music video keeps the literal name; cover art gets the Apple Music layout.
+  function fsLayoutName(mode) {
+    if (mode === "side" && !hasFsVideo()) return "Apple Music";
+    return FS_LAYOUT_NAMES[mode] || mode;
+  }
   // Hits is the cover-art default: artwork, title and actions at the top,
   // lyrics directly beneath. Music videos deliberately do NOT get it — the
   // side-by-side composition is the clean framing there, so a video cycles
@@ -490,9 +496,9 @@
    */
   function updateFsLayoutButtonTitle() {
     if (!fsLayoutSelect) return;
-    const current = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
+    const current = fsLayoutName(fsLayoutMode);
     const nextMode = nextFsLayoutMode(fsLayoutMode);
-    const next = FS_LAYOUT_NAMES[nextMode] || nextMode;
+    const next = fsLayoutName(nextMode);
     const text = "Layout: " + current + " - click for " + next;
     fsLayoutSelect.title = text;
     fsLayoutSelect.setAttribute("aria-label", text);
@@ -816,7 +822,13 @@
     // corrected it until the next line change happened to retarget the spring.
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
+    }
     // AMLL owns its own scroll offset, so keep its focal line in step with this
     // layout switch too.
     amllSyncAlignPosition();
@@ -1103,6 +1115,19 @@
     }
   }
 
+  // The fullscreen volume floor is 4. The custom slider still reads 0-100, but
+  // 0 is painted at actual volume 4 and 100 stays 100. That keeps the full
+  // range usable without a dead zone at the bottom.
+  const FS_VOLUME_MIN = 4;
+  function fsVolumeActualFromUi(value) {
+    const ui = clamp(Math.round(Number(value) || 0), 0, 100);
+    return Math.round(FS_VOLUME_MIN + (ui / 100) * (100 - FS_VOLUME_MIN));
+  }
+  function fsVolumeUiFromActual(value) {
+    const actual = clamp(Number(value) || 0, 0, 100);
+    return clamp(Math.round(((actual - FS_VOLUME_MIN) / (100 - FS_VOLUME_MIN)) * 100), 0, 100);
+  }
+
   // One write path for the fullscreen volume, shared by the slider's own handler
   // and the overlay's arrow keys (handleFsKeydown in 10-fullscreen-entry): the
   // custom track, its ARIA value and YTM's real volume move together, clamped the
@@ -1116,7 +1141,9 @@
       fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
       fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
     }
-    setPlayerVolume(v);
+    const actual = fsVolumeActualFromUi(v);
+    fsPlayerVolumeActual = actual;
+    setPlayerVolume(actual);
   }
 
   function syncFullscreenVolumeControl() {
@@ -1126,13 +1153,15 @@
     const sourceValue = Number(source.value);
     const sourceMax = Number(source.max);
     if (!Number.isFinite(sourceValue) || !Number.isFinite(sourceMax) || sourceMax <= 0) return;
-    const percent = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    const actual = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    if (actual === fsPlayerVolumeActual) return;
     // The track is a <div> (no .value). Skip while the user is driving it so the
     // 500ms refresh loop doesn't fight an in-progress drag/focus.
     if (document.activeElement !== fsPlayerVolumeRange) {
-      fsPlayerVolumeValue = percent;
-      fsPlayerVolumeRange.style.setProperty("--vol-fill", percent + "%");
-      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(percent));
+      fsPlayerVolumeActual = actual;
+      fsPlayerVolumeValue = fsVolumeUiFromActual(actual);
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", fsPlayerVolumeValue + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(fsPlayerVolumeValue));
     }
   }
 
@@ -1148,11 +1177,15 @@
   // range KEEPS focus after a click, so the guard never lifted: the thumb froze
   // wherever it was clicked while --slider-fill (written outside the guard)
   // kept advancing underneath it. Exactly AJ's 2026-09-28 report - "the dot
-  // just stays there and doesnt follow the fill". A short timestamp window is
-  // self-healing: a real drag refreshes it through the input event, and it
-  // expires on its own if the pointerup is missed.
+  // just stays there and doesnt follow the fill".
+  //
+  // The timestamp alone is not enough: holding the pointer still for longer
+  // than the grace window let the tick take the fill back while the drag was
+  // still down. Track the held drag explicitly, and keep the timestamp for the
+  // seek commute after release.
   const FS_SEEK_USER_GRACE_MS = 1200;
   let fsSeekUserAt = 0;
+  let fsSeekDragging = false;
 
   function syncFullscreenSeekControl() {
     if (!fsPlayerSeekRange || !window.YTMod || !window.YTMod.player) return;
@@ -1160,12 +1193,14 @@
     const duration = Number(window.YTMod.player.getDurationMs());
     if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) return;
     const percent = clamp((position / duration) * 100, 0, 100);
-    if (performance.now() - fsSeekUserAt > FS_SEEK_USER_GRACE_MS) {
+    const driving = fsSeekDragging ||
+      performance.now() - fsSeekUserAt <= FS_SEEK_USER_GRACE_MS;
+    if (!driving) {
       fsPlayerSeekRange.value = String(position);
+      fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
+      if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
     }
     fsPlayerSeekRange.max = String(duration);
-    fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
-    if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
     if (fsTimeTotal) fsTimeTotal.textContent = formatClock(duration);
   }
 

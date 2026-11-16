@@ -735,7 +735,8 @@
   accent-color: var(--mk-accent);
   cursor: pointer;
 }
-#ym-market .ym-detail-setting-input[type="text"] {
+#ym-market .ym-detail-setting-input[type="text"],
+#ym-market select.ym-detail-setting-select {
   box-sizing: border-box;
   min-height: calc(var(--ym-u) * 2.125);
   padding: calc(var(--ym-u) * .4375) calc(var(--ym-u) * .625);
@@ -747,9 +748,16 @@
   cursor: text;
   outline: none;
 }
-#ym-market .ym-detail-setting-input[type="text"]:focus {
+#ym-market .ym-detail-setting-input[type="text"]:focus,
+#ym-market select.ym-detail-setting-select:focus {
   border-color: var(--mk-accent);
   box-shadow: 0 0 0 2px rgba(224,16,64,.16);
+}
+#ym-market select.ym-detail-setting-select {
+  cursor: pointer;
+}
+#ym-market .ym-detail-setting-select-value {
+  display: none;
 }
 #ym-market .ym-detail-setting-input[type="checkbox"] {
   appearance: none;
@@ -1701,6 +1709,9 @@ ytmusic-player-bar .ym-pb-btn:active,
   transition: opacity .18s ease, transform .18s ease;
 }
 #ym-market .ym-mk-provider-mark:hover { opacity: 1; transform: translateY(-1px); }
+/* Aurora Community's square mark gets the same small corner radius in the
+   add-on's "Lyrics from" strip as it has in the lyrics credits. */
+#ym-market .ym-mk-provider-mark[src*="provider-aurora"] { border-radius: 5px; }
 
 /* attribution */
 #ym-market .ym-mk-sources {

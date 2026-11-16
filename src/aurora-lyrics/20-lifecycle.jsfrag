@@ -184,6 +184,7 @@
     pendingAnimationLines.clear();
     syncNativePanel(false);
     cleanupTabBar(tabBar);
+    braccatoDeactivate();
     if (panelEl) panelEl.remove();
     const optsOverlay = document.querySelector(".ym-sl-options-overlay");
     if (optsOverlay) optsOverlay.remove();

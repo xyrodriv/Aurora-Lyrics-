@@ -539,6 +539,14 @@
     if (key === currentTrackKey) return;
 
     currentTrackKey = key;
+    // Recycle the Apple Music player while the loading skeleton is about to go
+    // up. A browser refresh makes both renderers fast again after a long
+    // session; the built-in line DOM is already rebuilt per track, while the
+    // AMLL player otherwise lives for the whole page. Doing this before the
+    // skeletons means the old player is gone before the new content arrives,
+    // and the next renderer choice decides whether a fresh one is built.
+    try { recycleLyricsSurfaceForTrackChange(); } catch (e) {}
+    try { amllRecycleForTrackChange(); } catch (e) {}
     // A new track starts a fresh lookup; the ad notice reports "Looking…"
     // until one of the sources answers.
     adBreakNoteLookup(key);

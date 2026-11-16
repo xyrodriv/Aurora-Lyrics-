@@ -85,6 +85,9 @@
   // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
   // relative URL is all we need.
   const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
+  // Bundled Braccato renderer (the Better Lyrics engine, MIT). Same resolution
+  // rule as AMLL: the page world cannot use chrome.runtime.getURL().
+  const BRACCATO_CORE_URL = SCRIPT_URL ? new URL("braccato-core.js", SCRIPT_URL).href : "";
   // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
   // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
   // These are what the backdrop uses before that handshake lands, and they

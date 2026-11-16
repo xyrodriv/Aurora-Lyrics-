@@ -356,6 +356,10 @@
       if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.remove("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // The optimistic video flip is being rolled back to cover art. If its
+        // chrome fade already started, restore it now instead of waiting for
+        // the heal timer.
+        fsChromeFadeIn();
         // No video left to blur; drop Video Background back to side-by-side
         // without rewriting the audio layout preference.
         if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
@@ -373,6 +377,8 @@
       // reported. Readiness is handled separately (the video stays at opacity 0
       // until frames advance), so this cannot show a stale frame.
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
+        // This is the cover-art composition changing to video geometry.
+        fsChromeFadeOut();
         fsOverlay.classList.add("ym-sl-fs-has-video");
         syncFsChromeStructure();
         // Hits is cover-art only; a video appearing mid-session moves straight
@@ -421,9 +427,8 @@
         return;
       }
       if (want && !ha) {
-        // Committed cover -> MV swap: the whole control column restructures, so
-        // dissolve the chrome before the swap runs (it fades back in with the
-        // video via awaitFsVideoReady -> revealFsMediaPane -> fsFadeInMedia).
+        // Committed cover -> MV swap: the control column restructures in place;
+        // the chrome fades while that happens, then returns with the video.
         fsChromeFadeOut();
         // Attach the live video (mirrors enterFullscreenMode).
         fsSavedVideo = {
@@ -500,8 +505,9 @@
             return;
           }
         }
-        // Committed MV -> cover swap: restructure the control column, so dissolve
-        // the chrome first. (The debounce above already ruled out a mere reload.)
+        // Committed MV -> cover swap: the chrome fades while the column
+        // restructures, then returns with the new cover. (The debounce above
+        // already ruled out a mere reload.)
         fsChromeFadeOut();
         // Detach the stale video and fall back to cover art.
         const saved = fsSavedVideo;
@@ -896,30 +902,8 @@
     }
     fsFadeAt = now;
     if (id) fsFadeTrackId = id;
-    // Sync the control dissolve with the media dissolve.
-    if (fsOverlay && !fsSavedVideo) {
-      // LEAVING a cover-art track (cover -> MV or cover -> cover): the controls
-      // fade out on the same beat the media does, not when the next video finishes
-      // attaching.
-      fsChromeFadeOut();
-    } else if (fsOverlay && fsSavedVideo) {
-      // LEAVING a music video: an MV -> MV reload and an MV -> cover look
-      // identical at the skip instant (both still have a live player video). The
-      // restructure is gated by the source-load wait below so a reload is never
-      // mistaken for a cover, but the control fade should NOT wait that long.
-      // Probe a beat later: if the player video is GONE by then it is a cover ->
-      // dissolve the controls now, synced with the video leaving; if it survived
-      // it is MV -> MV and the controls must stay perfectly still.
-      window.setTimeout(() => {
-        if (!fsActive || !fsSavedVideo) return;
-        // Readiness, not intent: on an MV -> MV skip the reused element reports
-        // videoWidth 0 for the whole reload, so findPlayerVideo() alone read as
-        // "the video is gone" and dissolved the controls that must stay still.
-        const node = fsSavedVideo.node;
-        const reloading = !!node && node.readyState < 1;
-        if (!reloading && !findPlayerVideo()) fsChromeFadeOut();
-      }, 170);
-    }
+    // The chrome stays visible across track changes. Only the media dissolves;
+    // a cover <-> MV switch restructures the column in place when it commits.
     fsFadeOutMedia();
   }
 

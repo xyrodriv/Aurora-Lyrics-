@@ -140,11 +140,13 @@
   let fsPlayerLikeButton = null;   // fullscreen "like" button (clones YTM's own icon)
   let fsPlayerDislikeButton = null; // fullscreen "dislike" button (clones YTM's own icon)
   let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
-  let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
+  let fsPlayerVolumeValue = 100;   // 0-100 display volume (0 = actual minimum, 4%)
+  let fsPlayerVolumeActual = null; // last actual percent written/read, avoids round-trip snapping
   let fsPlayerSeekRange = null;
   let fsTimeCurrent = null;
   let fsTimeTotal = null;
   let fsScrubTip = null; // time bubble above the seek thumb while dragging
+  let fsVolumeTip = null; // percent bubble above the volume thumb while dragging
   let fsPlayerStateTimer = 0;
   let fsBgImg = null; // cover-art layer used when fullscreen has no live video
   let fsArtImg = null; // sharp cover-art card in fsMediaHost (no-video tracks)
@@ -512,9 +514,15 @@
     // this was a toggle cannot leave half the renderer switched off.
     simpleLyrics: true,
     // Which renderer draws which KIND of track (the Renderer rows in the panel).
-    // Each row names its own renderer, so these are not inverses of one setting:
-    // both false = Spicy for words, engine for lines, which is the default and
-    // the behaviour that was hard-coded before. Both true swaps them.
+    // Each row names its own renderer instead of being an inverse toggle, so a
+    // third renderer can be added without a second boolean. The legacy
+    // amllWordTracks/spicyLineTracks booleans are still read once to migrate an
+    // existing install, then ignored.
+    wordRenderer: "spicy",
+    lineRenderer: "amll",
+    // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
+    // exposes it so a quieter karaoke look is one switch away.
+    braccatoLetterWave: true,
     amllWordTracks: false,
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
@@ -555,6 +563,12 @@
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
+  function normalizeRendererChoice(value, fallback) {
+    const name = String(value || "").trim();
+    if (name === "spicy" || name === "amll" || name === "braccato") return name;
+    return fallback;
+  }
+
   function normalizeSourceOrder(value) {
     const all = ["community", "spicy", "unison", "lrclib"];
     const seen = new Set();
@@ -670,6 +684,15 @@
     // extension unusable until storage was cleared by hand; the clamps below
     // cover bad VALUES, this covers a bad SHAPE.
     const incoming = next && typeof next === "object" && !Array.isArray(next) ? next : {};
+    // Migration has to look at the INCOMING payload: currentSettings already
+    // carries the new defaults, so a legacy install (no wordRenderer key) would
+    // otherwise be pinned to Spicy/AMLL before its old toggles are read.
+    const incomingHasWordRenderer = incoming.wordRenderer != null;
+    const incomingHasLineRenderer = incoming.lineRenderer != null;
+    const incomingHasLegacyRenderer =
+      incoming.amllWordTracks != null || incoming.spicyLineTracks != null;
+    const previousWordRenderer = currentSettings.wordRenderer;
+    const previousLineRenderer = currentSettings.lineRenderer;
     currentSettings = Object.assign({}, currentSettings, incoming);
     const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
     const booleanValue = (value, fallback) => {
@@ -746,6 +769,29 @@
     // Pinned: the Apple look is chosen per track by the renderer rows now, so
     // this can no longer be turned off from the UI (see DEFAULT_SETTINGS).
     currentSettings.simpleLyrics = true;
+    // New per-kind renderer names, seeded from the old pairs of booleans when
+    // this install predates them. The old values are defaults here, not live
+    // settings: once the name exists the name is the only thing consulted.
+    const legacyWordRenderer = booleanValue(currentSettings.amllWordTracks, false) ? "amll" : "spicy";
+    const legacyLineRenderer = booleanValue(currentSettings.spicyLineTracks, false) ? "spicy" : "amll";
+    // A partial settings patch (Aurora Bloom sends brightness only) has neither
+    // shape and must not re-run migration against stale defaults: preserve the
+    // choice it did not mention. Only a payload that actually carries the old
+    // booleans is treated as the legacy migration pass.
+    currentSettings.wordRenderer = incomingHasWordRenderer
+      ? normalizeRendererChoice(incoming.wordRenderer, legacyWordRenderer)
+      : incomingHasLegacyRenderer
+        ? normalizeRendererChoice("", legacyWordRenderer)
+        : normalizeRendererChoice(previousWordRenderer, legacyWordRenderer);
+    currentSettings.lineRenderer = incomingHasLineRenderer
+      ? normalizeRendererChoice(incoming.lineRenderer, legacyLineRenderer)
+      : incomingHasLegacyRenderer
+        ? normalizeRendererChoice("", legacyLineRenderer)
+        : normalizeRendererChoice(previousLineRenderer, legacyLineRenderer);
+    currentSettings.braccatoLetterWave = booleanValue(
+      currentSettings.braccatoLetterWave,
+      DEFAULT_SETTINGS.braccatoLetterWave
+    );
     currentSettings.amllWordTracks = booleanValue(
       currentSettings.amllWordTracks,
       DEFAULT_SETTINGS.amllWordTracks
@@ -805,7 +851,7 @@
     // alone, so the mode follows the lyrics into fullscreen for free.
     // Which renderer owns the current content decides the LOOK as well as the
     // engine, and it is the user's per-kind choice (the two Renderer rows:
-    // amllWordTracks / spicyLineTracks). Recompute before the body class so a
+    // wordRenderer / lineRenderer). Recompute before the body class so a
     // settings change can never leave a track dressed in the other renderer's
     // clothing.
     let rendererChanged = false;
@@ -832,8 +878,10 @@
           smoothScrolling: currentSettings.smoothScrolling !== false,
           simpleLyrics: currentSettings.simpleLyrics === true,
           // Flipping a Renderer row re-homes the CURRENT track, so the PiP has to
-          // switch renderer now rather than on the next song.
-          renderer: amllTrackUsesEngine(lastRendererContent) ? "amll" : "spicy",
+          // switch renderer now rather than on the next song. Braccato is
+          // panel-only for now; the PiP's existing fallback keeps drawing the
+          // Spicy surface for it.
+          renderer: rendererOwner,
           scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
           scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
         });
@@ -845,6 +893,7 @@
       lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
       lineScrollEl.style.setProperty("--ym-sl-lyrics-offset", `${currentSettings.offset}px`);
       lineScrollEl.style.setProperty("--ym-sl-bg-vocal-scale", String(currentSettings.bgOpacity));
+      if (braccatoOwnsTrack()) braccatoRelayout();
     }
     // A size change reflows EVERY line, so the scroll offset that was correct for
     // the old line heights no longer points at the active line — the same "camera
@@ -852,7 +901,7 @@
     // with a fifth trigger. Re-centre after the write. recentreActiveLine() holds
     // a window open and re-pins each frame, which is what covers the reflow
     // actually landing a frame after the custom property is set.
-    if (prevSize !== currentSettings.size) recentreActiveLine();
+    if (prevSize !== currentSettings.size && !braccatoOwnsTrack()) recentreActiveLine();
     // Translation slots are per line, so turning it on or off has to rebuild the
     // current lines rather than wait for the next song.
     if (prevAutoTranslate !== currentSettings.autoTranslate && lastRendererContent) {

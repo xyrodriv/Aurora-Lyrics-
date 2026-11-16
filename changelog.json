@@ -1,6 +1,18 @@
 {
   "releases": [
     {
+      "version": "1.4.0",
+      "date": "2026-11-16",
+      "title": "A refreshed fullscreen layout and a new Better Lyrics renderer.",
+      "features": [
+        "Fullscreen has a refreshed layout for cover-art and music-video tracks, with the title, artists and writers above a cleaner seek bar and transport row.",
+        "Better Lyrics (Braccato) is now a third lyrics renderer, with its own line animations, smooth scrolling and optional wavy letters. Choose it in Renderer settings; it clears the previous song's lines as soon as the next track starts."
+      ],
+      "fixes": [
+        "Double-clicking the cover art now opens Aurora fullscreen instead of YouTube Music's own fullscreen view."
+      ]
+    },
+    {
       "version": "1.3.0",
       "date": "2026-11-15",
       "title": "Faster lyrics loading, Unison, and a rebuilt Options panel.",

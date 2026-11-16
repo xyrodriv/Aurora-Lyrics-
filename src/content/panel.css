@@ -477,6 +477,24 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+#ym-market.ym-mk2 .ym-detail-setting-select {
+  width: 156px; max-width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  background: #181818;
+  color: #f1f1f1;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+#ym-market.ym-mk2 .ym-detail-setting-select:focus {
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px rgba(224,16,64,.16);
+}
+#ym-market.ym-mk2 .ym-detail-setting-select-value { display: none; }
 #ym-market.ym-mk2 .ym-detail-setting-section {
   margin: 18px 0 2px; padding-top: 0; border-top: 0;
   font-size: 12px; font-weight: 600; letter-spacing: 0;

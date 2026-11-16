@@ -243,7 +243,12 @@
     // fullscreen always opened on the TOP of the song no matter where the
     // playhead was. The recentre window also rides out the overlay's entrance
     // layout, which is still moving for a few frames after this point.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+    }
 
     // Keep the cover-art layers in sync if the track changes mid-fullscreen.
     // The sharp card art (fsArtImg) and the blurred backdrop (fsBgImg) are
@@ -390,7 +395,12 @@
     }
     // Same reparenting reset as on the way in: leaving fullscreen would otherwise
     // drop the panel back to the top of the song.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+    }
 
     // Put back the tab-driven visibility we overrode on entry. Without this,
     // exiting fullscreen while the active tab is NOT ours (Comments, …) leaves
@@ -655,12 +665,91 @@
      "style-scope yt-icon-button"), so the test is a loose regex over that label.
      It deliberately does NOT match "Exit full screen" - that label only exists
      while YTM is in its own fullscreen, which this prevents, and hijacking it
-     would leave no way out. */
+     would leave no way out.
+
+     Double-clicking the artwork/video is YTM's other fullscreen affordance
+     (its `ytmusic-player` handler calls playerUiService.toggleFullscreen()).
+     Catch that gesture too, but only on the media surfaces: a capture listener
+     on the whole page would also swallow double-clicks on the player controls. */
+  /* YTM's double-click handler is not a plain document listener: it is a
+     Polymer method (`ytmusic-player.polymerController.onDoubleClick`) that
+     calls playerUiService.toggleFullscreen(). A capture listener can be raced
+     by that player path, so point the method itself at our fullscreen. This is
+     installed before the first click of a double-click whenever possible; the
+     click fallback below covers a player that appeared after boot. */
+  function installYtmDoubleClickRedirect() {
+    const player = document.querySelector("ytmusic-player");
+    const controller = player && player.polymerController;
+    if (!controller || typeof controller.onDoubleClick !== "function") return false;
+    // Keep the ORIGINAL YTM method across extension reloads/re-patches. Always
+    // assigning a fresh wrapper from that original avoids nesting wrappers
+    // whose closure points at a dead content-script instance.
+    const original = controller.__ymAuroraOriginalDoubleClick || controller.onDoubleClick;
+    controller.__ymAuroraOriginalDoubleClick = original;
+    controller.__ymAuroraDoubleClickRedirect = true;
+    controller.onDoubleClick = function (event) {
+      // Our surface is already up. Consume the rest of the gesture so the
+      // native fullscreen change cannot hand the page back to YTM's own view.
+      if (fsActive) {
+        try {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        } catch (_) {}
+        return;
+      }
+      // If YTM was already fullscreen before Aurora loaded, its original method
+      // is the only way out; do not trap the user in that state.
+      if (!panelEl || player.playerFullscreened || this.isAdvertisementPlaying) {
+        return original.call(this, event);
+      }
+      try {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } catch (_) {}
+      enterFullscreenMode();
+    };
+    // Belt and braces: YTM sometimes reaches the fullscreen service through a
+    // different player path than the double-click method. Redirect that too so
+    // no entry point can leave the native page behind our overlay.
+    const service = player.playerUiService;
+    if (service && typeof service.toggleFullscreen === "function") {
+      const originalToggle = service.__ymAuroraOriginalToggleFullscreen || service.toggleFullscreen;
+      service.__ymAuroraOriginalToggleFullscreen = originalToggle;
+      service.toggleFullscreen = function (...args) {
+        if (fsActive) return;
+        if (!panelEl || player.playerFullscreened || this.isAdvertisementPlaying) {
+          return originalToggle.apply(this, args);
+        }
+        enterFullscreenMode();
+      };
+    }
+    return true;
+  }
+
   function installNativeFullscreenRedirect() {
+    installYtmDoubleClickRedirect();
+    // The cover art is covered by YTM's song-media window, so clicks land on
+    // that div rather than the <img> or #song-image itself. Keep all the media
+    // surfaces here; the player controls are deliberately excluded.
+    const mediaSelector = "#song-image, #song-media-window, .player-wrapper, #movie_player, video";
     const redirect = (event) => {
+      // A double-click's first click arrives before YTM's dblclick callback;
+      // make sure a player created after boot is patched by then.
+      installYtmDoubleClickRedirect();
       if (fsActive || !panelEl) return;
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
+      // The second click of a double-click is the one with usable user
+      // activation, and it arrives before YTM's dblclick handler. Redirecting
+      // here avoids racing YTM's toggle and lets requestFullscreen() succeed
+      // from the click itself. The first click is left alone so a normal click
+      // still reaches the player.
+      if (event.detail >= 2 && target.closest(mediaSelector)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        enterFullscreenMode();
+        return;
+      }
       const hit = target.closest("[aria-label]");
       if (!hit) return;
       const label = (hit.getAttribute("aria-label") || "").toLowerCase();
@@ -669,8 +758,18 @@
       event.stopImmediatePropagation();
       enterFullscreenMode();
     };
+    const redirectDoubleClick = (event) => {
+      if (fsActive || !panelEl) return;
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      if (!target.closest(mediaSelector)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      enterFullscreenMode();
+    };
     window.addEventListener("click", redirect, true);
     window.addEventListener("tap", redirect, true);
+    window.addEventListener("dblclick", redirectDoubleClick, true);
   }
 
   function syncNativePanel(on) {
@@ -805,6 +904,8 @@
     if (on) {
       refreshTrack();
       syncTrackLyrics();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
     }
   }
 
@@ -827,6 +928,8 @@
       panelVisible = true;
       // The panel left #tab-renderer, so its native children can show again.
       syncNativePanel(false);
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
       refreshTrack();
       syncTrackLyrics();
       return true;
@@ -853,6 +956,8 @@
     if (panelVisible) {
       refreshTrack();
       syncTrackLyrics();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
     }
     return true;
   }

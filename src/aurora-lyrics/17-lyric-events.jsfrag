@@ -153,7 +153,7 @@
       staticLyrics: !!staticLyricsActive,
       // Which renderer draws this track. The PiP runs the SAME one for its
       // line-by-line surface, so it must not infer it from the timings.
-      renderer: amllTrackUsesEngine(content) ? "amll" : "spicy",
+      renderer: rendererOwner,
       songwriters: currentSongwriters.slice(),
       smoothScrolling: currentSettings.smoothScrolling !== false,
       simpleLyrics: currentSettings.simpleLyrics === true,
@@ -216,6 +216,19 @@
       document.documentElement.dataset.ymLyricSync =
         (pauseSync ? "pause+" : "") + formatOffset(getActiveOffsetMs());
     } catch (e) {}
+  }
+
+  /* A browser refresh makes word-by-word songs fast again after a long session.
+     `buildRendererLines` already replaces every line, but it does so inside the
+     same VirtualLyricsContainer, and the container/its old raster layers are the
+     only lyric nodes that survive a track. Recreate that one wrapper on each
+     track change so the next song starts on a fresh layer tree, while keeping the
+     panel, scroll box, settings and skeleton machinery intact. */
+  function recycleLyricsSurfaceForTrackChange() {
+    if (!linesRoot || !linesRoot.parentElement) return;
+    const fresh = h("div", { class: "VirtualLyricsContainer" });
+    linesRoot.replaceWith(fresh);
+    linesRoot = fresh;
   }
 
   function buildRendererLines(content) {
@@ -402,7 +415,7 @@
     lineScrollEl.classList.remove("offline");
     // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
     // from here through the song (AJ, 2026-09-18).
-    if (staticLyricsActive && lineScrollEl) {
+    if (staticLyricsActive && lineScrollEl && !braccatoOwnsTrack()) {
       // Instant: a reset, not a scroll the user asked to watch.
       writeScrollTop(0, true);
     }
@@ -411,7 +424,14 @@
     // different line geometry. Place the camera instantly. Letting the spring
     // handle it is what made a new song glide all the way up from the last
     // song's final line.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      recentreUntilMs = 0;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      braccatoSetContent(content);
+    } else {
+      recentreActiveLine();
+    }
   }
 
   function loadLyrics(xml) {

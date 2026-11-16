@@ -85,6 +85,9 @@
   // chrome-extension://<id>/src/extensions/aurora-lyrics.js, so a sibling
   // relative URL is all we need.
   const AMLL_CORE_URL = SCRIPT_URL ? new URL("amll-core.js", SCRIPT_URL).href : "";
+  // Bundled Braccato renderer (the Better Lyrics engine, MIT). Same resolution
+  // rule as AMLL: the page world cannot use chrome.runtime.getURL().
+  const BRACCATO_CORE_URL = SCRIPT_URL ? new URL("braccato-core.js", SCRIPT_URL).href : "";
   // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
   // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
   // These are what the backdrop uses before that handshake lands, and they
@@ -1579,11 +1582,13 @@
   let fsPlayerLikeButton = null;   // fullscreen "like" button (clones YTM's own icon)
   let fsPlayerDislikeButton = null; // fullscreen "dislike" button (clones YTM's own icon)
   let fsPlayerVolumeRange = null; // the custom <div> track (replaces native range input)
-  let fsPlayerVolumeValue = 100;   // numeric 0-100 volume, source of truth for the custom slider
+  let fsPlayerVolumeValue = 100;   // 0-100 display volume (0 = actual minimum, 4%)
+  let fsPlayerVolumeActual = null; // last actual percent written/read, avoids round-trip snapping
   let fsPlayerSeekRange = null;
   let fsTimeCurrent = null;
   let fsTimeTotal = null;
   let fsScrubTip = null; // time bubble above the seek thumb while dragging
+  let fsVolumeTip = null; // percent bubble above the volume thumb while dragging
   let fsPlayerStateTimer = 0;
   let fsBgImg = null; // cover-art layer used when fullscreen has no live video
   let fsArtImg = null; // sharp cover-art card in fsMediaHost (no-video tracks)
@@ -1951,9 +1956,15 @@
     // this was a toggle cannot leave half the renderer switched off.
     simpleLyrics: true,
     // Which renderer draws which KIND of track (the Renderer rows in the panel).
-    // Each row names its own renderer, so these are not inverses of one setting:
-    // both false = Spicy for words, engine for lines, which is the default and
-    // the behaviour that was hard-coded before. Both true swaps them.
+    // Each row names its own renderer instead of being an inverse toggle, so a
+    // third renderer can be added without a second boolean. The legacy
+    // amllWordTracks/spicyLineTracks booleans are still read once to migrate an
+    // existing install, then ignored.
+    wordRenderer: "spicy",
+    lineRenderer: "amll",
+    // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
+    // exposes it so a quieter karaoke look is one switch away.
+    braccatoLetterWave: true,
     amllWordTracks: false,
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
@@ -1994,6 +2005,12 @@
 
   // Every source id, in the canonical fallback order. Kept as a literal inside
   // the function so it cannot be read before its fragment has initialised.
+  function normalizeRendererChoice(value, fallback) {
+    const name = String(value || "").trim();
+    if (name === "spicy" || name === "amll" || name === "braccato") return name;
+    return fallback;
+  }
+
   function normalizeSourceOrder(value) {
     const all = ["community", "spicy", "unison", "lrclib"];
     const seen = new Set();
@@ -2109,6 +2126,15 @@
     // extension unusable until storage was cleared by hand; the clamps below
     // cover bad VALUES, this covers a bad SHAPE.
     const incoming = next && typeof next === "object" && !Array.isArray(next) ? next : {};
+    // Migration has to look at the INCOMING payload: currentSettings already
+    // carries the new defaults, so a legacy install (no wordRenderer key) would
+    // otherwise be pinned to Spicy/AMLL before its old toggles are read.
+    const incomingHasWordRenderer = incoming.wordRenderer != null;
+    const incomingHasLineRenderer = incoming.lineRenderer != null;
+    const incomingHasLegacyRenderer =
+      incoming.amllWordTracks != null || incoming.spicyLineTracks != null;
+    const previousWordRenderer = currentSettings.wordRenderer;
+    const previousLineRenderer = currentSettings.lineRenderer;
     currentSettings = Object.assign({}, currentSettings, incoming);
     const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
     const booleanValue = (value, fallback) => {
@@ -2185,6 +2211,29 @@
     // Pinned: the Apple look is chosen per track by the renderer rows now, so
     // this can no longer be turned off from the UI (see DEFAULT_SETTINGS).
     currentSettings.simpleLyrics = true;
+    // New per-kind renderer names, seeded from the old pairs of booleans when
+    // this install predates them. The old values are defaults here, not live
+    // settings: once the name exists the name is the only thing consulted.
+    const legacyWordRenderer = booleanValue(currentSettings.amllWordTracks, false) ? "amll" : "spicy";
+    const legacyLineRenderer = booleanValue(currentSettings.spicyLineTracks, false) ? "spicy" : "amll";
+    // A partial settings patch (Aurora Bloom sends brightness only) has neither
+    // shape and must not re-run migration against stale defaults: preserve the
+    // choice it did not mention. Only a payload that actually carries the old
+    // booleans is treated as the legacy migration pass.
+    currentSettings.wordRenderer = incomingHasWordRenderer
+      ? normalizeRendererChoice(incoming.wordRenderer, legacyWordRenderer)
+      : incomingHasLegacyRenderer
+        ? normalizeRendererChoice("", legacyWordRenderer)
+        : normalizeRendererChoice(previousWordRenderer, legacyWordRenderer);
+    currentSettings.lineRenderer = incomingHasLineRenderer
+      ? normalizeRendererChoice(incoming.lineRenderer, legacyLineRenderer)
+      : incomingHasLegacyRenderer
+        ? normalizeRendererChoice("", legacyLineRenderer)
+        : normalizeRendererChoice(previousLineRenderer, legacyLineRenderer);
+    currentSettings.braccatoLetterWave = booleanValue(
+      currentSettings.braccatoLetterWave,
+      DEFAULT_SETTINGS.braccatoLetterWave
+    );
     currentSettings.amllWordTracks = booleanValue(
       currentSettings.amllWordTracks,
       DEFAULT_SETTINGS.amllWordTracks
@@ -2244,7 +2293,7 @@
     // alone, so the mode follows the lyrics into fullscreen for free.
     // Which renderer owns the current content decides the LOOK as well as the
     // engine, and it is the user's per-kind choice (the two Renderer rows:
-    // amllWordTracks / spicyLineTracks). Recompute before the body class so a
+    // wordRenderer / lineRenderer). Recompute before the body class so a
     // settings change can never leave a track dressed in the other renderer's
     // clothing.
     let rendererChanged = false;
@@ -2271,8 +2320,10 @@
           smoothScrolling: currentSettings.smoothScrolling !== false,
           simpleLyrics: currentSettings.simpleLyrics === true,
           // Flipping a Renderer row re-homes the CURRENT track, so the PiP has to
-          // switch renderer now rather than on the next song.
-          renderer: amllTrackUsesEngine(lastRendererContent) ? "amll" : "spicy",
+          // switch renderer now rather than on the next song. Braccato is
+          // panel-only for now; the PiP's existing fallback keeps drawing the
+          // Spicy surface for it.
+          renderer: rendererOwner,
           scrollLeadEnabled: currentSettings.scrollLeadEnabled === true,
           scrollLeadMs: Number(currentSettings.scrollLeadMs) || 0,
         });
@@ -2284,6 +2335,7 @@
       lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
       lineScrollEl.style.setProperty("--ym-sl-lyrics-offset", `${currentSettings.offset}px`);
       lineScrollEl.style.setProperty("--ym-sl-bg-vocal-scale", String(currentSettings.bgOpacity));
+      if (braccatoOwnsTrack()) braccatoRelayout();
     }
     // A size change reflows EVERY line, so the scroll offset that was correct for
     // the old line heights no longer points at the active line — the same "camera
@@ -2291,7 +2343,7 @@
     // with a fifth trigger. Re-centre after the write. recentreActiveLine() holds
     // a window open and re-pins each frame, which is what covers the reflow
     // actually landing a frame after the custom property is set.
-    if (prevSize !== currentSettings.size) recentreActiveLine();
+    if (prevSize !== currentSettings.size && !braccatoOwnsTrack()) recentreActiveLine();
     // Translation slots are per line, so turning it on or off has to rebuild the
     // current lines rather than wait for the next song.
     if (prevAutoTranslate !== currentSettings.autoTranslate && lastRendererContent) {
@@ -3934,6 +3986,11 @@
       z-index: 23;
     }
     .ym-sl-fs-scrub-tip.ym-sl-fs-scrub-tip-on { opacity: 1; }
+    .ym-sl-fs-volume-tip {
+      min-width: 2.4ch;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
     /* Transient arrow-key readout. Same dark pill as the scrub tip, with a
        hairline border so it still reads over bright artwork. JS writes its
        left/top from the live scrubber or volume rect. */
@@ -4077,6 +4134,22 @@
       color: #fff;
       box-shadow: none;
     }
+    /* The transport reads better as a fixed-size row: hover changes colour
+       only on these, never size. Likes/options keep their existing feedback. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next:hover,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play:hover {
+      transform: none;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next:active,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play:active {
+      transform: scale(.92);
+    }
     .ym-sl-fs-player-controls button:active { transform: scale(.92); }
     /* Prev / Next flank the play button and AJ wants them BIGGER than the
        40px shuffle/repeat pair, but still smaller than play. Play/pause is the
@@ -4096,6 +4169,17 @@
       font-size: 22px;
       background: none;
     }
+    /* The play/pause morph is two overlapping fills. currentColor is
+       translucent, so stacking the paths makes the overlap brighter; paint the
+       paths opaque and fade the whole SVG to the same .88 / 1 hover weight. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play .ym-sl-fs-play-morph {
+      fill: #fff;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play svg {
+      opacity: .88;
+      transition: opacity .22s ease;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play:hover svg { opacity: 1; }
     /* Spicy transport glyphs. Prev / Next use a 35x20 viewBox (a wide double
        triangle) and Play / Pause a narrow one, so each is sized on its own
        instead of inheriting a single font-size. pointer-events:none keeps the
@@ -4112,6 +4196,32 @@
       width: 26px;
       height: 26px;
     }
+    /* Skip conveyor: the pair shifts by one triangle, while a clipped copy of
+       the left triangle grows into the slot it vacated. The SVG clips the
+       departing triangle at its right edge; the button never moves. Prev uses
+       the same local animation on a 180deg-rotated glyph, so it runs left. */
+    .ym-sl-fs-player-controls .ym-sl-fs-skip-icon { overflow: hidden; }
+    .ym-sl-fs-player-controls .ym-sl-fs-skip-new {
+      opacity: 0;
+      transform-box: fill-box;
+      transform-origin: left center;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next.is-skipping .ym-sl-fs-skip-shift,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev.is-skipping .ym-sl-fs-skip-shift {
+      animation: ym-sl-fs-skip-shift .34s cubic-bezier(.22,.61,.36,1) both;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next.is-skipping .ym-sl-fs-skip-new,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev.is-skipping .ym-sl-fs-skip-new {
+      animation: ym-sl-fs-skip-new .24s cubic-bezier(.22,.61,.36,1) .12s both;
+    }
+    @keyframes ym-sl-fs-skip-shift {
+      from { transform: translateX(0); }
+      to   { transform: translateX(17.5px); }
+    }
+    @keyframes ym-sl-fs-skip-new {
+      from { opacity: 0; transform: scaleX(.2); }
+      to   { opacity: 1; transform: scaleX(1); }
+    }
     /* Shuffle / repeat are redrawn as thick strokes, so they need a little more
        room than the old solid 22px glyphs to carry the same weight beside the
        prev/next triangles and the play button. */
@@ -4119,6 +4229,125 @@
     .ym-sl-fs-player-controls .ym-sl-fs-player-repeat svg {
       width: 26px;
       height: 26px;
+      transform-box: view-box;
+      transform-origin: 50% 50%;
+      transition: filter .25s ease, color .25s ease;
+    }
+    /* The click hands the two rails off to two dashes on one rounded-square
+       track. Those dashes are strokes of the path itself, so they turn and bend
+       through every corner instead of sliding as straight bars. */
+    /* The repeat motion animates stroke-dashoffset and offset-distance, both
+       paint properties. Without its own layer that repaint walks the fullscreen
+       overlay and the SVG undersamples the display (~40-70fps). Promoting this
+       26px SVG keeps the repaint local, so the same keyframes follow the
+       display's actual refresh cadence. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat > svg {
+      overflow: visible;
+      transform: translateZ(0);
+      will-change: transform;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping > svg {
+      color: #fff;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-track {
+      opacity: 0;
+      stroke-dasharray: 32.15 17.85;
+      stroke-dashoffset: 0;
+      transition: opacity .06s linear;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-rail {
+      transition: opacity .06s linear;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-head {
+      opacity: 0;
+      transform-box: fill-box;
+      offset-distance: 0%;
+      transition: opacity .06s linear;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-head-top {
+      offset-path: path("M20.2 5A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8A1.6 1.6 0 0 1 2.2 17.4V9.5H3V8.5A3.5 3.5 0 0 1 6.5 5H20.2Z");
+      offset-anchor: 100% 50%;
+      offset-rotate: auto;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-head-bottom {
+      offset-path: path("M3.8 19A1.6 1.6 0 0 1 2.2 17.4V9.5H3V8.5A3.5 3.5 0 0 1 6.5 5H20.2A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8Z");
+      offset-anchor: 0% 50%;
+      offset-rotate: auto -180deg;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-rail {
+      opacity: 0;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-track,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-head {
+      opacity: 1;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-track {
+      animation: ym-sl-fs-repeat-track .62s cubic-bezier(.65, 0, .35, 1) both;
+      will-change: stroke-dashoffset;
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-head {
+      animation: ym-sl-fs-repeat-head .62s cubic-bezier(.65, 0, .35, 1) both;
+      will-change: offset-distance;
+    }
+    @keyframes ym-sl-fs-repeat-track {
+      from { stroke-dashoffset: 0; }
+      to   { stroke-dashoffset: -100; }
+    }
+    @keyframes ym-sl-fs-repeat-head {
+      from { offset-distance: 0%; }
+      to   { offset-distance: 100%; }
+    }
+    /* The numeral is always present and crossfades with the repeat mode, so
+       entering and leaving repeat-one never swaps the icon. */
+    .ym-sl-fs-player-controls .ym-sl-fs-repeat-one {
+      opacity: 0;
+      transform-box: fill-box;
+      transform-origin: 50% 50%;
+      transform: scale(.55);
+      transition: opacity .28s ease,
+        transform .36s cubic-bezier(.34, 1.56, .64, 1);
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat[data-repeat-one="true"] .ym-sl-fs-repeat-one {
+      opacity: 1;
+      transform: scale(1);
+    }
+    /* Repeat-one keeps a quiet halo after the loop lands. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat[data-repeat-one="true"] > svg {
+      color: #fff;
+      filter: drop-shadow(0 0 4px rgba(255, 255, 255, .38));
+    }
+    /* A faint glyph-shaped hover halo, not a button surface. The repeat-one
+       halo is kept underneath it so engaging repeat-one doesn't lose its cue. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle:hover > svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat:hover > svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev:hover > svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next:hover > svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play:hover > svg {
+      filter: drop-shadow(0 0 5px rgba(255, 255, 255, .4));
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-repeat[data-repeat-one="true"]:hover > svg {
+      filter: drop-shadow(0 0 4px rgba(255, 255, 255, .38)) drop-shadow(0 0 5px rgba(255, 255, 255, .4));
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-prev svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-next svg,
+    .ym-sl-fs-player-controls .ym-sl-fs-player-play svg {
+      transition: filter .22s ease;
+    }
+    /* Shuffle keeps the simple, readable idea: the engaged dot fades in and
+       the icon gives one soft glow pulse. No spinning picture. */
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active > svg {
+      color: #fff;
+      filter: drop-shadow(0 0 3px rgba(255, 255, 255, .32));
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active:hover > svg {
+      filter: drop-shadow(0 0 5px rgba(255, 255, 255, .4));
+    }
+    .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.is-glowing > svg {
+      animation: ym-sl-fs-shuffle-glow .52s ease-in-out both;
+    }
+    @keyframes ym-sl-fs-shuffle-glow {
+      0%, 100% { transform: scale(1); filter: drop-shadow(0 0 0 rgba(255, 255, 255, 0)); }
+      48%      { transform: scale(1.08); filter: drop-shadow(0 0 7px rgba(255, 255, 255, .65)); }
     }
     .ym-sl-fs-player-controls .ym-sl-fs-player-play svg {
       width: 32px;
@@ -4162,6 +4391,13 @@
     .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.active::after,
     .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.active::after {
       opacity: 1;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-track,
+      .ym-sl-fs-player-controls .ym-sl-fs-player-repeat.is-looping .ym-sl-fs-repeat-head,
+      .ym-sl-fs-player-controls .ym-sl-fs-player-shuffle.is-glowing > svg {
+        animation: none;
+      }
     }
     /* Like / Dislike are OUR OWN buttons. Inactive = outline thumb; active =
        the GLYPH itself fills (CSS fills the path) — there is NO background pill
@@ -4650,15 +4886,46 @@
       font-weight: 500;
       opacity: .38;
     }
+    /* Registered lengths let the edge fades interpolate instead of snapping
+       when the marquee reaches or leaves an endpoint. */
+    @property --ym-sl-fs-writers-fade-left {
+      syntax: "<length>";
+      inherits: false;
+      initial-value: 0px;
+    }
+    @property --ym-sl-fs-writers-fade-right {
+      syntax: "<length>";
+      inherits: false;
+      initial-value: 0px;
+    }
     .ym-sl-fs-title-writers {
       --ym-sl-fs-writers-opacity: 1;
+      --ym-sl-fs-writers-fade-left: 0px;
+      --ym-sl-fs-writers-fade-right: 0px;
       min-width: 0;
       max-width: 100%;
-      /* Hard edge, no mask: the writer marquee should cut off cleanly instead
-         of dissolving names at either end while it drifts. */
+      /* Fade only the edge that has text moving under it. JS keeps the fade at
+         0 on whichever side the track is currently resting against, so the
+         first/last name stays crisp at the turn-around point. */
       overflow: hidden;
       white-space: nowrap;
-      transition: opacity .2s ease;
+      transition: opacity .2s ease,
+        --ym-sl-fs-writers-fade-left .26s ease,
+        --ym-sl-fs-writers-fade-right .26s ease;
+      -webkit-mask-image: linear-gradient(to right,
+        transparent 0,
+        #000 var(--ym-sl-fs-writers-fade-left),
+        #000 calc(100% - var(--ym-sl-fs-writers-fade-right)),
+        transparent 100%);
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-size: 100% 100%;
+      mask-image: linear-gradient(to right,
+        transparent 0,
+        #000 var(--ym-sl-fs-writers-fade-left),
+        #000 calc(100% - var(--ym-sl-fs-writers-fade-right)),
+        transparent 100%);
+      mask-repeat: no-repeat;
+      mask-size: 100% 100%;
     }
     .ym-sl-fs-title-writers.is-writers-out { opacity: 0; }
     .ym-sl-fs-title-writers-track {
@@ -4912,6 +5179,13 @@
       font-weight: 500;
       opacity: .34;
       letter-spacing: 0;
+    }
+    /* The separator and writer line use smaller type than the artist, so
+       baseline alignment leaves their optical centres about 1px low. Lift just
+       those two pieces; the artist stays put. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-sep,
+    .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      transform: translateY(-1px);
     }
     /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
        upward and the new one rises up into its place, so the track + artist read
@@ -5526,8 +5800,10 @@
        screen and the band; it is a no-op for anything wider than ~1.09.
        Nothing else writes transform on this host (only opacity does), so the
        translateY cannot collide with the layout-switch animation. */
+    /* Video side metadata row: hidden until a music video is in side mode. */
+    .ym-sl-fs-video-meta { display: none; }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
-      top: 50%;
+      top: 45%;
       bottom: auto;
       height: auto;
       transform: translateY(-50%);
@@ -5586,7 +5862,7 @@
          different axes (AJ, 2026-10-21). */
       align-items: stretch;
       justify-content: flex-start;
-      top: calc(50% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
+      top: calc(45% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
       bottom: auto;
       left: 2%;
       right: auto;
@@ -5598,14 +5874,13 @@
       order: 0;
       left: auto;
       bottom: auto;
-      width: auto;
+      width: 100%;
       max-width: none;
-      /* 20px, matching the column's 20px offset from the video's bottom edge. It
-         looked BIGGER than the top gap because the chip below carried 10px of
-         vertical padding, which added to the space without appearing in either
-         number — the chip's padding is 0 now, so both gaps are honestly 20px. */
-      margin: 0 0 20px;
-      text-align: center;
+      margin: 0;
+      text-align: left;
+      font-size: clamp(22px, 3vh, 32px);
+      line-height: 1.16;
+      letter-spacing: -.012em;
       transform: none;
       /* ⭐ MUST swap the KEYFRAMES, not just the property. The base entrance
          animation bakes translateX(-50%) into every frame and ends with a
@@ -5619,30 +5894,246 @@
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title.ym-sl-fs-title-leaving {
       animation: ym-sl-fs-title-out-l .24s cubic-bezier(.4, 0, 1, 1) forwards;
     }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta {
+      display: flex;
+      order: 0;
+      width: 100%;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      margin: 0 0 14px;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta .ym-sl-fs-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-inner {
+      display: flex;
+      flex-direction: column-reverse;
+      align-items: flex-start;
+      width: 100%;
+      white-space: normal;
+      padding-inline: 0;
+      gap: 2px;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-track {
+      font-weight: 700;
+      opacity: 1;
+      letter-spacing: -.012em;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-artist {
+      font-weight: 500;
+      opacity: .62;
+      font-size: 14px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      flex: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline {
+      display: flex;
+      width: 100%;
+      max-width: 100%;
+      align-items: baseline;
+    }
+    /* The cover-art credit line, reused under a music video: artist | writers,
+       with the writer viewport fading at whichever edge has hidden text. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-artist.has-writers .ym-sl-fs-title-sep {
+      display: inline-block;
+      font-size: 12px;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      --ym-sl-fs-writers-opacity: .34;
+      display: inline-block;
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 12px;
+      font-weight: 500;
+      opacity: .34;
+      letter-spacing: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-sep,
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-byline.has-writers .ym-sl-fs-title-writers {
+      transform: translateY(-1px);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 0 0 auto;
+      padding-bottom: 2px;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-player-dislike--edge {
+      position: static;
+      z-index: auto;
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      min-height: 40px;
+      margin: 0;
+    }
+    /* The edge thumbs are not the video rating control any more; the cover-art
+       heart takes their place. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-player-like--edge,
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-player-dislike--edge {
+      display: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-art-like {
+      position: static;
+      left: auto;
+      top: auto;
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      max-width: 40px;
+      margin: 0;
+      padding: 0;
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      pointer-events: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-actions .ym-sl-fs-art-like svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+    }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
       position: static;
-      order: 1;
+      order: 2;
       left: auto;
       bottom: auto;
-      width: auto;
-      margin: 0 0 16px;
+      width: 100%;
+      /* The seek's time row sits above the transport, so a symmetric gap would
+         leave the transport visually low. The cover layout uses 24px below its
+         chip for the same reason; keep the two compositions on one rhythm. */
+      margin: 0 0 24px;
       transform: none;
-      /* No vertical padding: it added 10px to the gap ABOVE the transport (which
-         is what made that gap read wider than the one under the video) and
-         inflated the row the edge buttons centre on. The buttons carry their own
-         hit area. */
+      display: flex;
+      justify-content: center;
       padding: 0;
     }
     .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
       position: static;
-      order: 2;
+      order: 1;
       left: auto;
       right: auto;
       bottom: auto;
-      width: auto;
-      margin: 0;
+      width: 100%;
+      margin: 0 0 10px;
       transform: none;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 6px 10px;
       padding: 0;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-player-seek {
+      grid-row: 1;
+      grid-column: 1 / -1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time {
+      grid-row: 2;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(1) {
+      grid-column: 1;
+      justify-self: start;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time:nth-of-type(2) {
+      grid-column: 2;
+      justify-self: end;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-transport {
+      width: 100%;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-transport > :first-child {
+      margin-right: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-transport > :last-child {
+      margin-left: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
+      order: 3;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      border-left: 0;
+      gap: 12px;
+      pointer-events: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-icon {
+      display: block;
+      flex: 0 0 auto;
+      width: 18px;
+      height: 18px;
+      color: rgba(255, 255, 255, .62);
+      pointer-events: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume {
+      flex: 1 1 auto;
+      width: auto;
+      min-width: 0;
+      transform: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-knob {
+      display: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume::before,
+    .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-fill {
+      height: 9px;
+    }
+    /* Short landscape screens cannot fit four rows under a 16:9 video at the
+       normal 45% centre, so tighten the stack, drop the volume row (the same
+       rule the cover layout uses for short screens) and lift the video a little
+       more. The full four-row composition stays on 900px+ displays. */
+    @media (max-height: 860px) and (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta {
+        margin-bottom: 10px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta .ym-sl-fs-title {
+        font-size: 24px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-title-artist {
+        font-size: 13px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
+        display: none;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
+        margin-bottom: 0;
+      }
+    }
+    @media (max-height: 820px) and (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
+        top: 43%;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
+        top: calc(43% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta .ym-sl-fs-title {
+        font-size: 22px;
+      }
+    }
+    @media (max-height: 700px) and (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta {
+        margin-bottom: 8px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-video-meta .ym-sl-fs-title {
+        font-size: 20px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
+        margin-bottom: 8px;
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
+        margin-bottom: 0;
+      }
     }
     /* The SEPARATOR sits dead under the title (AJ, 2026-10-01). The chip spans the
        pane and lays out as 1fr / auto / 1fr: the transport is pushed to the END of
@@ -6556,6 +7047,67 @@
       display: flex;
       align-items: center;
       justify-content: center;
+    }
+    /* Better Lyrics (Braccato) third renderer. Its container lives inside the
+       same .LyricsContent scrollport as the Spicy lines, so the panel mask,
+       offset transform, fullscreen reparent and typography variables all keep
+       working. The Spicy surface stays in the DOM as a timing model but is not
+       painted while Braccato owns the track. */
+    #ym-sl-panel .ym-sl-braccato {
+      display: none;
+      box-sizing: border-box;
+      width: 100%;
+      padding: 25cqh 28px 45cqh;
+      font-size: var(--DefaultLyricsSize);
+      --blyrics-font-family: var(--ym-sl-lyric-font, "SpicyLyrics");
+      --blyrics-font-size: var(--DefaultLyricsSize);
+      --blyrics-font-weight: 700;
+      --blyrics-line-height: 1.25;
+      --blyrics-padding: .75rem;
+      --blyrics-translated-font-size: .5em;
+      --blyrics-active-scale: 1;
+      --blyrics-scale: .95;
+      /* Sit the playing line higher than Better Lyrics' .37 default. */
+      --blyrics-target-scroll-pos-ratio: .28;
+      /* Keep the engine's timing variables at their bundle defaults; the
+         renderer adapter cancels Braccato's built-in 115/150 ms lead in
+         braccatoTickOptions so Better Lyrics uses the same timestamp as Spicy
+         and Apple. The user's own offset is still applied by Aurora before
+         tick(), so these variables are not the place to tune it. */
+    }
+    #ym-sl-panel.BraccatoRenderer .ym-sl-braccato { display: block; }
+    #ym-sl-panel.BraccatoRenderer .SpicyLyricsScrollContainer { display: none !important; }
+    /* Braccato writes scrollTop every frame. The shared smooth-scroll easing
+       would restart an animation after each of those writes. */
+    #ym-sl-panel.BraccatoRenderer .LyricsContent { scroll-behavior: auto; }
+    #ym-sl-panel.BraccatoRenderer .LyricsContent .blyrics-container {
+      display: block;
+    }
+    /* Braccato culls offscreen lines with content-visibility:auto. At the top
+       edge that cull can remove a line a frame before it leaves the mask, which
+       reads as the top line snapping upward while the lines below glide. Keep
+       the lines rendered; the scrollport already clips them and the saved paint
+       is not worth the visible edge pop. */
+    #ym-sl-panel.BraccatoRenderer .blyrics--line {
+      content-visibility: visible !important;
+    }
+    /* The shared credits card is normally the last child of the lyric
+       container. Braccato's generic "direct child" rule gives every line a
+       large padding and a 0.95 scale; the footer is a direct child too, so
+       undo those here. The engine's own bottom spacer stays AFTER the footer,
+       which is what keeps the credits against the last line instead of a
+       viewport away from it. */
+    #ym-sl-panel.BraccatoRenderer .blyrics-container > .ym-sl-credits.blyrics-credits {
+      margin: 48px 0 22px;
+      padding: 18px 22px 16px !important;
+      transform: none;
+      cursor: default;
+      /* The .blyrics-credits class opts the card into Braccato's line-scroll
+         plan. Its stock credit styling dims the row and the focused-credit
+         rule changes opacity again; Aurora's card is a static footer, so keep
+         it fully opaque. */
+      opacity: 1 !important;
+      color: inherit;
     }
     /* Music-video off-sync notice (see syncMvSyncNotice). A pill at the top of
        the panel with a shrinking timer bar: no pointer events, no layout shift,
@@ -7518,6 +8070,11 @@
       flex: none;
       object-fit: contain;
     }
+    /* The Aurora Community mark is a square tile; soften its corners wherever
+       the shared provider icon appears, not only inside the credits rail. */
+    .ym-sl-provider-icon[src*="provider-aurora"] {
+      border-radius: 5px;
+    }
     /* Provider name as a link (LRCLIB) — keeps the same
        weight and colour, underlines only on hover. */
     #ym-sl-panel.SpicyRenderer a.ym-sl-provider-name {
@@ -7690,7 +8247,7 @@
       background: linear-gradient(270deg, #e11d2e 0%, #3b070b 48%, #050505 100%);
     }
     #ym-sl-panel.SpicyRenderer .ym-sl-credits--aurora .ym-sl-credit-provider .ym-sl-provider-icon {
-      border-radius: 4px;
+      border-radius: 5px;
     }
     /* Apple Music has no contributor rows. The provider mark is the whole
        headline, so it gets a large rounded square at the far left and the
@@ -9203,6 +9760,275 @@
       86%, 100% { opacity: var(--ym-sl-fs-lyrics-shade-opacity, 0); }
     }
 
+    /* ===== APPLE MUSIC cover-art layout ==================================
+       The no-video side composition, rebuilt on Spicy Lyrics' Player Below
+       the Cover geometry: one left-aligned cover, then title, progress,
+       transport and volume directly beneath it, with the words in a separate
+       right column. Every length that should scale with the artwork is a
+       fraction of --ym-am-cover, so a 900p monitor and a 1440p monitor keep
+       the same proportions instead of drifting apart at breakpoints.
+       Music videos keep the existing side layout untouched. */
+    @media (min-aspect-ratio: 1 / 1) {
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) {
+        --ym-am-cover: min(34vw, 57vh);
+        /* The artwork column is centred between the monitor's left edge and
+           the first pixel of lyric text (44% pane + 4vw inset). This keeps
+           the air on both sides of the cover equal instead of hugging the
+           screen edge. */
+        --ym-am-inset: calc((44vw + clamp(24px, 4vw, 72px) - var(--ym-am-cover)) * .5);
+        /* Spicy centres the whole ~1.47-cover stack: 50cqh - cover * .735. */
+        --ym-am-top: calc(max(clamp(20px, 6.4vh, 80px),
+          calc(50vh - var(--ym-am-cover) * .735)) + 2vh);
+        /* One gap for cover -> title and title -> progress. The metadata block
+           reads as one unit instead of floating halfway down the page. */
+        --ym-am-gap: calc(var(--ym-am-cover) * .024);
+        --ym-am-bar: max(3px, calc(var(--ym-am-cover) * .0115));
+        --ym-am-bar-hover: max(4px, calc(var(--ym-am-cover) * .0155));
+        --ym-am-thumb: max(11px, calc(var(--ym-am-cover) * .028));
+      }
+      /* The media pane IS the cover box now: no 50% flex column and no
+         vertical centring. The artwork fills it exactly, which also gives the
+         hover swap surface the same edges as the image. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
+        left: var(--ym-am-inset);
+        top: var(--ym-am-top);
+        bottom: auto;
+        width: var(--ym-am-cover);
+        height: var(--ym-am-cover);
+        display: block;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > img {
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        max-height: none;
+        aspect-ratio: 1 / 1;
+        transform: none;
+        border-radius: 18px;
+        object-fit: cover;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        max-height: none;
+        padding: 12px;
+        align-items: flex-start;
+        justify-content: flex-end;
+        transform: none;
+        border-radius: 18px;
+      }
+      /* Title, then progress + times, then transport, then volume. The 8%
+         gap under the cover and the 2.2% under the title are Spicy's values. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
+        /* The artwork -> title gap is pulled in slightly; the title -> progress
+           gap keeps the full --ym-am-gap. */
+        top: calc(var(--ym-am-top) + var(--ym-am-cover) + (var(--ym-am-gap) * .82));
+        left: var(--ym-am-inset);
+        width: var(--ym-am-cover);
+        gap: 0;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
+        margin: 0 0 var(--ym-am-gap);
+        padding-right: calc(var(--ym-am-cover) * .075);
+        font-size: calc(var(--ym-am-cover) * .0465);
+        line-height: 1.3;
+        letter-spacing: -.012em;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-inner {
+        gap: 0;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-track {
+        font-weight: 700;
+        letter-spacing: -.012em;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title-artist {
+        font-size: .82em;
+        font-weight: 500;
+        opacity: .62;
+        letter-spacing: 0;
+      }
+      /* The artwork heart joins the title row, at the cover's right edge. It
+         stays out of the art hover surface so it is visible without pointing
+         at the cover, exactly like the reference. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls > .ym-sl-fs-art-like {
+        position: absolute;
+        /* Centre the heart in the whole artwork-bottom -> progress-top band,
+           including the two-line title and the asymmetric top gap. */
+        top: calc(var(--ym-am-cover) * .0345 + (var(--ym-am-gap) * .09));
+        right: 0;
+        left: auto;
+        display: block;
+        width: calc(var(--ym-am-cover) * .052);
+        height: calc(var(--ym-am-cover) * .052);
+        min-width: 0;
+        min-height: 0;
+        max-width: none;
+        margin: 0;
+        padding: 0;
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        pointer-events: auto;
+        color: #fff;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls > .ym-sl-fs-art-like svg {
+        width: 100%;
+        height: 100%;
+        filter: none;
+      }
+      /* Progress: a bare rail, white travelled section, faint remaining one.
+         No inset highlight, no hover slab. The bar gains one pixel of weight
+         while hovered and the handle is the only round thing that appears. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber {
+        gap: calc(var(--ym-am-cover) * .012) 10px;
+        padding: 0;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber .ym-sl-fs-time {
+        min-width: 4.8ch;
+        font-size: max(10px, calc(var(--ym-am-cover) * .025));
+        font-weight: 500;
+        color: rgba(255, 255, 255, .64);
+        letter-spacing: .01em;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek {
+        height: var(--ym-am-bar);
+        border-radius: 999px;
+        background: transparent;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-webkit-slider-runnable-track {
+        height: var(--ym-am-bar);
+        background: linear-gradient(to right,
+          rgba(255, 255, 255, .96) 0%,
+          rgba(255, 255, 255, .96) var(--slider-fill),
+          rgba(255, 255, 255, .28) var(--slider-fill),
+          rgba(255, 255, 255, .28) 100%);
+        box-shadow: none;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-moz-range-track {
+        height: var(--ym-am-bar);
+        background: rgba(255, 255, 255, .28);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-moz-range-progress {
+        height: var(--ym-am-bar);
+        background: rgba(255, 255, 255, .96);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-webkit-slider-thumb {
+        width: var(--ym-am-thumb);
+        height: var(--ym-am-thumb);
+        margin-top: calc((var(--ym-am-bar) - var(--ym-am-thumb)) / 2);
+        box-shadow: none;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-moz-range-thumb {
+        width: var(--ym-am-thumb);
+        height: var(--ym-am-thumb);
+        box-shadow: none;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek:focus {
+        height: var(--ym-am-bar-hover);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-runnable-track,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek:focus::-webkit-slider-runnable-track {
+        height: var(--ym-am-bar-hover);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-track,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek:focus::-moz-range-track,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-progress,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek:focus::-moz-range-progress {
+        height: var(--ym-am-bar-hover);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek:focus::-webkit-slider-thumb {
+        margin-top: calc((var(--ym-am-bar-hover) - var(--ym-am-thumb)) / 2);
+      }
+      /* Volume: the same rail language as the progress bar, bracketed by the
+         two speaker glyphs. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
+        width: 100%;
+        margin-top: calc(var(--ym-am-cover) * .019);
+        gap: calc(var(--ym-am-cover) * .022);
+        padding: 0;
+        border: 0;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-icon {
+        width: max(14px, calc(var(--ym-am-cover) * .0415));
+        height: max(14px, calc(var(--ym-am-cover) * .0415));
+        color: rgba(255, 255, 255, .9);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume {
+        height: max(10px, calc(var(--ym-am-cover) * .034));
+      }
+      /* The transport used to sit flush under the time row, which left a hole
+         above the volume. Give the chip a matching lead-in and take it from
+         the volume gap, so the icons land midway between both rails. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-play-chip {
+        margin-top: calc(var(--ym-am-cover) * .019);
+      }
+      /* Enlarge the transport glyphs inside their existing button slots: the
+         controls stay on the same centre lines, but read fuller and closer to
+         the cover's scale. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-prev svg,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-next svg,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-shuffle svg,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-repeat svg {
+        width: max(26px, calc(var(--ym-am-cover) * .053));
+        height: max(26px, calc(var(--ym-am-cover) * .053));
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-play svg {
+        width: max(32px, calc(var(--ym-am-cover) * .064));
+        height: max(32px, calc(var(--ym-am-cover) * .064));
+      }
+      /* Apple Music sliders: suppress the floating thumb dot. The rail's
+         hover thickness is the only affordance, matching the bigger controls. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-webkit-slider-thumb {
+        opacity: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-seek::-moz-range-thumb {
+        opacity: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-knob {
+        opacity: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume::before,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-fill {
+        height: var(--ym-am-bar);
+        box-shadow: none;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume::before {
+        background: rgba(255, 255, 255, .28);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-fill {
+        background: rgba(255, 255, 255, .96);
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-knob {
+        width: var(--ym-am-thumb);
+        height: var(--ym-am-thumb);
+        box-shadow: none;
+      }
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume::before,
+      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-volume-fill {
+        height: var(--ym-am-bar-hover);
+      }
+      /* Mirror the whole column when the artwork/words are swapped. */
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media,
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
+        left: calc(100% - var(--ym-am-inset) - var(--ym-am-cover));
+      }
+      .ym-sl-fs-overlay.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
+        left: 2%;
+        width: 54%;
+      }
+    }
+
     /* ===== HITS (AJ, 2026-11-09) ===========================================
        The default fullscreen composition: a centred header with the artwork,
        title, metadata chips and the song actions, then the lyrics in the same
@@ -9622,22 +10448,6 @@
     .ym-sl-fs-hits-chip-icon .ym-sl-provider-icon {
       width: 16px;
       height: 16px;
-    }
-    .ym-sl-fs-hits-chip-sync {
-      color: #ffd98a;
-      border-color: rgba(255, 206, 110, .28);
-      background: rgba(255, 196, 90, .14);
-    }
-    .ym-sl-fs-hits-chip-sync::before {
-      content: "";
-      width: 11px;
-      height: 10px;
-      border-radius: 2px;
-      background: linear-gradient(90deg,
-        #ffc65c 0 24%, rgba(255, 198, 92, .3) 24% 38%,
-        #ffc65c 38% 62%, rgba(255, 198, 92, .3) 62% 76%,
-        #ffc65c 76% 100%);
-      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
     }
     /* ---- Hits control dock (retired) -------------------------------------
        The nodes stay in the tree for the live state sync, but cover-art Hits
@@ -12122,6 +12932,7 @@
     lineScrollEl = content;
     lineScrollEl.addEventListener("wheel", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("touchstart", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("touchmove", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("keydown", handleManualScrollKey);
     applySettings(currentSettings);
@@ -12623,6 +13434,12 @@
     side: "Video + Lyrics",
     background: "Video Background",
   };
+  // The side composition means two different things depending on the track.
+  // A music video keeps the literal name; cover art gets the Apple Music layout.
+  function fsLayoutName(mode) {
+    if (mode === "side" && !hasFsVideo()) return "Apple Music";
+    return FS_LAYOUT_NAMES[mode] || mode;
+  }
   // Hits is the cover-art default: artwork, title and actions at the top,
   // lyrics directly beneath. Music videos deliberately do NOT get it — the
   // side-by-side composition is the clean framing there, so a video cycles
@@ -12653,9 +13470,9 @@
    */
   function updateFsLayoutButtonTitle() {
     if (!fsLayoutSelect) return;
-    const current = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
+    const current = fsLayoutName(fsLayoutMode);
     const nextMode = nextFsLayoutMode(fsLayoutMode);
-    const next = FS_LAYOUT_NAMES[nextMode] || nextMode;
+    const next = fsLayoutName(nextMode);
     const text = "Layout: " + current + " - click for " + next;
     fsLayoutSelect.title = text;
     fsLayoutSelect.setAttribute("aria-label", text);
@@ -12979,7 +13796,13 @@
     // corrected it until the next line change happened to retarget the spring.
     // Hence "the camera doesn't stay on the active line". The window keeps
     // re-placing it for the length of the transition.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
+    }
     // AMLL owns its own scroll offset, so keep its focal line in step with this
     // layout switch too.
     amllSyncAlignPosition();
@@ -13266,6 +14089,19 @@
     }
   }
 
+  // The fullscreen volume floor is 4. The custom slider still reads 0-100, but
+  // 0 is painted at actual volume 4 and 100 stays 100. That keeps the full
+  // range usable without a dead zone at the bottom.
+  const FS_VOLUME_MIN = 4;
+  function fsVolumeActualFromUi(value) {
+    const ui = clamp(Math.round(Number(value) || 0), 0, 100);
+    return Math.round(FS_VOLUME_MIN + (ui / 100) * (100 - FS_VOLUME_MIN));
+  }
+  function fsVolumeUiFromActual(value) {
+    const actual = clamp(Number(value) || 0, 0, 100);
+    return clamp(Math.round(((actual - FS_VOLUME_MIN) / (100 - FS_VOLUME_MIN)) * 100), 0, 100);
+  }
+
   // One write path for the fullscreen volume, shared by the slider's own handler
   // and the overlay's arrow keys (handleFsKeydown in 10-fullscreen-entry): the
   // custom track, its ARIA value and YTM's real volume move together, clamped the
@@ -13279,7 +14115,9 @@
       fsPlayerVolumeRange.style.setProperty("--vol-fill", v + "%");
       fsPlayerVolumeRange.setAttribute("aria-valuenow", String(v));
     }
-    setPlayerVolume(v);
+    const actual = fsVolumeActualFromUi(v);
+    fsPlayerVolumeActual = actual;
+    setPlayerVolume(actual);
   }
 
   function syncFullscreenVolumeControl() {
@@ -13289,13 +14127,15 @@
     const sourceValue = Number(source.value);
     const sourceMax = Number(source.max);
     if (!Number.isFinite(sourceValue) || !Number.isFinite(sourceMax) || sourceMax <= 0) return;
-    const percent = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    const actual = clamp((sourceValue / sourceMax) * 100, 0, 100);
+    if (actual === fsPlayerVolumeActual) return;
     // The track is a <div> (no .value). Skip while the user is driving it so the
     // 500ms refresh loop doesn't fight an in-progress drag/focus.
     if (document.activeElement !== fsPlayerVolumeRange) {
-      fsPlayerVolumeValue = percent;
-      fsPlayerVolumeRange.style.setProperty("--vol-fill", percent + "%");
-      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(percent));
+      fsPlayerVolumeActual = actual;
+      fsPlayerVolumeValue = fsVolumeUiFromActual(actual);
+      fsPlayerVolumeRange.style.setProperty("--vol-fill", fsPlayerVolumeValue + "%");
+      fsPlayerVolumeRange.setAttribute("aria-valuenow", String(fsPlayerVolumeValue));
     }
   }
 
@@ -13311,11 +14151,15 @@
   // range KEEPS focus after a click, so the guard never lifted: the thumb froze
   // wherever it was clicked while --slider-fill (written outside the guard)
   // kept advancing underneath it. Exactly AJ's 2026-09-28 report - "the dot
-  // just stays there and doesnt follow the fill". A short timestamp window is
-  // self-healing: a real drag refreshes it through the input event, and it
-  // expires on its own if the pointerup is missed.
+  // just stays there and doesnt follow the fill".
+  //
+  // The timestamp alone is not enough: holding the pointer still for longer
+  // than the grace window let the tick take the fill back while the drag was
+  // still down. Track the held drag explicitly, and keep the timestamp for the
+  // seek commute after release.
   const FS_SEEK_USER_GRACE_MS = 1200;
   let fsSeekUserAt = 0;
+  let fsSeekDragging = false;
 
   function syncFullscreenSeekControl() {
     if (!fsPlayerSeekRange || !window.YTMod || !window.YTMod.player) return;
@@ -13323,12 +14167,14 @@
     const duration = Number(window.YTMod.player.getDurationMs());
     if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) return;
     const percent = clamp((position / duration) * 100, 0, 100);
-    if (performance.now() - fsSeekUserAt > FS_SEEK_USER_GRACE_MS) {
+    const driving = fsSeekDragging ||
+      performance.now() - fsSeekUserAt <= FS_SEEK_USER_GRACE_MS;
+    if (!driving) {
       fsPlayerSeekRange.value = String(position);
+      fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
+      if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
     }
     fsPlayerSeekRange.max = String(duration);
-    fsPlayerSeekRange.style.setProperty("--slider-fill", percent + "%");
-    if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
     if (fsTimeTotal) fsTimeTotal.textContent = formatClock(duration);
   }
 
@@ -13406,6 +14252,102 @@
     if (fsSpinnerEl) fsSpinnerEl.classList.remove("visible");
   }
 
+  /* Play / pause morph. Two four-point paths: at t=0 they are the two pause
+     bars, at t=1 they are the two halves of the play triangle. Interpolating
+     the points in JS gives a real shape morph (CSS `d` transitions are not
+     animatable in Chromium) and runs on requestAnimationFrame. */
+  const FS_PLAY_MORPH_MS = 260;
+  const FS_PLAY_PAUSE_SHAPES = [
+    { p: [2, 0, 8, 0, 8, 20, 2, 20], r: [2, 2, 2, 2] },
+    { p: [10, 0, 16, 0, 16, 20, 10, 20], r: [2, 2, 2, 2] },
+  ];
+  const FS_PLAY_TRIANGLE_SHAPES = [
+    { p: [2, 0, 9.5, 5, 9.5, 15, 2, 20], r: [2.2, 0, 0, 2.2] },
+    { p: [6, 2.67, 17, 10, 6, 17.33, 6, 10], r: [0, 3.2, 0, 0] },
+  ];
+  function fsPlayMorphEase(t) {
+    return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+  function fsRoundedQuadPath(points, radii) {
+    let d = "";
+    for (let i = 0; i < 4; i++) {
+      const pi = ((i + 3) % 4) * 2;
+      const ci = i * 2;
+      const ni = ((i + 1) % 4) * 2;
+      const px = points[pi], py = points[pi + 1];
+      const cx = points[ci], cy = points[ci + 1];
+      const nx = points[ni], ny = points[ni + 1];
+      const r = radii[i] || 0;
+      const prevLen = Math.hypot(cx - px, cy - py);
+      const nextLen = Math.hypot(nx - cx, ny - cy);
+      const prevR = prevLen > 0 ? Math.min(r, prevLen / 2) : 0;
+      const nextR = nextLen > 0 ? Math.min(r, nextLen / 2) : 0;
+      const sx = prevLen > 0 ? cx + (px - cx) * (prevR / prevLen) : cx;
+      const sy = prevLen > 0 ? cy + (py - cy) * (prevR / prevLen) : cy;
+      const ex = nextLen > 0 ? cx + (nx - cx) * (nextR / nextLen) : cx;
+      const ey = nextLen > 0 ? cy + (ny - cy) * (nextR / nextLen) : cy;
+      d += (i === 0 ? "M" : "L") + sx.toFixed(2) + " " + sy.toFixed(2);
+      d += "Q" + cx.toFixed(2) + " " + cy.toFixed(2) +
+        " " + ex.toFixed(2) + " " + ey.toFixed(2);
+    }
+    return d + " Z";
+  }
+  function fsDrawPlayMorph(button, t) {
+    const paths = button.querySelectorAll(".ym-sl-fs-play-morph");
+    if (paths.length < 2) return;
+    for (let i = 0; i < 2; i++) {
+      const from = FS_PLAY_PAUSE_SHAPES[i];
+      const to = FS_PLAY_TRIANGLE_SHAPES[i];
+      const points = [];
+      const radii = [];
+      for (let j = 0; j < 8; j++) {
+        points.push(from.p[j] + (to.p[j] - from.p[j]) * t);
+      }
+      for (let j = 0; j < 4; j++) {
+        radii.push(from.r[j] + (to.r[j] - from.r[j]) * t);
+      }
+      paths[i].setAttribute("d", fsRoundedQuadPath(points, radii));
+    }
+  }
+  function fsSetPlayMorph(button, action, immediate) {
+    if (!button) return;
+    const wasPlay = button.dataset.playState === "play";
+    button.dataset.playState = action;
+    button.setAttribute("aria-label", action === "play" ? "Play" : "Pause");
+    const target = action === "play" ? 1 : 0;
+    let state = button.__fsPlayMorph;
+    if (!state) {
+      state = button.__fsPlayMorph = { t: wasPlay ? 1 : 0, raf: 0 };
+    }
+    if (state.raf) {
+      cancelAnimationFrame(state.raf);
+      state.raf = 0;
+    }
+    const from = state.t;
+    if (immediate === true || !fsMotionOK() || Math.abs(target - from) < .001) {
+      state.t = target;
+      fsDrawPlayMorph(button, target);
+      return;
+    }
+    const start = performance.now();
+    const step = (now) => {
+      if (!button.isConnected) {
+        state.raf = 0;
+        return;
+      }
+      const progress = Math.min(1, (now - start) / FS_PLAY_MORPH_MS);
+      state.t = from + (target - from) * fsPlayMorphEase(progress);
+      fsDrawPlayMorph(button, state.t);
+      if (progress < 1) {
+        state.raf = requestAnimationFrame(step);
+      } else {
+        state.t = target;
+        state.raf = 0;
+      }
+    };
+    state.raf = requestAnimationFrame(step);
+  }
+
   function refreshFullscreenPlayerState() {
     if (!fsPlayerPlayButton) return;
     syncFullscreenSeekControl();
@@ -13415,18 +14357,11 @@
     const paused = window.YTMod && window.YTMod.player && window.YTMod.player.isPaused
       ? window.YTMod.player.isPaused()
       : null;
-    // Only rebuild the glyph when the transport state actually flips. This
-    // runs on a 500ms interval, so an unconditional replaceChildren would
-    // recreate the SVG node twice a second for the whole session.
+    // Only morph when the transport state actually flips. This runs on a 500ms
+    // interval, so the paths are otherwise left alone for the whole session.
     const playState = paused === true ? "play" : (paused === false ? "pause" : "");
     if (playState && fsPlayerPlayButton.dataset.playState !== playState) {
-      fsPlayerPlayButton.dataset.playState = playState;
-      fsPlayerPlayButton.replaceChildren(
-        playState === "play"
-          ? fsSvgIcon(FS_ICON_PLAY, "0 0 18 20")
-          : fsSvgIcon(FS_ICON_PAUSE, "0 0 15 20")
-      );
-      fsPlayerPlayButton.setAttribute("aria-label", playState === "play" ? "Play" : "Pause");
+      fsSetPlayMorph(fsPlayerPlayButton, playState);
     }
     syncFullscreenModeButtons();
     refreshFsRatingState();
@@ -13503,12 +14438,47 @@
     // second for the whole session — the same reason the play button caches its
     // state rather than rewriting it.
     const wantOne = mode === "one";
+    // The numeral is always in the SVG; the data flag crossfades it. That is
+    // what keeps repeat-one from popping in and out when the mode changes.
     if (fsPlayerRepeatButton.dataset.repeatOne !== String(wantOne)) {
       fsPlayerRepeatButton.dataset.repeatOne = String(wantOne);
-      fsPlayerRepeatButton.replaceChildren(
-        fsSvgIcon(wantOne ? FS_ICON_REPEAT_ONE : FS_ICON_REPEAT, "0 0 24 24")
-      );
     }
+  }
+
+  // One-shot toggle animation. The class lives on the BUTTON, not the SVG, so
+  // the repeat-one glyph can be swapped after the spin without losing the
+  // effect if a state tick lands late.
+  function animateFsToggleIcon(button, cls) {
+    if (!button || !fsMotionOK()) return;
+    button.classList.remove(cls);
+    void button.offsetWidth;
+    button.classList.add(cls);
+    let done = () => {};
+    const finish = () => {
+      window.clearTimeout(timer);
+      button.classList.remove(cls);
+      button.removeEventListener("animationend", done);
+    };
+    done = finish;
+    // The repeat rails animate as groups inside the SVG; animationend bubbles
+    // from those groups to the button, so the listener belongs here.
+    const timer = window.setTimeout(finish, 1200);
+    button.addEventListener("animationend", done, { once: true });
+  }
+
+  // A one-shot conveyor on the skip glyph. The CSS animations total ~360ms;
+  // hold the final frame briefly, then drop the class so the icon is identical
+  // at rest and nothing keeps an animation attached.
+  function animateFsSkip(button) {
+    if (!button || !fsMotionOK()) return;
+    button.classList.remove("is-skipping");
+    void button.offsetWidth;
+    button.classList.add("is-skipping");
+    if (button.__fsSkipTimer) window.clearTimeout(button.__fsSkipTimer);
+    button.__fsSkipTimer = window.setTimeout(() => {
+      button.__fsSkipTimer = 0;
+      button.classList.remove("is-skipping");
+    }, 460);
   }
 
   /* ---- fullscreen icon-pill chrome ----------------------------------------
@@ -13562,14 +14532,44 @@
   const FS_ICON_NEXT = [
     { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
   ];
-  const FS_ICON_PLAY = [
-    { tag: "path", attrs: { d: "M 1.558 20 C 2.006 20 2.381 19.838 2.874 19.561 L 16.622 11.572 C 17.527 11.053 17.894 10.65 17.894 9.997 C 17.894 9.35 17.527 8.948 16.622 8.419 L 2.874 0.439 C 2.381 0.153 2.006 0 1.558 0 C 0.706 0 0.106 0.654 0.106 1.694 L 0.106 18.298 C 0.106 19.346 0.706 20 1.558 20 L 1.558 20 Z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
-  // Pause is two vertical bars in one path; keep them as a single d so the
-  // builder sees exactly one part (the same way Spicy's Icons.ts does).
-  const FS_ICON_PAUSE = [
-    { tag: "path", attrs: { d: "M 4.427 19.963 C 5.513 19.963 6.06 19.416 6.06 18.33 L 6.06 1.66 C 6.06 0.545 5.513 0.037 4.427 0.037 L 1.633 0.037 C 0.548 0.037 0 0.575 0 1.66 L 0 18.331 C -0.009 19.416 0.538 19.963 1.633 19.963 L 4.427 19.963 Z M 13.377 19.963 C 14.462 19.963 15 19.416 15 18.33 L 15 1.66 C 15 0.545 14.462 0.037 13.376 0.037 L 10.573 0.037 C 9.487 0.037 8.949 0.575 8.949 1.66 L 8.949 18.331 C 8.949 19.416 9.487 19.963 10.573 19.963 L 13.376 19.963 L 13.377 19.963 Z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
+  function fsPlayMorphSvg() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = fsSvgIcon([], "0 0 18 20");
+    for (let i = 0; i < 2; i++) {
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("class", "ym-sl-fs-play-morph");
+      path.setAttribute("d", fsRoundedQuadPath(
+        FS_PLAY_PAUSE_SHAPES[i].p, FS_PLAY_PAUSE_SHAPES[i].r
+      ));
+      path.setAttribute("fill", "currentColor");
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
+  // One skip triangle = half of the 35x20 double-chevron glyph. The icon is a
+  // shifted pair plus a clipped copy of the left triangle that grows in while
+  // the pair slides, so a click reads as the last chevron leaving and a fresh
+  // one growing in WITHOUT moving the button itself. The clip id is unique per
+  // SVG because Prev and Next are both on screen.
+  let fsSkipIconUid = 0;
+  function fsSkipIconSvg() {
+    const id = "ym-sl-fs-skip-clip-" + (++fsSkipIconUid);
+    const d = FS_ICON_NEXT[0].attrs.d;
+    const svg = fsSvgIcon([
+      { tag: "defs", children: [
+        { tag: "clipPath", attrs: { id, clipPathUnits: "userSpaceOnUse" }, children: [
+          { tag: "rect", attrs: { x: "0", y: "0", width: "17.5", height: "20" } },
+        ] },
+      ] },
+      { tag: "g", attrs: { class: "ym-sl-fs-skip-shift" }, children: [
+        { tag: "path", attrs: { d, fill: "currentColor", "fill-rule": "nonzero" } },
+      ] },
+      { tag: "path", attrs: { class: "ym-sl-fs-skip-new", d, fill: "currentColor", "fill-rule": "nonzero", "clip-path": "url(#" + id + ")" } },
+    ], "0 0 35 20");
+    svg.classList.add("ym-sl-fs-skip-icon");
+    return svg;
+  }
   // Shuffle / Repeat / Repeat-one for the transport chip. These are NOT from
   // Icons.ts — Spicy's transport set has no equivalent — so they are plain 24x24
   // solid paths, square like the chip's own buttons, and Repeat-one carries its
@@ -13594,31 +14594,71 @@
       ),
     }));
   }
-  // Two crossed rails with a solid head on each right-hand end. The glyph uses
-  // 3..21 of the grid (not the usual 5..19) so it carries the same visual
-  // weight as the Spicy prev/next triangles at the same rendered size.
+  // Two crossed rails with rounded open heads. The curves keep the crossing
+  // legible at 20px, where a pair of straight diagonals read as an X; the open
+  // chevrons match Apple's transport instead of the old solid triangles.
   const FS_ICON_SHUFFLE = fsThickIcon([
-    { tag: "path", attrs: { d: "M3 7h3.6l9.4 10h0.8" } },
-    { tag: "path", attrs: { d: "M3 17h3.6l9.4-10h0.8" } },
-    { tag: "path", attrs: { d: "M16.9 13.8 21.6 17 16.9 20.2Z", fill: "currentColor", stroke: "none" } },
-    { tag: "path", attrs: { d: "M16.9 3.8 21.6 7 16.9 10.2Z", fill: "currentColor", stroke: "none" } },
+    { tag: "path", attrs: { d: "M3 17h2.4c2.1 0 3.4-1.2 4.6-3l3.1-4c1.2-1.8 2.5-3 4.6-3H20" } },
+    { tag: "path", attrs: { d: "M3 7h2.4c2.1 0 3.4 1.2 4.6 3l3.1 4c1.2 1.8 2.6 3 4.6 3H20" } },
+    { tag: "path", attrs: { d: "M17.2 4.3 20.2 7l-3 2.7" } },
+    { tag: "path", attrs: { d: "M17.2 14.3 20.2 17l-3 2.7" } },
   ]);
-  // Rounded loop, open at the top-left and bottom-right, with heads pointing
-  // along the loop (right at the top, left at the bottom).
-  const FS_ICON_REPEAT = fsThickIcon([
-    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
-    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
-    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
-    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
-  ]);
-  // Same loop with the numeral riding inside it, so the state lives in the glyph.
-  const FS_ICON_REPEAT_ONE = fsThickIcon([
-    { tag: "path", attrs: { d: "M4 11.5V9.5A4.5 4.5 0 0 1 8.5 5h7.3" } },
-    { tag: "path", attrs: { d: "M15.2 1.9 19.6 5 15.2 8.1Z", fill: "currentColor", stroke: "none" } },
-    { tag: "path", attrs: { d: "M20 12.5v2a4.5 4.5 0 0 1-4.5 4.5H8.2" } },
-    { tag: "path", attrs: { d: "M8.8 15.9 4.4 19 8.8 22.1Z", fill: "currentColor", stroke: "none" } },
-    { tag: "path", attrs: { d: "M10.6 10.6 12.5 9.3V15" } },
-  ]);
+  // The two rails are separate groups so the click can move each one around
+  // the loop on its own. The numeral always exists and is crossfaded by data
+  // attributes, so there is no glyph replacement to pop in.
+  const FS_ICON_REPEAT = [
+    {
+      tag: "path",
+      attrs: {
+        class: "ym-sl-fs-repeat-track",
+        d: "M3 9.5V8.5A3.5 3.5 0 0 1 6.5 5H20.2A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8A1.6 1.6 0 0 1 2.2 17.4V9.5H3Z",
+        pathLength: "100",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.6",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-sl-fs-repeat-rail ym-sl-fs-repeat-rail-top" },
+      children: fsThickIcon([
+        { tag: "path", attrs: { d: "M3 9.5V8.5A3.5 3.5 0 0 1 6.5 5H20" } },
+        { tag: "path", attrs: { d: "M17.2 2.3 20.2 5l-3 2.7" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-sl-fs-repeat-rail ym-sl-fs-repeat-rail-bottom" },
+      children: fsThickIcon([
+        { tag: "path", attrs: { d: "M21 14.5v1A3.5 3.5 0 0 1 17.5 19H4" } },
+        { tag: "path", attrs: { d: "M6.8 16.3 3.8 19l3 2.7" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-sl-fs-repeat-one" },
+      children: fsThickIcon([
+        { tag: "path", attrs: { d: "M11.1 10.4 12.8 9.2v5.9" } },
+        { tag: "path", attrs: { d: "M10.9 15.1h3.8" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-sl-fs-repeat-head ym-sl-fs-repeat-head-top" },
+      children: fsThickIcon([
+        { tag: "path", attrs: { d: "M17.2 2.3 20.2 5l-3 2.7" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-sl-fs-repeat-head ym-sl-fs-repeat-head-bottom" },
+      children: fsThickIcon([
+        { tag: "path", attrs: { d: "M6.8 16.3 3.8 19l3 2.7" } },
+      ]),
+    },
+  ];
   // Spicy Lyrics' Volume SVG, namespaced so it does not collide with the
   // upstream extension if both happen to load. All four sub-paths ship at once
   // and CSS toggles their visibility based on .ym-sl-fs-volume-{muted,low,high}
@@ -13657,17 +14697,21 @@
     svg.setAttribute("class", "ym-sl-fs-btn-icon");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const el = document.createElementNS(NS, part.tag);
-      const attrs = part.attrs || {};
-      for (const k in attrs) {
-        if (Object.prototype.hasOwnProperty.call(attrs, k)) {
-          el.setAttribute(k, attrs[k]);
+    const appendParts = (parent, list) => {
+      for (let i = 0; i < list.length; i++) {
+        const part = list[i];
+        const el = document.createElementNS(NS, part.tag);
+        const attrs = part.attrs || {};
+        for (const k in attrs) {
+          if (Object.prototype.hasOwnProperty.call(attrs, k)) {
+            el.setAttribute(k, attrs[k]);
+          }
         }
+        if (Array.isArray(part.children)) appendParts(el, part.children);
+        parent.appendChild(el);
       }
-      svg.appendChild(el);
-    }
+    };
+    appendParts(svg, parts);
     return svg;
   }
 
@@ -13753,6 +14797,17 @@
 
   function positionFsEdgeButtons() {
     if (!fsPlayerLikeButton || !fsPlayerDislikeButton) return;
+    // Video side mode lays the rating buttons out in the metadata row. Clear
+    // the old absolute coordinates so the flex row owns their position; the
+    // other compositions hide these buttons entirely.
+    if (fsPlayerLikeButton.closest && fsPlayerLikeButton.closest(".ym-sl-fs-video-meta")) {
+      for (const btn of [fsPlayerLikeButton, fsPlayerDislikeButton]) {
+        btn.style.position = "";
+        btn.style.left = "";
+        btn.style.top = "";
+      }
+      return;
+    }
     const layer = fsPlayerControls;
     const media = document.querySelector(".ym-sl-fs-media");
     if (!layer || !media) return;
@@ -14122,16 +15177,6 @@
     fsHitsLegacyCopy(text, done);
   }
 
-  function fsHitsSyncLabel() {
-    if (staticLyricsActive) return "Static";
-    // Word-level timing is no longer TTML-only: LRCLIB's Lyricsfile and Unison
-    // LRC can both produce multiple syllables per line. The model is the source
-    // of truth here, regardless of which provider supplied it.
-    const wordTimed = modelLines.some((line) => line && !line.DotLine &&
-      line.Syllables && line.Syllables.Lead && line.Syllables.Lead.length > 1);
-    return wordTimed ? "Syllable" : "Line synced";
-  }
-
   function fsHitsLineText(line) {
     if (!line) return "";
     if (line.Syllables && line.Syllables.Lead && typeof syllablesToText === "function") {
@@ -14152,15 +15197,16 @@
 
   function syncFsHitsChips(force) {
     if (!fsHits) return;
-    const labels = [fsHitsSyncLabel(), currentProvider || "Aurora"];
-    const key = labels.join("|");
-    if (!force && key === fsHitsMetaKey) return;
-    fsHitsMetaKey = key;
-    if (fsHits.chips[0].textContent !== labels[0]) fsHits.chips[0].textContent = labels[0];
-    if (fsHits.providerText.textContent !== labels[1]) fsHits.providerText.textContent = labels[1];
+    // Hits is the cover-art layout. It shows the source, not whether the track
+    // is word- or line-synced; that technical label belongs in the old info
+    // rail, not over the artwork (AJ, 2026-11-16).
+    const providerLabel = currentProvider || "Aurora";
+    if (!force && providerLabel === fsHitsMetaKey) return;
+    fsHitsMetaKey = providerLabel;
+    if (fsHits.providerText.textContent !== providerLabel) fsHits.providerText.textContent = providerLabel;
     // The provider mark sits to the LEFT of the chip label. Rebuilding just the
     // icon slot keeps the text node stable while the source changes.
-    const icon = buildProviderIcon(labels[1]);
+    const icon = buildProviderIcon(providerLabel);
     fsHits.providerIcon.replaceChildren();
     if (icon) fsHits.providerIcon.appendChild(icon);
   }
@@ -14327,15 +15373,18 @@
       ? info.media * 100
       : (Number.isFinite(info.slider) ? info.slider : null);
     if (percent === null) return;
-    const clamped = clamp(percent, 0, 100);
-    if (!fsHits.volumeDrag && performance.now() - (fsHits.volumeAt || 0) > 900) {
-      fsHits.volume.value = String(Math.round(clamped));
-    }
-    fsHits.volume.style.setProperty("--slider-fill", clamped + "%");
-    fsHits.volume.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    const actual = clamp(percent, 0, 100);
     if (fsHits.volumeIcon) {
       fsHits.volumeIcon.classList.toggle("is-muted", info.muted === true);
     }
+    const now = performance.now();
+    if (fsHits.volumeDrag || now - (fsHits.volumeAt || 0) < 900) return;
+    if (actual === fsHits.volumeActual) return;
+    fsHits.volumeActual = actual;
+    const clamped = fsVolumeUiFromActual(actual);
+    fsHits.volume.value = String(clamped);
+    fsHits.volume.style.setProperty("--slider-fill", clamped + "%");
+    fsHits.volume.setAttribute("aria-valuenow", String(clamped));
   }
 
   // The Hits dock belongs to the cover-art header flow. Music videos use the
@@ -14380,8 +15429,8 @@
     // so the floating top-right layout button carries the next mode.
     if (fsHits.layoutLabel) {
       const nextMode = nextFsLayoutMode(fsLayoutMode);
-      const currentName = FS_LAYOUT_NAMES[fsLayoutMode] || fsLayoutMode;
-      const nextName = FS_LAYOUT_NAMES[nextMode] || nextMode;
+      const currentName = fsLayoutName(fsLayoutMode);
+      const nextName = fsLayoutName(nextMode);
       const text = "Layout: " + nextName;
       if (fsHits.layoutLabel.textContent !== text) fsHits.layoutLabel.textContent = text;
       const hint = "Current: " + currentName + " — switch to " + nextName;
@@ -14454,12 +15503,11 @@
     const writers = h("div", { class: "ym-sl-fs-hits-writers" });
     const bylineDivider = h("span", { class: "ym-sl-fs-hits-byline-divider", "aria-hidden": "true" });
     const bylineRow = h("div", { class: "ym-sl-fs-hits-byline-row" }, byline, bylineDivider, writers);
-    const chipSync = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-sync", text: "Syllable" });
     const chipProviderIcon = h("span", { class: "ym-sl-fs-hits-chip-icon" });
     const chipProviderText = h("span", { class: "ym-sl-fs-hits-chip-text", text: "Aurora" });
     const chipProvider = h("span", { class: "ym-sl-fs-hits-chip ym-sl-fs-hits-chip-provider" }, chipProviderIcon, chipProviderText);
     const people = h("div", { class: "ym-sl-fs-hits-people" });
-    const chips = h("div", { class: "ym-sl-fs-hits-chips" }, chipSync, chipProvider, people);
+    const chips = h("div", { class: "ym-sl-fs-hits-chips" }, chipProvider, people);
     const play = fsHitsButton("ym-sl-fs-hits-play", "Play", fsHitsIcon(FS_HITS_ICON_PLAY, "0 0 24 24"), true);
     const previous = fsHitsButton("ym-sl-fs-hits-prev", "Previous", fsHitsIcon(FS_HITS_ICON_PREV, "0 0 24 24"), true);
     const next = fsHitsButton("ym-sl-fs-hits-next", "Next", fsHitsIcon(FS_HITS_ICON_NEXT, "0 0 24 24"), true);
@@ -14506,12 +15554,12 @@
     const root = h("div", { class: "ym-sl-fs-hits" }, inner, topUtils);
 
     fsHits = {
-      root, inner, art, artWrap, title, byline, writers, bylineRow, chips: [chipSync, chipProvider],
+      root, inner, art, artWrap, title, byline, writers, bylineRow,
       creditsKey: "", people, providerIcon: chipProviderIcon, providerText: chipProviderText,
       play, previous, next, like, dislike,
       copyLink, options, layout, copyLyrics, layoutLabel,
       dock, seek, seekCurrent, seekTotal, volume, volumeIcon,
-      seekAt: 0, volumeAt: 0, seekTimer: 0, seekDrag: false, volumeDrag: false,
+      seekAt: 0, volumeAt: 0, seekTimer: 0, seekDrag: false, volumeDrag: false, volumeActual: null,
     };
     fsOverlay.appendChild(root);
 
@@ -14563,13 +15611,15 @@
       const percent = clamp(raw, 0, 100);
       volume.style.setProperty("--slider-fill", percent + "%");
       volume.setAttribute("aria-valuenow", String(Math.round(percent)));
+      const actual = fsVolumeActualFromUi(percent);
+      fsHits.volumeActual = actual;
       const player = window.YTMod && window.YTMod.player;
       if (!player) return;
       if (typeof player.getVolume === "function") {
         const info = player.getVolume();
         if (info && info.muted && typeof player.setMuted === "function") player.setMuted(false);
       }
-      if (typeof player.setVolume === "function") player.setVolume(percent / 100);
+      if (typeof player.setVolume === "function") player.setVolume(actual / 100);
     };
     const endHitsVolumeDrag = () => {
       fsHits.volumeDrag = false;
@@ -14704,11 +15754,11 @@
     // Transport buttons use Spicy Lyrics' own solid icons. Prev is the same
     // TrackSkip path as Next, rotated 180deg - exactly how upstream does it
     // (.PlaybackControl.TrackSkip.PrevTrack { rotate: 180deg }).
-    const prevIcon = fsSvgIcon(FS_ICON_PREV, "0 0 35 20");
+    const prevIcon = fsSkipIconSvg();
     prevIcon.style.transform = "rotate(180deg)";
     const previousButton = h("button", { class: "ym-sl-fs-player-prev", type: "button", title: "Previous song", "aria-label": "Previous song" }, prevIcon);
-    const playButton = h("button", { class: "ym-sl-fs-player-play", type: "button", title: "Play or pause", "aria-label": "Play or pause" }, fsSvgIcon(FS_ICON_PAUSE, "0 0 15 20"));
-    const nextButton = h("button", { class: "ym-sl-fs-player-next", type: "button", title: "Next song", "aria-label": "Next song" }, fsSvgIcon(FS_ICON_NEXT, "0 0 35 20"));
+    const playButton = h("button", { class: "ym-sl-fs-player-play", type: "button", title: "Play or pause", "aria-label": "Play or pause" }, fsPlayMorphSvg());
+    const nextButton = h("button", { class: "ym-sl-fs-player-next", type: "button", title: "Next song", "aria-label": "Next song" }, fsSkipIconSvg());
     // Shuffle and Repeat FLANK the transport, the way every other player does it.
     // Both are TOGGLES, so refreshFullscreenPlayerState() mirrors YTM's own state
     // onto them on the 500ms tick — see syncFullscreenModeButtons().
@@ -14761,16 +15811,26 @@
     // it reads as a scale instead of a stray line under the transport. They are
     // markers, not buttons — the slider is the control — so they are hidden from
     // assistive tech and never take a pointer (see .ym-sl-fs-volume-icon).
-    const volumeLowIcon = fsSvgIcon([
-      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
-      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
-    ]);
+    // A rounded stroked speaker, not a filled wedge. The body is one continuous
+    // curve with a thick round-joined outline, so it keeps the same soft weight
+    // as the lyric type instead of ending in sharp cone points.
+    const volumeSpeaker = {
+      tag: "path",
+      attrs: {
+        d: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.2",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    };
+    const volumeLowIcon = fsSvgIcon([volumeSpeaker]);
     volumeLowIcon.setAttribute("class", "ym-sl-fs-volume-icon");
     const volumeHighIcon = fsSvgIcon([
-      { tag: "path", attrs: { d: "M4 9.5h3.4L12 6v12l-4.6-3.5H4z" } },
-      { tag: "path", attrs: { d: "M15.2 9.2a3.8 3.8 0 0 1 0 5.6" } },
-      { tag: "path", attrs: { d: "M17.9 6.6a7.5 7.5 0 0 1 0 10.8" } },
-      { tag: "path", attrs: { d: "M20.6 4.2a11 11 0 0 1 0 15.6" } },
+      volumeSpeaker,
+      { tag: "path", attrs: { d: "M16 9a5 5 0 0 1 0 6", "stroke-width": "2.2", "stroke-linecap": "round" } },
+      { tag: "path", attrs: { d: "M19.4 18.4a9 9 0 0 0 0-12.8", "stroke-width": "2.2", "stroke-linecap": "round" } },
     ]);
     volumeHighIcon.setAttribute("class", "ym-sl-fs-volume-icon");
     // Only the slider remains interactive (the mute button was removed); the
@@ -14829,6 +15889,10 @@
       syncFsChromeStructure();
     }));
     syncFsChromeStructure();
+    // A fresh set of controls must never inherit a drag that was interrupted
+    // by the overlay being torn down.
+    fsSeekDragging = false;
+    fsSeekUserAt = 0;
     // The ResizeObserver that re-pinned the edge buttons whenever the media
     // resized is REMOVED (AJ, 2026-10-20). It fired repeatedly while the pane
     // animated its width, which slid the buttons along with it — one of the
@@ -14840,11 +15904,29 @@
     // as "skip the close animation". This is why the overlay used to vanish
     // without its fade (AJ, 2026-10-22).
     exit.addEventListener("click", () => exitFullscreenMode());
-    previousButton.addEventListener("click", () => clickPlayerButton("previous"));
-    playButton.addEventListener("click", () => clickPlayerButton("play"));
-    nextButton.addEventListener("click", () => clickPlayerButton("next"));
-    shuffleButton.addEventListener("click", () => clickPlayerButton("shuffle"));
-    repeatButton.addEventListener("click", () => clickPlayerButton("repeat"));
+    previousButton.addEventListener("click", () => {
+      clickPlayerButton("previous");
+      animateFsSkip(previousButton);
+    });
+    playButton.addEventListener("click", () => {
+      const next = playButton.dataset.playState === "play" ? "pause" : "play";
+      clickPlayerButton("play");
+      // Flip the glyph immediately; the 500ms player-state tick still corrects
+      // it if YTM refuses the command or another device changes playback.
+      fsSetPlayMorph(playButton, next);
+    });
+    nextButton.addEventListener("click", () => {
+      clickPlayerButton("next");
+      animateFsSkip(nextButton);
+    });
+    shuffleButton.addEventListener("click", () => {
+      clickPlayerButton("shuffle");
+      animateFsToggleIcon(shuffleButton, "is-glowing");
+    });
+    repeatButton.addEventListener("click", () => {
+      clickPlayerButton("repeat");
+      animateFsToggleIcon(repeatButton, "is-looping");
+    });
     likeButton.addEventListener("click", () => clickFsRating("like"));
     dislikeButton.addEventListener("click", () => clickFsRating("dislike"));
     // Single source of truth for the custom slider: writes the fill (via
@@ -14891,6 +15973,34 @@
     function hideScrubTip() {
       if (fsScrubTip) fsScrubTip.classList.remove("ym-sl-fs-scrub-tip-on");
     }
+    // The volume slider uses the same floating pill. It shows the integer
+    // 0-100 value at the current fill edge while the bar is being dragged.
+    function ensureVolumeTip() {
+      if (fsVolumeTip && fsVolumeTip.isConnected) return fsVolumeTip;
+      fsVolumeTip = h("div", {
+        class: "ym-sl-fs-scrub-tip ym-sl-fs-volume-tip",
+        "aria-hidden": "true",
+      }, "100");
+      fsPlayerControls.appendChild(fsVolumeTip);
+      return fsVolumeTip;
+    }
+    function updateVolumeTip() {
+      if (!fsVolumeTip || !fsPlayerVolumeRange || !fsPlayerControls) return;
+      const value = clamp(fsPlayerVolumeValue, 0, 100);
+      fsVolumeTip.textContent = String(Math.round(value));
+      const volumeRect = fsPlayerVolumeRange.getBoundingClientRect();
+      const hostRect = fsPlayerControls.getBoundingClientRect();
+      fsVolumeTip.style.left = (volumeRect.left - hostRect.left + (value / 100) * volumeRect.width) + "px";
+      fsVolumeTip.style.top = (volumeRect.top - hostRect.top - 34) + "px";
+    }
+    function showVolumeTip() {
+      ensureVolumeTip();
+      updateVolumeTip();
+      if (fsVolumeTip) fsVolumeTip.classList.add("ym-sl-fs-scrub-tip-on");
+    }
+    function hideVolumeTip() {
+      if (fsVolumeTip) fsVolumeTip.classList.remove("ym-sl-fs-scrub-tip-on");
+    }
     // Map a pointer X to 0-100 against the VISUAL (post-transform) rect so the
     // value tracks exactly where the user grabs the scaled bar.
     function volumeFromPointer(clientX) {
@@ -14904,17 +16014,26 @@
       fsPlayerVolumeRange.setPointerCapture(e.pointerId);
       setDragCursor(true);
       applyFullscreenVolume(volumeFromPointer(e.clientX));
-      const onMove = (ev) => applyFullscreenVolume(volumeFromPointer(ev.clientX));
+      showVolumeTip();
+      const onMove = (ev) => {
+        applyFullscreenVolume(volumeFromPointer(ev.clientX));
+        updateVolumeTip();
+      };
       const onUp = (ev) => {
         try { fsPlayerVolumeRange.releasePointerCapture(ev.pointerId); } catch (_) {}
         fsPlayerVolumeRange.removeEventListener("pointermove", onMove);
         fsPlayerVolumeRange.removeEventListener("pointerup", onUp);
         fsPlayerVolumeRange.removeEventListener("pointercancel", onUp);
         setDragCursor(false);
+        hideVolumeTip();
       };
       fsPlayerVolumeRange.addEventListener("pointermove", onMove);
       fsPlayerVolumeRange.addEventListener("pointerup", onUp);
       fsPlayerVolumeRange.addEventListener("pointercancel", onUp);
+    });
+    fsPlayerVolumeRange.addEventListener("lostpointercapture", () => {
+      setDragCursor(false);
+      hideVolumeTip();
     });
     fsPlayerVolumeRange.addEventListener("keydown", (e) => {
       let v = fsPlayerVolumeValue;
@@ -14935,11 +16054,17 @@
     // the first refresh. Keep the mute/icon in sync.
     fsPlayerVolumeRange.style.setProperty("--vol-fill", clamp(fsPlayerVolumeValue, 0, 100) + "%");
     fsPlayerSeekRange.addEventListener("pointerdown", () => {
+      fsSeekDragging = true;
       fsSeekUserAt = performance.now();
       setDragCursor(true);
       showScrubTip();
     });
-    const endSeekDrag = () => { setDragCursor(false); hideScrubTip(); };
+    const endSeekDrag = () => {
+      fsSeekDragging = false;
+      fsSeekUserAt = performance.now();
+      setDragCursor(false);
+      hideScrubTip();
+    };
     fsPlayerSeekRange.addEventListener("pointerup", endSeekDrag);
     fsPlayerSeekRange.addEventListener("pointercancel", endSeekDrag);
     // Belt for a pointerup the browser never delivers (release outside the
@@ -14953,6 +16078,7 @@
       const position = Number(fsPlayerSeekRange.value);
       if (Number.isFinite(duration) && duration > 0 && Number.isFinite(position)) {
         fsPlayerSeekRange.style.setProperty("--slider-fill", clamp(position / duration * 100, 0, 100) + "%");
+        if (fsTimeCurrent) fsTimeCurrent.textContent = formatClock(position);
       }
       // The bubble tracks the thumb live through the whole drag (input also
       // fires for keyboard arrows, which is the desired behaviour there too).
@@ -15054,6 +16180,16 @@
     if (fsIdleRing) fsIdleRing.classList.remove("visible", "leaving");
   }
 
+  // The transport buttons, seek bar and volume all live inside the player
+  // controls layer; the top chrome is .ym-sl-fs-controls. When the pointer is
+  // resting on either, idle must leave the cursor and its fill ring alone.
+  function fsPointerOverChrome() {
+    if (!fsHavePointer) return false;
+    const el = document.elementFromPoint(fsLastPointerX, fsLastPointerY);
+    return !!(el && (el.closest(".ym-sl-fs-player-controls") ||
+      el.closest(".ym-sl-fs-controls")));
+  }
+
   // Any activity: hide the ring while the pointer is moving, then re-arm it to
   // appear (and re-fill from empty) once movement pauses.
   function resetFsIdleRing() {
@@ -15061,7 +16197,7 @@
     hideFsIdleRing();
     fsIdleRingShowTimer = window.setTimeout(() => {
       fsIdleRingShowTimer = 0;
-      if (!fsActive) return;
+      if (!fsActive || fsPointerOverChrome()) return;
       const el = ensureFsIdleRing();
       if (!el) return;
       placeFsIdleRing();
@@ -15092,6 +16228,12 @@
   function hideFsChrome() {
     fsIdleTimer = 0;
     if (!fsActive || !fsOverlay) return;
+    // A pointer resting on the transport/top chrome is still using the UI.
+    // Keep the cursor and controls visible instead of starting the idle hide.
+    if (fsPointerOverChrome()) {
+      fsIdleTimer = setTimeout(hideFsChrome, FS_IDLE_HIDE_MS);
+      return;
+    }
     // Only block while a button is physically held (mid-drag on the offset
     // slider). Focus must NOT block this: changing the layout leaves the
     // <select> focused, and gating on focus meant the chrome never hid until
@@ -15148,6 +16290,9 @@
   }
 
   function handleFsPointerLeave() {
+    // No pointer in the window: stop treating the last control it crossed as
+    // hovered, otherwise the idle hide would defer forever after leaving there.
+    fsHavePointer = false;
     // A drag that ends on another monitor never delivers its mouseup here, which
     // left fsPointerDown stuck true and made hideFsChrome reschedule itself
     // forever instead of hiding the chrome. The pointer has left the window, so
@@ -15551,6 +16696,10 @@
       if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         fsOverlay.classList.remove("ym-sl-fs-has-video");
         syncFsChromeStructure();
+        // The optimistic video flip is being rolled back to cover art. If its
+        // chrome fade already started, restore it now instead of waiting for
+        // the heal timer.
+        fsChromeFadeIn();
         // No video left to blur; drop Video Background back to side-by-side
         // without rewriting the audio layout preference.
         if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
@@ -15568,6 +16717,8 @@
       // reported. Readiness is handled separately (the video stays at opacity 0
       // until frames advance), so this cannot show a stale frame.
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
+        // This is the cover-art composition changing to video geometry.
+        fsChromeFadeOut();
         fsOverlay.classList.add("ym-sl-fs-has-video");
         syncFsChromeStructure();
         // Hits is cover-art only; a video appearing mid-session moves straight
@@ -15616,9 +16767,8 @@
         return;
       }
       if (want && !ha) {
-        // Committed cover -> MV swap: the whole control column restructures, so
-        // dissolve the chrome before the swap runs (it fades back in with the
-        // video via awaitFsVideoReady -> revealFsMediaPane -> fsFadeInMedia).
+        // Committed cover -> MV swap: the control column restructures in place;
+        // the chrome fades while that happens, then returns with the video.
         fsChromeFadeOut();
         // Attach the live video (mirrors enterFullscreenMode).
         fsSavedVideo = {
@@ -15695,8 +16845,9 @@
             return;
           }
         }
-        // Committed MV -> cover swap: restructure the control column, so dissolve
-        // the chrome first. (The debounce above already ruled out a mere reload.)
+        // Committed MV -> cover swap: the chrome fades while the column
+        // restructures, then returns with the new cover. (The debounce above
+        // already ruled out a mere reload.)
         fsChromeFadeOut();
         // Detach the stale video and fall back to cover art.
         const saved = fsSavedVideo;
@@ -16091,30 +17242,8 @@
     }
     fsFadeAt = now;
     if (id) fsFadeTrackId = id;
-    // Sync the control dissolve with the media dissolve.
-    if (fsOverlay && !fsSavedVideo) {
-      // LEAVING a cover-art track (cover -> MV or cover -> cover): the controls
-      // fade out on the same beat the media does, not when the next video finishes
-      // attaching.
-      fsChromeFadeOut();
-    } else if (fsOverlay && fsSavedVideo) {
-      // LEAVING a music video: an MV -> MV reload and an MV -> cover look
-      // identical at the skip instant (both still have a live player video). The
-      // restructure is gated by the source-load wait below so a reload is never
-      // mistaken for a cover, but the control fade should NOT wait that long.
-      // Probe a beat later: if the player video is GONE by then it is a cover ->
-      // dissolve the controls now, synced with the video leaving; if it survived
-      // it is MV -> MV and the controls must stay perfectly still.
-      window.setTimeout(() => {
-        if (!fsActive || !fsSavedVideo) return;
-        // Readiness, not intent: on an MV -> MV skip the reused element reports
-        // videoWidth 0 for the whole reload, so findPlayerVideo() alone read as
-        // "the video is gone" and dissolved the controls that must stay still.
-        const node = fsSavedVideo.node;
-        const reloading = !!node && node.readyState < 1;
-        if (!reloading && !findPlayerVideo()) fsChromeFadeOut();
-      }, 170);
-    }
+    // The chrome stays visible across track changes. Only the media dissolves;
+    // a cover <-> MV switch restructures the column in place when it commits.
     fsFadeOutMedia();
   }
 
@@ -16660,7 +17789,12 @@
     // fullscreen always opened on the TOP of the song no matter where the
     // playhead was. The recentre window also rides out the overlay's entrance
     // layout, which is still moving for a few frames after this point.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+    }
 
     // Keep the cover-art layers in sync if the track changes mid-fullscreen.
     // The sharp card art (fsArtImg) and the blurred backdrop (fsBgImg) are
@@ -16807,7 +17941,12 @@
     }
     // Same reparenting reset as on the way in: leaving fullscreen would otherwise
     // drop the panel back to the top of the song.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      braccatoRecoverScroll();
+    } else {
+      recentreActiveLine();
+      braccatoRelayout();
+    }
 
     // Put back the tab-driven visibility we overrode on entry. Without this,
     // exiting fullscreen while the active tab is NOT ours (Comments, …) leaves
@@ -17072,12 +18211,91 @@
      "style-scope yt-icon-button"), so the test is a loose regex over that label.
      It deliberately does NOT match "Exit full screen" - that label only exists
      while YTM is in its own fullscreen, which this prevents, and hijacking it
-     would leave no way out. */
+     would leave no way out.
+
+     Double-clicking the artwork/video is YTM's other fullscreen affordance
+     (its `ytmusic-player` handler calls playerUiService.toggleFullscreen()).
+     Catch that gesture too, but only on the media surfaces: a capture listener
+     on the whole page would also swallow double-clicks on the player controls. */
+  /* YTM's double-click handler is not a plain document listener: it is a
+     Polymer method (`ytmusic-player.polymerController.onDoubleClick`) that
+     calls playerUiService.toggleFullscreen(). A capture listener can be raced
+     by that player path, so point the method itself at our fullscreen. This is
+     installed before the first click of a double-click whenever possible; the
+     click fallback below covers a player that appeared after boot. */
+  function installYtmDoubleClickRedirect() {
+    const player = document.querySelector("ytmusic-player");
+    const controller = player && player.polymerController;
+    if (!controller || typeof controller.onDoubleClick !== "function") return false;
+    // Keep the ORIGINAL YTM method across extension reloads/re-patches. Always
+    // assigning a fresh wrapper from that original avoids nesting wrappers
+    // whose closure points at a dead content-script instance.
+    const original = controller.__ymAuroraOriginalDoubleClick || controller.onDoubleClick;
+    controller.__ymAuroraOriginalDoubleClick = original;
+    controller.__ymAuroraDoubleClickRedirect = true;
+    controller.onDoubleClick = function (event) {
+      // Our surface is already up. Consume the rest of the gesture so the
+      // native fullscreen change cannot hand the page back to YTM's own view.
+      if (fsActive) {
+        try {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        } catch (_) {}
+        return;
+      }
+      // If YTM was already fullscreen before Aurora loaded, its original method
+      // is the only way out; do not trap the user in that state.
+      if (!panelEl || player.playerFullscreened || this.isAdvertisementPlaying) {
+        return original.call(this, event);
+      }
+      try {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } catch (_) {}
+      enterFullscreenMode();
+    };
+    // Belt and braces: YTM sometimes reaches the fullscreen service through a
+    // different player path than the double-click method. Redirect that too so
+    // no entry point can leave the native page behind our overlay.
+    const service = player.playerUiService;
+    if (service && typeof service.toggleFullscreen === "function") {
+      const originalToggle = service.__ymAuroraOriginalToggleFullscreen || service.toggleFullscreen;
+      service.__ymAuroraOriginalToggleFullscreen = originalToggle;
+      service.toggleFullscreen = function (...args) {
+        if (fsActive) return;
+        if (!panelEl || player.playerFullscreened || this.isAdvertisementPlaying) {
+          return originalToggle.apply(this, args);
+        }
+        enterFullscreenMode();
+      };
+    }
+    return true;
+  }
+
   function installNativeFullscreenRedirect() {
+    installYtmDoubleClickRedirect();
+    // The cover art is covered by YTM's song-media window, so clicks land on
+    // that div rather than the <img> or #song-image itself. Keep all the media
+    // surfaces here; the player controls are deliberately excluded.
+    const mediaSelector = "#song-image, #song-media-window, .player-wrapper, #movie_player, video";
     const redirect = (event) => {
+      // A double-click's first click arrives before YTM's dblclick callback;
+      // make sure a player created after boot is patched by then.
+      installYtmDoubleClickRedirect();
       if (fsActive || !panelEl) return;
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
+      // The second click of a double-click is the one with usable user
+      // activation, and it arrives before YTM's dblclick handler. Redirecting
+      // here avoids racing YTM's toggle and lets requestFullscreen() succeed
+      // from the click itself. The first click is left alone so a normal click
+      // still reaches the player.
+      if (event.detail >= 2 && target.closest(mediaSelector)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        enterFullscreenMode();
+        return;
+      }
       const hit = target.closest("[aria-label]");
       if (!hit) return;
       const label = (hit.getAttribute("aria-label") || "").toLowerCase();
@@ -17086,8 +18304,18 @@
       event.stopImmediatePropagation();
       enterFullscreenMode();
     };
+    const redirectDoubleClick = (event) => {
+      if (fsActive || !panelEl) return;
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      if (!target.closest(mediaSelector)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      enterFullscreenMode();
+    };
     window.addEventListener("click", redirect, true);
     window.addEventListener("tap", redirect, true);
+    window.addEventListener("dblclick", redirectDoubleClick, true);
   }
 
   function syncNativePanel(on) {
@@ -17222,6 +18450,8 @@
     if (on) {
       refreshTrack();
       syncTrackLyrics();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
     }
   }
 
@@ -17244,6 +18474,8 @@
       panelVisible = true;
       // The panel left #tab-renderer, so its native children can show again.
       syncNativePanel(false);
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
       refreshTrack();
       syncTrackLyrics();
       return true;
@@ -17270,6 +18502,8 @@
     if (panelVisible) {
       refreshTrack();
       syncTrackLyrics();
+      braccatoRelayout();
+      requestAnimationFrame(() => braccatoRelayout());
     }
     return true;
   }
@@ -17522,6 +18756,7 @@
       track.classList.remove("is-scrolling");
       track.style.removeProperty("--ym-sl-fs-writers-shift");
       track.style.removeProperty("--ym-sl-fs-writers-duration");
+      stopFsWritersFade(box);
       return;
     }
     const cW = box.clientWidth;
@@ -17532,6 +18767,7 @@
       track.classList.remove("is-scrolling");
       track.style.removeProperty("--ym-sl-fs-writers-shift");
       track.style.removeProperty("--ym-sl-fs-writers-duration");
+      stopFsWritersFade(box);
       return;
     }
     const shiftValue = shift + "px";
@@ -17552,6 +18788,83 @@
     track.classList.remove("is-scrolling");
     void track.offsetWidth;
     track.classList.add("is-scrolling");
+    watchFsWritersFade(box, track);
+  }
+
+  // The writer track clips at both edges. Fade an edge only while it has
+  // hidden text; at the exact left/right rest points the aligned edge stays
+  // crisp. The variables are written only when a side crosses that boundary,
+  // so the mask is not repainting every animation frame.
+  let fsWritersFadeRaf = 0;
+  let fsWritersFadeBox = null;
+  let fsWritersFadeTrack = null;
+  let fsWritersFadeLeftOn = false;
+  let fsWritersFadeRightOn = false;
+
+  function resetFsWritersFade(box) {
+    if (!box) return;
+    box.style.removeProperty("--ym-sl-fs-writers-fade-left");
+    box.style.removeProperty("--ym-sl-fs-writers-fade-right");
+  }
+
+  function stopFsWritersFade(box) {
+    if (fsWritersFadeRaf) {
+      cancelAnimationFrame(fsWritersFadeRaf);
+      fsWritersFadeRaf = 0;
+    }
+    resetFsWritersFade(box || fsWritersFadeBox);
+    fsWritersFadeBox = null;
+    fsWritersFadeTrack = null;
+    fsWritersFadeLeftOn = false;
+    fsWritersFadeRightOn = false;
+  }
+
+  function syncFsWritersFade() {
+    fsWritersFadeRaf = 0;
+    const box = fsWritersFadeBox;
+    const track = fsWritersFadeTrack;
+    if (!box || !track || !box.isConnected || !track.isConnected ||
+        !track.classList.contains("is-scrolling")) {
+      resetFsWritersFade(box);
+      fsWritersFadeBox = null;
+      fsWritersFadeTrack = null;
+      fsWritersFadeLeftOn = false;
+      fsWritersFadeRightOn = false;
+      return;
+    }
+    let x = 0;
+    const transform = getComputedStyle(track).transform;
+    if (transform && transform !== "none") {
+      try { x = new DOMMatrixReadOnly(transform).m41; } catch (_) {}
+    }
+    const overflow = Math.max(0, track.scrollWidth - box.clientWidth);
+    const leftOn = -x > 0.5;
+    const rightOn = overflow + x > 0.5;
+    const fade = Math.max(12, Math.min(20, box.clientWidth * .045));
+    if (leftOn !== fsWritersFadeLeftOn) {
+      fsWritersFadeLeftOn = leftOn;
+      box.style.setProperty("--ym-sl-fs-writers-fade-left", leftOn ? fade + "px" : "0px");
+    }
+    if (rightOn !== fsWritersFadeRightOn) {
+      fsWritersFadeRightOn = rightOn;
+      box.style.setProperty("--ym-sl-fs-writers-fade-right", rightOn ? fade + "px" : "0px");
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    fsWritersFadeRaf = requestAnimationFrame(syncFsWritersFade);
+  }
+
+  function watchFsWritersFade(box, track) {
+    if (fsWritersFadeBox !== box) resetFsWritersFade(fsWritersFadeBox);
+    if (fsWritersFadeRaf) {
+      cancelAnimationFrame(fsWritersFadeRaf);
+      fsWritersFadeRaf = 0;
+    }
+    fsWritersFadeBox = box;
+    fsWritersFadeTrack = track;
+    fsWritersFadeLeftOn = false;
+    fsWritersFadeRightOn = false;
+    resetFsWritersFade(box);
+    syncFsWritersFade();
   }
 
   // Per-render title-marquee updater. Measures the inner's scrollWidth
@@ -17608,37 +18921,81 @@
     const chip = fsOverlay.querySelector(".ym-sl-fs-play-chip");
     const vol = fsOverlay.querySelector(".ym-sl-fs-volume-group");
     if (!scrubber || !chip || !vol) return;
-    // Hits is its own composition: it has no classic credit or volume column
-    // to restructure, so it must be excluded from BOTH side checks. Without
-    // this the volume gets reparented out of the scrubber into the overlay's
-    // top-left corner (AJ, 2026-11-09).
     const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
-    const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !hits;
-    const column = chip.parentElement;
+    const hasVideo = fsOverlay.classList.contains("ym-sl-fs-has-video");
     const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
       !hits;
-    // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
-    // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
-    // only way the gaps stay equal: as a separate absolutely-positioned element
-    // the gap under the title depended on the column's CONTENT height, which CSS
-    // cannot subtract from a `bottom`.
-    if (side) {
+    const videoSide = side && hasVideo;
+    const column = chip.parentElement;
+    if (!column) return;
+
+    // Music videos get a real metadata row: track/artist on the left, the two
+    // rating buttons on the right. It lives INSIDE the same column as the seek
+    // and transport, so all four rows share one left edge and one width. The
+    // wrapper stays around in other modes but is display:none (see 05-styles).
+    if (videoSide) {
+      let meta = column.querySelector(".ym-sl-fs-video-meta");
+      if (!meta) {
+        meta = h("div", { class: "ym-sl-fs-video-meta" });
+        meta.appendChild(h("div", { class: "ym-sl-fs-video-actions" }));
+        column.insertBefore(meta, column.firstChild);
+      }
+      let actions = meta.querySelector(".ym-sl-fs-video-actions");
+      if (!actions) {
+        actions = h("div", { class: "ym-sl-fs-video-actions" });
+        meta.appendChild(actions);
+      }
+      if (fsPlayerLikeButton && fsPlayerLikeButton.parentElement !== actions) {
+        actions.appendChild(fsPlayerLikeButton);
+      }
+      if (fsPlayerDislikeButton && fsPlayerDislikeButton.parentElement !== actions) {
+        actions.appendChild(fsPlayerDislikeButton);
+      }
+      // The cover-art heart is the rating control in the video title row too:
+      // same button, same saved rating, just a different home. The two edge
+      // thumbs stay in the DOM but are hidden by CSS in this composition.
+      if (fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== actions) {
+        actions.appendChild(fsArtLikeButton);
+      }
+      if (fsTitleEl && fsTitleEl.parentElement !== meta) {
+        meta.insertBefore(fsTitleEl, meta.firstChild);
+      }
+      if (meta.parentElement !== column || column.firstElementChild !== meta) {
+        column.insertBefore(meta, column.firstElementChild);
+      }
+      for (const btn of [fsPlayerLikeButton, fsPlayerDislikeButton]) {
+        if (!btn) continue;
+        btn.style.position = "";
+        btn.style.left = "";
+        btn.style.top = "";
+      }
+    } else if (side) {
+      // Cover art keeps the title as the first child of the column.
       if (fsTitleEl && fsTitleEl.parentElement !== column) {
         column.insertBefore(fsTitleEl, column.firstChild);
       }
     } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
-      // Back to an overlay child for background.
+      // Back to an overlay child for background/Hits.
       fsOverlay.appendChild(fsTitleEl);
     }
-    // The volume only leaves the scrubber for the cover-art column, which wants
-    // it on its own row under the transport.
-    const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
-    if (coverSide) {
+
+    // Both side compositions put the volume on its own row under the transport.
+    // Background/Hits keep it on the seek row.
+    if (side) {
       if (vol.parentElement !== column) column.appendChild(vol);
-    } else if (vol.parentElement !== scrubber) {
-      scrubber.appendChild(vol);
+      // The Apple Music heart only exists for cover art; video ratings moved
+      // into the metadata row above.
+      if (!hasVideo && fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== column) {
+        column.appendChild(fsArtLikeButton);
+      }
+    } else {
+      if (vol.parentElement !== scrubber) scrubber.appendChild(vol);
+      if (!hasVideo && fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== fsCoverSwitch.ui) {
+        fsCoverSwitch.ui.appendChild(fsArtLikeButton);
+      }
     }
   }
 
@@ -18831,6 +20188,7 @@
   // that invalidates a skeleton paint still queued on rAF/`setTimeout`.
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
+    braccatoClearForLoad();
     lyricsSkeletonShown = false;
     currentLyricsfileArtist = "";
     currentWordSyncQualityWarning = false;
@@ -19140,6 +20498,17 @@
   }
 
   function onJumpButtonClick() {
+    if (braccatoOwnsTrack()) {
+      autoScrollUserPaused = false;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+      braccatoJumpToCurrent();
+      return;
+    }
     // Apple-style lyrics: the engine owns the scroll offset of its own DOM, so
     // the built-in camera has nothing to move here. resetScroll() is the engine's
     // supported "back to the playing line" (it clears the manual offset and
@@ -19175,13 +20544,28 @@
     }
   }
 
-  function handleManualScrollIntent() {
+  function handleManualScrollIntent(event) {
     if (!lineScrollEl) return;
+    // A click on a Better Lyrics line is a seek, not a scroll. pointerdown
+    // fires before that click; handing it to the engine would suspend its
+    // autoscroll and leave the jump affordance up after every line tap. A
+    // pointerdown on the scrollbar/padding still takes the scroll, and wheel,
+    // touchmove and keyboard always do.
+    if (braccatoOwnsTrack() && event &&
+      (event.type === "pointerdown" || event.type === "touchstart") &&
+      event.target && event.target.closest && event.target.closest(".blyrics--line")) {
+      return;
+    }
     // The user has taken the scroll. Kill the spring outright rather than
     // retargeting: a spring still holding a target would keep pulling against
     // their wheel/touch input, which reads as the panel fighting them.
     stopScrollGlide();
     manualScrollActive = true;
+    if (braccatoOwnsTrack() && braccatoRenderer) {
+      // Braccato has no scroll listener of its own; this is the explicit hook
+      // that suspends its auto-scroll and raises the resume affordance.
+      try { braccatoRenderer.noteUserScroll(); } catch (e) {}
+    }
     if (staticLyricsActive) {
       // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
       // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
@@ -19237,6 +20621,16 @@
   }
 
   function jumpToCurrentLyric() {
+    if (braccatoOwnsTrack()) {
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+      braccatoJumpToCurrent();
+      return;
+    }
     // Reinforce the line the panel is already gliding toward, not necessarily the
     // one being sung: with early scroll on those differ, and targeting the active
     // line here would fight the next frame's retarget back to the lead line.
@@ -20011,7 +21405,7 @@
     // amllApplyTrackRenderer also starts the engine when THIS track is the first
     // one it should draw (the previous track may have gone to Spicy, which never
     // starts it) - without that the new track stayed on Spicy until the mode was
-    // toggled. See amllContentGoesToSpicy.
+    // toggled. See rendererChoiceForContent.
     amllApplyTrackRenderer(content);
     buildRendererLines(content);
     // Feed the parsed content to the AMLL engine when Simple lyrics (Apple-Music
@@ -22524,6 +23918,14 @@
     if (key === currentTrackKey) return;
 
     currentTrackKey = key;
+    // Recycle the Apple Music player while the loading skeleton is about to go
+    // up. A browser refresh makes both renderers fast again after a long
+    // session; the built-in line DOM is already rebuilt per track, while the
+    // AMLL player otherwise lives for the whole page. Doing this before the
+    // skeletons means the old player is gone before the new content arrives,
+    // and the next renderer choice decides whether a fresh one is built.
+    try { recycleLyricsSurfaceForTrackChange(); } catch (e) {}
+    try { amllRecycleForTrackChange(); } catch (e) {}
     // A new track starts a fresh lookup; the ad notice reports "Looking…"
     // until one of the sources answers.
     adBreakNoteLookup(key);
@@ -23377,7 +24779,7 @@
       staticLyrics: !!staticLyricsActive,
       // Which renderer draws this track. The PiP runs the SAME one for its
       // line-by-line surface, so it must not infer it from the timings.
-      renderer: amllTrackUsesEngine(content) ? "amll" : "spicy",
+      renderer: rendererOwner,
       songwriters: currentSongwriters.slice(),
       smoothScrolling: currentSettings.smoothScrolling !== false,
       simpleLyrics: currentSettings.simpleLyrics === true,
@@ -23440,6 +24842,19 @@
       document.documentElement.dataset.ymLyricSync =
         (pauseSync ? "pause+" : "") + formatOffset(getActiveOffsetMs());
     } catch (e) {}
+  }
+
+  /* A browser refresh makes word-by-word songs fast again after a long session.
+     `buildRendererLines` already replaces every line, but it does so inside the
+     same VirtualLyricsContainer, and the container/its old raster layers are the
+     only lyric nodes that survive a track. Recreate that one wrapper on each
+     track change so the next song starts on a fresh layer tree, while keeping the
+     panel, scroll box, settings and skeleton machinery intact. */
+  function recycleLyricsSurfaceForTrackChange() {
+    if (!linesRoot || !linesRoot.parentElement) return;
+    const fresh = h("div", { class: "VirtualLyricsContainer" });
+    linesRoot.replaceWith(fresh);
+    linesRoot = fresh;
   }
 
   function buildRendererLines(content) {
@@ -23626,7 +25041,7 @@
     lineScrollEl.classList.remove("offline");
     // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
     // from here through the song (AJ, 2026-09-18).
-    if (staticLyricsActive && lineScrollEl) {
+    if (staticLyricsActive && lineScrollEl && !braccatoOwnsTrack()) {
       // Instant: a reset, not a scroll the user asked to watch.
       writeScrollTop(0, true);
     }
@@ -23635,7 +25050,14 @@
     // different line geometry. Place the camera instantly. Letting the spring
     // handle it is what made a new song glide all the way up from the last
     // song's final line.
-    recentreActiveLine();
+    if (braccatoOwnsTrack()) {
+      recentreUntilMs = 0;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      braccatoSetContent(content);
+    } else {
+      recentreActiveLine();
+    }
   }
 
   function loadLyrics(xml) {
@@ -24343,8 +25765,11 @@
     return false;
   }
 
-  function animate(positionMs) {
-    if (!panelVisible || !modelLines.length) return;
+  function animate(positionMs, positionSampledAtMs) {
+    if (!panelVisible) return;
+    // Better Lyrics can draw instrumental-only or otherwise model-less content;
+    // the built-in renderer cannot. Keep the frame loop alive for it.
+    if (!modelLines.length && !braccatoOwnsTrack()) return;
     // Defensive twin of the tick() guard: no non-finite playhead may reach the
     // animators, whatever the caller. Without this, NaN propagates into
     // --gradient-position as "NaN%" and blanks the clipped background for a
@@ -24362,7 +25787,7 @@
     // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
     // tracks playback — top at song start, bottom at song end. Paused while the
     // user scrolls manually (AJ, 2026-09-18).
-    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl) {
+    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl && !braccatoOwnsTrack()) {
       driveStaticAutoScroll(positionMs);
       setJumpButtonVisible(false);
     }
@@ -24383,7 +25808,11 @@
     // line-follow retarget has nothing to aim at — the panel used to sit at the
     // bottom for the whole intro and then sweep the entire song height once
     // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
-    if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
+    if (
+      lastLyricPositionMs >= 0 &&
+      lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS &&
+      !braccatoOwnsTrack()
+    ) {
       restartPlayheadScroll(lyricPositionMs);
     }
     lastLyricPositionMs = lyricPositionMs;
@@ -24397,6 +25826,20 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    // Better Lyrics owns its whole timeline, scroll and word animation. The
+    // built-in model above is kept in step only for Aurora's shared surfaces
+    // (fullscreen dimming, active-line bus, jump-to-current), so stop here and
+    // let the engine draw this frame.
+    if (braccatoOwnsTrack()) {
+      braccatoDrive(lyricPositionMs, positionSampledAtMs);
+      return;
+    }
+    // Apple Music drives its own engine and its own DOM. Running the built-in
+    // Spicy word/letter springs against the hidden Spicy model here was pure
+    // parallel work on every frame (and made AMLL slower than it needed to be).
+    // The shared surfaces above—active-line publication and fullscreen dimming—
+    // are already up to date by this point.
+    if (typeof rendererOwner !== "undefined" && rendererOwner === "amll") return;
     // Evaluated once per frame, not inside the line loop: the depth pass below
     // writes different values in Low mode, and a mode switch has to repaint the
     // whole stack now rather than at the next line boundary.
@@ -24700,6 +26143,11 @@
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
     const position = window.YTMod.player.getPositionMs();
+    // Remember when the position was READ, not when it reached the engine.
+    // Braccato extrapolates its clock from this snapshot; timing the snapshot
+    // after animate()'s work would make every busy frame hand it a stale
+    // position and the karaoke fill would trail the line animation.
+    const positionSampledAt = Date.now();
     // Number.isFinite, NOT "!= null". A media element's currentTime reports NaN
     // in transient states (seeking, metadata not loaded yet, track change), and
     // NaN != null is TRUE - so the old guard let NaN straight through. A single
@@ -24720,7 +26168,7 @@
     // flicker black for a very very short time".)
     if (Number.isFinite(position)) {
       const animStartedAt = performance.now();
-      animate(position);
+      animate(position, positionSampledAt);
       perfProbe.animateSum += performance.now() - animStartedAt;
       perfProbe.animateFrames++;
     }
@@ -25067,6 +26515,7 @@
     pendingAnimationLines.clear();
     syncNativePanel(false);
     cleanupTabBar(tabBar);
+    braccatoDeactivate();
     if (panelEl) panelEl.remove();
     const optsOverlay = document.querySelector(".ym-sl-options-overlay");
     if (optsOverlay) optsOverlay.remove();
@@ -25182,7 +26631,7 @@
    * WHICH renderer takes which kind of track is now the user's choice, not a
    * hard rule any more: the two Renderer rows in the panel (`amllWordTracks` /
    * `spicyLineTracks`, content.js) point either kind of track at either
-   * renderer. See amllContentGoesToSpicy.
+   * renderer. See rendererChoiceForContent.
    *
    * Two earlier attempts are gone and should not come back: (1) taking over the
    * engine's line contents to get Spicy words inside AMLL's scroll, which could
@@ -25194,6 +26643,10 @@
    * whatever the reason. It decides the LOOK too: the AMLL body class, the
    * gentle spline set and every `amllSimpleLookActive()` call follow it. */
   let amllSpicyTrack = false;
+  // Which renderer owns the current content: "spicy", "amll" or "braccato".
+  // amllSpicyTrack remains the Spicy/AMLL body-look switch; this is the full
+  // three-way answer used to hand content to the right engine.
+  let rendererOwner = "spicy";
   function amllSimpleLookActive() {
     return !amllSpicyTrack;
   }
@@ -25215,18 +26668,36 @@
     }
     return false;
   }
-  // Does THIS content belong to the built-in Spicy renderer? Each kind of track
-  // has its own Renderer row, and each row names the renderer it SELECTS, so the
-  // two are independent rather than inverses of one another.
-  function amllContentGoesToSpicy(content) {
-    if (amllContentHasWordTiming(content)) return currentSettings.amllWordTracks !== true;
-    return currentSettings.spicyLineTracks === true;
+  // Which renderer the user picked for THIS kind of track. Word timing gets
+  // the word-by-word row; everything else gets the line-by-line row. AMLL
+  // cannot draw untimed text, so that pairing keeps the built-in renderer.
+  function rendererChoiceForContent(content) {
+    if (!Array.isArray(content) || !content.length) return "spicy";
+    const wordTimed = amllContentHasWordTiming(content);
+    const choice = wordTimed
+      ? normalizeRendererChoice(currentSettings.wordRenderer, "spicy")
+      : normalizeRendererChoice(currentSettings.lineRenderer, "amll");
+    if (choice === "amll" && !amllContentIsTimed(content)) return "spicy";
+    return choice;
   }
 
   function amllSetSpicyTrack(spicy) {
     const next = !!spicy;
     if (next === amllSpicyTrack) return;
     amllSpicyTrack = next;
+    // Ownership is not just a body class. The AMLL engine is expensive even
+    // while its host is visibility:hidden: its own rAF loop writes
+    // --amll-player-time every frame and recalculates every word mask. Stop the
+    // loop when Spicy/Better Lyrics owns the track, and start it again only
+    // when AMLL is about to be shown. Before this it kept driving under Spicy,
+    // which cost ~1ms of JS plus a style pass on the hidden 100-word host on
+    // every single frame.
+    if (next) {
+      amllStopOwnLoop();
+      amllHide();
+    } else if (amllReady) {
+      amllStartOwnLoop();
+    }
     try {
       document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
     } catch (e) {}
@@ -25268,22 +26739,36 @@
   // else (word tracks pointed at Spicy, static lyrics, no content) is the
   // built-in renderer, even while the engine object exists.
   function amllTrackUsesEngine(content) {
-    if (!content || amllSpicyTrack) return false;
-    if (amllContentGoesToSpicy(content)) return false;
-    return amllContentIsTimed(content);
+    return rendererChoiceForContent(content) === "amll";
   }
 
   function amllApplyTrackRenderer(content) {
-    const spicy = !content || amllContentGoesToSpicy(content);
-    const changed = spicy !== amllSpicyTrack;
-    amllSetSpicyTrack(spicy);
-    if (spicy) {
+    const next = rendererChoiceForContent(content);
+    const changed = next !== rendererOwner;
+    rendererOwner = next;
+    try { panelEl && panelEl.classList.toggle("BraccatoRenderer", next === "braccato"); } catch (e) {}
+    if (next === "spicy") {
+      braccatoDeactivate();
+      amllSetSpicyTrack(true);
       amllHideSkeleton();
       if (amllActive) amllHide();
       return changed;
     }
-    if (!amllActive) amllActivate();          // async; it syncs amllLastContent
-    else if (changed && content) amllSyncLyrics(content);
+    if (next === "amll") {
+      braccatoDeactivate();
+      amllSetSpicyTrack(false);
+      if (!amllActive) amllActivate();          // async; it syncs amllLastContent
+      else if (changed && content) amllSyncLyrics(content);
+      return changed;
+    }
+    // Better Lyrics. Keep the built-in Spicy DOM alive as a hidden timing model
+    // for fullscreen dimming, active-line publishing and the jump button, but
+    // never let its scroll/animation code run.
+    if (changed) braccatoResetFailure();
+    amllSetSpicyTrack(true);
+    amllHideSkeleton();
+    if (amllActive) amllHide();
+    braccatoActivate(content);
     return changed;
   }
 
@@ -26045,13 +27530,39 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   function amllShow() {
     if (!amllPlayer || !amllHost) return;
     const c = amllLyricsContainer();
-    if (c && amllHost.parentNode !== c) c.appendChild(amllHost);
+    if (c && amllHost.parentNode !== c) {
+      c.appendChild(amllHost);
+      // The host is detached while another renderer owns the track. Re-seed the
+      // engine's viewport before anything calls setLyricLines(): the engine
+      // measures every word with clientWidth, and a detached host measures 0.
+      amllSeedEngineSize();
+    }
     document.body.classList.add("amll-active");
+    // Hiding the host must also stop the engine loop; showing it again (after
+    // an untimed track or a temporarily parked host) must wake the loop back
+    // up, or AMLL would render one frame and then sit frozen.
+    if (amllReady && !amllSpicyTrack) amllStartOwnLoop();
+  }
+
+  /* A visibility:hidden AMLL host still keeps ~100 line/word nodes in layout,
+     style and layer accounting. Live on a 170Hz panel that alone cost Spicy
+     20-35 FPS (75-85 with the host parked vs 100-122 without it), even after
+     the engine's own rAF loop was stopped. Detach the host entirely while
+     Spicy/Better Lyrics owns the track; amllShow() reattaches and re-seeds it
+     when Apple Music takes over again. The engine object and its DOM stay
+     alive, so switching back does not pay the 1-2s module/player startup. */
+  function amllParkHost() {
+    if (!amllHost || !amllHost.parentNode) return;
+    try { amllHost.parentNode.removeChild(amllHost); } catch (e) {}
   }
 
   function amllHide() {
     document.body.classList.remove("amll-active");
     amllStopAutoScroll();
+    // No visible host means no reason to keep recalculating its word masks.
+    // amllShow() restarts this when the engine becomes visible again.
+    amllStopOwnLoop();
+    amllParkHost();
   }
 
   /* ---- middle-click autoscroll --------------------------------------------
@@ -26330,10 +27841,27 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     }
   }
 
-  // Full teardown of the engine (host, player, drive loop, latches). Nothing in
-  // the settings path calls it any more — the renderer is chosen per track and
-  // a loaded engine is reused across tracks — so it stays as the subsystem's
-  // dispose primitive rather than being lost.
+  // A browser refresh makes both renderers faster again after a long listening
+  // session. The built-in renderer already rebuilds every line per track; the
+  // AMLL player is the long-lived half: setLyricLines() replaces its groups, but
+  // the engine object, its line caches and its GPU resources survive every
+  // track. Dispose that player at the start of a track change, while the
+  // skeleton is up, so the next track gets a genuinely fresh engine — the same
+  // reset a refresh gives it — without reloading YouTube Music or the extension.
+  // The module itself stays in the browser's module cache, so reactivation is
+  // just player construction, not a full download.
+  function amllRecycleForTrackChange() {
+    if (!amllActive && !amllReady && !amllHost) return;
+    amllDeactivate();
+    // Never let the old track's content be re-synced by the new activation.
+    amllLastContent = null;
+    amllLastPositionMs = 0;
+  }
+
+  // Full teardown of the engine (host, player, drive loop, latches). Called on
+  // every track change through amllRecycleForTrackChange(), and by the failure
+  // paths, so one track's line caches and GPU resources cannot accumulate into
+  // the next. A later AMLL track builds a fresh player from the cached module.
   function amllDeactivate() {
     // Always clear the failure latch and the cached import promise, so a later
     // activation retries. This must happen BEFORE the early return below:
@@ -26588,6 +28116,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         amllHide();
         return;
       }
+      // Make sure a parked host is attached and sized BEFORE the engine
+      // measures its words; otherwise every word width is 0 and the karaoke
+      // mask renders fully lit with no left-to-right fill. This also covers a
+      // track change after a no-lyrics result called amllHide().
+      amllShow();
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       // After the set: buildLyricGroups() has created a fresh line element per
       // line by now, and those are the ones that need the name hung on them.
@@ -26724,7 +28257,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     const step = () => {
       amllRaf = requestAnimationFrame(step);
       try {
-        if (!amllActive || !amllReady || !amllPlayer) return;
+        if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
         if (!window.YTMod || !window.YTMod.player) return;
         const pos = window.YTMod.player.getPositionMs();
         if (Number.isFinite(pos)) amllDrive(pos);
@@ -27105,7 +28638,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
   function amllDrive(positionMs) {
-    if (!amllActive || !amllReady || !amllPlayer) return;
+    if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
     const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
@@ -27783,6 +29316,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       node.classList.add("ready");
     }
     autoTranslateRefreshAmll();
+    try { braccatoRefreshTranslations(); } catch (e) {}
     atSetDebug(atWorkingSource + ":live");
   }
 
@@ -27910,6 +29444,637 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
   /* ===================== /on-device lyric translation ==================== */
+  /* ===================== Better Lyrics (Braccato) renderer ====================
+   * The third renderer. Braccato is the MIT-licensed engine extracted from the
+   * Better Lyrics extension (see extensions/braccato-LICENSE.txt). It is loaded
+   * as a sibling ES module and driven from Aurora's own clock, NOT from the
+   * YouTube <video>: Aurora already owns seeking, offsets, pause sync and
+   * fullscreen, so the engine must not install a second clock or scroll owner.
+   *
+   * The engine renders light DOM into its own `.blyrics-container`. That lives
+   * inside the existing `.LyricsContent` scrollport, so the panel's mask,
+   * typography variables and fullscreen reparenting all apply unchanged.
+   * One instance is enough: fullscreen moves the panel within this document.
+   *
+   * The vendored bundle raises Braccato's drift-reset threshold from 100 ms to
+   * 500 ms. At 60 Hz a normal frame leaves ~20 ms of residual between the WAAPI
+   * and lyric clocks; the engine's accumulator reads that as 100 ms of drift and
+   * restarts the line mid-word, which is the intermittent fill hitch.
+   */
+  let braccatoRenderer = null;
+  let braccatoMount = null;
+  let braccatoInitPromise = null;
+  let braccatoFailed = false;
+  let braccatoWanted = false;
+  let braccatoGen = 0;
+  let braccatoLastContent = null;
+  let braccatoLastSignature = "";
+  let braccatoLastPositionMs = 0;
+  let braccatoInjectTranslation = null;
+  let braccatoRemoveTranslation = null;
+  let braccatoSetThemeSettings = null;
+  let braccatoRelayoutRaf = 0;
+  let braccatoCreditsEl = null;
+  // Braccato's own stylesheet ships a perceptual lead: 150 ms for richsync
+  // (word-by-word) and 115 ms for line-synced tracks. Aurora already shifts the
+  // clock by the user's offset before calling tick(), so leaving that lead in
+  // place made Better Lyrics highlight ahead of Spicy and Apple. The engine's
+  // tick options SUBTRACT these trims, so passing the bundle defaults cancels
+  // its lead without touching the user's offset.
+  const BRACCATO_ENGINE_RICHSYNC_LEAD_S = 0.150;
+  const BRACCATO_ENGINE_LINE_LEAD_S = 0.115;
+
+  // Keep Braccato's stylesheet under Aurora's own id. `setTheme` writes the
+  // shared `#blyrics-custom-style`, which would overwrite a real Better Lyrics
+  // install's theme sheet; this is the same CSS without taking that id.
+  function braccatoRemoveCss() {
+    const style = document.getElementById("ym-sl-braccato-css");
+    if (style) style.remove();
+  }
+
+  function braccatoInjectCss(css) {
+    if (!css || document.getElementById("ym-sl-braccato-css")) return;
+    // The package's CSS string carries an @import for the optional image-glow
+    // stylesheet. There is no image-highlights.css next to the extension, and
+    // the feature is off by default, so drop the request rather than 404 on
+    // YouTube's origin.
+    const clean = css.replace(/@import\s+url\(["']?image-highlights\.css["']?\)\s*;/g, "");
+    const style = document.createElement("style");
+    style.id = "ym-sl-braccato-css";
+    style.textContent = clean;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function braccatoOwnsTrack() {
+    return typeof rendererOwner !== "undefined" && rendererOwner === "braccato";
+  }
+
+  // A failure is sticky for the current track so the frame loop cannot retry it
+  // every frame. Choosing Better Lyrics again (or loading another song) is a
+  // deliberate retry, and gets a fresh attempt.
+  function braccatoResetFailure() {
+    braccatoFailed = false;
+  }
+
+  function braccatoMs(value) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : 0;
+  }
+
+  // One syllable's text with the inter-word space TTML implies. Braccato
+  // tokenises `parts[].words` itself, so the space has to be on the part rather
+  // than added later by the line-level `words` string.
+  function braccatoPartText(list, index) {
+    const syllable = list[index];
+    const previous = list[index - 1];
+    let text = syllable && syllable.Text != null ? String(syllable.Text) : "";
+    if (
+      index > 0 &&
+      previous &&
+      !previous.IsPartOfWord &&
+      !/\s$/.test(String(previous.Text || "")) &&
+      !/^\s/.test(text)
+    ) {
+      text = " " + text;
+    }
+    return text;
+  }
+
+  function braccatoPart(list, index, isBackground, backgroundGroup) {
+    const syllable = list[index];
+    const start = braccatoMs(syllable && syllable.StartTime);
+    const end = Math.max(start, braccatoMs(syllable && syllable.EndTime));
+    const part = {
+      startTimeMs: start,
+      durationMs: end - start,
+      words: braccatoPartText(list, index),
+    };
+    if (isBackground) {
+      part.isBackground = true;
+      part.backgroundGroup = backgroundGroup;
+    }
+    return part;
+  }
+
+  function braccatoContentHasDuet(content) {
+    return (content || []).some((line) => line && line.OppositeAligned);
+  }
+
+  function braccatoLyrics(content) {
+    const source = Array.isArray(content) ? content : [];
+    const hasDuet = braccatoContentHasDuet(source);
+    const gapMs = (typeof GAP_DOTS_AFTER_SECONDS === "number" ? GAP_DOTS_AFTER_SECONDS : 10) * 1000;
+    const out = [];
+    let cursor = 0;
+
+    const pushInstrumental = (start, end) => {
+      if (!(end > start)) return;
+      out.push({
+        startTimeMs: start,
+        durationMs: end - start,
+        words: "",
+        isInstrumental: true,
+      });
+    };
+
+    source.forEach((line, lineIndex) => {
+      const lead = line && line.Lead;
+      if (!lead || !Array.isArray(lead.Syllables) || !lead.Syllables.length) return;
+      const start = braccatoMs(lead.StartTime);
+      const leadEnd = Math.max(start, braccatoMs(lead.EndTime));
+      if (start > cursor + gapMs) pushInstrumental(cursor, start);
+
+      const parts = [];
+      lead.Syllables.forEach((_, syllableIndex) => {
+        parts.push(braccatoPart(lead.Syllables, syllableIndex, false, 0));
+      });
+      (line.Background || []).forEach((background, backgroundIndex) => {
+        if (!background || !Array.isArray(background.Syllables)) return;
+        background.Syllables.forEach((_, syllableIndex) => {
+          parts.push(braccatoPart(background.Syllables, syllableIndex, true, backgroundIndex));
+        });
+      });
+      // Background syllables interleave with the lead by time, not by source
+      // array: Better Lyrics groups them into their own sub-line in timeline
+      // order.
+      parts.sort((a, b) => a.startTimeMs - b.startTimeMs);
+
+      let end = leadEnd;
+      (line.Background || []).forEach((background) => {
+        if (background) end = Math.max(end, braccatoMs(background.EndTime));
+      });
+
+      const translated = typeof autoTranslateAmllText === "function"
+        ? autoTranslateAmllText(lineIndex, -1)
+        : "";
+      const lyric = {
+        startTimeMs: start,
+        durationMs: Math.max(0, end - start),
+        words: syllablesToText(lead.Syllables),
+        agent: hasDuet ? (line.OppositeAligned ? "v2" : "v1") : "v1",
+      };
+      // Line-timed tracks have no per-syllable windows. Handing the engine
+      // zero-length parts makes it classify them as unsynced, so leave `parts`
+      // off and let it derive line-synced word timing from the line duration.
+      // Static lyrics follow the same rule and use the passive autoscroll.
+      if (!line.LineTimed && parts.some((part) => part.durationMs > 0)) {
+        lyric.parts = parts;
+      }
+      if (translated) lyric.translation = translated;
+      out.push(lyric);
+      cursor = Math.max(cursor, end);
+    });
+
+    return out;
+  }
+
+  function braccatoEnsureMount() {
+    if (!lineScrollEl) return null;
+    if (!braccatoMount || !braccatoMount.isConnected) {
+      braccatoMount = h("div", {
+        class: "ym-sl-braccato",
+        "aria-live": "off",
+      });
+      lineScrollEl.appendChild(braccatoMount);
+    }
+    if (panelEl) panelEl.classList.add("BraccatoRenderer");
+    return braccatoMount;
+  }
+
+  function braccatoHostApi() {
+    return {
+      isViewVisible() {
+        return !!(
+          panelVisible &&
+          braccatoOwnsTrack() &&
+          panelEl &&
+          !panelEl.classList.contains("hidden") &&
+          !(adBreakOverlayEl && !adBreakOverlayEl.classList.contains("hidden"))
+        );
+      },
+      isLoaderActive() {
+        return false;
+      },
+      syncAdState() {
+        return !!(adBreakOverlayEl && !adBreakOverlayEl.classList.contains("hidden"));
+      },
+      getScrollElement() {
+        return lineScrollEl;
+      },
+      setResumeAffordanceVisible(visible) {
+        // The engine reports that the reader has taken the scroll. Reuse the
+        // panel's existing "Jump to current" affordance instead of inventing a
+        // second control over the lyrics.
+        try { setJumpButtonVisible(!!visible); } catch (e) {}
+      },
+      seek(timeS) {
+        try {
+          const atMs = Number(timeS) * 1000;
+          if (pausePickMode) {
+            const index = findLineIndexAt(atMs);
+            if (index >= 0 && modelLines[index]) setPauseSyncLine(modelLines[index]);
+            return;
+          }
+          const player = window.YTMod && window.YTMod.player;
+          if (!player || typeof player.seek !== "function") return;
+          const targetMs = Math.max(0, atMs + getOffsetForLine(atMs));
+          player.seek(targetMs);
+        } catch (e) {}
+      },
+      log(...args) {
+        if (window.console && console.debug) console.debug("[Aurora/Better Lyrics]", ...args);
+      },
+    };
+  }
+
+  async function braccatoWaitForMount(gen) {
+    for (let tries = 0; tries < 25; tries++) {
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const mount = braccatoEnsureMount();
+      if (mount) return mount;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return null;
+  }
+
+  function braccatoEnsureRenderer() {
+    if (braccatoRenderer) return Promise.resolve(braccatoRenderer);
+    if (braccatoInitPromise) return braccatoInitPromise;
+    const gen = braccatoGen;
+    const pending = (async () => {
+      if (braccatoFailed) throw new Error("Better Lyrics failed earlier");
+      if (!BRACCATO_CORE_URL) throw new Error("Better Lyrics module URL unavailable");
+      const mount = await braccatoWaitForMount(gen);
+      if (!mount) throw new Error("Better Lyrics mount unavailable");
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const mod = await import(/* @vite-ignore */ BRACCATO_CORE_URL);
+      if (!mod || typeof mod.createLyricsRenderer !== "function") {
+        throw new Error("Better Lyrics renderer export missing");
+      }
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const renderer = mod.createLyricsRenderer({
+        document: document,
+        window: window,
+        mount: mount,
+        layout: "scroll",
+        host: braccatoHostApi(),
+      });
+      // The engine renders lyric text only. Translations are a decoration the
+      // consumer hangs on a built line, so keep the exported helper. A package
+      // without it still renders; it just has no second line.
+      braccatoInjectTranslation = typeof mod.injectTranslation === "function"
+        ? mod.injectTranslation
+        : null;
+      braccatoRemoveTranslation = typeof mod.removeTranslation === "function"
+        ? mod.removeTranslation
+        : null;
+      braccatoSetThemeSettings = typeof mod.setThemeSettings === "function"
+        ? mod.setThemeSettings
+        : null;
+      if (typeof mod.CSS === "string" && mod.CSS) braccatoInjectCss(mod.CSS);
+      braccatoRenderer = renderer;
+      return renderer;
+    })();
+    braccatoInitPromise = pending.then(
+      (renderer) => {
+        if (!renderer) braccatoInitPromise = null;
+        return renderer;
+      },
+      (error) => {
+        braccatoInitPromise = null;
+        throw error;
+      }
+    );
+    return braccatoInitPromise;
+  }
+
+  function braccatoTickOptions(sampledAtMs) {
+    let playing = false;
+    try {
+      const player = window.YTMod && window.YTMod.player;
+      playing = !!(player && typeof player.isPaused === "function" && player.isPaused() === false);
+    } catch (e) {}
+    return {
+      isPlaying: playing,
+      // Braccato's tick extrapolates from this against its own Date.now()
+      // clock. performance.now() is a different origin, so while playing it
+      // read as a position tens of years ahead and pinned the final line; while
+      // paused there is no extrapolation and the right line showed. Pass the
+      // moment the player clock was sampled rather than this call's time, so a
+      // slow frame is extrapolated over its real age instead of looking fresh.
+      eventCreationTime: Number.isFinite(sampledAtMs) ? sampledAtMs : Date.now(),
+      smoothScroll: currentSettings.smoothScrolling !== false,
+      // The position handed in is already shifted by Aurora's offset/pause sync.
+      globalLyricOffset: 0,
+      lyricOffset: 0,
+      // Cancel the bundle's built-in lead so all three renderers use the same
+      // lyric timestamp. Without these, Braccato's richsync path reads 150 ms
+      // ahead and its line path 115 ms ahead of the other two.
+      richsyncOffsetTrim: BRACCATO_ENGINE_RICHSYNC_LEAD_S,
+      lineOffsetTrim: BRACCATO_ENGINE_LINE_LEAD_S,
+      playbackRate: 1,
+      passiveScrollEnabled: !!staticLyricsActive,
+      followPausedSeeks: true,
+      countEveryUserScroll: true,
+    };
+  }
+
+  // Braccato keeps its animation switches in the bundle's theme registry, not
+  // in CSS. Setting them here (rather than through setTheme) avoids writing to
+  // the shared #blyrics-custom-style a real Better Lyrics install owns.
+  function braccatoApplyEngineSettings() {
+    if (!braccatoSetThemeSettings) return false;
+    try {
+      return braccatoSetThemeSettings(new Map([
+        ["blyrics-letter-wave", currentSettings.braccatoLetterWave !== false ? "true" : "false"],
+      ])) === true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /* Better Lyrics builds its own one-line writer credit, but the panel's
+     "Written by / Provided by / Uploaded by / Made by" card is the shared
+     Aurora chrome used by Spicy and Apple. Keep one implementation: drop the
+     engine's plain credit row and hang buildCreditsFooter() at the end of the
+     engine's container. It must be INSIDE .blyrics-container: the engine puts
+     its large bottom spacer (which lets the last line rest high) on that
+     container, so a footer after it would inherit the whole spacer as a gap. */
+  function braccatoSyncCredits(content) {
+    if (!braccatoMount) return;
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    const container = braccatoMount.querySelector(".blyrics-container");
+    if (!container) return;
+    // setLyrics() may have just rebuilt the engine's own credits; leaving it
+    // would print "Written by" twice, once at the top and once in the footer.
+    const engineCredits = container.querySelector(":scope > .blyrics-credits");
+    if (engineCredits) {
+      try { engineCredits.remove(); } catch (e) {}
+    }
+    if (!Array.isArray(content) || content.length === 0) return;
+    const hasCredits = currentSongwriters.length > 0 ||
+      !!currentLyricsfileArtist || !!currentProvider || !!currentUploader || !!currentMaker;
+    if (!hasCredits) return;
+    try {
+      braccatoCreditsEl = buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content));
+      // The engine's scroll plan only includes items it recognizes through its
+      // own classes: :scope > .blyrics-credits and :scope > .blyrics-footer.
+      // Without this class the card is outside Nr()'s line list, so it stays
+      // still while every lyric line translates smoothly and then jumps when
+      // scrollTop catches up. Treated as credits, it rides the same transform.
+      braccatoCreditsEl.classList.add("ym-sl-credits--braccato", "blyrics-credits");
+      container.appendChild(braccatoCreditsEl);
+      // setLyrics() ran before the card existed, so its cached credits item is
+      // stale. Re-measure once so the next scroll plan includes the footer.
+      braccatoScheduleRelayout();
+    } catch (error) {
+      braccatoCreditsEl = null;
+    }
+  }
+
+  function braccatoApplyContent(content) {
+    if (!braccatoRenderer || !braccatoMount) return;
+    // This must happen before setLyrics: the setting decides whether the line
+    // builder creates per-letter spans, and it is part of the engine's line key.
+    braccatoApplyEngineSettings();
+    const lyrics = braccatoLyrics(content);
+    const songwriters = Array.isArray(currentSongwriters) ? currentSongwriters.slice() : [];
+    const songKey = String(currentTrackKey || "track") + ":" + (staticLyricsActive ? "static" : "timed");
+    const signature = songKey + "|" +
+      (currentSettings.braccatoLetterWave !== false ? "wave" : "still") + "|" +
+      songwriters.join("\u0001") + "|" + JSON.stringify(lyrics);
+    if (signature === braccatoLastSignature) return;
+    braccatoLastSignature = signature;
+    try {
+      braccatoRenderer.setLyrics(lyrics, {
+        songKey: songKey,
+        noLyrics: lyrics.length === 0,
+        songwriters: songwriters,
+        mount: braccatoMount,
+      });
+      braccatoApplyTranslations(lyrics);
+      braccatoSyncCredits(content);
+    } catch (error) {
+      braccatoFallback("setLyrics failed", error);
+    }
+  }
+
+  // `setLyrics` ignores Lyric.translation; the package exposes it only through
+  // injectTranslation(doc, lineElement, text, language). The container's direct
+  // .blyrics--line children are in the same order as the array we handed it,
+  // including the instrumental gap rows, so index is the mapping.
+  function braccatoApplyTranslations(lyrics) {
+    if (!braccatoInjectTranslation || !braccatoMount || !Array.isArray(lyrics)) return;
+    const container = braccatoMount.querySelector(".blyrics-container");
+    if (!container) return;
+    const lineElements = Array.prototype.filter.call(
+      container.children,
+      (element) => element.classList && element.classList.contains("blyrics--line")
+    );
+    let injected = false;
+    lyrics.forEach((lyric, index) => {
+      const lineElement = lineElements[index];
+      if (!lineElement) return;
+      if (!lyric || !lyric.translation) {
+        // Turning auto-translate off rebuilds the content without a translation;
+        // a line kept by setLyrics' swap would otherwise keep the old row.
+        if (braccatoRemoveTranslation) {
+          try { if (braccatoRemoveTranslation(lineElement)) injected = true; } catch (error) {}
+        }
+        return;
+      }
+      try {
+        braccatoInjectTranslation(document, lineElement, lyric.translation, AT_TARGET);
+        injected = true;
+      } catch (error) {}
+    });
+    // A translation is a second row inside a line, so every offset measured
+    // before it was hung there is now short. Re-read the lines once, after the
+    // decoration is in the DOM. Late translations arrive one line at a time;
+    // coalescing the measurements into one frame keeps that from hitching.
+    if (injected) braccatoScheduleRelayout();
+  }
+
+  function braccatoDrive(positionMs, sampledAtMs) {
+    if (!braccatoOwnsTrack()) return;
+    if (!braccatoRenderer) {
+      // Never restart activation from the frame loop: a new generation each
+      // frame would invalidate the import before it could finish.
+      if (braccatoWanted && !braccatoInitPromise) braccatoActivate(braccatoLastContent);
+      return;
+    }
+    if (!Number.isFinite(positionMs)) return;
+    braccatoLastPositionMs = positionMs;
+    try {
+      braccatoRenderer.tick(positionMs / 1000, braccatoTickOptions(sampledAtMs));
+    } catch (error) {
+      braccatoFallback("tick failed", error);
+    }
+  }
+
+  function braccatoFallback(reason, error) {
+    // Leave the built-in renderer visible rather than a blank panel. The Spicy
+    // DOM is already built (it is the timing model), so dropping the panel class
+    // is the whole visual fallback.
+    braccatoFailed = true;
+    braccatoWanted = false;
+    braccatoGen++;
+    if (braccatoRenderer) {
+      try { braccatoRenderer.destroy(); } catch (e) {}
+      braccatoRenderer = null;
+    }
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    if (braccatoMount) {
+      try { braccatoMount.remove(); } catch (e) {}
+      braccatoMount = null;
+    }
+    braccatoInitPromise = null;
+    braccatoLastSignature = "";
+    if (braccatoRelayoutRaf) {
+      cancelAnimationFrame(braccatoRelayoutRaf);
+      braccatoRelayoutRaf = 0;
+    }
+    braccatoRemoveCss();
+    if (panelEl) panelEl.classList.remove("BraccatoRenderer");
+    rendererOwner = "spicy";
+    try { amllSetSpicyTrack(true); } catch (e) {}
+    if (window.console && console.warn) {
+      console.warn("[Aurora/Better Lyrics] " + reason + "; falling back to Spicy.", error || "");
+    }
+  }
+
+  async function braccatoActivate(content) {
+    if (!BRACCATO_CORE_URL) { braccatoFallback("module URL unavailable"); return; }
+    braccatoWanted = true;
+    braccatoLastContent = content || null;
+    if (braccatoRenderer) {
+      braccatoApplyContent(braccatoLastContent);
+      return;
+    }
+    // The track load calls this twice (owner selection, then the rebuilt model).
+    // Keep one import in flight and let the later content win through the
+    // signature refresh instead of cancelling the first activation.
+    if (braccatoInitPromise) return;
+    enqueueBraccatoEnsureMount();
+    const gen = ++braccatoGen;
+    try {
+      const renderer = await braccatoEnsureRenderer();
+      if (!renderer || gen !== braccatoGen || !braccatoOwnsTrack()) return;
+      braccatoApplyContent(braccatoLastContent);
+    } catch (error) {
+      if (gen !== braccatoGen) return;
+      braccatoFallback("could not start", error);
+    }
+  }
+
+  function enqueueBraccatoEnsureMount() {
+    if (braccatoEnsureMount()) return;
+    // The panel may still be building on the first settings pass. The wait loop
+    // in braccatoEnsureRenderer owns the bounded retry, so this is just an early
+    // attempt that usually succeeds.
+  }
+
+  // The Braccato mount is a sibling of the Spicy scroll container, so the
+  // panel's loading/empty reset only replaces the built-in lines and leaves the
+  // engine's already-rendered DOM in place. Clear that container as soon as a
+  // load starts; otherwise the previous track's lyrics stay on screen until the
+  // next setLyrics() lands. Keep the renderer itself: the next content reuses
+  // it and rebuilds the container through setLyrics().
+  function braccatoClearForLoad() {
+    if (!braccatoOwnsTrack()) return;
+    braccatoLastContent = null;
+    braccatoLastSignature = "";
+    if (!braccatoRenderer) return;
+    try { braccatoRenderer.clear(); } catch (e) {}
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+  }
+
+  function braccatoSetContent(content) {
+    if (!braccatoOwnsTrack()) return;
+    braccatoLastContent = content || null;
+    if (braccatoRenderer) {
+      braccatoApplyContent(braccatoLastContent);
+      try { braccatoRenderer.relayout(); } catch (e) {}
+      return;
+    }
+    braccatoActivate(braccatoLastContent);
+  }
+
+  function braccatoRefreshTranslations() {
+    if (!braccatoOwnsTrack() || !braccatoRenderer) return;
+    // The lines are already built. A late translation is a decoration on one
+    // of them, so hang it on without handing the whole song back to setLyrics:
+    // a rebuild would re-measure every line and can move the reader mid-song.
+    braccatoApplyTranslations(braccatoLyrics(braccatoLastContent));
+  }
+
+  function braccatoJumpToCurrent() {
+    if (!braccatoRenderer) return;
+    try {
+      braccatoRenderer.resumeAutoscroll();
+      braccatoDrive(braccatoLastPositionMs || 0);
+    } catch (e) {}
+  }
+
+  function braccatoRelayout() {
+    if (!braccatoRenderer) return;
+    try { braccatoRenderer.relayout(); } catch (e) {}
+  }
+
+  function braccatoScheduleRelayout() {
+    if (braccatoRelayoutRaf || !braccatoRenderer) return;
+    braccatoRelayoutRaf = requestAnimationFrame(() => {
+      braccatoRelayoutRaf = 0;
+      braccatoRelayout();
+    });
+  }
+
+  // Fullscreen and layout switches reparent the panel, which resets the
+  // scrollport to 0. Re-measure, then put the engine back on the playing line
+  // once the new geometry has settled.
+  function braccatoRecoverScroll() {
+    if (!braccatoRenderer) return;
+    braccatoRelayout();
+    requestAnimationFrame(() => {
+      braccatoRelayout();
+      braccatoJumpToCurrent();
+    });
+  }
+
+  function braccatoDeactivate() {
+    braccatoWanted = false;
+    braccatoGen++;
+    braccatoLastContent = null;
+    braccatoLastSignature = "";
+    braccatoInitPromise = null;
+    if (braccatoRenderer) {
+      try { braccatoRenderer.destroy(); } catch (e) {}
+      braccatoRenderer = null;
+    }
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    if (braccatoMount) {
+      try { braccatoMount.remove(); } catch (e) {}
+      braccatoMount = null;
+    }
+    if (braccatoRelayoutRaf) {
+      cancelAnimationFrame(braccatoRelayoutRaf);
+      braccatoRelayoutRaf = 0;
+    }
+    braccatoRemoveCss();
+    if (panelEl) panelEl.classList.remove("BraccatoRenderer");
+  }
   /* ===================== boot =====================
      The first-run onboarding tour used to live above this line: a modal card, a
      pulsing highlight on the waffle icon, a localStorage completion flag and a

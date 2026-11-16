@@ -1162,6 +1162,7 @@
   // that invalidates a skeleton paint still queued on rAF/`setTimeout`.
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
+    braccatoClearForLoad();
     lyricsSkeletonShown = false;
     currentLyricsfileArtist = "";
     currentWordSyncQualityWarning = false;

@@ -36,6 +36,9 @@ const parts = [
   // On-device translation reads the AMLL player when patching a line that was
   // already laid out, so it follows 22. It must also precede the boot fragment.
   "23-auto-translate.jsfrag",
+  // Better Lyrics (Braccato) is the third renderer. It follows translation so
+  // the adapter can read the translation plan at build time.
+  "24-braccato-renderer.jsfrag",
   "21-boot.jsfrag",
 ];
 
@@ -112,6 +115,26 @@ const source = Buffer.concat(await Promise.all(
       "\nA fragment calls these but nothing in the bundle defines them." +
       "\nThis is almost always a deleted block - check for a function that was" +
       "\nremoved while its call sites survived."
+    );
+    process.exit(1);
+  }
+}
+
+// Same guard for the third renderer: a deleted braccato* helper would leave a
+// perfectly parseable bundle that throws only when the user selects Better
+// Lyrics.
+{
+  const text = source.toString("utf8");
+  const called = new Set();
+  for (const m of text.matchAll(/\b(braccato[A-Za-z0-9_]*)\s*\(/g)) called.add(m[1]);
+  const defined = new Set();
+  for (const m of text.matchAll(/\bfunction\s+(braccato[A-Za-z0-9_]*)\s*\(/g)) defined.add(m[1]);
+  for (const m of text.matchAll(/\b(?:let|const|var)\s+(braccato[A-Za-z0-9_]*)\s*=/g)) defined.add(m[1]);
+  const missing = [...called].filter((name) => !defined.has(name)).sort();
+  if (missing.length) {
+    console.error(
+      "aurora-lyrics.js references undefined braccato* symbols: " + missing.join(", ") +
+      "\nA fragment calls these but nothing in the bundle defines them."
     );
     process.exit(1);
   }

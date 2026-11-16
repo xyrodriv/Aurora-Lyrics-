@@ -1,0 +1,631 @@
+  /* ===================== Better Lyrics (Braccato) renderer ====================
+   * The third renderer. Braccato is the MIT-licensed engine extracted from the
+   * Better Lyrics extension (see extensions/braccato-LICENSE.txt). It is loaded
+   * as a sibling ES module and driven from Aurora's own clock, NOT from the
+   * YouTube <video>: Aurora already owns seeking, offsets, pause sync and
+   * fullscreen, so the engine must not install a second clock or scroll owner.
+   *
+   * The engine renders light DOM into its own `.blyrics-container`. That lives
+   * inside the existing `.LyricsContent` scrollport, so the panel's mask,
+   * typography variables and fullscreen reparenting all apply unchanged.
+   * One instance is enough: fullscreen moves the panel within this document.
+   *
+   * The vendored bundle raises Braccato's drift-reset threshold from 100 ms to
+   * 500 ms. At 60 Hz a normal frame leaves ~20 ms of residual between the WAAPI
+   * and lyric clocks; the engine's accumulator reads that as 100 ms of drift and
+   * restarts the line mid-word, which is the intermittent fill hitch.
+   */
+  let braccatoRenderer = null;
+  let braccatoMount = null;
+  let braccatoInitPromise = null;
+  let braccatoFailed = false;
+  let braccatoWanted = false;
+  let braccatoGen = 0;
+  let braccatoLastContent = null;
+  let braccatoLastSignature = "";
+  let braccatoLastPositionMs = 0;
+  let braccatoInjectTranslation = null;
+  let braccatoRemoveTranslation = null;
+  let braccatoSetThemeSettings = null;
+  let braccatoRelayoutRaf = 0;
+  let braccatoCreditsEl = null;
+  // Braccato's own stylesheet ships a perceptual lead: 150 ms for richsync
+  // (word-by-word) and 115 ms for line-synced tracks. Aurora already shifts the
+  // clock by the user's offset before calling tick(), so leaving that lead in
+  // place made Better Lyrics highlight ahead of Spicy and Apple. The engine's
+  // tick options SUBTRACT these trims, so passing the bundle defaults cancels
+  // its lead without touching the user's offset.
+  const BRACCATO_ENGINE_RICHSYNC_LEAD_S = 0.150;
+  const BRACCATO_ENGINE_LINE_LEAD_S = 0.115;
+
+  // Keep Braccato's stylesheet under Aurora's own id. `setTheme` writes the
+  // shared `#blyrics-custom-style`, which would overwrite a real Better Lyrics
+  // install's theme sheet; this is the same CSS without taking that id.
+  function braccatoRemoveCss() {
+    const style = document.getElementById("ym-sl-braccato-css");
+    if (style) style.remove();
+  }
+
+  function braccatoInjectCss(css) {
+    if (!css || document.getElementById("ym-sl-braccato-css")) return;
+    // The package's CSS string carries an @import for the optional image-glow
+    // stylesheet. There is no image-highlights.css next to the extension, and
+    // the feature is off by default, so drop the request rather than 404 on
+    // YouTube's origin.
+    const clean = css.replace(/@import\s+url\(["']?image-highlights\.css["']?\)\s*;/g, "");
+    const style = document.createElement("style");
+    style.id = "ym-sl-braccato-css";
+    style.textContent = clean;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function braccatoOwnsTrack() {
+    return typeof rendererOwner !== "undefined" && rendererOwner === "braccato";
+  }
+
+  // A failure is sticky for the current track so the frame loop cannot retry it
+  // every frame. Choosing Better Lyrics again (or loading another song) is a
+  // deliberate retry, and gets a fresh attempt.
+  function braccatoResetFailure() {
+    braccatoFailed = false;
+  }
+
+  function braccatoMs(value) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : 0;
+  }
+
+  // One syllable's text with the inter-word space TTML implies. Braccato
+  // tokenises `parts[].words` itself, so the space has to be on the part rather
+  // than added later by the line-level `words` string.
+  function braccatoPartText(list, index) {
+    const syllable = list[index];
+    const previous = list[index - 1];
+    let text = syllable && syllable.Text != null ? String(syllable.Text) : "";
+    if (
+      index > 0 &&
+      previous &&
+      !previous.IsPartOfWord &&
+      !/\s$/.test(String(previous.Text || "")) &&
+      !/^\s/.test(text)
+    ) {
+      text = " " + text;
+    }
+    return text;
+  }
+
+  function braccatoPart(list, index, isBackground, backgroundGroup) {
+    const syllable = list[index];
+    const start = braccatoMs(syllable && syllable.StartTime);
+    const end = Math.max(start, braccatoMs(syllable && syllable.EndTime));
+    const part = {
+      startTimeMs: start,
+      durationMs: end - start,
+      words: braccatoPartText(list, index),
+    };
+    if (isBackground) {
+      part.isBackground = true;
+      part.backgroundGroup = backgroundGroup;
+    }
+    return part;
+  }
+
+  function braccatoContentHasDuet(content) {
+    return (content || []).some((line) => line && line.OppositeAligned);
+  }
+
+  function braccatoLyrics(content) {
+    const source = Array.isArray(content) ? content : [];
+    const hasDuet = braccatoContentHasDuet(source);
+    const gapMs = (typeof GAP_DOTS_AFTER_SECONDS === "number" ? GAP_DOTS_AFTER_SECONDS : 10) * 1000;
+    const out = [];
+    let cursor = 0;
+
+    const pushInstrumental = (start, end) => {
+      if (!(end > start)) return;
+      out.push({
+        startTimeMs: start,
+        durationMs: end - start,
+        words: "",
+        isInstrumental: true,
+      });
+    };
+
+    source.forEach((line, lineIndex) => {
+      const lead = line && line.Lead;
+      if (!lead || !Array.isArray(lead.Syllables) || !lead.Syllables.length) return;
+      const start = braccatoMs(lead.StartTime);
+      const leadEnd = Math.max(start, braccatoMs(lead.EndTime));
+      if (start > cursor + gapMs) pushInstrumental(cursor, start);
+
+      const parts = [];
+      lead.Syllables.forEach((_, syllableIndex) => {
+        parts.push(braccatoPart(lead.Syllables, syllableIndex, false, 0));
+      });
+      (line.Background || []).forEach((background, backgroundIndex) => {
+        if (!background || !Array.isArray(background.Syllables)) return;
+        background.Syllables.forEach((_, syllableIndex) => {
+          parts.push(braccatoPart(background.Syllables, syllableIndex, true, backgroundIndex));
+        });
+      });
+      // Background syllables interleave with the lead by time, not by source
+      // array: Better Lyrics groups them into their own sub-line in timeline
+      // order.
+      parts.sort((a, b) => a.startTimeMs - b.startTimeMs);
+
+      let end = leadEnd;
+      (line.Background || []).forEach((background) => {
+        if (background) end = Math.max(end, braccatoMs(background.EndTime));
+      });
+
+      const translated = typeof autoTranslateAmllText === "function"
+        ? autoTranslateAmllText(lineIndex, -1)
+        : "";
+      const lyric = {
+        startTimeMs: start,
+        durationMs: Math.max(0, end - start),
+        words: syllablesToText(lead.Syllables),
+        agent: hasDuet ? (line.OppositeAligned ? "v2" : "v1") : "v1",
+      };
+      // Line-timed tracks have no per-syllable windows. Handing the engine
+      // zero-length parts makes it classify them as unsynced, so leave `parts`
+      // off and let it derive line-synced word timing from the line duration.
+      // Static lyrics follow the same rule and use the passive autoscroll.
+      if (!line.LineTimed && parts.some((part) => part.durationMs > 0)) {
+        lyric.parts = parts;
+      }
+      if (translated) lyric.translation = translated;
+      out.push(lyric);
+      cursor = Math.max(cursor, end);
+    });
+
+    return out;
+  }
+
+  function braccatoEnsureMount() {
+    if (!lineScrollEl) return null;
+    if (!braccatoMount || !braccatoMount.isConnected) {
+      braccatoMount = h("div", {
+        class: "ym-sl-braccato",
+        "aria-live": "off",
+      });
+      lineScrollEl.appendChild(braccatoMount);
+    }
+    if (panelEl) panelEl.classList.add("BraccatoRenderer");
+    return braccatoMount;
+  }
+
+  function braccatoHostApi() {
+    return {
+      isViewVisible() {
+        return !!(
+          panelVisible &&
+          braccatoOwnsTrack() &&
+          panelEl &&
+          !panelEl.classList.contains("hidden") &&
+          !(adBreakOverlayEl && !adBreakOverlayEl.classList.contains("hidden"))
+        );
+      },
+      isLoaderActive() {
+        return false;
+      },
+      syncAdState() {
+        return !!(adBreakOverlayEl && !adBreakOverlayEl.classList.contains("hidden"));
+      },
+      getScrollElement() {
+        return lineScrollEl;
+      },
+      setResumeAffordanceVisible(visible) {
+        // The engine reports that the reader has taken the scroll. Reuse the
+        // panel's existing "Jump to current" affordance instead of inventing a
+        // second control over the lyrics.
+        try { setJumpButtonVisible(!!visible); } catch (e) {}
+      },
+      seek(timeS) {
+        try {
+          const atMs = Number(timeS) * 1000;
+          if (pausePickMode) {
+            const index = findLineIndexAt(atMs);
+            if (index >= 0 && modelLines[index]) setPauseSyncLine(modelLines[index]);
+            return;
+          }
+          const player = window.YTMod && window.YTMod.player;
+          if (!player || typeof player.seek !== "function") return;
+          const targetMs = Math.max(0, atMs + getOffsetForLine(atMs));
+          player.seek(targetMs);
+        } catch (e) {}
+      },
+      log(...args) {
+        if (window.console && console.debug) console.debug("[Aurora/Better Lyrics]", ...args);
+      },
+    };
+  }
+
+  async function braccatoWaitForMount(gen) {
+    for (let tries = 0; tries < 25; tries++) {
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const mount = braccatoEnsureMount();
+      if (mount) return mount;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return null;
+  }
+
+  function braccatoEnsureRenderer() {
+    if (braccatoRenderer) return Promise.resolve(braccatoRenderer);
+    if (braccatoInitPromise) return braccatoInitPromise;
+    const gen = braccatoGen;
+    const pending = (async () => {
+      if (braccatoFailed) throw new Error("Better Lyrics failed earlier");
+      if (!BRACCATO_CORE_URL) throw new Error("Better Lyrics module URL unavailable");
+      const mount = await braccatoWaitForMount(gen);
+      if (!mount) throw new Error("Better Lyrics mount unavailable");
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const mod = await import(/* @vite-ignore */ BRACCATO_CORE_URL);
+      if (!mod || typeof mod.createLyricsRenderer !== "function") {
+        throw new Error("Better Lyrics renderer export missing");
+      }
+      if (gen !== braccatoGen || !braccatoOwnsTrack()) return null;
+      const renderer = mod.createLyricsRenderer({
+        document: document,
+        window: window,
+        mount: mount,
+        layout: "scroll",
+        host: braccatoHostApi(),
+      });
+      // The engine renders lyric text only. Translations are a decoration the
+      // consumer hangs on a built line, so keep the exported helper. A package
+      // without it still renders; it just has no second line.
+      braccatoInjectTranslation = typeof mod.injectTranslation === "function"
+        ? mod.injectTranslation
+        : null;
+      braccatoRemoveTranslation = typeof mod.removeTranslation === "function"
+        ? mod.removeTranslation
+        : null;
+      braccatoSetThemeSettings = typeof mod.setThemeSettings === "function"
+        ? mod.setThemeSettings
+        : null;
+      if (typeof mod.CSS === "string" && mod.CSS) braccatoInjectCss(mod.CSS);
+      braccatoRenderer = renderer;
+      return renderer;
+    })();
+    braccatoInitPromise = pending.then(
+      (renderer) => {
+        if (!renderer) braccatoInitPromise = null;
+        return renderer;
+      },
+      (error) => {
+        braccatoInitPromise = null;
+        throw error;
+      }
+    );
+    return braccatoInitPromise;
+  }
+
+  function braccatoTickOptions(sampledAtMs) {
+    let playing = false;
+    try {
+      const player = window.YTMod && window.YTMod.player;
+      playing = !!(player && typeof player.isPaused === "function" && player.isPaused() === false);
+    } catch (e) {}
+    return {
+      isPlaying: playing,
+      // Braccato's tick extrapolates from this against its own Date.now()
+      // clock. performance.now() is a different origin, so while playing it
+      // read as a position tens of years ahead and pinned the final line; while
+      // paused there is no extrapolation and the right line showed. Pass the
+      // moment the player clock was sampled rather than this call's time, so a
+      // slow frame is extrapolated over its real age instead of looking fresh.
+      eventCreationTime: Number.isFinite(sampledAtMs) ? sampledAtMs : Date.now(),
+      smoothScroll: currentSettings.smoothScrolling !== false,
+      // The position handed in is already shifted by Aurora's offset/pause sync.
+      globalLyricOffset: 0,
+      lyricOffset: 0,
+      // Cancel the bundle's built-in lead so all three renderers use the same
+      // lyric timestamp. Without these, Braccato's richsync path reads 150 ms
+      // ahead and its line path 115 ms ahead of the other two.
+      richsyncOffsetTrim: BRACCATO_ENGINE_RICHSYNC_LEAD_S,
+      lineOffsetTrim: BRACCATO_ENGINE_LINE_LEAD_S,
+      playbackRate: 1,
+      passiveScrollEnabled: !!staticLyricsActive,
+      followPausedSeeks: true,
+      countEveryUserScroll: true,
+    };
+  }
+
+  // Braccato keeps its animation switches in the bundle's theme registry, not
+  // in CSS. Setting them here (rather than through setTheme) avoids writing to
+  // the shared #blyrics-custom-style a real Better Lyrics install owns.
+  function braccatoApplyEngineSettings() {
+    if (!braccatoSetThemeSettings) return false;
+    try {
+      return braccatoSetThemeSettings(new Map([
+        ["blyrics-letter-wave", currentSettings.braccatoLetterWave !== false ? "true" : "false"],
+      ])) === true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /* Better Lyrics builds its own one-line writer credit, but the panel's
+     "Written by / Provided by / Uploaded by / Made by" card is the shared
+     Aurora chrome used by Spicy and Apple. Keep one implementation: drop the
+     engine's plain credit row and hang buildCreditsFooter() at the end of the
+     engine's container. It must be INSIDE .blyrics-container: the engine puts
+     its large bottom spacer (which lets the last line rest high) on that
+     container, so a footer after it would inherit the whole spacer as a gap. */
+  function braccatoSyncCredits(content) {
+    if (!braccatoMount) return;
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    const container = braccatoMount.querySelector(".blyrics-container");
+    if (!container) return;
+    // setLyrics() may have just rebuilt the engine's own credits; leaving it
+    // would print "Written by" twice, once at the top and once in the footer.
+    const engineCredits = container.querySelector(":scope > .blyrics-credits");
+    if (engineCredits) {
+      try { engineCredits.remove(); } catch (e) {}
+    }
+    if (!Array.isArray(content) || content.length === 0) return;
+    const hasCredits = currentSongwriters.length > 0 ||
+      !!currentLyricsfileArtist || !!currentProvider || !!currentUploader || !!currentMaker;
+    if (!hasCredits) return;
+    try {
+      braccatoCreditsEl = buildCreditsFooter(currentSongwriters, contentEndsOnDuet(content));
+      // The engine's scroll plan only includes items it recognizes through its
+      // own classes: :scope > .blyrics-credits and :scope > .blyrics-footer.
+      // Without this class the card is outside Nr()'s line list, so it stays
+      // still while every lyric line translates smoothly and then jumps when
+      // scrollTop catches up. Treated as credits, it rides the same transform.
+      braccatoCreditsEl.classList.add("ym-sl-credits--braccato", "blyrics-credits");
+      container.appendChild(braccatoCreditsEl);
+      // setLyrics() ran before the card existed, so its cached credits item is
+      // stale. Re-measure once so the next scroll plan includes the footer.
+      braccatoScheduleRelayout();
+    } catch (error) {
+      braccatoCreditsEl = null;
+    }
+  }
+
+  function braccatoApplyContent(content) {
+    if (!braccatoRenderer || !braccatoMount) return;
+    // This must happen before setLyrics: the setting decides whether the line
+    // builder creates per-letter spans, and it is part of the engine's line key.
+    braccatoApplyEngineSettings();
+    const lyrics = braccatoLyrics(content);
+    const songwriters = Array.isArray(currentSongwriters) ? currentSongwriters.slice() : [];
+    const songKey = String(currentTrackKey || "track") + ":" + (staticLyricsActive ? "static" : "timed");
+    const signature = songKey + "|" +
+      (currentSettings.braccatoLetterWave !== false ? "wave" : "still") + "|" +
+      songwriters.join("\u0001") + "|" + JSON.stringify(lyrics);
+    if (signature === braccatoLastSignature) return;
+    braccatoLastSignature = signature;
+    try {
+      braccatoRenderer.setLyrics(lyrics, {
+        songKey: songKey,
+        noLyrics: lyrics.length === 0,
+        songwriters: songwriters,
+        mount: braccatoMount,
+      });
+      braccatoApplyTranslations(lyrics);
+      braccatoSyncCredits(content);
+    } catch (error) {
+      braccatoFallback("setLyrics failed", error);
+    }
+  }
+
+  // `setLyrics` ignores Lyric.translation; the package exposes it only through
+  // injectTranslation(doc, lineElement, text, language). The container's direct
+  // .blyrics--line children are in the same order as the array we handed it,
+  // including the instrumental gap rows, so index is the mapping.
+  function braccatoApplyTranslations(lyrics) {
+    if (!braccatoInjectTranslation || !braccatoMount || !Array.isArray(lyrics)) return;
+    const container = braccatoMount.querySelector(".blyrics-container");
+    if (!container) return;
+    const lineElements = Array.prototype.filter.call(
+      container.children,
+      (element) => element.classList && element.classList.contains("blyrics--line")
+    );
+    let injected = false;
+    lyrics.forEach((lyric, index) => {
+      const lineElement = lineElements[index];
+      if (!lineElement) return;
+      if (!lyric || !lyric.translation) {
+        // Turning auto-translate off rebuilds the content without a translation;
+        // a line kept by setLyrics' swap would otherwise keep the old row.
+        if (braccatoRemoveTranslation) {
+          try { if (braccatoRemoveTranslation(lineElement)) injected = true; } catch (error) {}
+        }
+        return;
+      }
+      try {
+        braccatoInjectTranslation(document, lineElement, lyric.translation, AT_TARGET);
+        injected = true;
+      } catch (error) {}
+    });
+    // A translation is a second row inside a line, so every offset measured
+    // before it was hung there is now short. Re-read the lines once, after the
+    // decoration is in the DOM. Late translations arrive one line at a time;
+    // coalescing the measurements into one frame keeps that from hitching.
+    if (injected) braccatoScheduleRelayout();
+  }
+
+  function braccatoDrive(positionMs, sampledAtMs) {
+    if (!braccatoOwnsTrack()) return;
+    if (!braccatoRenderer) {
+      // Never restart activation from the frame loop: a new generation each
+      // frame would invalidate the import before it could finish.
+      if (braccatoWanted && !braccatoInitPromise) braccatoActivate(braccatoLastContent);
+      return;
+    }
+    if (!Number.isFinite(positionMs)) return;
+    braccatoLastPositionMs = positionMs;
+    try {
+      braccatoRenderer.tick(positionMs / 1000, braccatoTickOptions(sampledAtMs));
+    } catch (error) {
+      braccatoFallback("tick failed", error);
+    }
+  }
+
+  function braccatoFallback(reason, error) {
+    // Leave the built-in renderer visible rather than a blank panel. The Spicy
+    // DOM is already built (it is the timing model), so dropping the panel class
+    // is the whole visual fallback.
+    braccatoFailed = true;
+    braccatoWanted = false;
+    braccatoGen++;
+    if (braccatoRenderer) {
+      try { braccatoRenderer.destroy(); } catch (e) {}
+      braccatoRenderer = null;
+    }
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    if (braccatoMount) {
+      try { braccatoMount.remove(); } catch (e) {}
+      braccatoMount = null;
+    }
+    braccatoInitPromise = null;
+    braccatoLastSignature = "";
+    if (braccatoRelayoutRaf) {
+      cancelAnimationFrame(braccatoRelayoutRaf);
+      braccatoRelayoutRaf = 0;
+    }
+    braccatoRemoveCss();
+    if (panelEl) panelEl.classList.remove("BraccatoRenderer");
+    rendererOwner = "spicy";
+    try { amllSetSpicyTrack(true); } catch (e) {}
+    if (window.console && console.warn) {
+      console.warn("[Aurora/Better Lyrics] " + reason + "; falling back to Spicy.", error || "");
+    }
+  }
+
+  async function braccatoActivate(content) {
+    if (!BRACCATO_CORE_URL) { braccatoFallback("module URL unavailable"); return; }
+    braccatoWanted = true;
+    braccatoLastContent = content || null;
+    if (braccatoRenderer) {
+      braccatoApplyContent(braccatoLastContent);
+      return;
+    }
+    // The track load calls this twice (owner selection, then the rebuilt model).
+    // Keep one import in flight and let the later content win through the
+    // signature refresh instead of cancelling the first activation.
+    if (braccatoInitPromise) return;
+    enqueueBraccatoEnsureMount();
+    const gen = ++braccatoGen;
+    try {
+      const renderer = await braccatoEnsureRenderer();
+      if (!renderer || gen !== braccatoGen || !braccatoOwnsTrack()) return;
+      braccatoApplyContent(braccatoLastContent);
+    } catch (error) {
+      if (gen !== braccatoGen) return;
+      braccatoFallback("could not start", error);
+    }
+  }
+
+  function enqueueBraccatoEnsureMount() {
+    if (braccatoEnsureMount()) return;
+    // The panel may still be building on the first settings pass. The wait loop
+    // in braccatoEnsureRenderer owns the bounded retry, so this is just an early
+    // attempt that usually succeeds.
+  }
+
+  // The Braccato mount is a sibling of the Spicy scroll container, so the
+  // panel's loading/empty reset only replaces the built-in lines and leaves the
+  // engine's already-rendered DOM in place. Clear that container as soon as a
+  // load starts; otherwise the previous track's lyrics stay on screen until the
+  // next setLyrics() lands. Keep the renderer itself: the next content reuses
+  // it and rebuilds the container through setLyrics().
+  function braccatoClearForLoad() {
+    if (!braccatoOwnsTrack()) return;
+    braccatoLastContent = null;
+    braccatoLastSignature = "";
+    if (!braccatoRenderer) return;
+    try { braccatoRenderer.clear(); } catch (e) {}
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+  }
+
+  function braccatoSetContent(content) {
+    if (!braccatoOwnsTrack()) return;
+    braccatoLastContent = content || null;
+    if (braccatoRenderer) {
+      braccatoApplyContent(braccatoLastContent);
+      try { braccatoRenderer.relayout(); } catch (e) {}
+      return;
+    }
+    braccatoActivate(braccatoLastContent);
+  }
+
+  function braccatoRefreshTranslations() {
+    if (!braccatoOwnsTrack() || !braccatoRenderer) return;
+    // The lines are already built. A late translation is a decoration on one
+    // of them, so hang it on without handing the whole song back to setLyrics:
+    // a rebuild would re-measure every line and can move the reader mid-song.
+    braccatoApplyTranslations(braccatoLyrics(braccatoLastContent));
+  }
+
+  function braccatoJumpToCurrent() {
+    if (!braccatoRenderer) return;
+    try {
+      braccatoRenderer.resumeAutoscroll();
+      braccatoDrive(braccatoLastPositionMs || 0);
+    } catch (e) {}
+  }
+
+  function braccatoRelayout() {
+    if (!braccatoRenderer) return;
+    try { braccatoRenderer.relayout(); } catch (e) {}
+  }
+
+  function braccatoScheduleRelayout() {
+    if (braccatoRelayoutRaf || !braccatoRenderer) return;
+    braccatoRelayoutRaf = requestAnimationFrame(() => {
+      braccatoRelayoutRaf = 0;
+      braccatoRelayout();
+    });
+  }
+
+  // Fullscreen and layout switches reparent the panel, which resets the
+  // scrollport to 0. Re-measure, then put the engine back on the playing line
+  // once the new geometry has settled.
+  function braccatoRecoverScroll() {
+    if (!braccatoRenderer) return;
+    braccatoRelayout();
+    requestAnimationFrame(() => {
+      braccatoRelayout();
+      braccatoJumpToCurrent();
+    });
+  }
+
+  function braccatoDeactivate() {
+    braccatoWanted = false;
+    braccatoGen++;
+    braccatoLastContent = null;
+    braccatoLastSignature = "";
+    braccatoInitPromise = null;
+    if (braccatoRenderer) {
+      try { braccatoRenderer.destroy(); } catch (e) {}
+      braccatoRenderer = null;
+    }
+    if (braccatoCreditsEl) {
+      try { braccatoCreditsEl.remove(); } catch (e) {}
+      braccatoCreditsEl = null;
+    }
+    if (braccatoMount) {
+      try { braccatoMount.remove(); } catch (e) {}
+      braccatoMount = null;
+    }
+    if (braccatoRelayoutRaf) {
+      cancelAnimationFrame(braccatoRelayoutRaf);
+      braccatoRelayoutRaf = 0;
+    }
+    braccatoRemoveCss();
+    if (panelEl) panelEl.classList.remove("BraccatoRenderer");
+  }

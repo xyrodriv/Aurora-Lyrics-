@@ -32,7 +32,7 @@
    * WHICH renderer takes which kind of track is now the user's choice, not a
    * hard rule any more: the two Renderer rows in the panel (`amllWordTracks` /
    * `spicyLineTracks`, content.js) point either kind of track at either
-   * renderer. See amllContentGoesToSpicy.
+   * renderer. See rendererChoiceForContent.
    *
    * Two earlier attempts are gone and should not come back: (1) taking over the
    * engine's line contents to get Spicy words inside AMLL's scroll, which could
@@ -44,6 +44,10 @@
    * whatever the reason. It decides the LOOK too: the AMLL body class, the
    * gentle spline set and every `amllSimpleLookActive()` call follow it. */
   let amllSpicyTrack = false;
+  // Which renderer owns the current content: "spicy", "amll" or "braccato".
+  // amllSpicyTrack remains the Spicy/AMLL body-look switch; this is the full
+  // three-way answer used to hand content to the right engine.
+  let rendererOwner = "spicy";
   function amllSimpleLookActive() {
     return !amllSpicyTrack;
   }
@@ -65,18 +69,36 @@
     }
     return false;
   }
-  // Does THIS content belong to the built-in Spicy renderer? Each kind of track
-  // has its own Renderer row, and each row names the renderer it SELECTS, so the
-  // two are independent rather than inverses of one another.
-  function amllContentGoesToSpicy(content) {
-    if (amllContentHasWordTiming(content)) return currentSettings.amllWordTracks !== true;
-    return currentSettings.spicyLineTracks === true;
+  // Which renderer the user picked for THIS kind of track. Word timing gets
+  // the word-by-word row; everything else gets the line-by-line row. AMLL
+  // cannot draw untimed text, so that pairing keeps the built-in renderer.
+  function rendererChoiceForContent(content) {
+    if (!Array.isArray(content) || !content.length) return "spicy";
+    const wordTimed = amllContentHasWordTiming(content);
+    const choice = wordTimed
+      ? normalizeRendererChoice(currentSettings.wordRenderer, "spicy")
+      : normalizeRendererChoice(currentSettings.lineRenderer, "amll");
+    if (choice === "amll" && !amllContentIsTimed(content)) return "spicy";
+    return choice;
   }
 
   function amllSetSpicyTrack(spicy) {
     const next = !!spicy;
     if (next === amllSpicyTrack) return;
     amllSpicyTrack = next;
+    // Ownership is not just a body class. The AMLL engine is expensive even
+    // while its host is visibility:hidden: its own rAF loop writes
+    // --amll-player-time every frame and recalculates every word mask. Stop the
+    // loop when Spicy/Better Lyrics owns the track, and start it again only
+    // when AMLL is about to be shown. Before this it kept driving under Spicy,
+    // which cost ~1ms of JS plus a style pass on the hidden 100-word host on
+    // every single frame.
+    if (next) {
+      amllStopOwnLoop();
+      amllHide();
+    } else if (amllReady) {
+      amllStartOwnLoop();
+    }
     try {
       document.body.classList.toggle("ym-sl-simple-lyrics", amllSimpleLookActive());
     } catch (e) {}
@@ -118,22 +140,36 @@
   // else (word tracks pointed at Spicy, static lyrics, no content) is the
   // built-in renderer, even while the engine object exists.
   function amllTrackUsesEngine(content) {
-    if (!content || amllSpicyTrack) return false;
-    if (amllContentGoesToSpicy(content)) return false;
-    return amllContentIsTimed(content);
+    return rendererChoiceForContent(content) === "amll";
   }
 
   function amllApplyTrackRenderer(content) {
-    const spicy = !content || amllContentGoesToSpicy(content);
-    const changed = spicy !== amllSpicyTrack;
-    amllSetSpicyTrack(spicy);
-    if (spicy) {
+    const next = rendererChoiceForContent(content);
+    const changed = next !== rendererOwner;
+    rendererOwner = next;
+    try { panelEl && panelEl.classList.toggle("BraccatoRenderer", next === "braccato"); } catch (e) {}
+    if (next === "spicy") {
+      braccatoDeactivate();
+      amllSetSpicyTrack(true);
       amllHideSkeleton();
       if (amllActive) amllHide();
       return changed;
     }
-    if (!amllActive) amllActivate();          // async; it syncs amllLastContent
-    else if (changed && content) amllSyncLyrics(content);
+    if (next === "amll") {
+      braccatoDeactivate();
+      amllSetSpicyTrack(false);
+      if (!amllActive) amllActivate();          // async; it syncs amllLastContent
+      else if (changed && content) amllSyncLyrics(content);
+      return changed;
+    }
+    // Better Lyrics. Keep the built-in Spicy DOM alive as a hidden timing model
+    // for fullscreen dimming, active-line publishing and the jump button, but
+    // never let its scroll/animation code run.
+    if (changed) braccatoResetFailure();
+    amllSetSpicyTrack(true);
+    amllHideSkeleton();
+    if (amllActive) amllHide();
+    braccatoActivate(content);
     return changed;
   }
 
@@ -895,13 +931,39 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   function amllShow() {
     if (!amllPlayer || !amllHost) return;
     const c = amllLyricsContainer();
-    if (c && amllHost.parentNode !== c) c.appendChild(amllHost);
+    if (c && amllHost.parentNode !== c) {
+      c.appendChild(amllHost);
+      // The host is detached while another renderer owns the track. Re-seed the
+      // engine's viewport before anything calls setLyricLines(): the engine
+      // measures every word with clientWidth, and a detached host measures 0.
+      amllSeedEngineSize();
+    }
     document.body.classList.add("amll-active");
+    // Hiding the host must also stop the engine loop; showing it again (after
+    // an untimed track or a temporarily parked host) must wake the loop back
+    // up, or AMLL would render one frame and then sit frozen.
+    if (amllReady && !amllSpicyTrack) amllStartOwnLoop();
+  }
+
+  /* A visibility:hidden AMLL host still keeps ~100 line/word nodes in layout,
+     style and layer accounting. Live on a 170Hz panel that alone cost Spicy
+     20-35 FPS (75-85 with the host parked vs 100-122 without it), even after
+     the engine's own rAF loop was stopped. Detach the host entirely while
+     Spicy/Better Lyrics owns the track; amllShow() reattaches and re-seeds it
+     when Apple Music takes over again. The engine object and its DOM stay
+     alive, so switching back does not pay the 1-2s module/player startup. */
+  function amllParkHost() {
+    if (!amllHost || !amllHost.parentNode) return;
+    try { amllHost.parentNode.removeChild(amllHost); } catch (e) {}
   }
 
   function amllHide() {
     document.body.classList.remove("amll-active");
     amllStopAutoScroll();
+    // No visible host means no reason to keep recalculating its word masks.
+    // amllShow() restarts this when the engine becomes visible again.
+    amllStopOwnLoop();
+    amllParkHost();
   }
 
   /* ---- middle-click autoscroll --------------------------------------------
@@ -1180,10 +1242,27 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     }
   }
 
-  // Full teardown of the engine (host, player, drive loop, latches). Nothing in
-  // the settings path calls it any more — the renderer is chosen per track and
-  // a loaded engine is reused across tracks — so it stays as the subsystem's
-  // dispose primitive rather than being lost.
+  // A browser refresh makes both renderers faster again after a long listening
+  // session. The built-in renderer already rebuilds every line per track; the
+  // AMLL player is the long-lived half: setLyricLines() replaces its groups, but
+  // the engine object, its line caches and its GPU resources survive every
+  // track. Dispose that player at the start of a track change, while the
+  // skeleton is up, so the next track gets a genuinely fresh engine — the same
+  // reset a refresh gives it — without reloading YouTube Music or the extension.
+  // The module itself stays in the browser's module cache, so reactivation is
+  // just player construction, not a full download.
+  function amllRecycleForTrackChange() {
+    if (!amllActive && !amllReady && !amllHost) return;
+    amllDeactivate();
+    // Never let the old track's content be re-synced by the new activation.
+    amllLastContent = null;
+    amllLastPositionMs = 0;
+  }
+
+  // Full teardown of the engine (host, player, drive loop, latches). Called on
+  // every track change through amllRecycleForTrackChange(), and by the failure
+  // paths, so one track's line caches and GPU resources cannot accumulate into
+  // the next. A later AMLL track builds a fresh player from the cached module.
   function amllDeactivate() {
     // Always clear the failure latch and the cached import promise, so a later
     // activation retries. This must happen BEFORE the early return below:
@@ -1438,6 +1517,11 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
         amllHide();
         return;
       }
+      // Make sure a parked host is attached and sized BEFORE the engine
+      // measures its words; otherwise every word width is 0 and the karaoke
+      // mask renders fully lit with no left-to-right fill. This also covers a
+      // track change after a no-lyrics result called amllHide().
+      amllShow();
       amllPlayer.setLyricLines(lines, amllLastPositionMs || 0);
       // After the set: buildLyricGroups() has created a fresh line element per
       // line by now, and those are the ones that need the name hung on them.
@@ -1574,7 +1658,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     const step = () => {
       amllRaf = requestAnimationFrame(step);
       try {
-        if (!amllActive || !amllReady || !amllPlayer) return;
+        if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
         if (!window.YTMod || !window.YTMod.player) return;
         const pos = window.YTMod.player.getPositionMs();
         if (Number.isFinite(pos)) amllDrive(pos);
@@ -1955,7 +2039,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
   function amllDrive(positionMs) {
-    if (!amllActive || !amllReady || !amllPlayer) return;
+    if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
     const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;

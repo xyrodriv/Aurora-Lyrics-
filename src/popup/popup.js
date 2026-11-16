@@ -91,8 +91,14 @@ function paintTrack(track) {
   ui.art.src = art;
 }
 
+function rendererLabel(renderer) {
+  if (renderer === "amll") return "Apple Music style";
+  if (renderer === "braccato") return "Better Lyrics";
+  return "Standard";
+}
+
 function paintFacts(snap) {
-  ui.renderer.textContent = snap.renderer === "amll" ? "Apple Music style" : "Standard";
+  ui.renderer.textContent = rendererLabel(snap.renderer);
   ui.panel.textContent = !snap.panel ? "Not mounted" : (snap.fullscreen ? "Fullscreen" : "Mounted");
 
   const addons = snap.addons || { installed: 0, enabled: 0, names: [] };
@@ -135,7 +141,7 @@ function buildCopyText(snap) {
     "Aurora Lyrics " + (ui.ver.textContent || "v?"),
     "URL:      " + (snap.url || "-"),
     "Track:    " + (track.title ? track.title + " - " + (track.artist || "unknown artist") : "nothing playing"),
-    "Renderer: " + (snap.renderer === "amll" ? "Apple Music style" : "Standard"),
+    "Renderer: " + rendererLabel(snap.renderer),
     "Panel:    " + (!snap.panel ? "not mounted" : (snap.fullscreen ? "fullscreen" : "mounted")),
     "Add-ons:  " + addons.enabled + " of " + addons.installed + " on" +
       (addons.names && addons.names.length ? " (" + addons.names.join(", ") + ")" : ""),

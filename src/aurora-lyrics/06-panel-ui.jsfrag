@@ -1001,6 +1001,7 @@
     lineScrollEl = content;
     lineScrollEl.addEventListener("wheel", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("touchstart", handleManualScrollIntent, { passive: true });
+    lineScrollEl.addEventListener("touchmove", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("keydown", handleManualScrollKey);
     applySettings(currentSettings);

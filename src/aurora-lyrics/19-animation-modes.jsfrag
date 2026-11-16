@@ -432,8 +432,11 @@
     return false;
   }
 
-  function animate(positionMs) {
-    if (!panelVisible || !modelLines.length) return;
+  function animate(positionMs, positionSampledAtMs) {
+    if (!panelVisible) return;
+    // Better Lyrics can draw instrumental-only or otherwise model-less content;
+    // the built-in renderer cannot. Keep the frame loop alive for it.
+    if (!modelLines.length && !braccatoOwnsTrack()) return;
     // Defensive twin of the tick() guard: no non-finite playhead may reach the
     // animators, whatever the caller. Without this, NaN propagates into
     // --gradient-position as "NaN%" and blanks the clipped background for a
@@ -451,7 +454,7 @@
     // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
     // tracks playback — top at song start, bottom at song end. Paused while the
     // user scrolls manually (AJ, 2026-09-18).
-    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl) {
+    if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl && !braccatoOwnsTrack()) {
       driveStaticAutoScroll(positionMs);
       setJumpButtonVisible(false);
     }
@@ -472,7 +475,11 @@
     // line-follow retarget has nothing to aim at — the panel used to sit at the
     // bottom for the whole intro and then sweep the entire song height once
     // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
-    if (lastLyricPositionMs >= 0 && lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS) {
+    if (
+      lastLyricPositionMs >= 0 &&
+      lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS &&
+      !braccatoOwnsTrack()
+    ) {
       restartPlayheadScroll(lyricPositionMs);
     }
     lastLyricPositionMs = lyricPositionMs;
@@ -486,6 +493,20 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    // Better Lyrics owns its whole timeline, scroll and word animation. The
+    // built-in model above is kept in step only for Aurora's shared surfaces
+    // (fullscreen dimming, active-line bus, jump-to-current), so stop here and
+    // let the engine draw this frame.
+    if (braccatoOwnsTrack()) {
+      braccatoDrive(lyricPositionMs, positionSampledAtMs);
+      return;
+    }
+    // Apple Music drives its own engine and its own DOM. Running the built-in
+    // Spicy word/letter springs against the hidden Spicy model here was pure
+    // parallel work on every frame (and made AMLL slower than it needed to be).
+    // The shared surfaces above—active-line publication and fullscreen dimming—
+    // are already up to date by this point.
+    if (typeof rendererOwner !== "undefined" && rendererOwner === "amll") return;
     // Evaluated once per frame, not inside the line loop: the depth pass below
     // writes different values in Low mode, and a mode switch has to repaint the
     // whole stack now rather than at the next line boundary.
@@ -789,6 +810,11 @@
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
     const position = window.YTMod.player.getPositionMs();
+    // Remember when the position was READ, not when it reached the engine.
+    // Braccato extrapolates its clock from this snapshot; timing the snapshot
+    // after animate()'s work would make every busy frame hand it a stale
+    // position and the karaoke fill would trail the line animation.
+    const positionSampledAt = Date.now();
     // Number.isFinite, NOT "!= null". A media element's currentTime reports NaN
     // in transient states (seeking, metadata not loaded yet, track change), and
     // NaN != null is TRUE - so the old guard let NaN straight through. A single
@@ -809,7 +835,7 @@
     // flicker black for a very very short time".)
     if (Number.isFinite(position)) {
       const animStartedAt = performance.now();
-      animate(position);
+      animate(position, positionSampledAt);
       perfProbe.animateSum += performance.now() - animStartedAt;
       perfProbe.animateFrames++;
     }

@@ -219,6 +219,7 @@
       track.classList.remove("is-scrolling");
       track.style.removeProperty("--ym-sl-fs-writers-shift");
       track.style.removeProperty("--ym-sl-fs-writers-duration");
+      stopFsWritersFade(box);
       return;
     }
     const cW = box.clientWidth;
@@ -229,6 +230,7 @@
       track.classList.remove("is-scrolling");
       track.style.removeProperty("--ym-sl-fs-writers-shift");
       track.style.removeProperty("--ym-sl-fs-writers-duration");
+      stopFsWritersFade(box);
       return;
     }
     const shiftValue = shift + "px";
@@ -249,6 +251,83 @@
     track.classList.remove("is-scrolling");
     void track.offsetWidth;
     track.classList.add("is-scrolling");
+    watchFsWritersFade(box, track);
+  }
+
+  // The writer track clips at both edges. Fade an edge only while it has
+  // hidden text; at the exact left/right rest points the aligned edge stays
+  // crisp. The variables are written only when a side crosses that boundary,
+  // so the mask is not repainting every animation frame.
+  let fsWritersFadeRaf = 0;
+  let fsWritersFadeBox = null;
+  let fsWritersFadeTrack = null;
+  let fsWritersFadeLeftOn = false;
+  let fsWritersFadeRightOn = false;
+
+  function resetFsWritersFade(box) {
+    if (!box) return;
+    box.style.removeProperty("--ym-sl-fs-writers-fade-left");
+    box.style.removeProperty("--ym-sl-fs-writers-fade-right");
+  }
+
+  function stopFsWritersFade(box) {
+    if (fsWritersFadeRaf) {
+      cancelAnimationFrame(fsWritersFadeRaf);
+      fsWritersFadeRaf = 0;
+    }
+    resetFsWritersFade(box || fsWritersFadeBox);
+    fsWritersFadeBox = null;
+    fsWritersFadeTrack = null;
+    fsWritersFadeLeftOn = false;
+    fsWritersFadeRightOn = false;
+  }
+
+  function syncFsWritersFade() {
+    fsWritersFadeRaf = 0;
+    const box = fsWritersFadeBox;
+    const track = fsWritersFadeTrack;
+    if (!box || !track || !box.isConnected || !track.isConnected ||
+        !track.classList.contains("is-scrolling")) {
+      resetFsWritersFade(box);
+      fsWritersFadeBox = null;
+      fsWritersFadeTrack = null;
+      fsWritersFadeLeftOn = false;
+      fsWritersFadeRightOn = false;
+      return;
+    }
+    let x = 0;
+    const transform = getComputedStyle(track).transform;
+    if (transform && transform !== "none") {
+      try { x = new DOMMatrixReadOnly(transform).m41; } catch (_) {}
+    }
+    const overflow = Math.max(0, track.scrollWidth - box.clientWidth);
+    const leftOn = -x > 0.5;
+    const rightOn = overflow + x > 0.5;
+    const fade = Math.max(12, Math.min(20, box.clientWidth * .045));
+    if (leftOn !== fsWritersFadeLeftOn) {
+      fsWritersFadeLeftOn = leftOn;
+      box.style.setProperty("--ym-sl-fs-writers-fade-left", leftOn ? fade + "px" : "0px");
+    }
+    if (rightOn !== fsWritersFadeRightOn) {
+      fsWritersFadeRightOn = rightOn;
+      box.style.setProperty("--ym-sl-fs-writers-fade-right", rightOn ? fade + "px" : "0px");
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    fsWritersFadeRaf = requestAnimationFrame(syncFsWritersFade);
+  }
+
+  function watchFsWritersFade(box, track) {
+    if (fsWritersFadeBox !== box) resetFsWritersFade(fsWritersFadeBox);
+    if (fsWritersFadeRaf) {
+      cancelAnimationFrame(fsWritersFadeRaf);
+      fsWritersFadeRaf = 0;
+    }
+    fsWritersFadeBox = box;
+    fsWritersFadeTrack = track;
+    fsWritersFadeLeftOn = false;
+    fsWritersFadeRightOn = false;
+    resetFsWritersFade(box);
+    syncFsWritersFade();
   }
 
   // Per-render title-marquee updater. Measures the inner's scrollWidth
@@ -305,37 +384,81 @@
     const chip = fsOverlay.querySelector(".ym-sl-fs-play-chip");
     const vol = fsOverlay.querySelector(".ym-sl-fs-volume-group");
     if (!scrubber || !chip || !vol) return;
-    // Hits is its own composition: it has no classic credit or volume column
-    // to restructure, so it must be excluded from BOTH side checks. Without
-    // this the volume gets reparented out of the scrubber into the overlay's
-    // top-left corner (AJ, 2026-11-09).
     const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
-    const stack = !fsOverlay.classList.contains("ym-sl-fs-has-video") &&
-      !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
-      !hits;
-    const column = chip.parentElement;
+    const hasVideo = fsOverlay.classList.contains("ym-sl-fs-has-video");
     const side = !fsOverlay.classList.contains("ym-sl-fs-mode-background") &&
       !hits;
-    // ⭐ The CREDIT joins the column in BOTH side layouts (AJ, 2026-10-21). One
-    // flow — media -> gap -> title -> gap -> transport -> gap -> scrubber — is the
-    // only way the gaps stay equal: as a separate absolutely-positioned element
-    // the gap under the title depended on the column's CONTENT height, which CSS
-    // cannot subtract from a `bottom`.
-    if (side) {
+    const videoSide = side && hasVideo;
+    const column = chip.parentElement;
+    if (!column) return;
+
+    // Music videos get a real metadata row: track/artist on the left, the two
+    // rating buttons on the right. It lives INSIDE the same column as the seek
+    // and transport, so all four rows share one left edge and one width. The
+    // wrapper stays around in other modes but is display:none (see 05-styles).
+    if (videoSide) {
+      let meta = column.querySelector(".ym-sl-fs-video-meta");
+      if (!meta) {
+        meta = h("div", { class: "ym-sl-fs-video-meta" });
+        meta.appendChild(h("div", { class: "ym-sl-fs-video-actions" }));
+        column.insertBefore(meta, column.firstChild);
+      }
+      let actions = meta.querySelector(".ym-sl-fs-video-actions");
+      if (!actions) {
+        actions = h("div", { class: "ym-sl-fs-video-actions" });
+        meta.appendChild(actions);
+      }
+      if (fsPlayerLikeButton && fsPlayerLikeButton.parentElement !== actions) {
+        actions.appendChild(fsPlayerLikeButton);
+      }
+      if (fsPlayerDislikeButton && fsPlayerDislikeButton.parentElement !== actions) {
+        actions.appendChild(fsPlayerDislikeButton);
+      }
+      // The cover-art heart is the rating control in the video title row too:
+      // same button, same saved rating, just a different home. The two edge
+      // thumbs stay in the DOM but are hidden by CSS in this composition.
+      if (fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== actions) {
+        actions.appendChild(fsArtLikeButton);
+      }
+      if (fsTitleEl && fsTitleEl.parentElement !== meta) {
+        meta.insertBefore(fsTitleEl, meta.firstChild);
+      }
+      if (meta.parentElement !== column || column.firstElementChild !== meta) {
+        column.insertBefore(meta, column.firstElementChild);
+      }
+      for (const btn of [fsPlayerLikeButton, fsPlayerDislikeButton]) {
+        if (!btn) continue;
+        btn.style.position = "";
+        btn.style.left = "";
+        btn.style.top = "";
+      }
+    } else if (side) {
+      // Cover art keeps the title as the first child of the column.
       if (fsTitleEl && fsTitleEl.parentElement !== column) {
         column.insertBefore(fsTitleEl, column.firstChild);
       }
     } else if (fsTitleEl && fsTitleEl.parentElement !== fsOverlay) {
-      // Back to an overlay child for background.
+      // Back to an overlay child for background/Hits.
       fsOverlay.appendChild(fsTitleEl);
     }
-    // The volume only leaves the scrubber for the cover-art column, which wants
-    // it on its own row under the transport.
-    const coverSide = side && !fsOverlay.classList.contains("ym-sl-fs-has-video");
-    if (coverSide) {
+
+    // Both side compositions put the volume on its own row under the transport.
+    // Background/Hits keep it on the seek row.
+    if (side) {
       if (vol.parentElement !== column) column.appendChild(vol);
-    } else if (vol.parentElement !== scrubber) {
-      scrubber.appendChild(vol);
+      // The Apple Music heart only exists for cover art; video ratings moved
+      // into the metadata row above.
+      if (!hasVideo && fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== column) {
+        column.appendChild(fsArtLikeButton);
+      }
+    } else {
+      if (vol.parentElement !== scrubber) scrubber.appendChild(vol);
+      if (!hasVideo && fsArtLikeButton && fsCoverSwitch &&
+          fsArtLikeButton.parentElement !== fsCoverSwitch.ui) {
+        fsCoverSwitch.ui.appendChild(fsArtLikeButton);
+      }
     }
   }
 

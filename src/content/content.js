@@ -336,6 +336,11 @@
       }
       return value == null ? Boolean(setting.default) : Boolean(value);
     }
+    if (setting.type === "select") {
+      const allowed = (setting.options || []).map((option) => String(option.value));
+      const chosen = value == null ? "" : String(value);
+      return allowed.indexOf(chosen) !== -1 ? chosen : String(setting.default);
+    }
     if (setting.type === "order") {
       // Ordered list of ids. Without this branch it would fall through to
       // settingNumber and become NaN, wiping the default order.
@@ -375,6 +380,13 @@
         return [key, settingValue(setting, saved[key] == null ? defaults[key] : saved[key])];
       })
     );
+    // One-time migration from the old pair of Renderer toggles. The new catalog
+    // has wordRenderer/lineRenderer, but an install saved before them still has
+    // only the booleans; moving them here means the add-on never sees a default
+    // that silently overwrites the user's old choice.
+    const savedTrue = (value) => value === true || value === 1 || String(value).toLowerCase() === "true";
+    if (saved.wordRenderer == null && savedTrue(saved.amllWordTracks)) out.wordRenderer = "amll";
+    if (saved.lineRenderer == null && savedTrue(saved.spicyLineTracks)) out.lineRenderer = "spicy";
     // Keys outside the add-on catalog (the custom font block) have no `setting`
     // descriptor, so the loop above drops them. Without this they vanish on the
     // next open: the panel then claims "default font" while the lyrics still use
@@ -991,15 +1003,6 @@
         // Lyric size ceiling is 600%. Default back to 130% (AJ, 2026-10-07) —
           // 145% (2026-09-28) read too big; 130% is the intended look.
         { key: "size", label: "Lyric size", min: 0.75, max: 6.0, step: 0.05, default: 1.30, display: "percent" },
-        // Renderer (AJ, 2026-10-23): WHICH renderer draws WHICH kind of track,
-        // named on the row itself instead of hanging off a master toggle. Both
-        // defaults are the renderer each kind was built for — Spicy for
-        // word-by-word karaoke, the Apple Music engine for line-by-line — and
-        // flipping both swaps them.
-        // They get their own rail tab (LYRICS_GROUPS, "renderer"), not a header
-        // row — the panel strips header rows now that the rail names sections.
-        { key: "amllWordTracks", label: "Apple Music for word-by-word", type: "toggle", default: false },
-        { key: "spicyLineTracks", label: "Spicy lyrics for line-by-line", type: "toggle", default: false },
         // On-device English translation of non-English lines (Chrome 138+ desktop).
         // ON by default (AJ, 2026-10-26). It may download a language pack, but
         // only when a foreign line actually appears, and that is the song where
@@ -1020,6 +1023,29 @@
         // behaviour as a choice instead of hard-coding it. Rendered as an
         // indented child row that only exists while the parent is ON.
         { key: "joinBgSyllables", label: "Also join background lines", type: "toggle", default: true, childOf: "joinSyllables" },
+        // Renderer: WHICH renderer draws WHICH kind of track. Each row is a named
+        // choice rather than a boolean, so the order is explicit: Spicy Lyrics
+        // first, Apple Music second, Better Lyrics third. Existing installs are
+        // migrated from amllWordTracks/spicyLineTracks by the add-on. This lives
+        // in its own card so the two choices read as one decision, not as two
+        // unrelated toggles buried among the display settings (AJ, 2026-11-16).
+        { type: "header", label: "Renderer" },
+        { key: "wordRenderer", label: "Word-by-word", type: "select", default: "spicy", options: [
+          { value: "spicy", label: "Spicy Lyrics" },
+          { value: "amll", label: "Apple Music" },
+          { value: "braccato", label: "Better Lyrics" },
+        ] },
+        // The wave is a Braccato line-builder switch: only offer it when Better
+        // Lyrics actually owns word-by-word tracks. It sits directly under the
+        // Word-by-word row and stays in the DOM collapsed, so switching to Better
+        // Lyrics animates it open instead of snapping the list (AJ, 2026-11-16).
+        { key: "braccatoLetterWave", label: "Wavy letters", type: "toggle", default: true,
+          visibleWhen: { key: "wordRenderer", value: "braccato" } },
+        { key: "lineRenderer", label: "Line-by-line", type: "select", default: "amll", options: [
+          { value: "spicy", label: "Spicy Lyrics" },
+          { value: "amll", label: "Apple Music" },
+          { value: "braccato", label: "Better Lyrics" },
+        ] },
         { type: "header", label: "Scrolling" },
         // smoothScrolling back ON by default (AJ, 2026-10-07) — he prefers the
         // eased glide into the active line. NOT locked while Apple Music style
@@ -1337,6 +1363,10 @@
   function formatSettingValue(setting, value) {
     if (setting.type === "text") return value ? "Configured" : "Not set";
     if (setting.type === "toggle") return value ? "On" : "Off";
+    if (setting.type === "select") {
+      const option = (setting.options || []).find((item) => String(item.value) === String(value));
+      return option ? option.label : String(value || "");
+    }
     if (setting.display === "percent") return Math.round(Number(value) * 100) + "%";
     if (setting.display === "passes") return String(value) + " passes";
     if (setting.display === "pixels") return (Number(value) > 0 ? "+" : "") + String(value) + "px";
@@ -3105,23 +3135,35 @@
       }
       const isText = setting.type === "text";
       const isToggle = setting.type === "toggle";
+      const isSelect = setting.type === "select";
       const valueEl = h("output", {
-        class: "ym-detail-setting-value",
+        class: "ym-detail-setting-value" + (isSelect ? " ym-detail-setting-select-value" : ""),
         text: formatSettingValue(setting, values[setting.key]),
       });
-      const input = h("input", {
-        class: "ym-detail-setting-input",
-        type: isText ? "text" : isToggle ? "checkbox" : "range",
-        min: isText || isToggle ? null : setting.min,
-        max: isText || isToggle ? null : setting.max,
-        step: isText || isToggle ? null : setting.step,
-        value: isText || !isToggle ? values[setting.key] : null,
-        placeholder: isText ? setting.placeholder : null,
-        autocomplete: isText ? "off" : null,
-        "aria-label": setting.label,
-      });
+      const input = isSelect
+        ? h("select", {
+            class: "ym-detail-setting-input ym-detail-setting-select",
+            "aria-label": setting.label,
+          })
+        : h("input", {
+            class: "ym-detail-setting-input",
+            type: isText ? "text" : isToggle ? "checkbox" : "range",
+            min: isText || isToggle ? null : setting.min,
+            max: isText || isToggle ? null : setting.max,
+            step: isText || isToggle ? null : setting.step,
+            value: isText || !isToggle ? values[setting.key] : null,
+            placeholder: isText ? setting.placeholder : null,
+            autocomplete: isText ? "off" : null,
+            "aria-label": setting.label,
+          });
+      if (isSelect) {
+        for (const option of setting.options || []) {
+          input.appendChild(h("option", { value: option.value, text: option.label }));
+        }
+        input.value = String(values[setting.key]);
+      }
       if (isToggle) input.checked = Boolean(values[setting.key]);
-      const isRange = !isText && !isToggle;
+      const isRange = !isText && !isToggle && !isSelect;
       // Drives the filled portion of the track (see the range CSS).
       const syncRangeFill = () => {
         if (!isRange) return;
@@ -3147,7 +3189,7 @@
           if (entry.syncVisible) entry.syncVisible();
         });
       };
-      input.addEventListener(isToggle ? "change" : "input", updateSetting);
+      input.addEventListener(isSelect || isToggle ? "change" : "input", updateSetting);
       syncRangeFill();
       const row = h("div", { class: "ym-detail-setting-row", "data-key": setting.key },
         h("div", { class: "ym-detail-setting-label" },
@@ -3156,15 +3198,21 @@
         ),
         h("div", { class: "ym-detail-setting-control" }, input, valueEl)
       );
-      // `childOf`: a nested row that only exists while its parent toggle is ON
-      // (AJ, 2026-10-20). It stays in the DOM and collapses to zero height, so
+      // A conditional row stays in the DOM and collapses to zero height, so
       // opening/closing is a CSS transition on the row itself instead of a
-      // layout jump — that is what gives the in AND out motion.
+      // layout jump. `childOf` follows a parent toggle; `visibleWhen` follows a
+      // named value on a select (used by Wavy letters, which only makes sense
+      // while Better Lyrics owns word-by-word tracks). (AJ, 2026-11-16)
       let syncVisible = null;
-      if (setting.childOf) {
+      const visibilityRule = setting.visibleWhen
+        ? () => String(values[setting.visibleWhen.key]) === String(setting.visibleWhen.value)
+        : setting.childOf
+          ? () => !!values[setting.childOf]
+          : null;
+      if (visibilityRule) {
         row.classList.add("ym-detail-setting-child");
         syncVisible = () => {
-          const open = !!values[setting.childOf];
+          const open = visibilityRule();
           row.classList.toggle("collapsed", !open);
           row.setAttribute("aria-hidden", open ? "false" : "true");
           // A collapsed row must not be tabbable or clickable either.
@@ -3194,11 +3242,16 @@
       // for it. Clear it explicitly or "reset" would leave a stale face applied.
       values = Object.assign(getExtensionDefaults(ext), { customFont: "", customFontScale: 2 });
       if (fontCtl) fontCtl.reset();
-      controls.forEach(({ input, valueEl, setting, syncRangeFill }) => {
+      controls.forEach(({ input, valueEl, setting, syncRangeFill, syncVisible, syncDisabled }) => {
         if (setting.type === "toggle") input.checked = Boolean(values[setting.key]);
         else input.value = values[setting.key];
         valueEl.textContent = formatSettingValue(setting, values[setting.key]);
         if (syncRangeFill) syncRangeFill();
+        // A reset can change the parent select/toggle that a conditional row
+        // follows, so re-evaluate both conditions instead of leaving the old
+        // open/disabled state until the next manual edit.
+        if (syncVisible) syncVisible();
+        if (syncDisabled) syncDisabled();
       });
       // Order lists are not in `controls` (they have no input element), so they
       // rebuild themselves from the restored values.
@@ -4921,7 +4974,7 @@
     { id: "look", label: "Look", keys: ["size", "legibilityBackdrop", "fullscreenInPage", "bgOpacity", "adaptiveSpacing"] },
     // Which renderer draws which kind of track (AJ, 2026-10-23). Its own tab so
     // the choice reads as a choice instead of hiding under the look settings.
-    { id: "renderer", label: "Renderer", keys: ["amllWordTracks", "spicyLineTracks"] },
+    { id: "renderer", label: "Renderer", keys: ["wordRenderer", "lineRenderer", "braccatoLetterWave"] },
     // Translation is a property of the WORDS, not of the look (AJ, 2026-10-22).
     { id: "words", label: "Words", keys: ["autoTranslate", "joinSyllables", "joinBgSyllables"] },
     { id: "motion", label: "Motion", keys: ["animation", "syllableAnimation", "verticalAnimation"] },
@@ -7673,7 +7726,13 @@
       url: location.href,
       track: readPlayerBarTrack(),
       // Which renderer the page is actually running, and where the panel lives.
-      renderer: document.body && document.body.classList.contains("amll-active") ? "amll" : "standard",
+      // The panel class is the only truthful source for Better Lyrics: the body
+      // class still says simple when Braccato owns the track.
+      renderer: document.querySelector("#ym-sl-panel.BraccatoRenderer")
+        ? "braccato"
+        : document.body && document.body.classList.contains("amll-active")
+          ? "amll"
+          : "standard",
       panel: !!document.querySelector("#ym-sl-panel"),
       fullscreen: !!document.querySelector(".ym-sl-fs-overlay"),
       addons: {

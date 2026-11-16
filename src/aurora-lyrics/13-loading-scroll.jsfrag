@@ -113,6 +113,17 @@
   }
 
   function onJumpButtonClick() {
+    if (braccatoOwnsTrack()) {
+      autoScrollUserPaused = false;
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+      braccatoJumpToCurrent();
+      return;
+    }
     // Apple-style lyrics: the engine owns the scroll offset of its own DOM, so
     // the built-in camera has nothing to move here. resetScroll() is the engine's
     // supported "back to the playing line" (it clears the manual offset and
@@ -148,13 +159,28 @@
     }
   }
 
-  function handleManualScrollIntent() {
+  function handleManualScrollIntent(event) {
     if (!lineScrollEl) return;
+    // A click on a Better Lyrics line is a seek, not a scroll. pointerdown
+    // fires before that click; handing it to the engine would suspend its
+    // autoscroll and leave the jump affordance up after every line tap. A
+    // pointerdown on the scrollbar/padding still takes the scroll, and wheel,
+    // touchmove and keyboard always do.
+    if (braccatoOwnsTrack() && event &&
+      (event.type === "pointerdown" || event.type === "touchstart") &&
+      event.target && event.target.closest && event.target.closest(".blyrics--line")) {
+      return;
+    }
     // The user has taken the scroll. Kill the spring outright rather than
     // retargeting: a spring still holding a target would keep pulling against
     // their wheel/touch input, which reads as the panel fighting them.
     stopScrollGlide();
     manualScrollActive = true;
+    if (braccatoOwnsTrack() && braccatoRenderer) {
+      // Braccato has no scroll listener of its own; this is the explicit hook
+      // that suspends its auto-scroll and raises the resume affordance.
+      try { braccatoRenderer.noteUserScroll(); } catch (e) {}
+    }
     if (staticLyricsActive) {
       // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
       // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
@@ -210,6 +236,16 @@
   }
 
   function jumpToCurrentLyric() {
+    if (braccatoOwnsTrack()) {
+      manualScrollActive = false;
+      setJumpButtonVisible(false);
+      if (manualScrollReturnTimer) {
+        clearTimeout(manualScrollReturnTimer);
+        manualScrollReturnTimer = 0;
+      }
+      braccatoJumpToCurrent();
+      return;
+    }
     // Reinforce the line the panel is already gliding toward, not necessarily the
     // one being sung: with early scroll on those differ, and targeting the active
     // line here would fight the next frame's retarget back to the lead line.
@@ -984,7 +1020,7 @@
     // amllApplyTrackRenderer also starts the engine when THIS track is the first
     // one it should draw (the previous track may have gone to Spicy, which never
     // starts it) - without that the new track stayed on Spicy until the mode was
-    // toggled. See amllContentGoesToSpicy.
+    // toggled. See rendererChoiceForContent.
     amllApplyTrackRenderer(content);
     buildRendererLines(content);
     // Feed the parsed content to the AMLL engine when Simple lyrics (Apple-Music
