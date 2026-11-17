@@ -1964,7 +1964,15 @@
     lineRenderer: "amll",
     // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
     // exposes it so a quieter karaoke look is one switch away.
-    braccatoLetterWave: true,
+    // OFF (AJ, 2026-11-16): the per-letter rise/fall is an opt-in look now.
+    braccatoLetterWave: false,
+    // "Glow on sung words": ON (AJ, 2026-11-16). Shipped off first on the theory
+    // that the halos were the cost; A/B/A then measured glow-on FASTER than
+    // glow-off, so the cost is inside the noise and this is purely the look.
+    braccatoGlow: true,
+    // "Satoshi font": OFF, so the Better Lyrics lines keep the engine's own
+    // face unless the panel is asked to match its chrome.
+    braccatoSatoshi: false,
     amllWordTracks: false,
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
@@ -2234,6 +2242,14 @@
       currentSettings.braccatoLetterWave,
       DEFAULT_SETTINGS.braccatoLetterWave
     );
+    currentSettings.braccatoGlow = booleanValue(
+      currentSettings.braccatoGlow,
+      DEFAULT_SETTINGS.braccatoGlow === true
+    );
+    currentSettings.braccatoSatoshi = booleanValue(
+      currentSettings.braccatoSatoshi,
+      DEFAULT_SETTINGS.braccatoSatoshi === true
+    );
     currentSettings.amllWordTracks = booleanValue(
       currentSettings.amllWordTracks,
       DEFAULT_SETTINGS.amllWordTracks
@@ -2330,6 +2346,9 @@
       }
     } catch (e) {}
     adaptiveLayoutLastAt = 0;
+    // The glow and font flags are classes on the panel, so they have to land on
+    // every settings pass rather than on the next lyric payload.
+    syncBraccatoPanelFlags();
     if (!currentSettings.adaptiveSpacing) resetAdaptiveSpacing();
     if (lineScrollEl) {
       lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));
@@ -3470,6 +3489,117 @@
     }
     .ym-sl-fs-media { z-index: 2; }
     .ym-sl-fs-lyrics { z-index: 3; }
+
+    /* ===== no-lyrics fullscreen composition (AJ, 2026-11-16) ===============
+       Nothing to read means nothing for the cover to sit beside: the lyrics
+       column fades out, the composition centres, and the Search CTA appears.
+       Hits centres its whole block (header + dock) as one unit, because the
+       dock is inside .ym-sl-fs-hits; the side layouts centre the media pane
+       instead, since there the cover IS the composition. No backticks here: the
+       sheet is a template literal. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics-shade {
+      opacity: 0 !important;
+    }
+    /* Hide the lyrics CONTENT, never the host: the Search sheet is a child of
+       #ym-sl-panel, so fading the host made the sheet open inside an opacity:0,
+       pointer-events:none subtree - invisible and unclickable (AJ, 2026-11-16). */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContainer,
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContent {
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits.ym-sl-fs-no-lyrics .ym-sl-fs-hits {
+      top: 50%;
+      transform: translateY(-50%);
+      transition:
+        top .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The offset is measured in JS (distance from the pane's normal column to
+       the middle) and applied as a transform, so the cover AND the transport
+       travel the same distance. A transform also composites, where changing
+       left relayouts every frame of the slide. */
+    /* The translate property, NOT transform: .ym-sl-fs-media already carries
+       its own vertical-centring transform, and a transform here would replace
+       it (which is why a video track never moved - the pane is excluded from the
+       horizontal rule by the media's own transform, and the controls are not).
+       Serving both panes through translate composes with whatever transform
+       each one already has. Music videos in the side-by-side composition are
+       included; Video Background is not, because there the media is the whole
+       frame and there is nothing to centre against. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics:not(.ym-sl-fs-mode-hits):not(.ym-sl-fs-mode-background) .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
+      translate: var(--ym-sl-fs-nolyr-dx, 0px) 0;
+    }
+    /* The base .ym-sl-fs-media rule lower down declares transition: opacity
+       only, which is why the first pass snapped: a later single-class rule beat
+       the pane list. These carry the transition for the slide. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-media {
+      transition:
+        translate .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .25s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-player-controls {
+      transition:
+        translate .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease;
+    }
+    /* The way out, bottom-right: pill, no loud fill, always above the backdrop. */
+    .ym-sl-fs-search-cta {
+      position: absolute;
+      right: clamp(18px, 2.4vw, 36px);
+      bottom: clamp(18px, 2.6vh, 34px);
+      z-index: 30;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, .18);
+      background: rgba(16, 16, 20, .62);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-backdrop-filter: blur(14px);
+      backdrop-filter: blur(14px);
+      transition: opacity .22s ease, background-color .16s ease, border-color .16s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-search-cta { display: inline-flex; }
+    /* While its sheet is open the CTA steps aside; it fades back in only if the
+       listener closes the sheet without picking anything. */
+    .ym-sl-fs-overlay.ym-sl-fs-search-open .ym-sl-fs-search-cta {
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* The sheet normally drops from the panel's top edge, which in fullscreen
+       lands it under the header. With the composition cleared there is nothing
+       up there, so it opens from the bottom instead, where the CTA was. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-search {
+      top: auto !important;
+      bottom: clamp(18px, 2.6vh, 34px) !important;
+    }
+    /* The sheet is a descendant of .ym-sl-fs-lyrics (z-index 3), so its own
+       z-index 30 was trapped in that stacking context and it painted UNDER the
+       transport layer (z-index 21). Lift the host for as long as the sheet is
+       open - the lyrics content is hidden in this state, so nothing else moves
+       with it (AJ, 2026-11-16). */
+    .ym-sl-fs-overlay.ym-sl-fs-search-open .ym-sl-fs-lyrics {
+      z-index: 25;
+    }
+    .ym-sl-fs-search-cta:hover {
+      background: rgba(30, 30, 36, .82);
+      border-color: rgba(255, 255, 255, .3);
+    }
+    .ym-sl-fs-search-cta:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .8);
+      outline-offset: 2px;
+    }
 
     /* Legibility backdrop (Synced Lyrics setting "Legibility backdrop"): a very
        dark, slightly transparent panel with a light frost behind the lyrics so
@@ -7023,8 +7153,14 @@
          container, without needing an extra wrapper element. */
       transform: translateY(calc(var(--ym-sl-lyrics-offset) + var(--ym-sl-scroll-frac, 0px)));
       transform-origin: center center;
-      -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
-      mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      /* No top/bottom dissolve (AJ, 2026-11-16). The 64px fades made every line
+         that crossed the panel edge read as DIMMER while the active line played,
+         which looks like a state bug, not a fade. The scrollport clips hard now:
+         lines stay at full brightness right up to the edge and leave at it. The
+         fullscreen rules below still fade, because there the scrollport is the
+         whole screen and the controls need the room. */
+      -webkit-mask-image: none;
+      mask-image: none;
       transition: opacity .25s ease;
     }
     /* Fullscreen: the scrollport is now the whole screen height, so the fade
@@ -7478,10 +7614,10 @@
        letters, the "bright outer layer" AJ reported twice (2026-10-22).
        Lowering the alpha only scaled that rim down; it cannot remove it.
        #ym-sl-amll-host gets away with a white stroke because its fill is opaque.
-       Word-by-word gets the heaviest cut, line-synced matches AMLL's 0.6px,
-       and plain (static) TTML only a touch heavier than before. */
+       Word-by-word keeps the old, unstroked weight. Line-synced matches AMLL's
+       0.6px, and plain (static) TTML only a touch heavier than before. */
     #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static) {
-      --ym-sl-lyric-stroke: 0.75px;
+      --ym-sl-lyric-stroke: 0;
     }
     #ym-sl-panel.SpicyRenderer .line.line-timed {
       --ym-sl-lyric-stroke: 0.6px;
@@ -9618,10 +9754,10 @@
     }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
-    /* The heart sits in the middle of the cover, the way it does in Spicy
-       Lyrics' NowBar. It shares the art-ui reveal with the swap button, so
-       both appear from one hover; the glyph and its fill come straight from
-       their Icons.Heart, including the long spring curve on the scale. */
+    /* The like affordance sits in the middle of the cover. It shares the
+       art-ui reveal with the swap button, so both appear from one hover; the
+       spring curve on the scale is unchanged, only the glyph is new (a
+       thumbs-up drawn in the same stroke language as the other icons). */
     .ym-sl-fs-art-like {
       -webkit-appearance: none;
       appearance: none;
@@ -9667,9 +9803,9 @@
           1.01 66.8%, 1
         );
     }
-    .ym-sl-fs-heart-fill { opacity: 0; transition: opacity .25s; }
-    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-heart-fill { opacity: .25; }
-    .ym-sl-fs-art-like.is-liked .ym-sl-fs-heart-fill { opacity: 1; }
+    .ym-sl-fs-thumb-fill { opacity: 0; transition: opacity .25s; }
+    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-thumb-fill { opacity: .25; }
+    .ym-sl-fs-art-like.is-liked .ym-sl-fs-thumb-fill { opacity: 1; }
     .ym-sl-fs-art-like:hover svg { scale: .925; }
     .ym-sl-fs-art-like.is-press svg { scale: 1.245; }
     .ym-sl-fs-art-like.is-release svg { scale: .755; }
@@ -13649,6 +13785,16 @@
     // backdrop for Video Background, so that also falls back to side.
     if (video && mode === "hits") mode = "side";
     if (!video && mode === "background") mode = "side";
+    // No lyrics: Hits has nothing to put under its header and its whole geometry
+    // is measured from that header, so it is not an available composition while
+    // the empty state is up. Coerce rather than merely hiding the option, so a
+    // stored Hits choice or a click on the cycle button cannot land there
+    // (AJ, 2026-11-16). persist=false keeps the stored preference intact for
+    // when lyrics return.
+    if (!video && mode === "hits" && fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) {
+      mode = "side";
+      persist = false;
+    }
 
     // Capture both ends before the class flip hides either one. The handoff is
     // cover art only; a video that just appeared must cut straight to its side
@@ -13857,53 +14003,54 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
-  // Spicy Lyrics' own heart (their Icons.Heart outline + HeartFill ellipses),
-  // rebuilt with DOM calls rather than innerHTML: YouTube Music enforces
-  // Trusted Types, so assigning markup throws and aborts the whole fullscreen
-  // entry (AJ, 2026-10-30). currentColor lets the CSS own the colour; the fill
-  // group's opacity is what animates between outline, hover hint and liked.
-  function fsHeartSvg() {
+  // The artwork's like affordance (AJ, 2026-11-16). It used to be Spicy's
+  // heart; it is a thumbs-up now, drawn in the same stroke language as the rest
+  // of the fullscreen icons - one silhouette path in a 24-unit box with round
+  // caps and joins - instead of a stack of 1000-unit ellipses.
+  //
+  // Two layers share the geometry: the stroke is the rest state, the fill group
+  // is the engaged state. That keeps the existing `.is-liked` opacity animation
+  // and the spring scale on the button completely untouched, while the glyph
+  // itself is new. Built with DOM calls, never innerHTML: YouTube Music enforces
+  // Trusted Types, so assigning markup aborts the whole fullscreen entry.
+  const FS_ART_THUMB_PATH =
+    "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
+
+  function fsArtThumbSvg() {
     const NS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("viewBox", "0 0 1000 1000");
+    svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("fill", "none");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
+    // The path only occupies about 16 of the 24 units, so it rendered smaller
+    // than the heart it replaced — that glyph filled its box edge to edge.
+    // Scaling the groups about the centre brings it up to the same presence
+    // without touching the geometry; the stroke is divided by the same factor
+    // so its optical weight stays put (AJ, 2026-11-16).
+    const ART_THUMB_SCALE = 1.35;
+    const ART_THUMB_TRANSFORM =
+      "translate(12 12) scale(" + ART_THUMB_SCALE + ") translate(-12 -12)";
     const outline = document.createElementNS(NS, "g");
-    outline.setAttribute("class", "ym-sl-fs-heart-outline");
+    outline.setAttribute("class", "ym-sl-fs-thumb-outline");
+    outline.setAttribute("transform", ART_THUMB_TRANSFORM);
     const path = document.createElementNS(NS, "path");
-    path.setAttribute("d", "M982.995 324.097C982.995 180.45 866.598 64 723.02 64C628.493 64 545.998 114.641 500.496 190.119C454.992 114.641 372.499 64 277.973 64C134.394 64 18 180.45 18 324.097C18 356.935 24.3385 388.224 35.436 417.155C121.399 664.536 500.499 936 500.499 936C500.499 936 879.595 664.536 965.562 417.155C976.659 388.226 982.995 356.935 982.995 324.097Z");
+    path.setAttribute("d", FS_ART_THUMB_PATH);
     path.setAttribute("stroke", "currentColor");
-    path.setAttribute("stroke-width", "22");
+    // 0.6 / 1.35: the group scale multiplies the stroke, so this keeps the
+    // painted width the same as before the glyph was enlarged.
+    path.setAttribute("stroke-width", "0.444");
     path.setAttribute("stroke-linecap", "round");
     path.setAttribute("stroke-linejoin", "round");
     outline.appendChild(path);
     svg.appendChild(outline);
     const fill = document.createElementNS(NS, "g");
-    fill.setAttribute("class", "ym-sl-fs-heart-fill");
-    const ellipse = (cx, cy, rx, ry, rotate) => {
-      const node = document.createElementNS(NS, "ellipse");
-      node.setAttribute("cx", cx);
-      node.setAttribute("cy", cy);
-      node.setAttribute("rx", rx);
-      node.setAttribute("ry", ry);
-      if (rotate) node.setAttribute("transform", rotate);
-      node.setAttribute("fill", "currentColor");
-      return node;
-    };
-    fill.append(
-      ellipse("276.5", "285.5", "244.5", "215.5"),
-      ellipse("725", "285.5", "247", "217.5"),
-      ellipse("189", "325.5", "165", "214.5"),
-      ellipse("234.335", "472.198", "150", "272", "rotate(-34.3576 234.335 472.198)"),
-      ellipse("298.508", "629.28", "97.5117", "183.378", "rotate(-42.2757 298.508 629.28)"),
-      ellipse("390.743", "718.138", "102.44", "192.646", "rotate(-42.2757 390.743 718.138)"),
-      ellipse("669.263", "652.69", "102.44", "328.343", "rotate(42.28 669.263 652.69)"),
-      ellipse("788.346", "447.149", "150", "262.498", "rotate(-143.364 788.346 447.149)"),
-      ellipse("500", "588", "150", "327"),
-      ellipse("499.5", "914.5", "24.5", "13.5"),
-      ellipse("822.516", "623.447", "55.9753", "13.5", "rotate(-52.0641 822.516 623.447)")
-    );
+    fill.setAttribute("class", "ym-sl-fs-thumb-fill");
+    fill.setAttribute("transform", ART_THUMB_TRANSFORM);
+    const solid = document.createElementNS(NS, "path");
+    solid.setAttribute("d", FS_ART_THUMB_PATH);
+    solid.setAttribute("fill", "currentColor");
+    fill.appendChild(solid);
     svg.appendChild(fill);
     return svg;
   }
@@ -13947,16 +14094,16 @@
     // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
     // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
     // the hover surface for music videos and portrait.
-    const heart = h("button", {
+    const like = h("button", {
       type: "button",
       class: "ym-sl-fs-art-like",
       "aria-pressed": "false",
       "aria-label": "Add to liked songs",
       title: "Add to liked songs",
     });
-    heart.appendChild(fsHeartSvg());
-    fsArtLikeButton = heart;
-    heart.addEventListener("click", (ev) => {
+    like.appendChild(fsArtThumbSvg());
+    fsArtLikeButton = like;
+    like.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       const videoId = getCurrentFsVideoId();
@@ -13964,12 +14111,12 @@
       const wasLiked = getFsRating(videoId) === "like";
       // Spicy's one-shot pop: grow on like, shrink on un-like, then release
       // the class so the spring transition carries the glyph back to rest.
-      heart.classList.remove("is-press", "is-release");
-      heart.classList.add(wasLiked ? "is-release" : "is-press");
-      window.setTimeout(() => heart.classList.remove("is-press", "is-release"), 160);
+      like.classList.remove("is-press", "is-release");
+      like.classList.add(wasLiked ? "is-release" : "is-press");
+      window.setTimeout(() => like.classList.remove("is-press", "is-release"), 160);
       clickFsRating("like");
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, heart);
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, like);
     fsMediaHost.appendChild(ui);
     fsCoverSwitch = { ui, btn };
     syncFsCoverSwitch();
@@ -17547,6 +17694,17 @@
   function enterFullscreenMode() {
     if (fsActive || !panelEl) return;
     fsActive = true;
+    // A track with no lyrics already built its empty state while the panel was
+    // docked, so entering fullscreen rebuilds nothing and the composition stayed
+    // in the side layout. Adopt the state once the panel has been moved into the
+    // overlay and the panes have their normal geometry to measure (AJ,
+    // 2026-11-16: "going in fullscreen doesnt move the stuff in the middle").
+    window.setTimeout(() => {
+      if (!fsActive || !fsOverlay || !linesRoot) return;
+      if (!linesRoot.querySelector(".ym-sl-empty")) return;
+      setFsNoLyricsState(true);
+      watchFsNoLyrics();
+    }, 120);
     // Fullscreen owns the panel from here, so tab-driven setPanel() is ignored
     // (it early-returns on fsActive). But animate() gates on panelVisible, so
     // entering from a non-Lyrics tab (Comments, …) would leave panelVisible
@@ -17639,6 +17797,16 @@
     fsNextUp = h("div", { class: "ym-sl-fs-nextup", "aria-hidden": "true" });
     fsNextUp.style.fontFamily = fsTitleEl.style.fontFamily;
     fsOverlay.appendChild(fsNextUp);
+    // Bottom-right escape hatch for a track with no lyrics: the lyrics column is
+    // faded out in that state, so the panel's own empty-state button is not
+    // reachable (AJ, 2026-11-16). Hidden unless .ym-sl-fs-no-lyrics is on.
+    const fsSearchCta = h("button", {
+      class: "ym-sl-fs-search-cta",
+      type: "button",
+      text: "Search lyrics",
+    });
+    fsSearchCta.addEventListener("click", () => toggleSearchPanel());
+    fsOverlay.appendChild(fsSearchCta);
 
     // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
     // abandoned, so there is nothing left to open. The Next up list above is
@@ -20316,6 +20484,109 @@
       empty.appendChild(emptySearch);
     }
     linesRoot.replaceChildren(empty);
+    // Fullscreen has no lines to pair the cover with, so the composition
+    // collapses to a centred cover plus a Search CTA (AJ, 2026-11-16).
+    if (fsActive) {
+      setFsNoLyricsState(true);
+      watchFsNoLyrics();
+    }
+  }
+
+  /* ---- fullscreen no-lyrics composition (AJ, 2026-11-16) --------------------
+     With nothing to read, the side-by-side composition leaves the cover pinned
+     to one half and an empty column on the other. The overlay gets a class
+     instead; the sheet uses it to centre the cover/controls, fade the lyrics
+     column away and reveal the Search CTA in the bottom-right corner. */
+  let fsNoLyricsWatch = 0;
+
+  let fsNoLyricsOutTimer = 0;
+
+  function setFsNoLyricsState(on) {
+    if (!fsOverlay) return;
+    if (!on) {
+      if (!fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) return;
+      if (fsNoLyricsOutTimer) window.clearTimeout(fsNoLyricsOutTimer);
+      // Return the offset first and drop the class once the panes have arrived:
+      // the transition lives on that class, so removing it up front would also
+      // remove the animation and the return would snap (AJ, 2026-11-16).
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", "0px");
+      fsNoLyricsOutTimer = window.setTimeout(() => {
+        fsNoLyricsOutTimer = 0;
+        if (!fsOverlay) return;
+        fsOverlay.classList.remove("ym-sl-fs-no-lyrics");
+        fsOverlay.style.removeProperty("--ym-sl-fs-nolyr-dx");
+      }, 480);
+      return;
+    }
+    if (fsNoLyricsOutTimer) {
+      window.clearTimeout(fsNoLyricsOutTimer);
+      fsNoLyricsOutTimer = 0;
+    }
+    if (fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) return;
+    // Measure BEFORE the class lands: the panes still sit in their normal
+    // column, and that is the distance they have to travel. Translating by a
+    // measured offset rather than snapping to left:50% is what makes both the
+    // cover and the transport slide (AJ, 2026-11-16: the cover jumped).
+    const media = fsOverlay.querySelector(".ym-sl-fs-media");
+    // Hits is not a valid composition without lyrics (its layout is measured
+    // from the header above the column), so an empty-state track in Hits falls
+    // back to the Apple-Music side layout. That switch has to happen BEFORE the
+    // measurement: in Hits the media host is a full-bleed, hidden box whose
+    // centre IS the screen centre, so measuring there produced dx=0 and the
+    // cover only centred once something measured again - the move to the left
+    // edge followed by the jump to the middle (AJ, 2026-11-16).
+    const forcingSide = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
+    let restoreAnim = false;
+    if (forcingSide) {
+      // Transitions off for the switch itself: the cover is invisible in Hits,
+      // so any motion it makes on the way to its column is wasted, and letting
+      // the layout transition run is what made the jump visible. It is painted
+      // already centred instead.
+      fsOverlay.classList.add("ym-sl-fs-no-anim");
+      applyFullscreenLayout("side", false);
+      void fsOverlay.offsetWidth;
+      restoreAnim = true;
+    }
+    const rect = media ? media.getBoundingClientRect() : null;
+    const dx = rect && rect.width
+      ? Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2))
+      : 0;
+    if (restoreAnim) {
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", dx + "px");
+      fsOverlay.classList.add("ym-sl-fs-no-lyrics");
+      window.requestAnimationFrame(() => {
+        if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
+      });
+      return;
+    }
+    // A frame between the measurement and the class gives the browser a start
+    // position to animate from; setting both in one frame has nothing to
+    // interpolate and reads as a jump.
+    window.requestAnimationFrame(() => {
+      if (!fsOverlay) return;
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", dx + "px");
+      fsOverlay.classList.add("ym-sl-fs-no-lyrics");
+    });
+  }
+
+  // Lyrics can arrive from the manual Search pick (or a retry) at any time, so
+  // the empty state cannot set the class and forget it. A 250ms poll runs only
+  // while the empty state is up and clears itself as soon as lines exist, which
+  // slides the layout back within a quarter second of the pick without any
+  // per-frame cost.
+  function watchFsNoLyrics() {
+    if (fsNoLyricsWatch) return;
+    fsNoLyricsWatch = window.setInterval(() => {
+      if (!fsActive || !fsOverlay || !linesRoot) {
+        window.clearInterval(fsNoLyricsWatch);
+        fsNoLyricsWatch = 0;
+        return;
+      }
+      if (linesRoot.querySelector(".ym-sl-empty")) return;
+      window.clearInterval(fsNoLyricsWatch);
+      fsNoLyricsWatch = 0;
+      setFsNoLyricsState(false);
+    }, 250);
   }
 
   /* ---- fullscreen "no lyrics" notice ----------------------------------------
@@ -22121,7 +22392,7 @@
   /* Uploader-styled titles never match a catalogue. The live console showed
      queries like "more than life ft. glaive (Official Music Video) (feat.
      glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
-     exclusive" — those miss MusicBrainz, ListenBrainz AND Deezer every time.
+     exclusive" — those miss MusicBrainz and ListenBrainz every time.
      Strip the noise before querying anything (AJ, 2026-10-19). */
   const TITLE_NOISE_RE =
     /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;
@@ -23720,9 +23991,27 @@
       done = true;
       panel.classList.remove("closing");
       panel.classList.add("hidden");
+      syncFsSearchCta(false);
     };
     panel.addEventListener("animationend", finish, { once: true });
     window.setTimeout(finish, 280);
+  }
+
+  // Fullscreen only: the Search CTA must yield to the sheet it opened, then come
+  // back if the listener closes it without picking a result (AJ, 2026-11-16).
+  // Toggled on the overlay rather than the button so the sheet's own open/close
+  // animation and the fade stay independent.
+  function syncFsSearchCta(open) {
+    const overlay = document.querySelector(".ym-sl-fs-overlay");
+    if (!overlay) return;
+    overlay.classList.toggle("ym-sl-fs-search-open", !!open);
+    // Inline as well as the class: something in the fullscreen chrome cascade
+    // kept winning the class rule (computed opacity stayed 1), and the fade has
+    // to be unconditional. The .22s transition on the button does the fading.
+    const cta = overlay.querySelector(".ym-sl-fs-search-cta");
+    if (!cta) return;
+    cta.style.opacity = open ? "0" : "";
+    cta.style.pointerEvents = open ? "none" : "";
   }
 
   function toggleSearchPanel(force) {
@@ -23741,6 +24030,7 @@
         ? "ERR: rate limited — try again in a couple of minutes."
         : "";
       panel.classList.remove("hidden", "closing");
+      syncFsSearchCta(true);
       panel._input.focus();
       panel._input.select();
     } else {
@@ -28637,8 +28927,26 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     setJumpButtonVisible(suspended);
   }
 
+  // Same problem the Better Lyrics tick had: this engine is pumped on EVERY rAF,
+  // so on a 170 Hz display it runs ~170 times a second - setCurrentTime(), update(),
+  // kickActiveLine(), two sweeps over the line list - while a word-synced track
+  // carries 77-113 live Web Animations (103 of them the per-word "float-word").
+  // That combination is what makes Apple Music word-by-word stutter where the
+  // line-by-line path idles at 170 fps with zero animations. 80 Hz matches the
+  // Better Lyrics cap and leaves the rest of the frame alone; the engine's clocks
+  // are time-based (update() takes a delta), so the picture does not change.
+  const AMLL_DRIVE_INTERVAL_MS = 1000 / 80;
+  let amllLastDriveAt = 0;
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
+    // A seek or a track change must never wait for the slot.
+    const amllDriveNow = performance.now();
+    if (amllLastDriveAt && amllDriveNow - amllLastDriveAt < AMLL_DRIVE_INTERVAL_MS) {
+      const amllJumped = Math.abs(positionMs - amllLastPositionMs) > 250;
+      if (!amllJumped) return;
+    }
+    amllLastDriveAt = amllDriveNow;
     const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
@@ -29499,9 +29807,39 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     // the feature is off by default, so drop the request rather than 404 on
     // YouTube's origin.
     const clean = css.replace(/@import\s+url\(["']?image-highlights\.css["']?\)\s*;/g, "");
+    // The package declares its ~120 --blyrics-* tokens on :root, so every one of
+    // YouTube Music's ~8,300 elements inherits them and carries them through every
+    // style recalc in the document - including the recalc the lyric engine itself
+    // triggers each frame. The words only ever live inside the panel, so hang the
+    // tokens there instead: same values, same inheritance for every lyric node,
+    // and the rest of the page stops paying for them. Measured on a forced full
+    // recalc in the live player: 33.9 ms with the :root block, 29.6 ms without.
+    const scoped = clean.replace(/:root\b/g, "#ym-sl-panel");
+    // The halo system keeps one copy of the line text per word for the WHOLE
+    // song - 574 of them on a 50-line track - and each one carries its own
+    // text-shadow raster. Only the line being sung ever shows a halo; the engine
+    // holds every other one at opacity 0, so they are pure compositing cost.
+    // The engine already holds every idle halo at opacity 0, so hiding them costs
+    // nothing anyone can see. The active and animating lines keep theirs, so the
+    // glow on the sung word is untouched. (It was shipped on the strength of an
+    // fps reading that later A/B'd back to base - the rule is kept because it is
+    // free, not because it is a measured win.)
+    const HALO_IDLE_CSS =
+      "#ym-sl-panel .blyrics--line:not(.blyrics--active):not(.blyrics--animating) .blyrics-sweep-glow{display:none}";
+    // The panel carries ym-sl-no-glow when "Glow on sung words" is switched off
+    // (see the add-on settings); this rule is what removes the halo pairs with
+    // it. Edit the setting to hide the glow, not this CSS.
+    const GLOW_FLAG_CSS =
+      "#ym-sl-panel.ym-sl-no-glow .blyrics-sweep-glow{display:none}";
+    // "Satoshi font": the panel's face, for anyone who wants the lyrics to match
+    // the chrome. The engine reads --blyrics-font-family off its own container
+    // (see #ym-sl-panel .ym-sl-braccato in 05-styles), so the flag only has to
+    // outrank that one rule - the id plus the flag class does it.
+    const FONT_FLAG_CSS =
+      '#ym-sl-panel.ym-sl-satoshi .ym-sl-braccato{--blyrics-font-family:"Satoshi",Avenir,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}';
     const style = document.createElement("style");
     style.id = "ym-sl-braccato-css";
-    style.textContent = clean;
+    style.textContent = scoped + "\n" + HALO_IDLE_CSS + "\n" + GLOW_FLAG_CSS + "\n" + FONT_FLAG_CSS;
     (document.head || document.documentElement).appendChild(style);
   }
 
@@ -29638,6 +29976,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       lineScrollEl.appendChild(braccatoMount);
     }
     if (panelEl) panelEl.classList.add("BraccatoRenderer");
+    syncBraccatoPanelFlags();
     return braccatoMount;
   }
 
@@ -29835,8 +30174,18 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     }
   }
 
+  // Both look switches are classes on the panel, so they are cheap, idempotent
+  // and safe to run on mount and on every content pass - which is also every
+  // settings change that reaches the renderer.
+  function syncBraccatoPanelFlags() {
+    if (!panelEl) return;
+    panelEl.classList.toggle("ym-sl-no-glow", currentSettings.braccatoGlow !== true);
+    panelEl.classList.toggle("ym-sl-satoshi", currentSettings.braccatoSatoshi === true);
+  }
+
   function braccatoApplyContent(content) {
     if (!braccatoRenderer || !braccatoMount) return;
+    syncBraccatoPanelFlags();
     // This must happen before setLyrics: the setting decides whether the line
     // builder creates per-letter spans, and it is part of the engine's line key.
     braccatoApplyEngineSettings();
@@ -29898,6 +30247,34 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     if (injected) braccatoScheduleRelayout();
   }
 
+  // The engine's tick is the most expensive thing Aurora runs per frame: 2.4 ms
+  // on a settled line, 4.6 ms while a word-dense line sweeps (measured through
+  // __auroraPerf on a running player). On a 170 Hz display the whole frame is
+  // 5.9 ms, so an unthrottled tick cannot fit and Chromium falls back to
+  // presenting every other frame - which is what makes the rest of the panel
+  // feel low-fps meanwhile. Past the budget, drive on alternating frames: the
+  // engine's keyframes live on the compositor, so the sweep keeps moving
+  // between drives. Nothing about the picture changes; the frame simply gets
+  // its budget back.
+  const BRACCATO_DRIVE_BUDGET_MS = 3.2;
+  let braccatoTickCostMs = 0;
+  let braccatoDriveSkipped = false;
+  // The tick is the single most expensive thing on the page, and it used to run on
+  // EVERY rAF - ~170 times a second on this display, against a 5.9 ms frame. The
+  // engine moves the sweep with compositor keyframes, so driving it at a fixed
+  // rate instead of once per frame changes nothing you can see: the highlight keeps interpolating
+  // on the compositor between drives. Proof it is the tick and not the paint: the
+  // live lyrics DOM cloned and frozen by hand runs 169 fps / 5.9 ms against 83 fps
+  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz (AJ, 2026-11-16) because
+  // 90 is the wrong number on a 170 Hz panel: a tick every 11.1 ms is SHORTER than
+  // the 11.8 ms a tick-carrying frame takes, so it lands on about half the frames
+  // and the median frame stays at two vsyncs. At 80 Hz the tick is due every
+  // 12.5 ms, i.e. once per ~2.1 frames, so a clear majority of frames are free and
+  // the median drops back to one vsync. Lower still (60) frees more frames but
+  // coarsens the highlight; 80 is the compromise AJ picked.
+  const BRACCATO_DRIVE_INTERVAL_MS = 1000 / 80;
+  let braccatoLastDriveAt = 0;
+
   function braccatoDrive(positionMs, sampledAtMs) {
     if (!braccatoOwnsTrack()) return;
     if (!braccatoRenderer) {
@@ -29907,12 +30284,30 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       return;
     }
     if (!Number.isFinite(positionMs)) return;
+    // A position jump is a seek or a new track: those always tick immediately.
+    // Anything else waits for its slot, so the engine runs at 80 Hz on a 170 Hz
+    // display instead of on every frame.
+    const driveNowAt = performance.now();
+    const positionJumped = Math.abs(positionMs - braccatoLastPositionMs) > 250;
+    if (!positionJumped && driveNowAt - braccatoLastDriveAt < BRACCATO_DRIVE_INTERVAL_MS) return;
+    braccatoLastDriveAt = driveNowAt;
     braccatoLastPositionMs = positionMs;
+    if (braccatoTickCostMs > BRACCATO_DRIVE_BUDGET_MS) {
+      if (!braccatoDriveSkipped) {
+        braccatoDriveSkipped = true;
+        return;
+      }
+      braccatoDriveSkipped = false;
+    }
+    const driveStartedAt = performance.now();
     try {
       braccatoRenderer.tick(positionMs / 1000, braccatoTickOptions(sampledAtMs));
     } catch (error) {
       braccatoFallback("tick failed", error);
+      return;
     }
+    const driveCost = performance.now() - driveStartedAt;
+    braccatoTickCostMs = braccatoTickCostMs * 0.8 + driveCost * 0.2;
   }
 
   function braccatoFallback(reason, error) {

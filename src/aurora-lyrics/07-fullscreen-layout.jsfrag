@@ -675,6 +675,16 @@
     // backdrop for Video Background, so that also falls back to side.
     if (video && mode === "hits") mode = "side";
     if (!video && mode === "background") mode = "side";
+    // No lyrics: Hits has nothing to put under its header and its whole geometry
+    // is measured from that header, so it is not an available composition while
+    // the empty state is up. Coerce rather than merely hiding the option, so a
+    // stored Hits choice or a click on the cycle button cannot land there
+    // (AJ, 2026-11-16). persist=false keeps the stored preference intact for
+    // when lyrics return.
+    if (!video && mode === "hits" && fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) {
+      mode = "side";
+      persist = false;
+    }
 
     // Capture both ends before the class flip hides either one. The handoff is
     // cover art only; a video that just appeared must cut straight to its side
@@ -883,53 +893,54 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
-  // Spicy Lyrics' own heart (their Icons.Heart outline + HeartFill ellipses),
-  // rebuilt with DOM calls rather than innerHTML: YouTube Music enforces
-  // Trusted Types, so assigning markup throws and aborts the whole fullscreen
-  // entry (AJ, 2026-10-30). currentColor lets the CSS own the colour; the fill
-  // group's opacity is what animates between outline, hover hint and liked.
-  function fsHeartSvg() {
+  // The artwork's like affordance (AJ, 2026-11-16). It used to be Spicy's
+  // heart; it is a thumbs-up now, drawn in the same stroke language as the rest
+  // of the fullscreen icons - one silhouette path in a 24-unit box with round
+  // caps and joins - instead of a stack of 1000-unit ellipses.
+  //
+  // Two layers share the geometry: the stroke is the rest state, the fill group
+  // is the engaged state. That keeps the existing `.is-liked` opacity animation
+  // and the spring scale on the button completely untouched, while the glyph
+  // itself is new. Built with DOM calls, never innerHTML: YouTube Music enforces
+  // Trusted Types, so assigning markup aborts the whole fullscreen entry.
+  const FS_ART_THUMB_PATH =
+    "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
+
+  function fsArtThumbSvg() {
     const NS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("viewBox", "0 0 1000 1000");
+    svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("fill", "none");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
+    // The path only occupies about 16 of the 24 units, so it rendered smaller
+    // than the heart it replaced — that glyph filled its box edge to edge.
+    // Scaling the groups about the centre brings it up to the same presence
+    // without touching the geometry; the stroke is divided by the same factor
+    // so its optical weight stays put (AJ, 2026-11-16).
+    const ART_THUMB_SCALE = 1.35;
+    const ART_THUMB_TRANSFORM =
+      "translate(12 12) scale(" + ART_THUMB_SCALE + ") translate(-12 -12)";
     const outline = document.createElementNS(NS, "g");
-    outline.setAttribute("class", "ym-sl-fs-heart-outline");
+    outline.setAttribute("class", "ym-sl-fs-thumb-outline");
+    outline.setAttribute("transform", ART_THUMB_TRANSFORM);
     const path = document.createElementNS(NS, "path");
-    path.setAttribute("d", "M982.995 324.097C982.995 180.45 866.598 64 723.02 64C628.493 64 545.998 114.641 500.496 190.119C454.992 114.641 372.499 64 277.973 64C134.394 64 18 180.45 18 324.097C18 356.935 24.3385 388.224 35.436 417.155C121.399 664.536 500.499 936 500.499 936C500.499 936 879.595 664.536 965.562 417.155C976.659 388.226 982.995 356.935 982.995 324.097Z");
+    path.setAttribute("d", FS_ART_THUMB_PATH);
     path.setAttribute("stroke", "currentColor");
-    path.setAttribute("stroke-width", "22");
+    // 0.6 / 1.35: the group scale multiplies the stroke, so this keeps the
+    // painted width the same as before the glyph was enlarged.
+    path.setAttribute("stroke-width", "0.444");
     path.setAttribute("stroke-linecap", "round");
     path.setAttribute("stroke-linejoin", "round");
     outline.appendChild(path);
     svg.appendChild(outline);
     const fill = document.createElementNS(NS, "g");
-    fill.setAttribute("class", "ym-sl-fs-heart-fill");
-    const ellipse = (cx, cy, rx, ry, rotate) => {
-      const node = document.createElementNS(NS, "ellipse");
-      node.setAttribute("cx", cx);
-      node.setAttribute("cy", cy);
-      node.setAttribute("rx", rx);
-      node.setAttribute("ry", ry);
-      if (rotate) node.setAttribute("transform", rotate);
-      node.setAttribute("fill", "currentColor");
-      return node;
-    };
-    fill.append(
-      ellipse("276.5", "285.5", "244.5", "215.5"),
-      ellipse("725", "285.5", "247", "217.5"),
-      ellipse("189", "325.5", "165", "214.5"),
-      ellipse("234.335", "472.198", "150", "272", "rotate(-34.3576 234.335 472.198)"),
-      ellipse("298.508", "629.28", "97.5117", "183.378", "rotate(-42.2757 298.508 629.28)"),
-      ellipse("390.743", "718.138", "102.44", "192.646", "rotate(-42.2757 390.743 718.138)"),
-      ellipse("669.263", "652.69", "102.44", "328.343", "rotate(42.28 669.263 652.69)"),
-      ellipse("788.346", "447.149", "150", "262.498", "rotate(-143.364 788.346 447.149)"),
-      ellipse("500", "588", "150", "327"),
-      ellipse("499.5", "914.5", "24.5", "13.5"),
-      ellipse("822.516", "623.447", "55.9753", "13.5", "rotate(-52.0641 822.516 623.447)")
-    );
+    fill.setAttribute("class", "ym-sl-fs-thumb-fill");
+    fill.setAttribute("transform", ART_THUMB_TRANSFORM);
+    const solid = document.createElementNS(NS, "path");
+    solid.setAttribute("d", FS_ART_THUMB_PATH);
+    solid.setAttribute("fill", "currentColor");
+    fill.appendChild(solid);
     svg.appendChild(fill);
     return svg;
   }
@@ -973,16 +984,16 @@
     // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
     // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
     // the hover surface for music videos and portrait.
-    const heart = h("button", {
+    const like = h("button", {
       type: "button",
       class: "ym-sl-fs-art-like",
       "aria-pressed": "false",
       "aria-label": "Add to liked songs",
       title: "Add to liked songs",
     });
-    heart.appendChild(fsHeartSvg());
-    fsArtLikeButton = heart;
-    heart.addEventListener("click", (ev) => {
+    like.appendChild(fsArtThumbSvg());
+    fsArtLikeButton = like;
+    like.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       const videoId = getCurrentFsVideoId();
@@ -990,12 +1001,12 @@
       const wasLiked = getFsRating(videoId) === "like";
       // Spicy's one-shot pop: grow on like, shrink on un-like, then release
       // the class so the spring transition carries the glyph back to rest.
-      heart.classList.remove("is-press", "is-release");
-      heart.classList.add(wasLiked ? "is-release" : "is-press");
-      window.setTimeout(() => heart.classList.remove("is-press", "is-release"), 160);
+      like.classList.remove("is-press", "is-release");
+      like.classList.add(wasLiked ? "is-release" : "is-press");
+      window.setTimeout(() => like.classList.remove("is-press", "is-release"), 160);
       clickFsRating("like");
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, heart);
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, like);
     fsMediaHost.appendChild(ui);
     fsCoverSwitch = { ui, btn };
     syncFsCoverSwitch();

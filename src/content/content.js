@@ -534,7 +534,6 @@
   // this only after ListenBrainz misses, and this gate makes the fallback
   // polite even when several tracks change quickly.
   let musicBrainzNextAt = 0;
-  const spotifyArtworkCache = new Map();
   const fetchLRCLIB = async (rawUrl) => {
     const url = new URL(String(rawUrl || ""));
     if (url.origin !== LRCLIB_ORIGIN || !LRCLIB_PATHS.has(url.pathname)) {
@@ -649,219 +648,77 @@
     // scoring, and dropping the parameters would silently change that contract.
     return { ok: true, status: 200, data: Object.assign({}, data, { recordings }) };
   };
-  const fetchSpotifyAlbumArtwork = async (artist, album) => {
-    const cacheKey = [artist, album].map((value) => String(value || "").toLowerCase().trim()).join("\u0001");
-    if (!artist || !album) return null;
-    if (spotifyArtworkCache.has(cacheKey)) return spotifyArtworkCache.get(cacheKey);
-
-    const lookup = (async () => {
-      try {
-        const musicBrainzUrl = new URL("https://musicbrainz.org/ws/2/release/");
-        musicBrainzUrl.search = new URLSearchParams({
-          query: `artist:"${artist}" AND release:"${album}"`,
-          fmt: "json",
-          inc: "url-rels",
-          limit: "5",
-        }).toString();
-        const musicBrainzResponse = await fetch(musicBrainzUrl.href, {
-          headers: { Accept: "application/json" },
-          credentials: "omit",
-        });
-        const musicBrainzData = musicBrainzResponse.ok
-          ? await musicBrainzResponse.json()
-          : null;
-        const release = musicBrainzData && Array.isArray(musicBrainzData.releases)
-          ? musicBrainzData.releases.find((item) =>
-            String(item.title || "").toLowerCase().trim() === String(album).toLowerCase().trim()
-          ) || musicBrainzData.releases[0]
-          : null;
-        if (!release || !release.id) return null;
-
-        const releaseUrl = new URL(
-          `https://musicbrainz.org/ws/2/release/${encodeURIComponent(release.id)}`
-        );
-        releaseUrl.search = new URLSearchParams({
-          fmt: "json",
-          inc: "url-rels",
-        }).toString();
-        const releaseResponse = await fetch(releaseUrl.href, {
-          headers: { Accept: "application/json" },
-          credentials: "omit",
-        });
-        const releaseData = releaseResponse.ok
-          ? await releaseResponse.json()
-          : release;
-        const relation = releaseData && Array.isArray(releaseData.relations)
-          ? releaseData.relations.find((item) =>
-            item && item.url && /^https:\/\/open\.spotify\.com\/album\/[A-Za-z0-9]+/.test(item.url.resource || "")
-          )
-          : null;
-        let artworkUrl = "";
-        if (relation && relation.url && relation.url.resource) {
-          const spotifyResponse = await fetch(relation.url.resource, {
-            credentials: "omit",
-          });
-          if (spotifyResponse.ok) {
-            const html = await spotifyResponse.text();
-            const imageMatch =
-              html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i) ||
-              html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
-            artworkUrl = imageMatch && imageMatch[1]
-              ? imageMatch[1].replace(/&amp;/g, "&")
-              : "";
-          }
-          if (!artworkUrl) {
-            const oembedUrl = new URL("https://open.spotify.com/oembed");
-            oembedUrl.search = new URLSearchParams({
-              url: relation.url.resource,
-            }).toString();
-            const oembedResponse = await fetch(oembedUrl.href, {
-              headers: { Accept: "application/json" },
-              credentials: "omit",
-            });
-            if (oembedResponse.ok) {
-              const oembedData = await oembedResponse.json();
-              artworkUrl = typeof oembedData.thumbnail_url === "string"
-                ? oembedData.thumbnail_url
-                : "";
-            }
-          }
-        }
-        return artworkUrl ? {
-          trackName: "",
-          artistName: artist,
-          collectionName: album,
-          artworkUrlDirect: artworkUrl,
-        } : null;
-      } catch (_) {
-        return null;
-      }
-    })();
-    spotifyArtworkCache.set(cacheKey, lookup);
-    const result = await lookup;
-    spotifyArtworkCache.set(cacheKey, Promise.resolve(result));
-    return result;
-  };
-
-  /* Deezer track search, exposed to add-ons for ISRC lookups.
-     Why Deezer: YouTube Music does NOT expose ISRC anywhere in its API —
-     verified against /youtubei/v1/player (videoDetails has musicVideoType but
-     no isrc) and /youtubei/v1/next (no isrc, no externalIds). Deezer returns
-     `isrc` on every track and carries new releases on release day, which
-     MusicBrainz does not (AJ, 2026-10-19).
-
-     It MUST go through the service worker: api.deezer.com sends no
-     Access-Control-Allow-Origin, and a content script is bound by the page's
-     CORS policy. The worker runs on the extension origin and can reach it.
-     Falls back to a direct fetch only if the worker is unavailable. */
-  const fetchDeezerTracks = async (title, artist, album) => {
-    const q = [title, artist, album].filter(Boolean).join(" ").trim();
-    if (!q) return { ok: false, status: 400, data: null };
-    const url = new URL("https://api.deezer.com/search/track");
-    url.search = new URLSearchParams({ q, limit: "10" }).toString();
-
-    const proxied = await Promise.race([
-      new Promise((resolve) => {
-        try {
-          chrome.runtime.sendMessage({ type: "ym-fetch-json", url: url.href }, (response) => {
-            // lastError is set when no listener exists (worker not running/failed).
-            resolve(chrome.runtime.lastError ? null : response || null);
-          });
-        } catch (_) {
-          resolve(null);
-        }
-      }),
-      // A hung worker must not stall the lyrics chain behind it.
-      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
-    ]);
-    if (proxied) return proxied;
-
+  /* The Spotify page publishes its cover as og:image; oembed is the fallback for
+     a page we cannot read (consent wall, A/B markup). Shared by the album-art
+     lookup and the track-art lookup, so both go through one scraper. */
+  const fetchSpotifyArtworkFromUrl = async (trackUrl) => {
+    const url = String(trackUrl || "");
+    if (!url) return "";
     try {
-      const response = await fetch(url.href, {
+      const spotifyResponse = await fetch(url, { credentials: "omit" });
+      if (spotifyResponse.ok) {
+        const html = await spotifyResponse.text();
+        const imageMatch =
+          html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i) ||
+          html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+        if (imageMatch && imageMatch[1]) return imageMatch[1].replace(/&amp;/g, "&");
+      }
+    } catch (_) {
+      /* fall through to oembed */
+    }
+    try {
+      const oembedUrl = new URL("https://open.spotify.com/oembed");
+      oembedUrl.search = new URLSearchParams({ url }).toString();
+      const oembedResponse = await fetch(oembedUrl.href, {
         headers: { Accept: "application/json" },
         credentials: "omit",
       });
-      return {
-        ok: response.ok,
-        status: response.status,
-        data: response.ok ? await response.json() : null,
-      };
-    } catch (error) {
-      return { ok: false, status: 0, data: null, error: String(error && error.message) };
-    }
+      if (oembedResponse.ok) {
+        const oembedData = await oembedResponse.json();
+        if (typeof oembedData.thumbnail_url === "string") return oembedData.thumbnail_url;
+      }
+    } catch (_) {}
+    return "";
   };
 
+  /* Cover art without Deezer or iTunes (AJ, 2026-11-16): MusicBrainz carries the
+     recording's Spotify link, and the Spotify page/oembed carries the image.
+     Deezer and iTunes used to front this chain, but Deezer existed only to
+     supply an ISRC for lrc.red, which the extension no longer talks to, and the
+     iTunes step was the fallback artwork for the animated cover art that is
+     gone. Both host permissions were removed with them.
+
+     One request fewer than before: the old path searched Deezer first and only
+     then asked MusicBrainz for the album name. */
   const fetchCoverArt = async (title, artist) => {
     const trackTitle = String(title || "");
     const trackArtist = String(artist || "");
-    const deezerParams = new URLSearchParams({
-      q: [
-        trackArtist ? `artist:"${trackArtist}"` : "",
-        trackTitle ? `track:"${trackTitle}"` : "",
-      ].filter(Boolean).join(" "),
-      limit: "5",
-    });
-    try {
-      const deezerUrl = new URL("https://api.deezer.com/search/track");
-      deezerUrl.search = deezerParams.toString();
-      const deezerResponse = await fetch(deezerUrl.href, {
-        headers: { Accept: "application/json" },
-        credentials: "omit",
-      });
-      const deezerData = deezerResponse.ok ? await deezerResponse.json() : null;
-      if (deezerData && Array.isArray(deezerData.data) && deezerData.data.length) {
-        const deezerResults = deezerData.data.map((result) => ({
-          trackName: result.title,
-          artistName: result.artist && result.artist.name,
-          collectionName: result.album && result.album.title,
-          artworkUrlDirect: result.album && result.album.id
-            ? `https://api.deezer.com/album/${encodeURIComponent(result.album.id)}/image?size=xl`
-            : "",
-          artworkUrl600: result.album && (
-            result.album.cover_xl ||
-            result.album.cover_big ||
-            result.album.cover_medium
-          ),
-        }));
-        const normalize = (value) => String(value || "")
-          .toLowerCase()
-          .replace(/[^\p{L}\p{N}]+/gu, " ")
-          .trim();
-        const exact = deezerResults.find((result) =>
-          normalize(result.trackName) === normalize(trackTitle) &&
-          normalize(result.artistName) === normalize(trackArtist)
-        );
-        const spotifyArtwork = await fetchSpotifyAlbumArtwork(
-          trackArtist,
-          exact && exact.collectionName || deezerResults[0].collectionName
-        );
-        return {
-          ok: true,
-          status: deezerResponse.status,
-          data: {
-            results: spotifyArtwork ? [spotifyArtwork, ...deezerResults] : deezerResults,
-          },
-        };
+    if (!trackTitle) return { ok: false, status: 400, data: null };
+    const mb = await fetchMusicBrainzRecordingSearch(trackTitle, trackArtist, "", 0);
+    const recordings = mb && mb.ok && mb.data && Array.isArray(mb.data.recordings)
+      ? mb.data.recordings
+      : [];
+    let trackUrl = "";
+    for (const recording of recordings) {
+      const relation = (recording.relations || []).find(musicBrainzSpotifyRelation);
+      if (relation) {
+        trackUrl = String(relation.url && relation.url.resource || "");
+        if (trackUrl) break;
       }
-    } catch (_) {}
-
-    const params = new URLSearchParams({
-      term: [trackTitle, trackArtist].filter(Boolean).join(" "),
-      media: "music",
-      entity: "song",
-      country: "us",
-      limit: "5",
-    });
-    const url = new URL("https://itunes.apple.com/search");
-    url.search = params.toString();
-    const response = await fetch(url.href, {
-      headers: { Accept: "application/json" },
-      credentials: "omit",
-    });
+    }
+    const artworkUrl = await fetchSpotifyArtworkFromUrl(trackUrl);
+    if (!artworkUrl) return { ok: false, status: mb && mb.status || 0, data: { results: [] } };
     return {
-      ok: response.ok,
-      status: response.status,
-      data: response.ok ? await response.json() : null,
+      ok: true,
+      status: 200,
+      data: {
+        results: [{
+          trackName: trackTitle,
+          artistName: trackArtist,
+          collectionName: "",
+          artworkUrlDirect: artworkUrl,
+        }],
+      },
     };
   };
 
@@ -1039,8 +896,35 @@
         // Lyrics actually owns word-by-word tracks. It sits directly under the
         // Word-by-word row and stays in the DOM collapsed, so switching to Better
         // Lyrics animates it open instead of snapping the list (AJ, 2026-11-16).
-        { key: "braccatoLetterWave", label: "Wavy letters", type: "toggle", default: true,
-          visibleWhen: { key: "wordRenderer", value: "braccato" } },
+        // Both switches below belong to the Better Lyrics engine, not to a
+        // particular way of slicing the track, so they show for either renderer:
+        // the word-by-word one and the line-by-line one. Wavy letters is OFF
+        // (AJ, 2026-11-16): the engine's letters are straighter by default.
+        { key: "braccatoLetterWave", label: "Wavy letters", type: "toggle", default: false,
+          visibleWhen: [
+            { key: "wordRenderer", value: "braccato" },
+            { key: "lineRenderer", value: "braccato" },
+          ] },
+        // ON by default (AJ, 2026-11-16). It was shipped off while the halos were
+        // the suspected cost; A/B/A on the live page then measured glow-on FASTER
+        // than glow-off (109 vs 94 fps), i.e. the halo cost is inside the noise
+        // and the switch is a look preference, not a performance knob. Shown
+        // whenever a Braccato renderer owns the track, either the word-by-word one
+        // or the line-by-line one - both come out of the same engine.
+        { key: "braccatoGlow", label: "Glow on sung words", type: "toggle", default: true,
+          visibleWhen: [
+            { key: "wordRenderer", value: "braccato" },
+            { key: "lineRenderer", value: "braccato" },
+          ] },
+        // OFF by default: the engine's own face is what the lyrics have always
+        // used, so nothing changes for anyone who does not ask. On, the lines
+        // take Satoshi - the add-ons panel's face - through a class on the
+        // panel (syncBraccatoPanelFlags).
+        { key: "braccatoSatoshi", label: "Satoshi font", type: "toggle", default: false,
+          visibleWhen: [
+            { key: "wordRenderer", value: "braccato" },
+            { key: "lineRenderer", value: "braccato" },
+          ] },
         { key: "lineRenderer", label: "Line-by-line", type: "select", default: "amll", options: [
           { value: "spicy", label: "Spicy Lyrics" },
           { value: "amll", label: "Apple Music" },
@@ -1053,8 +937,12 @@
         // track renders through the Spicy renderer, which honours this toggle.
         // (Line-synced tracks are drawn by the engine, which springs its own
         // scroll regardless.)
-        { key: "smoothScrolling", label: "Smooth scrolling", note: "Only for the Spicy Lyrics renderer", type: "toggle", default: true },
-        { key: "scrollLeadEnabled", label: "Start scrolling early", type: "toggle", default: false },
+        // This one rides BOTH line renderers: with it off the panel deliberately
+        // stops scrolling at all, so the note has to name both of them.
+        { key: "smoothScrolling", label: "Smooth scrolling", note: "Spicy Lyrics + Better Lyrics", type: "toggle", default: true },
+        // The early-scroll lead is the Spicy line index only - Better Lyrics
+        // runs its own scroll plan from its tick.
+        { key: "scrollLeadEnabled", label: "Start scrolling early", note: "Only for the Spicy Lyrics renderer", type: "toggle", default: false },
         { key: "scrollLeadMs", label: "Early scroll lead", min: 0, max: 800, step: 10, default: 250, display: "milliseconds" },
         // NOTE: "Use the Spicy Lyrics font across YouTube Music" used to live here.
         // It changes YouTube rather than the lyrics, so it now sits on the panel's
@@ -2596,43 +2484,27 @@
       });
     }
   }
-  // ---- Send feedback (AJ, 2026-11-04) --------------------------------------
-  // The quieter sibling of "Report a problem": same surface and the same thanks
-  // state, but the ask is a suggestion rather than a fault, so it is one
-  // free-text box instead of an issue list. Send is a placeholder like the
-  // report form's — the Discord relay is not wired up yet.
+  // ---- Discord feedback (AJ, 2026-11-04) -----------------------------------
+  // Feedback goes straight to the community Discord. No form and no relay:
+  // one short callout with the invite shown, shared by the header and the
+  // add-on footer.
   let feedbackOverlay = null;
-  let feedbackExtId = "";
-  let feedbackName = "";
   function buildFeedback() {
     const scrim = h("div", { class: "ym-report-scrim hidden" });
     const card = h("div", { class: "ym-report-card" });
     const form = h("div", { class: "ym-report-pick" });
-    const title = h("div", { class: "ym-report-title", text: "Send feedback" });
+    const title = h("div", { class: "ym-report-title", text: "Feedback" });
     const x = h("button", { class: "ym-report-x", type: "button", "aria-label": "Close", title: "Close", text: "\u00d7" });
     form.append(h("div", { class: "ym-report-head" }, title, x));
-    const sub = h("div", { class: "ym-report-sub" });
-    const input = h("textarea", {
-      class: "ym-report-other-input",
-      placeholder: "What would make it better?",
-      rows: "4",
-      maxlength: "1000",
-    });
-    const send = h("button", { class: "ym-report-send", type: "button", text: "Send" });
-    send.disabled = true;
-    const sendError = h("div", { class: "ym-report-error hidden" });
-    input.addEventListener("input", () => { send.disabled = !input.value.trim(); });
-    form.append(sub, input, send, sendError);
-    const thanks = h("div", { class: "ym-report-thanks hidden" },
-      h("div", { class: "ym-report-thanks-title", text: "Thanks for the feedback!" }),
-      h("div", { class: "ym-report-thanks-sub" },
-        document.createTextNode("We read every one. To talk it through, "),
-        makeReportDiscordLink(),
-        document.createTextNode(".")
-      ),
-      h("button", { class: "ym-report-close", type: "button", text: "Close" })
-    );
-    card.append(form, thanks);
+    const sub = h("div", { class: "ym-report-sub", text: "Join our Discord for feedback." });
+    const link = h("a", {
+      class: "ym-feedback-discord",
+      href: REPORT_DISCORD_URL,
+      target: "_blank",
+      rel: "noopener noreferrer",
+    }, h("span", { text: "discord.gg/wsZxTSnaMa" }));
+    form.append(sub, link);
+    card.append(form);
     scrim.appendChild(card);
     document.body.appendChild(scrim);
 
@@ -2650,7 +2522,6 @@
       scrim.classList.add("hidden");
       clearAnim(card);
       clearAnim(form);
-      clearAnim(thanks);
       clearAnim(scrim);
     };
     const close = () => {
@@ -2666,67 +2537,15 @@
       window.setTimeout(finish, 320);
     };
     x.addEventListener("click", close);
-    thanks.querySelector(".ym-report-close").addEventListener("click", close);
     scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
 
-    send.addEventListener("click", async () => {
-      if (send.disabled) return;
-      send.disabled = true;
-      send.textContent = "Sending…";
-      sendError.classList.add("hidden");
-      const result = await submitReport({
-        kind: "feedback",
-        addon: feedbackExtId,
-        addonName: feedbackName,
-        version: runningVersion(),
-        issues: [],
-        message: input.value.trim(),
-        id: reportRequestId(),
-        at: Date.now(),
-      });
-      send.textContent = "Send";
-      if (!result.ok) {
-        send.disabled = false;
-        sendError.textContent = REPORT_ERROR_TEXT;
-        sendError.classList.remove("hidden");
-        return;
-      }
-      if (reducedMotion() || !form.animate) {
-        form.classList.add("hidden");
-        thanks.classList.remove("hidden");
-        return;
-      }
-      form.animate(
-        [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-8px)" }],
-        { duration: 240, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }
-      ).onfinish = () => {
-        form.classList.add("hidden");
-        form.style.opacity = "";
-        form.style.transform = "";
-        thanks.classList.remove("hidden");
-        thanks.animate(
-          [{ opacity: 0, transform: "translateY(12px)" }, { opacity: 1, transform: "none" }],
-          { duration: 420, easing: "cubic-bezier(.34,1.4,.5,1)" }
-        );
-      };
-    });
-
     return {
-      open(name) {
+      open() {
         isOpen = true;
         clearAnim(card);
         clearAnim(form);
-        clearAnim(thanks);
         clearAnim(scrim);
         form.classList.remove("hidden");
-        thanks.classList.add("hidden");
-        input.value = "";
-        send.disabled = true;
-        send.textContent = "Send";
-        sendError.classList.add("hidden");
-        sub.textContent = name
-          ? "Tell us what to add or change in " + name + "."
-          : "Tell us what to add or change.";
         scrim.classList.remove("hidden");
         if (!reducedMotion() && card.animate) {
           scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
@@ -2735,24 +2554,22 @@
             { duration: 420, easing: "cubic-bezier(.34,1.4,.5,1)" }
           );
         }
-        window.setTimeout(() => { if (isOpen) input.focus(); }, 60);
+        window.setTimeout(() => { if (isOpen) link.focus(); }, 60);
       },
       close,
     };
   }
-  function openFeedback(ext) {
+  function openFeedback() {
     const r = feedbackOverlay || (feedbackOverlay = buildFeedback());
-    feedbackExtId = (ext && ext.id) || "";
-    feedbackName = (ext && ext.name) || "";
-    r.open(feedbackName);
+    r.open();
   }
 
-  // Appends the add-on's footer actions to a detail host: "Send feedback" and
+  // Appends the add-on's footer actions to a detail host: "Feedback" and
   // "Report a problem". EVERY add-on gets both — even ones with no settings —
   // and neither reads as an Uninstall/Action button (AJ, 2026-10-19).
   function mountReportButton(host, ext) {
-    const feedback = h("button", { class: "ym-feedback-btn", type: "button", text: "Send feedback" });
-    feedback.addEventListener("click", () => openFeedback(ext));
+    const feedback = h("button", { class: "ym-feedback-btn", type: "button", text: "Feedback", title: "Join our Discord for feedback" });
+    feedback.addEventListener("click", () => openFeedback());
     const report = h("button", { class: "ym-report-btn", type: "button", text: "Report a problem" });
     report.addEventListener("click", () => openReportProblem(ext));
     host.appendChild(h("div", { class: "ym-report-foot" }, feedback, report));
@@ -3204,8 +3021,13 @@
       // named value on a select (used by Wavy letters, which only makes sense
       // while Better Lyrics owns word-by-word tracks). (AJ, 2026-11-16)
       let syncVisible = null;
+      // visibleWhen is either one {key, value} pair or an array of them, which
+      // reads as OR: "Glow on sung words" belongs to either Braccato renderer.
       const visibilityRule = setting.visibleWhen
-        ? () => String(values[setting.visibleWhen.key]) === String(setting.visibleWhen.value)
+        ? () => {
+            const rules = Array.isArray(setting.visibleWhen) ? setting.visibleWhen : [setting.visibleWhen];
+            return rules.some((r) => String(values[r.key]) === String(r.value));
+          }
         : setting.childOf
           ? () => !!values[setting.childOf]
           : null;
@@ -3764,9 +3586,6 @@
           case "fetchUnison": r = await fetchUnison(args[0]); break;
           case "fetchMusicBrainzRecordingSearch":
             r = await fetchMusicBrainzRecordingSearch(args[0], args[1], args[2], args[3]);
-            break;
-          case "fetchDeezerTracks":
-            r = await fetchDeezerTracks(args[0], args[1], args[2]);
             break;
           case "fetchCoverArt": r = await fetchCoverArt(args[0], args[1]); break;
           default: throw new Error("unknown method " + method);
@@ -7111,13 +6930,13 @@
 
     // Settings is a BUTTON, not a rail row (AJ, 2026-10-26): it is an app-wide page,
     // so it must not read as another add-on to install.
-    // Feedback is general (not tied to an add-on): open the same modal with no
-    // extension, so the subtitle and report body stay generic.
+    // Feedback is general (not tied to an add-on): every entry point opens the
+    // same short Discord callout.
     const feedbackBtn = h("button", {
       class: "ym-mk-chbtn",
       type: "button",
-      title: "Send feedback",
-      "aria-label": "Send feedback",
+      title: "Join our Discord for feedback",
+      "aria-label": "Join our Discord for feedback",
     }, svgIcon("M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM6 9h12v2H6V9zm0 4h8v2H6v-2z"),
       h("span", { text: "Feedback" }));
     feedbackBtn.addEventListener("click", () => openFeedback());

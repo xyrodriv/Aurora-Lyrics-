@@ -53,9 +53,39 @@
     // the feature is off by default, so drop the request rather than 404 on
     // YouTube's origin.
     const clean = css.replace(/@import\s+url\(["']?image-highlights\.css["']?\)\s*;/g, "");
+    // The package declares its ~120 --blyrics-* tokens on :root, so every one of
+    // YouTube Music's ~8,300 elements inherits them and carries them through every
+    // style recalc in the document - including the recalc the lyric engine itself
+    // triggers each frame. The words only ever live inside the panel, so hang the
+    // tokens there instead: same values, same inheritance for every lyric node,
+    // and the rest of the page stops paying for them. Measured on a forced full
+    // recalc in the live player: 33.9 ms with the :root block, 29.6 ms without.
+    const scoped = clean.replace(/:root\b/g, "#ym-sl-panel");
+    // The halo system keeps one copy of the line text per word for the WHOLE
+    // song - 574 of them on a 50-line track - and each one carries its own
+    // text-shadow raster. Only the line being sung ever shows a halo; the engine
+    // holds every other one at opacity 0, so they are pure compositing cost.
+    // The engine already holds every idle halo at opacity 0, so hiding them costs
+    // nothing anyone can see. The active and animating lines keep theirs, so the
+    // glow on the sung word is untouched. (It was shipped on the strength of an
+    // fps reading that later A/B'd back to base - the rule is kept because it is
+    // free, not because it is a measured win.)
+    const HALO_IDLE_CSS =
+      "#ym-sl-panel .blyrics--line:not(.blyrics--active):not(.blyrics--animating) .blyrics-sweep-glow{display:none}";
+    // The panel carries ym-sl-no-glow when "Glow on sung words" is switched off
+    // (see the add-on settings); this rule is what removes the halo pairs with
+    // it. Edit the setting to hide the glow, not this CSS.
+    const GLOW_FLAG_CSS =
+      "#ym-sl-panel.ym-sl-no-glow .blyrics-sweep-glow{display:none}";
+    // "Satoshi font": the panel's face, for anyone who wants the lyrics to match
+    // the chrome. The engine reads --blyrics-font-family off its own container
+    // (see #ym-sl-panel .ym-sl-braccato in 05-styles), so the flag only has to
+    // outrank that one rule - the id plus the flag class does it.
+    const FONT_FLAG_CSS =
+      '#ym-sl-panel.ym-sl-satoshi .ym-sl-braccato{--blyrics-font-family:"Satoshi",Avenir,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}';
     const style = document.createElement("style");
     style.id = "ym-sl-braccato-css";
-    style.textContent = clean;
+    style.textContent = scoped + "\n" + HALO_IDLE_CSS + "\n" + GLOW_FLAG_CSS + "\n" + FONT_FLAG_CSS;
     (document.head || document.documentElement).appendChild(style);
   }
 
@@ -192,6 +222,7 @@
       lineScrollEl.appendChild(braccatoMount);
     }
     if (panelEl) panelEl.classList.add("BraccatoRenderer");
+    syncBraccatoPanelFlags();
     return braccatoMount;
   }
 
@@ -389,8 +420,18 @@
     }
   }
 
+  // Both look switches are classes on the panel, so they are cheap, idempotent
+  // and safe to run on mount and on every content pass - which is also every
+  // settings change that reaches the renderer.
+  function syncBraccatoPanelFlags() {
+    if (!panelEl) return;
+    panelEl.classList.toggle("ym-sl-no-glow", currentSettings.braccatoGlow !== true);
+    panelEl.classList.toggle("ym-sl-satoshi", currentSettings.braccatoSatoshi === true);
+  }
+
   function braccatoApplyContent(content) {
     if (!braccatoRenderer || !braccatoMount) return;
+    syncBraccatoPanelFlags();
     // This must happen before setLyrics: the setting decides whether the line
     // builder creates per-letter spans, and it is part of the engine's line key.
     braccatoApplyEngineSettings();
@@ -452,6 +493,34 @@
     if (injected) braccatoScheduleRelayout();
   }
 
+  // The engine's tick is the most expensive thing Aurora runs per frame: 2.4 ms
+  // on a settled line, 4.6 ms while a word-dense line sweeps (measured through
+  // __auroraPerf on a running player). On a 170 Hz display the whole frame is
+  // 5.9 ms, so an unthrottled tick cannot fit and Chromium falls back to
+  // presenting every other frame - which is what makes the rest of the panel
+  // feel low-fps meanwhile. Past the budget, drive on alternating frames: the
+  // engine's keyframes live on the compositor, so the sweep keeps moving
+  // between drives. Nothing about the picture changes; the frame simply gets
+  // its budget back.
+  const BRACCATO_DRIVE_BUDGET_MS = 3.2;
+  let braccatoTickCostMs = 0;
+  let braccatoDriveSkipped = false;
+  // The tick is the single most expensive thing on the page, and it used to run on
+  // EVERY rAF - ~170 times a second on this display, against a 5.9 ms frame. The
+  // engine moves the sweep with compositor keyframes, so driving it at a fixed
+  // rate instead of once per frame changes nothing you can see: the highlight keeps interpolating
+  // on the compositor between drives. Proof it is the tick and not the paint: the
+  // live lyrics DOM cloned and frozen by hand runs 169 fps / 5.9 ms against 83 fps
+  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz (AJ, 2026-11-16) because
+  // 90 is the wrong number on a 170 Hz panel: a tick every 11.1 ms is SHORTER than
+  // the 11.8 ms a tick-carrying frame takes, so it lands on about half the frames
+  // and the median frame stays at two vsyncs. At 80 Hz the tick is due every
+  // 12.5 ms, i.e. once per ~2.1 frames, so a clear majority of frames are free and
+  // the median drops back to one vsync. Lower still (60) frees more frames but
+  // coarsens the highlight; 80 is the compromise AJ picked.
+  const BRACCATO_DRIVE_INTERVAL_MS = 1000 / 80;
+  let braccatoLastDriveAt = 0;
+
   function braccatoDrive(positionMs, sampledAtMs) {
     if (!braccatoOwnsTrack()) return;
     if (!braccatoRenderer) {
@@ -461,12 +530,30 @@
       return;
     }
     if (!Number.isFinite(positionMs)) return;
+    // A position jump is a seek or a new track: those always tick immediately.
+    // Anything else waits for its slot, so the engine runs at 80 Hz on a 170 Hz
+    // display instead of on every frame.
+    const driveNowAt = performance.now();
+    const positionJumped = Math.abs(positionMs - braccatoLastPositionMs) > 250;
+    if (!positionJumped && driveNowAt - braccatoLastDriveAt < BRACCATO_DRIVE_INTERVAL_MS) return;
+    braccatoLastDriveAt = driveNowAt;
     braccatoLastPositionMs = positionMs;
+    if (braccatoTickCostMs > BRACCATO_DRIVE_BUDGET_MS) {
+      if (!braccatoDriveSkipped) {
+        braccatoDriveSkipped = true;
+        return;
+      }
+      braccatoDriveSkipped = false;
+    }
+    const driveStartedAt = performance.now();
     try {
       braccatoRenderer.tick(positionMs / 1000, braccatoTickOptions(sampledAtMs));
     } catch (error) {
       braccatoFallback("tick failed", error);
+      return;
     }
+    const driveCost = performance.now() - driveStartedAt;
+    braccatoTickCostMs = braccatoTickCostMs * 0.8 + driveCost * 0.2;
   }
 
   function braccatoFallback(reason, error) {

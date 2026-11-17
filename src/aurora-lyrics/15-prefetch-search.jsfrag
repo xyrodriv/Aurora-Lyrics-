@@ -341,9 +341,27 @@
       done = true;
       panel.classList.remove("closing");
       panel.classList.add("hidden");
+      syncFsSearchCta(false);
     };
     panel.addEventListener("animationend", finish, { once: true });
     window.setTimeout(finish, 280);
+  }
+
+  // Fullscreen only: the Search CTA must yield to the sheet it opened, then come
+  // back if the listener closes it without picking a result (AJ, 2026-11-16).
+  // Toggled on the overlay rather than the button so the sheet's own open/close
+  // animation and the fade stay independent.
+  function syncFsSearchCta(open) {
+    const overlay = document.querySelector(".ym-sl-fs-overlay");
+    if (!overlay) return;
+    overlay.classList.toggle("ym-sl-fs-search-open", !!open);
+    // Inline as well as the class: something in the fullscreen chrome cascade
+    // kept winning the class rule (computed opacity stayed 1), and the fade has
+    // to be unconditional. The .22s transition on the button does the fading.
+    const cta = overlay.querySelector(".ym-sl-fs-search-cta");
+    if (!cta) return;
+    cta.style.opacity = open ? "0" : "";
+    cta.style.pointerEvents = open ? "none" : "";
   }
 
   function toggleSearchPanel(force) {
@@ -362,6 +380,7 @@
         ? "ERR: rate limited — try again in a couple of minutes."
         : "";
       panel.classList.remove("hidden", "closing");
+      syncFsSearchCta(true);
       panel._input.focus();
       panel._input.select();
     } else {

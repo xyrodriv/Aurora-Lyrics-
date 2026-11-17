@@ -1032,9 +1032,6 @@
     fetchUnison: (url) => cmd("fetchUnison", [url]),
     fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
       cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
-    // Deezer track search — the ISRC source for lrc.red (YTM exposes none).
-    fetchDeezerTracks: (title, artist, album) =>
-      cmd("fetchDeezerTracks", [title, artist, album]),
     fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
   };
   alLog("public API ready (page world) v" + window.YTMod.version);

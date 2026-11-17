@@ -522,7 +522,15 @@
     lineRenderer: "amll",
     // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
     // exposes it so a quieter karaoke look is one switch away.
-    braccatoLetterWave: true,
+    // OFF (AJ, 2026-11-16): the per-letter rise/fall is an opt-in look now.
+    braccatoLetterWave: false,
+    // "Glow on sung words": ON (AJ, 2026-11-16). Shipped off first on the theory
+    // that the halos were the cost; A/B/A then measured glow-on FASTER than
+    // glow-off, so the cost is inside the noise and this is purely the look.
+    braccatoGlow: true,
+    // "Satoshi font": OFF, so the Better Lyrics lines keep the engine's own
+    // face unless the panel is asked to match its chrome.
+    braccatoSatoshi: false,
     amllWordTracks: false,
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
@@ -792,6 +800,14 @@
       currentSettings.braccatoLetterWave,
       DEFAULT_SETTINGS.braccatoLetterWave
     );
+    currentSettings.braccatoGlow = booleanValue(
+      currentSettings.braccatoGlow,
+      DEFAULT_SETTINGS.braccatoGlow === true
+    );
+    currentSettings.braccatoSatoshi = booleanValue(
+      currentSettings.braccatoSatoshi,
+      DEFAULT_SETTINGS.braccatoSatoshi === true
+    );
     currentSettings.amllWordTracks = booleanValue(
       currentSettings.amllWordTracks,
       DEFAULT_SETTINGS.amllWordTracks
@@ -888,6 +904,9 @@
       }
     } catch (e) {}
     adaptiveLayoutLastAt = 0;
+    // The glow and font flags are classes on the panel, so they have to land on
+    // every settings pass rather than on the next lyric payload.
+    syncBraccatoPanelFlags();
     if (!currentSettings.adaptiveSpacing) resetAdaptiveSpacing();
     if (lineScrollEl) {
       lineScrollEl.style.setProperty("--ym-sl-lyrics-scale", String(currentSettings.size));

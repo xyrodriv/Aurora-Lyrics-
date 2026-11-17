@@ -113,8 +113,6 @@ The services contacted are:
 | `discord.com` | Optional Discord sign-in for maker profiles |
 | `cdn.discordapp.com` | Community uploader and maker avatars |
 | `labs.api.listenbrainz.org` | Spotify-id resolution |
-| `itunes.apple.com` | Artwork and metadata search |
-| `api.deezer.com` | Artwork and metadata search |
 | `musicbrainz.org` | Release lookup, for matching a track |
 | `open.spotify.com` | Artwork and artist lookup (oEmbed) |
 | `raw.githubusercontent.com` | Update check (release notes only) |

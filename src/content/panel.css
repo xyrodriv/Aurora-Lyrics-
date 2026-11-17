@@ -994,6 +994,24 @@
 .ym-report-x { color: rgba(255,255,255,.5); }
 .ym-report-x:hover { color: #fff; }
 .ym-report-sub { font-size: 12.5px; color: rgba(255,255,255,.45); }
+.ym-feedback-discord {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 2px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: #5865f2;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background .18s ease, transform .15s ease;
+}
+.ym-feedback-discord:hover { background: #4752c4; color: #fff; }
+.ym-feedback-discord:active { transform: scale(.97); }
 .ym-report-error { font-size: 12px; line-height: 1.45; color: #ff8fa3; }
 .ym-report-option {
   padding: 11px 14px;

@@ -1290,6 +1290,109 @@
       empty.appendChild(emptySearch);
     }
     linesRoot.replaceChildren(empty);
+    // Fullscreen has no lines to pair the cover with, so the composition
+    // collapses to a centred cover plus a Search CTA (AJ, 2026-11-16).
+    if (fsActive) {
+      setFsNoLyricsState(true);
+      watchFsNoLyrics();
+    }
+  }
+
+  /* ---- fullscreen no-lyrics composition (AJ, 2026-11-16) --------------------
+     With nothing to read, the side-by-side composition leaves the cover pinned
+     to one half and an empty column on the other. The overlay gets a class
+     instead; the sheet uses it to centre the cover/controls, fade the lyrics
+     column away and reveal the Search CTA in the bottom-right corner. */
+  let fsNoLyricsWatch = 0;
+
+  let fsNoLyricsOutTimer = 0;
+
+  function setFsNoLyricsState(on) {
+    if (!fsOverlay) return;
+    if (!on) {
+      if (!fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) return;
+      if (fsNoLyricsOutTimer) window.clearTimeout(fsNoLyricsOutTimer);
+      // Return the offset first and drop the class once the panes have arrived:
+      // the transition lives on that class, so removing it up front would also
+      // remove the animation and the return would snap (AJ, 2026-11-16).
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", "0px");
+      fsNoLyricsOutTimer = window.setTimeout(() => {
+        fsNoLyricsOutTimer = 0;
+        if (!fsOverlay) return;
+        fsOverlay.classList.remove("ym-sl-fs-no-lyrics");
+        fsOverlay.style.removeProperty("--ym-sl-fs-nolyr-dx");
+      }, 480);
+      return;
+    }
+    if (fsNoLyricsOutTimer) {
+      window.clearTimeout(fsNoLyricsOutTimer);
+      fsNoLyricsOutTimer = 0;
+    }
+    if (fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) return;
+    // Measure BEFORE the class lands: the panes still sit in their normal
+    // column, and that is the distance they have to travel. Translating by a
+    // measured offset rather than snapping to left:50% is what makes both the
+    // cover and the transport slide (AJ, 2026-11-16: the cover jumped).
+    const media = fsOverlay.querySelector(".ym-sl-fs-media");
+    // Hits is not a valid composition without lyrics (its layout is measured
+    // from the header above the column), so an empty-state track in Hits falls
+    // back to the Apple-Music side layout. That switch has to happen BEFORE the
+    // measurement: in Hits the media host is a full-bleed, hidden box whose
+    // centre IS the screen centre, so measuring there produced dx=0 and the
+    // cover only centred once something measured again - the move to the left
+    // edge followed by the jump to the middle (AJ, 2026-11-16).
+    const forcingSide = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
+    let restoreAnim = false;
+    if (forcingSide) {
+      // Transitions off for the switch itself: the cover is invisible in Hits,
+      // so any motion it makes on the way to its column is wasted, and letting
+      // the layout transition run is what made the jump visible. It is painted
+      // already centred instead.
+      fsOverlay.classList.add("ym-sl-fs-no-anim");
+      applyFullscreenLayout("side", false);
+      void fsOverlay.offsetWidth;
+      restoreAnim = true;
+    }
+    const rect = media ? media.getBoundingClientRect() : null;
+    const dx = rect && rect.width
+      ? Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2))
+      : 0;
+    if (restoreAnim) {
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", dx + "px");
+      fsOverlay.classList.add("ym-sl-fs-no-lyrics");
+      window.requestAnimationFrame(() => {
+        if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-no-anim");
+      });
+      return;
+    }
+    // A frame between the measurement and the class gives the browser a start
+    // position to animate from; setting both in one frame has nothing to
+    // interpolate and reads as a jump.
+    window.requestAnimationFrame(() => {
+      if (!fsOverlay) return;
+      fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", dx + "px");
+      fsOverlay.classList.add("ym-sl-fs-no-lyrics");
+    });
+  }
+
+  // Lyrics can arrive from the manual Search pick (or a retry) at any time, so
+  // the empty state cannot set the class and forget it. A 250ms poll runs only
+  // while the empty state is up and clears itself as soon as lines exist, which
+  // slides the layout back within a quarter second of the pick without any
+  // per-frame cost.
+  function watchFsNoLyrics() {
+    if (fsNoLyricsWatch) return;
+    fsNoLyricsWatch = window.setInterval(() => {
+      if (!fsActive || !fsOverlay || !linesRoot) {
+        window.clearInterval(fsNoLyricsWatch);
+        fsNoLyricsWatch = 0;
+        return;
+      }
+      if (linesRoot.querySelector(".ym-sl-empty")) return;
+      window.clearInterval(fsNoLyricsWatch);
+      fsNoLyricsWatch = 0;
+      setFsNoLyricsState(false);
+    }, 250);
   }
 
   /* ---- fullscreen "no lyrics" notice ----------------------------------------

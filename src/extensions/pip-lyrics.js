@@ -58,6 +58,207 @@
   const ICON_REPEAT_ONE = "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z";
   const ICON_VOLUME = "M3 10v4h4l5 4V6L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12z";
 
+  /* ---- fullscreen transport glyphs ---------------------------------------
+     Copied from 08-fullscreen-controls so the PiP draws the SAME icons as the
+     fullscreen player instead of Material lookalikes: one double-chevron skip
+     (35x20), and the thick rounded shuffle / repeat (24 grid, 2.6 stroke).
+     fsSvgIcon's multi-part builder is mirrored here as partSvg because the PiP
+     document is built by this add-on alone. */
+  const FS_STROKE = 2.6;
+  const fsThick = (parts) => parts.map((part) => ({
+    tag: part.tag,
+    attrs: Object.assign(
+      {
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": String(FS_STROKE),
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+      part.attrs
+    ),
+  }));
+  const FS_SKIP_D = "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z";
+  const PART_ICON_SHUFFLE = fsThick([
+    { tag: "path", attrs: { d: "M3 17h2.4c2.1 0 3.4-1.2 4.6-3l3.1-4c1.2-1.8 2.5-3 4.6-3H20" } },
+    { tag: "path", attrs: { d: "M3 7h2.4c2.1 0 3.4 1.2 4.6 3l3.1 4c1.2 1.8 2.6 3 4.6 3H20" } },
+    { tag: "path", attrs: { d: "M17.2 4.3 20.2 7l-3 2.7" } },
+    { tag: "path", attrs: { d: "M17.2 14.3 20.2 17l-3 2.7" } },
+  ]);
+  /* Repeat is the fullscreen chip's glyph STRUCTURE, not just its shape: the
+     looping animation travels a filled "track" around the loop while the two
+     static rails fade out and a head rides an offset-path in the same
+     direction. Those class names are the ones the fullscreen CSS animates, and
+     the same keyframes are copied into this add-on's stylesheet - rebuilding a
+     lookalike spin from the description was exactly what not to do. */
+  const PART_ICON_REPEAT = [
+    {
+      tag: "path",
+      attrs: {
+        class: "ym-pip-repeat-track",
+        d: "M3 9.5V8.5A3.5 3.5 0 0 1 6.5 5H20.2A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8A1.6 1.6 0 0 1 2.2 17.4V9.5H3Z",
+        pathLength: "100",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.6",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-pip-repeat-rail ym-pip-repeat-rail-top" },
+      children: fsThick([
+        { tag: "path", attrs: { d: "M3 9.5V8.5A3.5 3.5 0 0 1 6.5 5H20" } },
+        { tag: "path", attrs: { d: "M17.2 2.3 20.2 5l-3 2.7" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-pip-repeat-rail ym-pip-repeat-rail-bottom" },
+      children: fsThick([
+        { tag: "path", attrs: { d: "M21 14.5v1A3.5 3.5 0 0 1 17.5 19H4" } },
+        { tag: "path", attrs: { d: "M6.8 16.3 3.8 19l3 2.7" } },
+      ]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-pip-repeat-head ym-pip-repeat-head-top" },
+      children: fsThick([{ tag: "path", attrs: { d: "M17.2 2.3 20.2 5l-3 2.7" } }]),
+    },
+    {
+      tag: "g",
+      attrs: { class: "ym-pip-repeat-head ym-pip-repeat-head-bottom" },
+      children: fsThick([{ tag: "path", attrs: { d: "M6.8 16.3 3.8 19l3 2.7" } }]),
+    },
+  ];
+  const PART_ICON_REPEAT_ONE = fsThick([
+    { tag: "path", attrs: { d: "M11.1 10.4 12.8 9.2v5.9" } },
+    { tag: "path", attrs: { d: "M10.9 15.1h3.8" } },
+  ]);
+
+  /* ---- play / pause morph -------------------------------------------------
+     Ported from 08-fullscreen-controls: the glyph is TWO rounded quads that are
+     interpolated point-by-point and re-emitted as path data every frame, so
+     pause's two bars BECOME the play triangle instead of crossfading. Same
+     shapes, same 260ms, same cubic ease. */
+  const FS_PLAY_MORPH_MS = 260;
+  const FS_PLAY_PAUSE_SHAPES = [
+    { p: [2, 0, 8, 0, 8, 20, 2, 20], r: [2, 2, 2, 2] },
+    { p: [10, 0, 16, 0, 16, 20, 10, 20], r: [2, 2, 2, 2] },
+  ];
+  const FS_PLAY_TRIANGLE_SHAPES = [
+    { p: [2, 0, 9.5, 5, 9.5, 15, 2, 20], r: [2.2, 0, 0, 2.2] },
+    { p: [6, 2.67, 17, 10, 6, 17.33, 6, 10], r: [0, 3.2, 0, 0] },
+  ];
+  function fsPlayMorphEase(t) {
+    return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+  function fsRoundedQuadPath(points, radii) {
+    let d = "";
+    for (let i = 0; i < 4; i++) {
+      const pi = ((i + 3) % 4) * 2;
+      const ci = i * 2;
+      const ni = ((i + 1) % 4) * 2;
+      const px = points[pi], py = points[pi + 1];
+      const cx = points[ci], cy = points[ci + 1];
+      const nx = points[ni], ny = points[ni + 1];
+      const r = radii[i] || 0;
+      const prevLen = Math.hypot(cx - px, cy - py);
+      const nextLen = Math.hypot(nx - cx, ny - cy);
+      const prevR = prevLen > 0 ? Math.min(r, prevLen / 2) : 0;
+      const nextR = nextLen > 0 ? Math.min(r, nextLen / 2) : 0;
+      const sx = prevLen > 0 ? cx + (px - cx) * (prevR / prevLen) : cx;
+      const sy = prevLen > 0 ? cy + (py - cy) * (prevR / prevLen) : cy;
+      const ex = nextLen > 0 ? cx + (nx - cx) * (nextR / nextLen) : cx;
+      const ey = nextLen > 0 ? cy + (ny - cy) * (nextR / nextLen) : cy;
+      d += (i === 0 ? "M" : "L") + sx.toFixed(2) + " " + sy.toFixed(2);
+      d += "Q" + cx.toFixed(2) + " " + cy.toFixed(2) +
+        " " + ex.toFixed(2) + " " + ey.toFixed(2);
+    }
+    return d + " Z";
+  }
+  function pipDrawPlayMorph(button, t) {
+    const paths = button.querySelectorAll(".ym-pip-play-morph");
+    if (paths.length < 2) return;
+    for (let i = 0; i < 2; i++) {
+      const from = FS_PLAY_PAUSE_SHAPES[i];
+      const to = FS_PLAY_TRIANGLE_SHAPES[i];
+      const points = [];
+      const radii = [];
+      for (let j = 0; j < 8; j++) points.push(from.p[j] + (to.p[j] - from.p[j]) * t);
+      for (let j = 0; j < 4; j++) radii.push(from.r[j] + (to.r[j] - from.r[j]) * t);
+      paths[i].setAttribute("d", fsRoundedQuadPath(points, radii));
+    }
+  }
+  // t = 0 is pause (two bars), t = 1 is play (triangle), exactly as fullscreen.
+  function pipSetPlayMorph(button, action, immediate) {
+    if (!button) return;
+    // Call-on-CHANGE only, like the fullscreen chip. The PiP's sync loop runs
+    // every frame, and re-entering here each time cancelled the running tween
+    // and restarted the 260ms ease from the current value - the morph crept a
+    // few percent forward per frame and never arrived, so the glyph sat on the
+    // pause bars forever.
+    if (button.dataset.playState === action && immediate !== true) return;
+    button.dataset.playState = action;
+    button.setAttribute("aria-label", action === "play" ? "Play" : "Pause");
+    const target = action === "play" ? 1 : 0;
+    let state = button.__pipPlayMorph;
+    if (!state) state = button.__pipPlayMorph = { t: target, raf: 0 };
+    if (state.raf) { cancelAnimationFrame(state.raf); state.raf = 0; }
+    const from = state.t;
+    const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (immediate === true || reduced || Math.abs(target - from) < .001) {
+      state.t = target;
+      pipDrawPlayMorph(button, target);
+      return;
+    }
+    const start = performance.now();
+    const step = (now) => {
+      if (!button.isConnected) { state.raf = 0; return; }
+      const progress = Math.min(1, (now - start) / FS_PLAY_MORPH_MS);
+      state.t = from + (target - from) * fsPlayMorphEase(progress);
+      pipDrawPlayMorph(button, state.t);
+      if (progress < 1) state.raf = requestAnimationFrame(step);
+      else { state.t = target; state.raf = 0; }
+    };
+    state.raf = requestAnimationFrame(step);
+  }
+  function pipPlayMorphSvg(doc) {
+    const svg = partSvg(doc, [], "0 0 18 20");
+    for (let i = 0; i < 2; i++) {
+      const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "ym-pip-play-morph");
+      path.setAttribute("d", fsRoundedQuadPath(
+        FS_PLAY_PAUSE_SHAPES[i].p, FS_PLAY_PAUSE_SHAPES[i].r
+      ));
+      path.setAttribute("fill", "currentColor");
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
+  // Build an SVG from part descriptors. Attributes are set one by one so the
+  // stroke parts keep fill:none without a stylesheet rule having to fight the
+  // generic "button svg { fill: currentColor }".
+  function partSvg(doc, parts, viewBox, extraClass) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = doc.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", viewBox || "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    if (extraClass) svg.setAttribute("class", extraClass);
+    const add = (parent, part) => {
+      const el = doc.createElementNS(NS, part.tag);
+      const attrs = part.attrs || {};
+      for (const key of Object.keys(attrs)) el.setAttribute(key, attrs[key]);
+      if (part.children) part.children.forEach((child) => add(el, child));
+      parent.appendChild(el);
+      return el;
+    };
+    parts.forEach((part) => add(svg, part));
+    return svg;
+  }
+
   // Same vendored Kawarp module the Dynamic theme and the fullscreen backdrop
   // use, so the PiP gets the identical fluid treatment rather than a lookalike.
   const KAWARP_CORE_URL = SCRIPT_URL ? new URL("kawarp-core.js", SCRIPT_URL).href : "";
@@ -368,14 +569,6 @@
       display: none;
     }
     .ym-pip-art.has-art { display: block; }
-    /* Source label, pushed to the right edge of the header (AJ, 2026-10-07). */
-    .ym-pip-source {
-      margin-left: auto;
-      flex: 0 0 auto;
-      font-size: 11px;
-      color: rgba(255, 255, 255, .38);
-      white-space: nowrap;
-    }
     /* The title/artist stack beside the art. min-width:0 is what lets the
        ellipsis actually engage inside a flex row. */
     .ym-pip-meta {
@@ -415,10 +608,25 @@
        glyph in half under the header is what reads as broken. No bottom mask:
        the controls card terminates the area, and fading the last lines there
        just made the fill look like it was dying early. */
-    .ym-pip-lines,
     #ym-sl-amll-host {
       -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
       mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
+    }
+    /* Top AND bottom dissolve (AJ, 2026-11-16): with the card gone, lines were
+       ending on a hard cut right above the transport. The bottom band is 72px
+       so a line fades out as it approaches the controls instead of being sliced
+       by the scrollport edge. */
+    .ym-pip-lines {
+      -webkit-mask-image: linear-gradient(to bottom,
+        transparent 0,
+        #000 26px,
+        #000 calc(100% - 72px),
+        transparent 100%);
+      mask-image: linear-gradient(to bottom,
+        transparent 0,
+        #000 26px,
+        #000 calc(100% - 72px),
+        transparent 100%);
     }
     .ym-pip-lines {
       position: relative;
@@ -438,6 +646,13 @@
          would clip them. Scrolling itself is unchanged; "Jump to current" is the
          discoverable way back to the active line. */
       padding-right: 32px;
+      /* Same reason as the right inset, for the LEFT edge: a word's glow
+         (text-shadow) and a long word's first syllable both paint past the
+         layout box, and overflow-x:hidden was cutting them at the window edge.
+         The lines sat flush left, so the 1-second emphasis glow lost its left
+         half. This reserves the band the glow needs; the text layout itself is
+         unchanged apart from that inset. */
+      padding-left: 22px;
       overscroll-behavior: contain;
       /* smooth, so the one-shot "auto" writes (smoothScrolling OFF) actually
          EASE. The per-frame spring writes pass behavior:"instant" to override
@@ -544,31 +759,36 @@
     }
     /* Own class: the panel relies on its scroll container plus adaptive spacing
        to fade distant lines, which a small window has no room for. */
-    #ym-sl-panel.SpicyRenderer .line.ym-pip-far { opacity: .2 !important; }
+    /* No far-line dimming (AJ, 2026-11-16: "the lyrics that cut off at the bottom
+       still get dim which i dont want"). The bottom mask already dissolves a
+       line as it leaves; a second opacity cut made the next lines look broken
+       rather than faded. Depth blur supplies the distance cue now. */
     /* ---- controls ---------------------------------------------------------
        One glass card instead of loose rows: the seek bar, transport and volume
        now read as a single object, which is also what gives the window its
        "floating player" feel. */
+    /* No card (AJ, 2026-11-16: "i dont really want a whole frosted border down
+       there"): Apple Music's mini player doesn't box its transport either. The
+       controls sit straight on the artwork, only the glyphs and a thin progress
+       line carry weight. */
     .ym-pip-controls {
       flex: 0 0 auto;
-      margin-top: 10px;
-      padding: 10px 12px 9px;
-      border-radius: 18px;
-      background: rgba(18, 18, 22, .55);
-      border: 1px solid rgba(255, 255, 255, .1);
-      box-shadow:
-        0 12px 30px rgba(0, 0, 0, .28),
-        inset 0 1px 0 rgba(255, 255, 255, .07);
-      backdrop-filter: blur(24px) saturate(1.35);
-      -webkit-backdrop-filter: blur(24px) saturate(1.35);
-      animation: ym-pip-rise .42s .08s cubic-bezier(.2, .7, .3, 1) both;
+      position: relative;
+      margin-top: 6px;
+      padding: 4px 4px 0;
+      border-radius: 0;
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
     }
     .ym-pip-transport {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 4px;
-      padding-top: 7px;
+      gap: 12px;
+      padding-top: 10px;
       /* The volume sits at the far right WITHOUT dragging the centred transport
          off-centre — an absolute child does not take part in the centring. */
       position: relative;
@@ -587,7 +807,13 @@
       justify-content: center;
       transition: background-color .16s ease, color .16s ease, transform .16s ease;
     }
-    .ym-pip-transport button:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+    /* Hover is a glyph-shaped halo, not a button surface - the fullscreen
+       player's treatment. A filled disc reads heavy in a 480px window. */
+    .ym-pip-transport button:hover { background: transparent; color: #fff; }
+    .ym-pip-transport button > svg { transition: filter .22s ease; }
+    .ym-pip-transport button:hover > svg {
+      filter: drop-shadow(0 0 5px rgba(255, 255, 255, .4));
+    }
     .ym-pip-transport button:active { transform: scale(.92); }
     .ym-pip-transport button:focus-visible {
       outline: 2px solid rgba(255, 255, 255, .8);
@@ -617,7 +843,109 @@
        is set from the LIVE player state in syncLoop, so they cannot lie. */
     .ym-pip-transport .ym-pip-opt { color: rgba(255, 255, 255, .42); }
     .ym-pip-transport .ym-pip-opt:hover { color: rgba(255, 255, 255, .9); }
+    /* The skip glyph is the fullscreen 35x20 double chevron: it needs its own
+       aspect ratio, and Prev is the same drawing mirrored. */
+    .ym-pip-transport .ym-pip-skip svg { width: 25px; height: 14px; }
+    .ym-pip-transport .ym-pip-prev svg { transform: scaleX(-1); }
+    .ym-pip-transport .ym-pip-opt { position: relative; }
     .ym-pip-transport .ym-pip-opt.active { color: #fff; }
+    .ym-pip-transport .ym-pip-opt.active > svg {
+      filter: drop-shadow(0 0 3px rgba(255, 255, 255, .32));
+    }
+    /* The fullscreen "engaged" cue, copied exactly: a 4px dot under the glyph,
+       opacity-gated so it fades rather than pops. */
+    .ym-pip-transport .ym-pip-shuffle::after,
+    .ym-pip-transport .ym-pip-repeat::after {
+      content: "";
+      position: absolute;
+      bottom: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #fff;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    .ym-pip-transport .ym-pip-shuffle.active::after,
+    .ym-pip-transport .ym-pip-repeat.active::after { opacity: 1; }
+    /* Same 0.52s pulse the fullscreen shuffle plays when switched on. */
+    .ym-pip-transport .ym-pip-opt.is-glowing > svg {
+      animation: ym-pip-opt-glow .52s ease-in-out both;
+    }
+    @keyframes ym-pip-opt-glow {
+      0%, 100% { transform: scale(1); filter: drop-shadow(0 0 0 rgba(255, 255, 255, 0)); }
+      48%      { transform: scale(1.08); filter: drop-shadow(0 0 7px rgba(255, 255, 255, .65)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-pip-transport .ym-pip-opt.is-glowing > svg { animation: none; }
+    }
+    /* Play/pause is a floating glyph like the fullscreen transport, not a white
+       disc: the two morphing quads are filled with currentColor and there is no
+       surface under them. */
+    .ym-pip-transport .ym-pip-main {
+      background: transparent;
+      color: #fff;
+      box-shadow: none;
+      opacity: .9;
+    }
+    .ym-pip-transport .ym-pip-main:hover {
+      background: transparent;
+      box-shadow: none;
+      opacity: 1;
+      transform: scale(1.06);
+    }
+    .ym-pip-transport .ym-pip-main svg { width: 20px; height: 22px; }
+    .ym-pip-transport .ym-pip-play-morph { fill: currentColor; }
+    /* Repeat loop: the fullscreen keyframes, copied verbatim. The filled track
+       draws itself round the loop while the head rides the same path. */
+    .ym-pip-transport .ym-pip-repeat-track {
+      opacity: 0;
+      stroke-dasharray: 32.15 17.85;
+      stroke-dashoffset: 0;
+      transition: opacity .06s linear;
+    }
+    .ym-pip-transport .ym-pip-repeat-rail { transition: opacity .06s linear; }
+    .ym-pip-transport .ym-pip-repeat-head {
+      opacity: 0;
+      transform-box: fill-box;
+      offset-distance: 0%;
+      transition: opacity .06s linear;
+    }
+    .ym-pip-transport .ym-pip-repeat-head-top {
+      offset-path: path("M20.2 5A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8A1.6 1.6 0 0 1 2.2 17.4V9.5H3V8.5A3.5 3.5 0 0 1 6.5 5H20.2Z");
+      offset-anchor: 100% 50%;
+      offset-rotate: auto;
+    }
+    .ym-pip-transport .ym-pip-repeat-head-bottom {
+      offset-path: path("M3.8 19A1.6 1.6 0 0 1 2.2 17.4V9.5H3V8.5A3.5 3.5 0 0 1 6.5 5H20.2A1.6 1.6 0 0 1 21.8 6.6V14.5H21V15.5A3.5 3.5 0 0 1 17.5 19H3.8Z");
+      offset-anchor: 0% 50%;
+      offset-rotate: auto -180deg;
+    }
+    .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-rail { opacity: 0; }
+    .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-track,
+    .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-head { opacity: 1; }
+    .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-track {
+      animation: ym-pip-repeat-track .62s cubic-bezier(.65, 0, .35, 1) both;
+      will-change: stroke-dashoffset;
+    }
+    .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-head {
+      animation: ym-pip-repeat-head .62s cubic-bezier(.65, 0, .35, 1) both;
+      will-change: offset-distance;
+    }
+    @keyframes ym-pip-repeat-track {
+      from { stroke-dashoffset: 0; }
+      to   { stroke-dashoffset: -100; }
+    }
+    @keyframes ym-pip-repeat-head {
+      from { offset-distance: 0%; }
+      to   { offset-distance: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-track,
+      .ym-pip-transport .ym-pip-repeat.is-looping .ym-pip-repeat-head { animation: none; }
+    }
     .ym-pip-vol {
       position: absolute;
       right: -2px;
@@ -676,6 +1004,80 @@
     }
     .ym-pip-seek-range:hover::-webkit-slider-thumb,
     .ym-pip-volume:hover::-webkit-slider-thumb { transform: scale(1.25); }
+    /* No knob on the playback bar either (AJ, 2026-11-16). */
+    .ym-pip-seek-range::-webkit-slider-thumb { width: 0; height: 0; opacity: 0; }
+    .ym-pip-seek-range::-moz-range-thumb { width: 0; height: 0; opacity: 0; border: 0; }
+    /* ---- sliders: the fullscreen scrubber's dimensions and behaviour --------
+       A 3px track with hairline insets that grows to 9px on hover, and a 12px
+       thumb that only appears while you are pointing at it - so nothing sits
+       there as a stray dot, but dragging still has a grab handle. */
+    .ym-pip-seek-range,
+    .ym-pip-volume {
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(90deg,
+        rgba(255, 255, 255, .92) 0 var(--ym-pip-fill, 0%),
+        rgba(255, 255, 255, .18) var(--ym-pip-fill, 0%) 100%);
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, .16),
+        inset 0 1px 0 rgba(255, 255, 255, .22);
+      transition: height .18s ease;
+    }
+    .ym-pip-seek-range:hover,
+    .ym-pip-volume:hover { height: 9px; }
+    .ym-pip-seek-range::-webkit-slider-thumb,
+    .ym-pip-volume::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      margin-top: -4.5px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    /* The thumb stays invisible even on hover (AJ, 2026-11-16: "a dot shows when
+       hovering over the sliders pls fix that"). The track alone carries the
+       value, the same as the volume slider before the fullscreen restyle; the
+       drag readout pill already tells you where you are pointing. */
+    .ym-pip-seek-range:hover::-webkit-slider-thumb,
+    .ym-pip-volume:hover::-webkit-slider-thumb,
+    .ym-pip-seek-range:focus::-webkit-slider-thumb,
+    .ym-pip-volume:focus::-webkit-slider-thumb { opacity: 0; }
+    .ym-pip-seek-range::-moz-range-thumb,
+    .ym-pip-volume::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
+      opacity: 0;
+    }
+    .ym-pip-seek-range:hover::-moz-range-thumb,
+    .ym-pip-volume:hover::-moz-range-thumb { opacity: 0; }
+    /* The fullscreen readout pill, floating over the slider while dragging. */
+    .ym-pip-tip {
+      position: absolute;
+      transform: translateX(-50%);
+      background: rgba(18, 18, 20, .92);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 6px 9px;
+      border-radius: 8px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .15s ease;
+      z-index: 8;
+      font-variant-numeric: tabular-nums;
+    }
+    .ym-pip-tip-on { opacity: 1; }
     .ym-pip-hint {
       flex: 0 0 auto;
       text-align: center;
@@ -868,8 +1270,9 @@
     artist.id = "ym-pip-artist";
     meta.appendChild(artist);
     head.appendChild(meta);
-    // Source label (AJ, 2026-10-07) — dim, pushed to the far right of the header.
-    head.appendChild(makeEl(doc, "div", "ym-pip-source", "Aurora Lyrics"));
+    // The dim "Aurora Lyrics" source label that used to sit at the far right of
+    // the header is gone (AJ, 2026-11-16): the window already says what it is,
+    // and the corner read as clutter next to the Apple-Music-style header.
     board.appendChild(head);
 
     // ---- lyric stage ------------------------------------------------------
@@ -937,6 +1340,22 @@
       // the window reads as a single surface instead of three loose rows.
       const controls = makeEl(doc, "div", "ym-pip-controls");
       controls.id = "ym-pip-controls";
+      // Value readout while a slider is dragged, the same pill the fullscreen
+      // scrubber floats above its thumb.
+      const pipTip = makeEl(doc, "div", "ym-pip-tip");
+      controls.appendChild(pipTip);
+      const repositionTip = (input, text) => {
+        const cardBox = controls.getBoundingClientRect();
+        const box = input.getBoundingClientRect();
+        const min = Number(input.min) || 0;
+        const max = Number(input.max) || 100;
+        const ratio = Math.max(0, Math.min(1, (Number(input.value) - min) / Math.max(1, max - min)));
+        pipTip.textContent = text;
+        pipTip.style.left = Math.round(box.left - cardBox.left + ratio * box.width) + "px";
+        pipTip.style.top = Math.round(box.top - cardBox.top - 28) + "px";
+        pipTip.classList.add("ym-pip-tip-on");
+      };
+      const hideTip = () => pipTip.classList.remove("ym-pip-tip-on");
       // ---- seek row (AJ, 2026-10-07) --------------------------------------
       // Times either side of a range, mirroring the fullscreen scrubber. The range
       // is a 0..1000 RATIO, so it never depends on the duration arriving first.
@@ -963,7 +1382,14 @@
       seek.addEventListener("input", () => {
         pipSeekUserAt = performance.now();
         setRangeFill(seek);
+        const pTip = player();
+        const durMs = pTip && pTip.getDurationMs ? Number(pTip.getDurationMs()) : 0;
+        const ms = (Number(seek.value) / 1000) * (Number.isFinite(durMs) ? durMs : 0);
+        const totalS = Math.max(0, Math.round(ms / 1000));
+        repositionTip(seek, Math.floor(totalS / 60) + ":" + String(totalS % 60).padStart(2, "0"));
       });
+      seek.addEventListener("change", hideTip);
+      seek.addEventListener("pointerup", hideTip);
       setRangeFill(seek);
       const commitSeek = () => {
         pipSeekUserAt = performance.now();
@@ -988,16 +1414,17 @@
       shuffle.title = "Shuffle";
       shuffle.setAttribute("aria-label", "Shuffle");
       shuffle.setAttribute("aria-pressed", "false");
-      shuffle.appendChild(svgIcon(doc, ICON_SHUFFLE));
+      shuffle.appendChild(partSvg(doc, PART_ICON_SHUFFLE, "0 0 24 24"));
       shuffle.addEventListener("click", () => {
         if (kit && kit.clickPlayerButton) kit.clickPlayerButton("shuffle");
+        pulsePipToggle(shuffle);
       });
 
-      const prev = makeEl(doc, "button", "");
+      const prev = makeEl(doc, "button", "ym-pip-skip ym-pip-prev");
       prev.type = "button";
       prev.title = "Previous";
       prev.setAttribute("aria-label", "Previous");
-      prev.appendChild(svgIcon(doc, ICON_PREV));
+      prev.appendChild(partSvg(doc, [{ tag: "path", attrs: { d: FS_SKIP_D, fill: "currentColor", "fill-rule": "nonzero" } }], "0 0 35 20"));
       prev.addEventListener("click", () => { const p = player(); if (p && p.previous) p.previous(); });
 
       const main = makeEl(doc, "button", "ym-pip-main");
@@ -1005,14 +1432,14 @@
       main.type = "button";
       main.title = "Play / pause";
       main.setAttribute("aria-label", "Play or pause");
-      main.appendChild(svgIcon(doc, ICON_PLAY));
+      main.appendChild(pipPlayMorphSvg(doc));
       main.addEventListener("click", () => { const p = player(); if (p && p.togglePlay) p.togglePlay(); });
 
-      const next = makeEl(doc, "button", "");
+      const next = makeEl(doc, "button", "ym-pip-skip ym-pip-next");
       next.type = "button";
       next.title = "Next";
       next.setAttribute("aria-label", "Next");
-      next.appendChild(svgIcon(doc, ICON_NEXT));
+      next.appendChild(partSvg(doc, [{ tag: "path", attrs: { d: FS_SKIP_D, fill: "currentColor", "fill-rule": "nonzero" } }], "0 0 35 20"));
       next.addEventListener("click", () => { const p = player(); if (p && p.next) p.next(); });
 
       const repeat = makeEl(doc, "button", "ym-pip-opt ym-pip-repeat");
@@ -1021,9 +1448,11 @@
       repeat.title = "Repeat";
       repeat.setAttribute("aria-label", "Repeat");
       repeat.setAttribute("aria-pressed", "false");
-      repeat.appendChild(svgIcon(doc, ICON_REPEAT));
+      repeat.appendChild(partSvg(doc, PART_ICON_REPEAT, "0 0 24 24"));
       repeat.addEventListener("click", () => {
         if (kit && kit.clickPlayerButton) kit.clickPlayerButton("repeat");
+        pulsePipToggle(repeat);
+        animatePipLoop(repeat);
       });
 
       // Volume: a small speaker icon + a range, wired straight to the player API.
@@ -1044,7 +1473,10 @@
         // slider up jumped straight to max (AJ, 2026-10-07).
         if (p && typeof p.setVolume === "function") p.setVolume(Number(vol.value) / 100);
         setRangeFill(vol);
+        repositionTip(vol, Math.round(Number(vol.value)) + "%");
       });
+      vol.addEventListener("change", hideTip);
+      vol.addEventListener("pointerup", hideTip);
       setRangeFill(vol);
       volWrap.appendChild(vol);
       pipVolumeEl = vol;
@@ -1856,6 +2288,29 @@
   // own per-letter timing (letterEnd = end - 250ms, split evenly across chars).
   // Each element gets its own spring set from the panel's kit, mirroring the
   // panel's structure: a word-level store, plus a letter store per character.
+  // The fullscreen player plays one 0.52s glow pulse when shuffle or repeat is
+  // switched on. The PiP gets the same cue through the same class name, so the
+  // two surfaces cannot drift apart again.
+  // The fullscreen chip runs its loop-rail animation by holding `is-looping` for
+  // one animation length; the same class drives the same keyframes here.
+  function animatePipLoop(el) {
+    if (!el || !el.classList) return;
+    el.classList.remove("is-looping");
+    void el.offsetWidth;
+    el.classList.add("is-looping");
+    setTimeout(() => { try { el.classList.remove("is-looping"); } catch (e) {} }, 640);
+  }
+
+  function pulsePipToggle(el) {
+    if (!el || !el.classList) return;
+    el.classList.remove("is-glowing");
+    // Read the width so a second click restarts the animation instead of being
+    // swallowed as "class already present".
+    void el.offsetWidth;
+    el.classList.add("is-glowing");
+    setTimeout(() => { try { el.classList.remove("is-glowing"); } catch (e) {} }, 560);
+  }
+
   function makeAnimRecord(el, startMs, endMs, kind, lineTimed) {
     return {
       el: el,
@@ -2448,6 +2903,20 @@
         targetYOffset = splines.LetterYOffsetSpline.at(1);
         targetGlow = splines.GlowSpline.at(1);
       }
+      // OVERRIDE PASS - the clause the PiP was missing, and the reason its
+      // long-word glow looked old. The proximity pass above is directionless: it
+      // lights the letters the playhead has NOT REACHED exactly as hard as the
+      // ones it just left (at distance 1 the falloff is 1/(1+0.9) = 0.526, and
+      // the spline peaks at 1.433, so an unsung neighbour sits at ~0.75 -> a
+      // 13px halo at full opacity). The panel pins those letters to rest in
+      // 18-animation ("Upstream LyricsAnimator.ts:1092-1102"), which makes the
+      // glow TRAIL the karaoke point as a travelling pulse. Without it the PiP
+      // smeared a broad bloom ~2 letters ahead of the sung one - the old look.
+      if (state === "NotSung") {
+        targetScale = restingScale;
+        targetYOffset = restingYOffset;
+        targetGlow = restingGlow;
+      }
       L.springs.Scale.SetGoal(kit.blendSyllableAnimation(restingScale, targetScale));
       L.springs.YOffset.SetGoal(kit.blendVerticalAnimation(restingYOffset, targetYOffset));
       L.springs.Glow.SetGoal(kit.blendSyllableAnimation(restingGlow, targetGlow));
@@ -2532,7 +3001,16 @@
     // the same or every line/word lands that offset early. Mirror the panel's
     // animate(): lyricPositionMs = positionMs - getOffsetForPosition(positionMs).
     const lyricPos = lyricPositionMs(pos);
-    const paused = p.isPaused ? p.isPaused() : false;
+    // NOT p.isPaused(): YTMod's flag lags the element by a frame or more and
+    // reports "playing" on players that have already stopped, which left the
+    // PiP's play/pause glyph stuck on the pause bars after a pause. The <video>
+    // element's own flag is the truth; pick the real one, not a hover preview or
+    // an ad surface.
+    const videoEl = [...document.querySelectorAll("video")]
+      .find((v) => v.duration > 1 && v.readyState >= 2) || null;
+    const paused = videoEl
+      ? videoEl.paused
+      : (p.isPaused ? p.isPaused() : false);
     // The music-video mirror is polled, not built per frame: attaching a stream
     // is cheap but not free, and the video element YTM recycles only changes on
     // a track change.
@@ -2566,14 +3044,7 @@
       }
     }
     const toggle = pipEl("ym-pip-toggle");
-    if (toggle) {
-      const want = paused ? ICON_PLAY : ICON_PAUSE;
-      if (toggle.dataset.icon !== want) {
-        toggle.dataset.icon = want;
-        while (toggle.firstChild) toggle.removeChild(toggle.firstChild);
-        toggle.appendChild(svgIcon(pipDoc, want));
-      }
-    }
+    if (toggle) pipSetPlayMorph(toggle, paused ? "play" : "pause", false);
     syncPipControls(p, pos);
   }
 
@@ -2636,7 +3107,11 @@
       if (repeatEl.dataset.one !== String(wantOne)) {
         repeatEl.dataset.one = String(wantOne);
         while (repeatEl.firstChild) repeatEl.removeChild(repeatEl.firstChild);
-        repeatEl.appendChild(svgIcon(pipDoc, wantOne ? ICON_REPEAT_ONE : ICON_REPEAT));
+        // Same glyph as the fullscreen chip; repeat-one carries its state in the
+        // numeral drawn inside the loop, not in a second badge.
+        repeatEl.appendChild(partSvg(pipDoc,
+          wantOne ? PART_ICON_REPEAT.concat(PART_ICON_REPEAT_ONE) : PART_ICON_REPEAT,
+          "0 0 24 24"));
       }
     }
   }
@@ -2647,6 +3122,32 @@
       // Far-line is PiP-only presentation chrome; the actual Active/Sung/
       // NotSung state is assigned from each interval in updateLineStates().
       lineEls[i].classList.toggle("ym-pip-far", activeIdx >= 0 && Math.abs(i - activeIdx) > 4);
+      // Depth blur, copied from the panel (19-animation-modes): the sung line
+      // is crisp, then 2px, 3px, 4px, 5px as it gets further away, capped at 5.
+      // A background-vocal row is a sibling ELEMENT of the same line set, so it
+      // inherits its lead line's distance and never blurs while it is still the
+      // phrase being played.
+      const distance = activeIdx >= 0 ? Math.abs(i - activeIdx) : 0;
+      // Softer than the panel (AJ, 2026-11-16: "turn the blur a little down a
+      // bit but keep it") AND bounded: a filtered line is its own compositor
+      // surface, so blurring every row of a 33-line song is exactly the kind of
+      // per-line cost that made this window stutter before. Only the five rows
+      // nearest the sung one get a filter; past that the text is already dimmed
+      // by .ym-pip-far, where a 3-5px blur just reads as haze anyway.
+      const near = distance > 0 && distance <= 5;
+      const blur = near ? Math.min(3, 1 + distance * 0.6) : 0;
+      const els = set.elements || [];
+      for (let e = 0; e < els.length; e++) {
+        const el = els[e];
+        if (!el || !el.style) continue;
+        // Panel rule 1: a line that is still being sung stays crisp even when it
+        // is not the line being read - a background phrase routinely runs past
+        // the start of the next lead, and blurring it mid-phrase is wrong.
+        // updateLineStates() runs before this, so the class is current.
+        const singing = el.classList && el.classList.contains("Active");
+        const value = (blur === 0 || singing) ? "none" : "blur(" + blur + "px)";
+        if (el.style.filter !== value) el.style.filter = value;
+      }
     });
     centerOn(activeIdx);
   }

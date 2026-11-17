@@ -1,6 +1,17 @@
   function enterFullscreenMode() {
     if (fsActive || !panelEl) return;
     fsActive = true;
+    // A track with no lyrics already built its empty state while the panel was
+    // docked, so entering fullscreen rebuilds nothing and the composition stayed
+    // in the side layout. Adopt the state once the panel has been moved into the
+    // overlay and the panes have their normal geometry to measure (AJ,
+    // 2026-11-16: "going in fullscreen doesnt move the stuff in the middle").
+    window.setTimeout(() => {
+      if (!fsActive || !fsOverlay || !linesRoot) return;
+      if (!linesRoot.querySelector(".ym-sl-empty")) return;
+      setFsNoLyricsState(true);
+      watchFsNoLyrics();
+    }, 120);
     // Fullscreen owns the panel from here, so tab-driven setPanel() is ignored
     // (it early-returns on fsActive). But animate() gates on panelVisible, so
     // entering from a non-Lyrics tab (Comments, …) would leave panelVisible
@@ -93,6 +104,16 @@
     fsNextUp = h("div", { class: "ym-sl-fs-nextup", "aria-hidden": "true" });
     fsNextUp.style.fontFamily = fsTitleEl.style.fontFamily;
     fsOverlay.appendChild(fsNextUp);
+    // Bottom-right escape hatch for a track with no lyrics: the lyrics column is
+    // faded out in that state, so the panel's own empty-state button is not
+    // reachable (AJ, 2026-11-16). Hidden unless .ym-sl-fs-no-lyrics is on.
+    const fsSearchCta = h("button", {
+      class: "ym-sl-fs-search-cta",
+      type: "button",
+      text: "Search lyrics",
+    });
+    fsSearchCta.addEventListener("click", () => toggleSearchPanel());
+    fsOverlay.appendChild(fsSearchCta);
 
     // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
     // abandoned, so there is nothing left to open. The Next up list above is

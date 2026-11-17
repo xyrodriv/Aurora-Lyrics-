@@ -18,6 +18,9 @@
     blurPasses: 6,
     animationSpeed: 0.1,
     saturation: 1.2,
+    brightness: 1,
+    contrast: 1,
+    outputSaturation: 1,
     // Dithering is the fixed kawarp-core default, not a user setting.
     transitionDuration: 1000,
     tintIntensity: 0,
@@ -68,6 +71,8 @@
   let pageBgHost = null;
   let pageBarBlur = null;
   let pageScrollHandler = null;
+  let pageChromeRaf = 0;
+  let pageChromeState = "";
   let rootObserver = null;
   let resizeObserver = null;
   let kawarpCanvas = null;
@@ -83,6 +88,12 @@
   // and hides, guaranteeing the two never animate at the same time; resume()
   // restores it on exit.
   let kawarpSuspended = false;
+  // A lost WebGL context paints the canvas blank (Chromium can leave it white)
+  // and never draws again on its own - the "Kawarp went white and only a
+  // refresh fixed it" report. See onKawarpContextLost().
+  let kawarpLostTimer = 0;
+  let kawarpLostBackoffMs = 400;
+  let kawarpLastRebuildAt = 0;
 
   // Performance mode (AJ, 2026-10-26), mirrored into every add-on's settings by
   // the content script. Ultra = the untouched theme; Normal = 30fps backdrop and
@@ -96,8 +107,17 @@
     return PERFORMANCE_MODES.indexOf(mode) === -1 ? "ultra" : mode;
   }
 
+  // Ultra used to mean "uncapped", so on a 170 Hz display the backdrop ran 170
+  // full-screen shader passes plus a CSS filter pass every second. The warp is a
+  // slow, blurry drift: past ~60 paints nothing on screen changes, but the GPU
+  // work starves the compositor and the whole page reads as low-fps. Ultra keeps
+  // its resolution, brightness and live video sampling - only the wasted paints
+  // go. (Kawarp skips frames without advancing its clock, so the motion speed is
+  // unchanged.)
   function kawarpFpsForPerformance() {
-    return performanceMode === "low" ? 24 : performanceMode === "normal" ? 30 : 0;
+    if (performanceMode === "low") return 24;
+    if (performanceMode === "normal") return 30;
+    return 60;
   }
 
   function videoSamplingAllowed() {
@@ -126,15 +146,25 @@
     KAWARP_OPTIONS.warpIntensity = currentSettings.warpIntensity;
     KAWARP_OPTIONS.blurPasses = currentSettings.blurPasses;
     KAWARP_OPTIONS.saturation = currentSettings.saturation;
-    if (kawarpCanvas) {
-      kawarpCanvas.style.filter =
-        `saturate(${currentSettings.saturation}) brightness(${currentSettings.brightness}) contrast(${currentSettings.contrast || 1})`;
-    }
+    // Grade the backdrop inside the shader. This used to be a CSS filter on the
+    // canvas, which made the compositor run a second full-screen pass over a
+    // texture that repaints every frame; kawarp-core now applies the same
+    // saturate/brightness/contrast maths at the end of its output shader.
+    const gradeBrightness = Number(currentSettings.brightness) || 1;
+    const gradeContrast = Number(currentSettings.contrast) || 1;
+    const gradeSaturation = Number(currentSettings.saturation) || 1;
+    KAWARP_OPTIONS.brightness = gradeBrightness;
+    KAWARP_OPTIONS.contrast = gradeContrast;
+    KAWARP_OPTIONS.outputSaturation = gradeSaturation;
+    if (kawarpCanvas) kawarpCanvas.style.filter = "";
     if (kawarpInstance) {
       kawarpInstance.setOptions({
         warpIntensity: currentSettings.warpIntensity,
         blurPasses: currentSettings.blurPasses,
         saturation: currentSettings.saturation,
+        brightness: gradeBrightness,
+        contrast: gradeContrast,
+        outputSaturation: gradeSaturation,
       });
       try { kawarpInstance.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
     }
@@ -408,7 +438,6 @@
       transform: none;
       -webkit-mask-image: none;
       mask-image: none;
-      filter: saturate(1.2) brightness(.60);
     }
     .ym-dynamic-page-bg-host .ym-dynamic-kawarp-bg.ready { opacity: .88; }
     .ym-dynamic-page-bg-host .ym-dynamic-custom-img {
@@ -694,7 +723,6 @@
       pointer-events: none;
       transform: scaleX(1.08);
       transform-origin: center center;
-      filter: saturate(1.7) brightness(.72);
       -webkit-mask-image: linear-gradient(
         90deg,
         transparent 0%,
@@ -744,17 +772,34 @@
       document.querySelector("ytmusic-player-page");
   }
 
-  function syncPageChrome() {
+  function applyPageChrome() {
     if (!pageBgRoot) return;
     const isSongPage = window.location.pathname === "/watch";
-    const scrollTop = Math.max(
-      Number(window.scrollY) || 0,
-      document.documentElement ? Number(document.documentElement.scrollTop) || 0 : 0,
-      document.body ? Number(document.body.scrollTop) || 0 : 0
-    );
+    // window.scrollY is the one scroll metric that does not have to flush style
+    // and layout first. documentElement.scrollTop and body.scrollTop both do,
+    // and this used to run straight inside a scroll handler - the profile showed
+    // it as "Recalculate style dynamic.js:766" for 18% of a 5 s recording.
+    const scrollTop = Number(window.scrollY) || 0;
+    // One class toggle on ytmusic-app invalidates the whole app AND makes
+    // Chromium rebuild the compositor layer tree (Layerize was 29% of that same
+    // profile), so only touch the DOM when the answer actually changed.
+    const next = (isSongPage ? "song" : "home") + (scrollTop > 2 ? "+scrolled" : "");
+    if (next === pageChromeState) return;
+    pageChromeState = next;
     pageBgRoot.classList.toggle("ym-dynamic-song-mode", isSongPage);
     pageBgRoot.classList.toggle("ym-dynamic-home-mode", !isSongPage);
     pageBgRoot.classList.toggle("ym-dynamic-topbar-scrolled", scrollTop > 2);
+  }
+
+  // Scroll events fire once per scroller per frame (window, the app's own pane,
+  // the add-ons panel's ledger ...), and the capture listener below sees all of
+  // them. Coalesce to one pass per frame and let the state check drop the rest.
+  function syncPageChrome() {
+    if (!pageBgRoot || pageChromeRaf) return;
+    pageChromeRaf = requestAnimationFrame(() => {
+      pageChromeRaf = 0;
+      applyPageChrome();
+    });
   }
 
   function mountPageBackground() {
@@ -777,6 +822,7 @@
       getComputedStyle(pageBgRoot).position === "static"
     );
     if (pageBgHost.parentElement !== pageBgRoot) pageBgRoot.prepend(pageBgHost);
+    pageChromeState = "";
     syncPageChrome();
     return true;
   }
@@ -809,8 +855,13 @@
     const rect = pageBgHost.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    const width = Math.max(1, Math.round(rect.width * dpr));
-    const height = Math.max(1, Math.round(rect.height * dpr));
+    // Half scale: the backdrop is a soft, dithered warp, so it does not need
+    // display-rate resolution to look the same. Rendering it at half size cuts
+    // the shader and the canvas' CSS filter pass to a quarter of the pixels;
+    // CSS stretches the layer back over the page. Only the dither softens.
+    const scale = dpr * 0.5;
+    const width = Math.max(1, Math.round(rect.width * scale));
+    const height = Math.max(1, Math.round(rect.height * scale));
 
     if (kawarpCanvas.width === width && kawarpCanvas.height === height) return;
     kawarpCanvas.width = width;
@@ -845,6 +896,56 @@
     kawarpSuspended = false;
     if (pageBgHost) pageBgHost.style.visibility = "";
     syncKawarpPlaybackState();
+  }
+
+  // Chromium drops a WebGL context on driver resets, GPU-process restarts and
+  // memory pressure, and a lost context never draws again: the canvas is left
+  // blank/white until the page reloads. Rebuild instead of waiting - dispose the
+  // dead instance, swap the element, and let the normal artwork path refill it.
+  // It is the same backdrop, so the fade-in is the only thing anyone sees.
+  function watchKawarpContext(canvas) {
+    if (!canvas || canvas.__ymKawarpContextWatch) return;
+    canvas.__ymKawarpContextWatch = true;
+    canvas.addEventListener("webglcontextlost", onKawarpContextLost, false);
+  }
+
+  function onKawarpContextLost(event) {
+    // preventDefault asks Chromium to hand the context back; the rebuild does
+    // not wait for it, because a context dropped under memory pressure is
+    // usually never restored.
+    try { if (event && event.preventDefault) event.preventDefault(); } catch (_) {}
+    try { if (kawarpInstance) kawarpInstance.stop(); } catch (_) {}
+    if (kawarpCanvas) kawarpCanvas.classList.remove("ready");
+    if (kawarpLostTimer) return;
+    // A healthy instance survives for minutes. One that dies seconds after a
+    // rebuild is a failing GPU, so back off rather than thrash contexts.
+    if (performance.now() - kawarpLastRebuildAt > 10000) kawarpLostBackoffMs = 400;
+    const delay = kawarpLostBackoffMs;
+    kawarpLostBackoffMs = Math.min(kawarpLostBackoffMs * 2, 30000);
+    kawarpLostTimer = setTimeout(() => {
+      kawarpLostTimer = 0;
+      rebuildKawarpAfterContextLoss();
+    }, delay);
+  }
+
+  function rebuildKawarpAfterContextLoss() {
+    if (!pageBgHost || !kawarpCanvas || !pageBgHost.isConnected) return;
+    kawarpLastRebuildAt = performance.now();
+    try { if (kawarpInstance) kawarpInstance.dispose(); } catch (_) {}
+    kawarpInstance = null;
+    const deadCanvas = kawarpCanvas;
+    const freshCanvas = deadCanvas.cloneNode(false);
+    if (deadCanvas.parentNode) deadCanvas.parentNode.replaceChild(freshCanvas, deadCanvas);
+    kawarpCanvas = freshCanvas;
+    watchKawarpContext(freshCanvas);
+    // Match the live filter in case the inline style did not survive the swap.
+    // (The full settings pass is not repeated here: it would fire a second
+    // artwork load into the instance the next line is about to fill.)
+    kawarpCanvas.style.filter = "";
+    // Emptying the cached URL sends the current artwork through the normal load
+    // path into the new instance.
+    kawarpArtworkUrl = "";
+    if (!kawarpSuspended) updateKawarpBackground(getCurrentTrack());
   }
 
   // The <video> actually showing a picture right now. YTM keeps several around
@@ -1095,6 +1196,7 @@
     kawarpCanvas = document.createElement("canvas");
     kawarpCanvas.className = "ym-dynamic-kawarp-bg";
     kawarpCanvas.setAttribute("aria-hidden", "true");
+    watchKawarpContext(kawarpCanvas);
     applySettings(currentSettings);
     const shade = document.createElement("div");
     shade.className = "ym-dynamic-kawarp-shade";
@@ -1169,6 +1271,9 @@
 
   function teardown() {
     kawarpSuspended = false;
+    if (kawarpLostTimer) { clearTimeout(kawarpLostTimer); kawarpLostTimer = 0; }
+    if (pageChromeRaf) { cancelAnimationFrame(pageChromeRaf); pageChromeRaf = 0; }
+    pageChromeState = "";
     dropArtworkAccent();
     try { delete window.__ymAuroraDynamic; } catch (_) { window.__ymAuroraDynamic = undefined; }
     if (raf) cancelAnimationFrame(raf);

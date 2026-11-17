@@ -2038,8 +2038,26 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     setJumpButtonVisible(suspended);
   }
 
+  // Same problem the Better Lyrics tick had: this engine is pumped on EVERY rAF,
+  // so on a 170 Hz display it runs ~170 times a second - setCurrentTime(), update(),
+  // kickActiveLine(), two sweeps over the line list - while a word-synced track
+  // carries 77-113 live Web Animations (103 of them the per-word "float-word").
+  // That combination is what makes Apple Music word-by-word stutter where the
+  // line-by-line path idles at 170 fps with zero animations. 80 Hz matches the
+  // Better Lyrics cap and leaves the rest of the frame alone; the engine's clocks
+  // are time-based (update() takes a delta), so the picture does not change.
+  const AMLL_DRIVE_INTERVAL_MS = 1000 / 80;
+  let amllLastDriveAt = 0;
+
   function amllDrive(positionMs) {
     if (!amllActive || !amllReady || !amllPlayer || amllSpicyTrack) return;
+    // A seek or a track change must never wait for the slot.
+    const amllDriveNow = performance.now();
+    if (amllLastDriveAt && amllDriveNow - amllLastDriveAt < AMLL_DRIVE_INTERVAL_MS) {
+      const amllJumped = Math.abs(positionMs - amllLastPositionMs) > 250;
+      if (!amllJumped) return;
+    }
+    amllLastDriveAt = amllDriveNow;
     const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;

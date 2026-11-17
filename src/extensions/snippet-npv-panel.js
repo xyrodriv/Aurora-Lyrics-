@@ -373,7 +373,10 @@ class Kawarp {
             antialias: false,
             depth: false,
             stencil: false,
-            preserveDrawingBuffer: true,
+            // Nothing reads the default framebuffer - sampling goes through
+            // FBOs + readPixels - so preserving it only forces Chromium to keep
+            // a full-frame copy of the drawing buffer alive every frame.
+            preserveDrawingBuffer: false,
             powerPreference: "high-performance",
         };
         const gl2 = options.highPrecisionInput || options.highPrecisionOutput

@@ -1067,6 +1067,117 @@
     .ym-sl-fs-media { z-index: 2; }
     .ym-sl-fs-lyrics { z-index: 3; }
 
+    /* ===== no-lyrics fullscreen composition (AJ, 2026-11-16) ===============
+       Nothing to read means nothing for the cover to sit beside: the lyrics
+       column fades out, the composition centres, and the Search CTA appears.
+       Hits centres its whole block (header + dock) as one unit, because the
+       dock is inside .ym-sl-fs-hits; the side layouts centre the media pane
+       instead, since there the cover IS the composition. No backticks here: the
+       sheet is a template literal. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics-shade {
+      opacity: 0 !important;
+    }
+    /* Hide the lyrics CONTENT, never the host: the Search sheet is a child of
+       #ym-sl-panel, so fading the host made the sheet open inside an opacity:0,
+       pointer-events:none subtree - invisible and unclickable (AJ, 2026-11-16). */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContainer,
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContent {
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits.ym-sl-fs-no-lyrics .ym-sl-fs-hits {
+      top: 50%;
+      transform: translateY(-50%);
+      transition:
+        top .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1);
+    }
+    /* The offset is measured in JS (distance from the pane's normal column to
+       the middle) and applied as a transform, so the cover AND the transport
+       travel the same distance. A transform also composites, where changing
+       left relayouts every frame of the slide. */
+    /* The translate property, NOT transform: .ym-sl-fs-media already carries
+       its own vertical-centring transform, and a transform here would replace
+       it (which is why a video track never moved - the pane is excluded from the
+       horizontal rule by the media's own transform, and the controls are not).
+       Serving both panes through translate composes with whatever transform
+       each one already has. Music videos in the side-by-side composition are
+       included; Video Background is not, because there the media is the whole
+       frame and there is nothing to centre against. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics:not(.ym-sl-fs-mode-hits):not(.ym-sl-fs-mode-background) .ym-sl-fs-media,
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics:not(.ym-sl-fs-mode-background) .ym-sl-fs-player-controls {
+      translate: var(--ym-sl-fs-nolyr-dx, 0px) 0;
+    }
+    /* The base .ym-sl-fs-media rule lower down declares transition: opacity
+       only, which is why the first pass snapped: a later single-class rule beat
+       the pane list. These carry the transition for the slide. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-media {
+      transition:
+        translate .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        left .45s cubic-bezier(.22, .61, .36, 1),
+        width .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .25s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-player-controls {
+      transition:
+        translate .45s cubic-bezier(.22, .61, .36, 1),
+        transform .45s cubic-bezier(.22, .61, .36, 1),
+        opacity .35s ease;
+    }
+    /* The way out, bottom-right: pill, no loud fill, always above the backdrop. */
+    .ym-sl-fs-search-cta {
+      position: absolute;
+      right: clamp(18px, 2.4vw, 36px);
+      bottom: clamp(18px, 2.6vh, 34px);
+      z-index: 30;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, .18);
+      background: rgba(16, 16, 20, .62);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-backdrop-filter: blur(14px);
+      backdrop-filter: blur(14px);
+      transition: opacity .22s ease, background-color .16s ease, border-color .16s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-search-cta { display: inline-flex; }
+    /* While its sheet is open the CTA steps aside; it fades back in only if the
+       listener closes the sheet without picking anything. */
+    .ym-sl-fs-overlay.ym-sl-fs-search-open .ym-sl-fs-search-cta {
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* The sheet normally drops from the panel's top edge, which in fullscreen
+       lands it under the header. With the composition cleared there is nothing
+       up there, so it opens from the bottom instead, where the CTA was. */
+    .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-search {
+      top: auto !important;
+      bottom: clamp(18px, 2.6vh, 34px) !important;
+    }
+    /* The sheet is a descendant of .ym-sl-fs-lyrics (z-index 3), so its own
+       z-index 30 was trapped in that stacking context and it painted UNDER the
+       transport layer (z-index 21). Lift the host for as long as the sheet is
+       open - the lyrics content is hidden in this state, so nothing else moves
+       with it (AJ, 2026-11-16). */
+    .ym-sl-fs-overlay.ym-sl-fs-search-open .ym-sl-fs-lyrics {
+      z-index: 25;
+    }
+    .ym-sl-fs-search-cta:hover {
+      background: rgba(30, 30, 36, .82);
+      border-color: rgba(255, 255, 255, .3);
+    }
+    .ym-sl-fs-search-cta:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, .8);
+      outline-offset: 2px;
+    }
+
     /* Legibility backdrop (Synced Lyrics setting "Legibility backdrop"): a very
        dark, slightly transparent panel with a light frost behind the lyrics so
        they stay readable over bright artwork / video. Body-level class so it
@@ -4619,8 +4730,14 @@
          container, without needing an extra wrapper element. */
       transform: translateY(calc(var(--ym-sl-lyrics-offset) + var(--ym-sl-scroll-frac, 0px)));
       transform-origin: center center;
-      -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
-      mask-image: linear-gradient(180deg, transparent 0, transparent 16px, #0f0f0f 64px, #0f0f0f calc(100% - 64px), transparent calc(100% - 16px), transparent);
+      /* No top/bottom dissolve (AJ, 2026-11-16). The 64px fades made every line
+         that crossed the panel edge read as DIMMER while the active line played,
+         which looks like a state bug, not a fade. The scrollport clips hard now:
+         lines stay at full brightness right up to the edge and leave at it. The
+         fullscreen rules below still fade, because there the scrollport is the
+         whole screen and the controls need the room. */
+      -webkit-mask-image: none;
+      mask-image: none;
       transition: opacity .25s ease;
     }
     /* Fullscreen: the scrollport is now the whole screen height, so the fade
@@ -5074,10 +5191,10 @@
        letters, the "bright outer layer" AJ reported twice (2026-10-22).
        Lowering the alpha only scaled that rim down; it cannot remove it.
        #ym-sl-amll-host gets away with a white stroke because its fill is opaque.
-       Word-by-word gets the heaviest cut, line-synced matches AMLL's 0.6px,
-       and plain (static) TTML only a touch heavier than before. */
+       Word-by-word keeps the old, unstroked weight. Line-synced matches AMLL's
+       0.6px, and plain (static) TTML only a touch heavier than before. */
     #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static) {
-      --ym-sl-lyric-stroke: 0.75px;
+      --ym-sl-lyric-stroke: 0;
     }
     #ym-sl-panel.SpicyRenderer .line.line-timed {
       --ym-sl-lyric-stroke: 0.6px;
@@ -7214,10 +7331,10 @@
     }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-words { transform: translateX(-9.5px); }
     .ym-sl-fs-art-swap.is-left .ym-sl-fs-art-swap-art { transform: translateX(9.5px); }
-    /* The heart sits in the middle of the cover, the way it does in Spicy
-       Lyrics' NowBar. It shares the art-ui reveal with the swap button, so
-       both appear from one hover; the glyph and its fill come straight from
-       their Icons.Heart, including the long spring curve on the scale. */
+    /* The like affordance sits in the middle of the cover. It shares the
+       art-ui reveal with the swap button, so both appear from one hover; the
+       spring curve on the scale is unchanged, only the glyph is new (a
+       thumbs-up drawn in the same stroke language as the other icons). */
     .ym-sl-fs-art-like {
       -webkit-appearance: none;
       appearance: none;
@@ -7263,9 +7380,9 @@
           1.01 66.8%, 1
         );
     }
-    .ym-sl-fs-heart-fill { opacity: 0; transition: opacity .25s; }
-    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-heart-fill { opacity: .25; }
-    .ym-sl-fs-art-like.is-liked .ym-sl-fs-heart-fill { opacity: 1; }
+    .ym-sl-fs-thumb-fill { opacity: 0; transition: opacity .25s; }
+    .ym-sl-fs-art-like:not(.is-liked):hover .ym-sl-fs-thumb-fill { opacity: .25; }
+    .ym-sl-fs-art-like.is-liked .ym-sl-fs-thumb-fill { opacity: 1; }
     .ym-sl-fs-art-like:hover svg { scale: .925; }
     .ym-sl-fs-art-like.is-press svg { scale: 1.245; }
     .ym-sl-fs-art-like.is-release svg { scale: .755; }

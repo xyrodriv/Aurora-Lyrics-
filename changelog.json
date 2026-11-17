@@ -1,6 +1,18 @@
 {
   "releases": [
     {
+      "version": "1.5.0",
+      "date": "2026-11-17",
+      "title": "A fullscreen for empty tracks and a rebuilt picture-in-picture view.",
+      "features": [
+        "Opening fullscreen on a track without lyrics now keeps the artwork and controls in a proper layout, with a Search lyrics button in reach.",
+        "Picture-in-picture lyrics have been rebuilt to match the fullscreen player, with smoother lyric fades and easier seeking and volume control."
+      ],
+      "fixes": [
+        "Aurora now asks for fewer site permissions; iTunes and Deezer access are gone."
+      ]
+    },
+    {
       "version": "1.4.0",
       "date": "2026-11-16",
       "title": "A refreshed fullscreen layout and a new Better Lyrics renderer.",

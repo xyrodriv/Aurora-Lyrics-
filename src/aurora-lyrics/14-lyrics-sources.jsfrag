@@ -410,7 +410,7 @@
   /* Uploader-styled titles never match a catalogue. The live console showed
      queries like "more than life ft. glaive (Official Music Video) (feat.
      glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
-     exclusive" — those miss MusicBrainz, ListenBrainz AND Deezer every time.
+     exclusive" — those miss MusicBrainz and ListenBrainz every time.
      Strip the noise before querying anything (AJ, 2026-10-19). */
   const TITLE_NOISE_RE =
     /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;

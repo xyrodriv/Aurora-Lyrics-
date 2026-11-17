@@ -168,6 +168,9 @@ const OUTPUT_SHADER = `
   uniform float u_time;
   uniform float u_scale;
   uniform vec2 u_resolution;
+  uniform float u_brightness;
+  uniform float u_contrast;
+  uniform float u_outputSaturation;
   varying vec2 v_texCoord;
 
   highp float hash(highp vec3 p) {
@@ -192,6 +195,17 @@ const OUTPUT_SHADER = `
     highp vec2 pixelPos = floor(v_texCoord * u_resolution);
     highp float noise = hash(vec3(pixelPos, floor(u_time * 60.0)));
     color.rgb += (noise - 0.5) * u_dithering;
+
+    // Output grade. The page backdrop used to get saturate()/brightness()/
+    // contrast() from a CSS filter on the canvas, which made the compositor run
+    // a second full-screen pass over a texture that changes every frame. Same
+    // maths, same Filter Effects order, done here for free. 1/1/1 is a no-op,
+    // so the fullscreen and NPV instances are byte-for-byte unchanged.
+    float outputLuma = dot(color.rgb, vec3(0.213, 0.715, 0.072));
+    color.rgb = mix(vec3(outputLuma), color.rgb, u_outputSaturation);
+    color.rgb *= u_brightness;
+    color.rgb = (color.rgb - 0.5) * u_contrast + 0.5;
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
 
     gl_FragColor = color;
   }
@@ -276,6 +290,9 @@ export class Kawarp {
     _animationSpeed;
     _targetAnimationSpeed;
     _saturation;
+    _brightness;
+    _contrast;
+    _outputSaturation;
     _tintColor;
     _tintIntensity;
     _dithering;
@@ -341,7 +358,10 @@ export class Kawarp {
             antialias: false,
             depth: false,
             stencil: false,
-            preserveDrawingBuffer: true,
+            // Nothing reads the default framebuffer - sampling goes through
+            // FBOs + readPixels - so preserving it only forces Chromium to keep
+            // a full-frame copy of the drawing buffer alive every frame.
+            preserveDrawingBuffer: false,
             powerPreference: "high-performance",
         };
         const gl2 = options.highPrecisionInput || options.highPrecisionOutput
@@ -368,6 +388,12 @@ export class Kawarp {
         this._targetAnimationSpeed = this._animationSpeed;
         this._transitionDuration = options.transitionDuration ?? 1000;
         this._saturation = options.saturation ?? 1.5;
+        // Output grade, the three values a CSS filter used to apply on the
+        // canvas element. Defaults are neutral so every other caller is
+        // unaffected.
+        this._brightness = options.brightness ?? 1;
+        this._contrast = options.contrast ?? 1;
+        this._outputSaturation = options.outputSaturation ?? 1;
         this._tintColor = options.tintColor ?? [0.157, 0.157, 0.235];
         this._tintIntensity = options.tintIntensity ?? 0.15;
         // Fixed grain for the Aurora backdrops: the old 0.008 was only about
@@ -422,6 +448,9 @@ export class Kawarp {
                 time: gl.getUniformLocation(this.outputProgram, "u_time"),
                 scale: gl.getUniformLocation(this.outputProgram, "u_scale"),
                 resolution: gl.getUniformLocation(this.outputProgram, "u_resolution"),
+                brightness: gl.getUniformLocation(this.outputProgram, "u_brightness"),
+                contrast: gl.getUniformLocation(this.outputProgram, "u_contrast"),
+                outputSaturation: gl.getUniformLocation(this.outputProgram, "u_outputSaturation"),
             },
         };
         // Create buffers
@@ -513,6 +542,27 @@ export class Kawarp {
             }
         }
     }
+    get brightness() {
+        return this._brightness;
+    }
+    set brightness(value) {
+        const next = Number(value);
+        this._brightness = Number.isFinite(next) ? Math.max(0, Math.min(4, next)) : 1;
+    }
+    get contrast() {
+        return this._contrast;
+    }
+    set contrast(value) {
+        const next = Number(value);
+        this._contrast = Number.isFinite(next) ? Math.max(0, Math.min(4, next)) : 1;
+    }
+    get outputSaturation() {
+        return this._outputSaturation;
+    }
+    set outputSaturation(value) {
+        const next = Number(value);
+        this._outputSaturation = Number.isFinite(next) ? Math.max(0, Math.min(4, next)) : 1;
+    }
     get dithering() {
         return this._dithering;
     }
@@ -536,6 +586,12 @@ export class Kawarp {
             this.transitionDuration = options.transitionDuration;
         if (options.saturation !== undefined)
             this.saturation = options.saturation;
+        if (options.brightness !== undefined)
+            this.brightness = options.brightness;
+        if (options.contrast !== undefined)
+            this.contrast = options.contrast;
+        if (options.outputSaturation !== undefined)
+            this.outputSaturation = options.outputSaturation;
         if (options.tintColor !== undefined)
             this.tintColor = options.tintColor;
         if (options.tintIntensity !== undefined)
@@ -554,6 +610,9 @@ export class Kawarp {
             animationSpeed: this._targetAnimationSpeed,
             transitionDuration: this._transitionDuration,
             saturation: this._saturation,
+            brightness: this._brightness,
+            contrast: this._contrast,
+            outputSaturation: this._outputSaturation,
             tintColor: this._tintColor,
             tintIntensity: this._tintIntensity,
             dithering: this._dithering,
@@ -1342,6 +1401,9 @@ export class Kawarp {
         gl.bindTexture(gl.TEXTURE_2D, this.warpFBO.texture);
         gl.uniform1i(this.uniforms.output.texture, 0);
         gl.uniform1f(this.uniforms.output.saturation, this._saturation);
+        gl.uniform1f(this.uniforms.output.brightness, this._brightness);
+        gl.uniform1f(this.uniforms.output.contrast, this._contrast);
+        gl.uniform1f(this.uniforms.output.outputSaturation, this._outputSaturation);
         gl.uniform1f(this.uniforms.output.dithering, this._dithering);
         gl.uniform1f(this.uniforms.output.time, time);
         gl.uniform1f(this.uniforms.output.scale, this._scale);
