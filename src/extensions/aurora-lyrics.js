@@ -22943,7 +22943,12 @@
   // who previously missed the track without making them wait long.
   const COMMUNITY_CACHE_NEGATIVE_TTL_MS = 2 * 60 * 1000;
   const COMMUNITY_CACHE_LIMIT = 80;
-  const COMMUNITY_REQUEST_TIMEOUT_MS = 2500;
+  // A cold Worker isolate can spend a couple of seconds on the D1 schema
+  // check before the public lookup runs. Give the active track enough room to
+  // finish instead of aborting a request that is about to return its TTML. The
+  // next-track prefetch stays short because a miss there is harmless.
+  const COMMUNITY_REQUEST_TIMEOUT_MS = 6000;
+  const COMMUNITY_PREFETCH_TIMEOUT_MS = 3000;
 
   let communityCache = null;
   let communityCacheLoad = null;
@@ -23113,14 +23118,19 @@
         if (typeof AbortSignal !== "undefined"
           && typeof AbortSignal.any === "function"
           && typeof AbortSignal.timeout === "function") {
-          signal = AbortSignal.any([controller.signal, AbortSignal.timeout(COMMUNITY_REQUEST_TIMEOUT_MS)]);
+          const timeoutMs = options && options.prefetch
+            ? COMMUNITY_PREFETCH_TIMEOUT_MS
+            : COMMUNITY_REQUEST_TIMEOUT_MS;
+          signal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
         }
       } catch (_) {}
       response = await fetch(requestUrl, {
         headers: { Accept: "application/json" },
         credentials: "omit",
         signal,
-        cache: "no-store",
+        // The API sends a five-minute public cache header. Reuse it instead of
+        // forcing every track change through a fresh Worker/D1 lookup.
+        cache: "default",
       });
     } catch (error) {
       if (controller.signal.aborted || (error && error.name === "AbortError")) return null;
