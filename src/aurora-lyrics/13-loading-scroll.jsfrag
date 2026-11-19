@@ -91,7 +91,7 @@
     if (jumpButton) {
       if (visible) {
         // The same popup doubles as "Jump to current" (synced) and "Auto scroll"
-        // (unsynced) — label it for whichever mode is active (AJ, 2026-09-18).
+        // (unsynced) — label it for whichever mode is active.
         if (staticLyricsActive) {
           jumpButton.textContent = "Auto scroll";
           jumpButton.title = "Resume automatic scrolling";
@@ -176,6 +176,9 @@
     // their wheel/touch input, which reads as the panel fighting them.
     stopScrollGlide();
     manualScrollActive = true;
+    // Stop skipping far lines while the user browses: every line they can
+    // scroll to must be painted, not just the active line's neighbourhood.
+    if (!braccatoOwnsTrack()) applyLyricCulling(lastActiveLine);
     if (braccatoOwnsTrack() && braccatoRenderer) {
       // Braccato has no scroll listener of its own; this is the explicit hook
       // that suspends its auto-scroll and raises the resume affordance.
@@ -183,7 +186,7 @@
     }
     if (staticLyricsActive) {
       // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
-      // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
+      // setJumpButtonVisible below) resumes it when tapped.
       autoScrollUserPaused = true;
     }
     setJumpButtonVisible(true);
@@ -296,7 +299,7 @@
 
        hard === false -> behavior: "auto" -> the CSS ease. One-shot only: issued
          when the target CHANGES (once per line), never per frame. */
-  /* ---- line-follow glide: a SPRING (upstream 6.3.153's model, AJ 2026-10-07) ---
+  /* ---- line-follow glide: a SPRING (upstream 6.3.153's model) ---
      Upstream drives its smooth scroll with a Fraktality `spr` spring
      (LyricsVirtualizer._smoothScrollToIndex): critically damped, ~0.8s to settle,
      and — the part that matters — a RETARGET MID-FLIGHT KEEPS THE VELOCITY, so
@@ -363,9 +366,17 @@
   // is needed (upstream applies it to their virtual container instead).
   function setScrollFraction(fraction) {
     if (!lineScrollEl) return;
-    if (Math.abs(fraction - scrollGlideFraction) < 0.01 && fraction !== 0) return;
-    scrollGlideFraction = fraction;
-    lineScrollEl.style.setProperty("--ym-sl-scroll-frac", fraction === 0 ? "0px" : (-fraction) + "px");
+    // Quantised to a quarter pixel. The carry exists to stop the list ticking a
+    // whole pixel at the slow end of the glide, and a 0.25px step is far below
+    // the granularity that fixes - but writing it at frame resolution (the old
+    // 0.01px epsilon) changed the scrollport's transform on EVERY frame, and a
+    // changed transform repaints the whole transformed subtree. In fullscreen
+    // that subtree is a 1080px-tall, masked lyric column: measured 17.7ms per
+    // frame with the per-frame carry, 11.9ms with the transform pinned.
+    const quantised = Math.round(fraction * 4) / 4;
+    if (quantised === scrollGlideFraction) return;
+    scrollGlideFraction = quantised;
+    lineScrollEl.style.setProperty("--ym-sl-scroll-frac", quantised === 0 ? "0px" : (-quantised) + "px");
   }
 
   function stopScrollGlide() {
@@ -398,7 +409,7 @@
     // glyph inside it onto a composited layer, and Chromium drops LCD sub-pixel
     // text antialiasing on composited layers — the words render a hair differently
     // and read as shifting left while the glide runs, snapping back the moment the
-    // promotion is released (AJ, 2026-10-07). The sub-pixel carry still works
+    // promotion is released. The sub-pixel carry still works
     // without it; the @property registration is what carries the perf.
     scrollGlideActive = true;
   }
@@ -481,7 +492,7 @@
      stepScrollSpring, stopScrollSpring). It was DEAD — its target was never set
      from outside — and it is superseded by the glide above, which drives the exact
      `spr` Spring class (frame-rate independent, velocity-carrying) instead of
-     hand-integrated Euler steps. Removed 2026-10-07; the four lifecycle sites now
+     hand-integrated Euler steps. Removed; the four lifecycle sites now
      call stopScrollGlide(). */
 
   function scrollActiveLineIntoView(element, force) {
@@ -495,7 +506,6 @@
     const lineRect = element.getBoundingClientRect();
     const viewportRect = lineScrollEl.getBoundingClientRect();
     const lineCenter = lineRect.top + lineRect.height / 2;
-    const viewportCenter = viewportRect.top + viewportRect.height / 2;
     // Side-by-side and background keep the true centre. Hits lifts the active
     // line above it, because reading near the bottom of a tall column makes the
     // eye travel down on every line change.
@@ -570,7 +580,7 @@
      pass there is no active line at all until the first lyric starts - so the
      normal line-follow retarget has nothing to aim at and the panel sat at the
      bottom for the whole intro, then glided the entire song height in one
-     sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
+     sweep once line 1 finally began (, repeat-one in fullscreen).
      Place it NOW, on the line the new position belongs to (the first line when
      the pass starts in an intro), and do not animate: the user did not scroll,
      the track restarted. */
@@ -596,7 +606,7 @@
   // (unsynced) lyrics: scrollTop = progress * maxScroll, eased each frame. At
   // song start progress is 0 (top), at the end it is 1 (bottom). A small lerp
   // factor keeps it slow and fluid; if playback is paused the target is fixed so
-  // the panel simply settles and holds (AJ, 2026-09-18).
+  // the panel simply settles and holds.
   function driveStaticAutoScroll(positionMs) {
     const player = window.YTMod && window.YTMod.player;
     const durationMs = player && typeof player.getDurationMs === "function"
@@ -990,7 +1000,7 @@
   // these as NoKaraoke static blocks and, because their time window is empty,
   // they resolve to the "Sung" (fully-filled) state at every playback position
   // and the active-line search never matches them, so the panel shows them all
-  // at once with no karaoke sweep and no auto-scroll (AJ, 2026-09-18).
+  // at once with no karaoke sweep and no auto-scroll.
   function parsePlain(text) {
     const lines = String(text || "")
       .replace(/\r/g, "")
@@ -1084,7 +1094,7 @@
       // A TTML loaded from a local file (not via the Spicy Lyrics API) has no
       // provider and no credited people — the attribution rule governs API
       // responses, not files the user brought. Surface it as a Local Database
-      // credit instead of showing nothing — AJ, 2026-09-26. No url, so
+      // credit instead of showing nothing —. No url, so
       // buildPersonRow renders it as plain text (no dead link).
       currentProvider = "";
       currentMaker = null;
@@ -1147,7 +1157,7 @@
     }
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
-    // Synced lyrics always win when both are present (AJ, 2026-09-18).
+    // Synced lyrics always win when both are present.
     if (data && data.syncedLyrics) {
       staticLyricsActive = false;
       const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
@@ -1297,7 +1307,6 @@
   // Sibling of selectLRCLIBResult for plain (unsynced) entries. Only used as a
   // last-resort auto-fetch fallback when no synced result exists, so unsynced
   // LRCLIB lyrics render automatically instead of reporting "no lyrics"
-  // (AJ, 2026-09-18).
   function selectLRCLIBPlainResult(results, track) {
     const candidates = Array.isArray(results)
       ? results.filter((result) => result

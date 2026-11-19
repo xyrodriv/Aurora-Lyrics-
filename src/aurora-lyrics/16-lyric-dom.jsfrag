@@ -49,7 +49,7 @@
 
   // Does the whole-word join apply to this line? `joinSyllables` is the master
   // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
-  // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
+  // background-vocal lines while the lead lines stay joined.
   // Defaults to ON, which is the historical behaviour — bg lines joined too.
   function joinApplies(background) {
     if (!currentSettings.joinSyllables) return false;
@@ -60,7 +60,7 @@
   function makeWord(word, isLast, lineTimed, noKaraoke, background) {
     // An unsynced line (no real per-word timing) must not spawn syllable/letter
     // karaoke springs — that is what tanks FPS on partially-synced TTML imports
-    // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
+    //. Force it to a plain word so animateWord shows it as a
     // static block.
     const suppressKaraoke = !!(noKaraoke && !lineTimed);
     const start = word.StartTime * 1000;
@@ -70,7 +70,7 @@
     // become a letterGroup: makeLetterGroup() would spawn one karaoke spring per
     // CHARACTER, so a 40-character line turns into 40 animated spans each with a
     // ~90ms window, while the line-level fill runs over the full multi-second
-    // window. The result is the "wavy and glowy" drift AJ sees — it reads as an
+    // window. The result is the "wavy and glowy" drift sees — it reads as an
     // animation bug, not as line-synced lyrics.
     //
     // Keeping it a plain `.word` hands the whole thing to the line-level fill:
@@ -83,9 +83,9 @@
       !word.DisableLetterAnimation &&
       !word.disableLetterAnimation &&
       isLetterCapable(word.Text, duration);
-    // Join syllables (AJ, 2026-10-19): paint every word as ONE whole-word fill
+    // Join syllables: paint every word as ONE whole-word fill
     // instead of a per-letter karaoke group, so a word lights up whole with no
-    // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
+    // syllable stepping, matching the Spicy Lyrics whole-word toggle. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
     // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
@@ -138,7 +138,7 @@
   }
 
   function appendWords(lineElement, lineModel, words, background, noKaraoke) {
-    // Join syllables (AJ, 2026-10-19): a logical word is a run of syllable tokens
+    // Join syllables: a logical word is a run of syllable tokens
     // glued by IsPartOfWord. Left alone each token fills in sequence, so a word
     // reads as separate syllables. When the setting is on, collapse every run into
     // ONE word spanning the whole run (merged text + merged time window) so it
@@ -447,8 +447,8 @@
   };
   // Sources whose timing is machine-aligned rather than hand-synced get the
   // warning treatment: red pill + triangle. Persistent, unlike the transient
-  // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
-  // (2026-10-22); kept as the hook for any future machine-aligned source.
+  // chip above the lyrics. Empty since lrc.red was retired
+  // ; kept as the hook for any future machine-aligned source.
   const PROVIDER_WARN = {};
 
   // Provider marks ship beside the renderer so the page can load them from the
@@ -510,7 +510,7 @@
   function buildProviderRow(provider, isStatic) {
     // The red pill/triangle means "these timings are machine-aligned". A static
     // (unsynced) set has no timings at all, so the warning is meaningless and
-    // reads as a defect — show the normal credit instead (AJ, 2026-10-20).
+    // reads as a defect — show the normal credit instead.
     const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
@@ -531,7 +531,7 @@
     }
     if (!warn) return row;
     // Explain WHY it is flagged, so the red pill is not just alarm without
-    // context. Static — it lives as long as the lyrics do (AJ, 2026-10-19).
+    // context. Static — it lives as long as the lyrics do.
     return h("div", { class: "ym-sl-provider-block" },
       row,
       h("div", {

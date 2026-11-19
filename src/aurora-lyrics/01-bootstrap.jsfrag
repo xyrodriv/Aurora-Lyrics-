@@ -30,7 +30,10 @@
   const EXT_ID = "ytmod-spicy-lyrics";
   const LRCLIB_API = "https://lrclib.net/api/get";
   const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
-  const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
+  // One host for both routes: /lyrics/{id} and /tracks/search. The search is
+  // how a Spotify id is found in the first place (see resolveSpotifyIdUncached).
+  const SPICY_LYRICS_BASE = "https://api.spicylyrics.org/v1";
+  const SPICY_LYRICS_API = `${SPICY_LYRICS_BASE}/lyrics`;
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
@@ -47,26 +50,22 @@
   // before that field existed, whose Discord avatar URL still carries the id.
   const AURORA_PROFILE_ORIGIN = "https://aurora-lyrics.mitsyonsp.workers.dev";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
-  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
-  // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
-  // search + Spotify URL relations. MusicBrainz is deliberately last in the ID
-  // layer because it is slower/rate-limited, but it covers mappings LB misses.
-  //
-  // ListenBrainz runs `labs.api.listenbrainz.org`, MetaBrainz's free dataset
-  // hoster. It publishes the recording->Spotify mapping directly — no key, no
-  // account, no backend, and CORS `*` so we can call it from here.
-  const LISTENBRAINZ_LABS_API = "https://labs.api.listenbrainz.org";
-  // Per-request cap. This sits on the critical path of a track change, so it
-  // must never be the reason a song hangs.
-  const LB_TIMEOUT_MS = 5000;
-  // Bounds the total work across the whole variant ladder. Without this, a
-  // pathological title (lots of parens variants) could issue dozens of calls
-  // and stall the panel while the user is already on the next song.
-  const LB_MAX_ATTEMPTS = 12;
-  // Set when ListenBrainz returns 429/5xx. While it is in the future we stop
-  // trying and report the failure as transient, instead of burning the rest of
-  // the song's budget on calls that cannot succeed.
-  let lbThrottledUntil = 0;
+  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The Spicy Lyrics API is keyed by
+  // a Spotify track id, which YouTube Music does not expose, so /tracks/search
+  // finds one from the metadata we do have (title, artist, album, duration).
+  // It is the only mapping layer now: one request per track, no variant ladder.
+  const SPICY_SEARCH_TIMEOUT_MS = 5000;
+  const SPICY_SEARCH_LIMIT = 5;
+  // A `likely` result matched title and artist but not the duration. Take it
+  // only for small padding, never for another cut.
+  const SPICY_SEARCH_LIKELY_DELTA_MS = 10_000;
+  // The window `exact` itself uses. A `version` inside it is the same recording
+  // under another credit spelling ("dropout (feat. blackbear)" vs Spotify's
+  // "dropout (w/ blackbear)"), not a live/remix take.
+  const SPICY_SEARCH_EXACT_DELTA_MS = 3_500;
+  // Set when /tracks/search returns 429. Search and /lyrics share one
+  // application window, so backing off here protects the lyrics call too.
+  let spicySearchThrottledUntil = 0;
   // The extension script is injected into the page world, where chrome.runtime
   // is unavailable. Resolve the local font CSS from this script's own extension
   // URL instead of resolving it against music.youtube.com.
@@ -88,7 +87,7 @@
   // Bundled Braccato renderer (the Better Lyrics engine, MIT). Same resolution
   // rule as AMLL: the page world cannot use chrome.runtime.getURL().
   const BRACCATO_CORE_URL = SCRIPT_URL ? new URL("braccato-core.js", SCRIPT_URL).href : "";
-  // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
+  // FALLBACK ONLY: the live values come from Aurora Bloom via
   // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
   // These are what the backdrop uses before that handshake lands, and they
   // match Bloom's shipped defaults. animationSpeed is overridden per playback

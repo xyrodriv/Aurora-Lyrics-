@@ -1,6 +1,6 @@
   /* ===================== next-track prefetch ===================== */
   // Warm the NEXT track's ARTWORK so an MV -> audio skip has a decoded image the
-  // instant the pane switches (AJ, 2026-10-20). The browser keeps the decoded
+  // instant the pane switches. The browser keeps the decoded
   // bitmap for the URL, so the pane's <img> paints on its first frame instead of
   // showing an empty box while the CDN responds.
   // Best-effort: no DOM node is kept, no error surfaces, and the URL goes through
@@ -286,7 +286,7 @@
     // ON by default. A manual pick exists precisely because the automatic
     // resolver could not find this track, so without remembering it the next
     // play (or a page reload) goes back to "No lyrics found" and the pick is
-    // lost — AJ's exact report (2026-10-22). Untick it for a one-off answer.
+    // lost — the exact report. Untick it for a one-off answer.
     remember.checked = true;
     rememberRow.append(remember, h("span", { text: "Remember for this track" }));
 
@@ -348,7 +348,7 @@
   }
 
   // Fullscreen only: the Search CTA must yield to the sheet it opened, then come
-  // back if the listener closes it without picking a result (AJ, 2026-11-16).
+  // back if the listener closes it without picking a result.
   // Toggled on the overlay rather than the button so the sheet's own open/close
   // animation and the fade stay independent.
   function syncFsSearchCta(open) {
@@ -451,7 +451,7 @@
     row.append(name, meta);
     if (hasSync || hasPlain) {
       // Both synced and plain matches are now loadable. Plain ones render as a
-      // static, already-filled set with no karaoke sweep (AJ, 2026-09-18).
+      // static, already-filled set with no karaoke sweep.
       if (!hasSync) {
         row.classList.add("no-sync-available");
         row.title = "Load unsynced lyrics (no timestamps)";

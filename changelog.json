@@ -1,6 +1,24 @@
 {
   "releases": [
     {
+      "version": "1.6.0",
+      "date": "2026-11-19",
+      "title": "An immersive stage layout and animated cover art.",
+      "features": [
+        "Stage layout: in fullscreen, the cover art or music video fills one side of the screen and blends into the lyrics side. Turn it on with the new button on the artwork.",
+        "Animated Artwork: covers with a motion loop now play it instead of sitting still. Select tracks only; turn it on in Extensions.",
+        "Sung lines fade back as a song moves on, so the line being sung stands out. Optional in the add-ons panel.",
+        "Add-ons can optionally show in the extension popup, so you can browse them without opening the full marketplace.",
+        "Added Spicy Lyrics search, so matching a song takes one lookup instead of several.",
+        "Aurora no longer contacts MusicBrainz or ListenBrainz, and asks for access to fewer sites."
+      ],
+      "fixes": [
+        "Fixed Better Lyrics showing a blank panel instead of the no-lyrics message and its LRCLIB search when a song has no lyrics.",
+        "Spicy Lyrics keeps up better in the lyrics panel, with smoother scrolling on busier songs.",
+        "Fixed songs with brackets or featured artists in the title matching the wrong lyrics."
+      ]
+    },
+    {
       "version": "1.5.1",
       "date": "2026-11-17",
       "title": "Community lyrics timeout fix.",

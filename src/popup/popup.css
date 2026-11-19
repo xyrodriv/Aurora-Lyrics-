@@ -34,6 +34,10 @@ html { color-scheme: dark; }
 
 body {
   width: 400px;
+  /* The detail sheet needs more room than the list, so the popup widens while
+     it is open and settles back when it closes. Chrome sizes the popup to its
+     content, so the transition drives the window width with it. */
+  transition: width .26s var(--ease);
   background: var(--panel);
   color: var(--text);
   font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -45,6 +49,11 @@ body {
 }
 
 .shell { display: flex; flex-direction: column; gap: 12px; }
+body.mk-detail-open { width: 480px; }
+/* The detail sheet covers the frame, so the pages behind it can give height
+   back while it is open: the popup shrinks with the pages frame (which already
+   animates its height), instead of staying as tall as the compact catalogue. */
+body.mk-detail-open .pages { height: 340px !important; }
 
 /* -- header ---------------------------------------------------------------- */
 .head { display: flex; align-items: center; gap: 8px; }
@@ -69,6 +78,20 @@ body {
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .ver:empty { display: none; }
+.embed-toggle {
+  display: flex;
+  flex: none;
+  white-space: nowrap;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .02em;
+}
+.embed-toggle .switch { width: 28px; height: 16px; }
+.embed-toggle .switch::after { top: 2px; left: 2px; width: 12px; height: 12px; }
+.embed-toggle .switch[aria-checked="true"]::after { transform: translateX(12px); }
 
 /* -- status pill ----------------------------------------------------------
    Removed: a green "connected" badge read as a dashboard control when the popup
@@ -221,14 +244,18 @@ body {
 .copy.copied .swap-done { opacity: 1; transform: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .pages-track, .pages, .switch, .switch::after { transition: none; }
+  body, .pages-track, .pages, .page, .mk-detail, .switch, .switch::after { transition: none; }
+  .tabs::before, .mk-tabs::before { transition: none; }
   .btn, .swap-face, .btn:active { transition: none; scale: 1; }
 }
 
 /* -- tabs ------------------------------------------------------------------ */
 /* One strip, two sections. The strip is a recessed track and the active tab a
-   raised chip, the same language as the panel's segmented control. */
+   raised chip, the same language as the panel's segmented control. The chip is
+   one pill behind the tabs and it slides to the tab being selected. */
 .tabs {
+  --peek: 22px;
+  position: relative;
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -236,7 +263,25 @@ body {
   background: rgba(255, 255, 255, .04);
   box-shadow: inset 0 0 0 1px var(--line);
 }
+/* Hovering the tab on either side of the active one stretches the pill toward
+   it by --peek and pulls it back on leave. Left stretches keep the right edge
+   put, so the pill grows out of the active tab instead of sliding off it. */
+.tabs::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: calc(3px + var(--i, 0) * ((100% - 10px) / 3 + 2px) - var(--peek-left, 0) * var(--peek));
+  width: calc((100% - 10px) / 3 + (var(--peek-left, 0) + var(--peek-right, 0)) * var(--peek));
+  height: 28px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .08);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: left .24s var(--ease), width .24s var(--ease);
+  pointer-events: none;
+}
 .tab {
+  position: relative;
+  z-index: 1;
   flex: 1;
   height: 28px;
   padding: 0;
@@ -248,14 +293,10 @@ body {
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+  transition: color .18s ease;
 }
 .tab:hover { color: var(--text); }
-.tab[aria-selected="true"] {
-  background: rgba(255, 255, 255, .08);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-  color: var(--ink);
-}
+.tab[aria-selected="true"] { color: var(--ink); }
 .tab:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .28); }
 
 /* -- pages ---------------------------------------------------------------- */
@@ -277,7 +318,14 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* The page leaving fades out while it slides away and the arriving one fades
+     in over the same beat, so the switch reads as one move instead of a hard
+     wipe at the edge. Ease-in-out, not the slide's ease-out: the ease-out put
+     the fade at ~96% halfway through the move, which read as no fade at all. */
+  opacity: 0;
+  transition: opacity .34s cubic-bezier(.4, 0, .2, 1);
 }
+.page.current { opacity: 1; }
 
 /* -- add-ons --------------------------------------------------------------- */
 /* The catalogue can run past the popup's height, so it scrolls on its own and
@@ -286,7 +334,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 420px;
+  max-height: 300px;
   overflow-y: auto;
   /* No visible scrollbar: wheel and keyboard scroll, the bar never appears. */
   scrollbar-width: none;
@@ -318,6 +366,16 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.addons-launch { display: flex; flex-direction: column; gap: 7px; }
+.surface-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 .addons-empty {
   margin: 0;
@@ -359,6 +417,405 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .tab, .switch, .switch::after { transition: none; }
+}
+
+/* -- compact add-ons panel -------------------------------------------------- */
+/* The popup counterpart of the full marketplace. It keeps the same catalogue and
+   settings, but uses a fixed 430px frame, one list/detail stack at a time, and
+   controls sized for a 400px popup. */
+.mk {
+  display: flex;
+  flex-direction: column;
+  height: 430px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #141417;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.mk[hidden] { display: none; }
+.mk-off {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  color: var(--dim);
+  font-size: 10.5px;
+  text-align: center;
+}
+.mk-off[hidden] { display: none; }
+.mk-off p { margin: 0; }
+.mk-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.mk-list[hidden] { display: none; }
+.mk-tools {
+  padding: 8px 9px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.mk-tabs { --peek: 20px; position: relative; display: flex; gap: 3px; margin-bottom: 7px; }
+.mk-tabs::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(var(--i, 0) * ((100% - 6px) / 3 + 3px) - var(--peek-left, 0) * var(--peek));
+  width: calc((100% - 6px) / 3 + (var(--peek-left, 0) + var(--peek-right, 0)) * var(--peek));
+  height: 23px;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  transition: left .24s var(--ease), width .24s var(--ease);
+  pointer-events: none;
+}
+.mk-tab {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color .18s ease;
+}
+.mk-tab:hover { color: var(--text); }
+.mk-tab.on { color: var(--ink); }
+.mk-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: #19191d;
+  color: var(--dim);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.mk-search svg { width: 12px; height: 12px; flex: none; }
+.mk-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+.mk-search input::placeholder { color: var(--dim); }
+.mk-rows {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 3px 5px 7px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+/* Category switch: the embedded panel's reel. Both lists share ONE grid cell
+   and travel by a full pane width, so the outgoing one leaves and the incoming
+   one follows it edge to edge — the pane is never empty. (Side-by-side flex put
+   the incoming list a second width away, so it only appeared at the end.) */
+.mk-reel { display: grid; width: 100%; }
+.mk-reelbox { grid-area: 1 / 1; align-self: start; min-width: 0; }
+.mk-rows::-webkit-scrollbar,
+.mk-detail-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.mk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 45px;
+  padding: 6px 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.mk-row:hover { background: rgba(255, 255, 255, .04); }
+.mk-row.on { background: rgba(255, 255, 255, .06); }
+.mk-row:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .24); }
+.mk-row-main { flex: 1; min-width: 0; }
+.mk-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mk-line {
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mk-tail { display: flex; align-items: center; gap: 5px; flex: none; }
+.mk-builtin { color: var(--dim); font-size: 9px; font-weight: 650; }
+.mk-get {
+  height: 22px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--red);
+  color: #fff;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mk-get:hover { background: #c40b35; }
+.mk-row .switch { width: 30px; height: 18px; flex: 0 0 30px; }
+.mk-row .switch::after { top: 2px; left: 2px; width: 14px; height: 14px; }
+.mk-row .switch[aria-checked="true"]::after { transform: translateX(12px); }
+/* The add-on detail is a sheet over the WHOLE popup — header, tabs and footer
+   included — so the settings get the full surface. It fades in and out; the X
+   in its top-left corner closes it. */
+.mk-detail {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: #141417;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .22s ease, visibility 0s linear .22s;
+}
+.mk-detail.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity .22s ease;
+}
+.mk-detail-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.mk-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mk-back svg { width: 16px; height: 16px; }
+.mk-back:hover { background: var(--surface); color: var(--ink); }
+.mk-back:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .28); }
+.mk-detail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 12px 16px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.mk-dt-title { margin: 0; color: var(--ink); font-size: 18px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
+.mk-dt-meta { margin: 3px 0 0; color: var(--dim); font-size: 9.5px; line-height: 1.4; }
+.mk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.mk-btn {
+  height: 27px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.mk-btn:hover { background: rgba(255, 255, 255, .1); color: var(--ink); }
+.mk-btn.primary { background: var(--red); box-shadow: none; color: #fff; }
+.mk-btn.primary:hover { background: #c40b35; }
+.mk-btn.danger { color: #ff9aaa; }
+.mk-btn.danger:hover { background: rgba(224, 16, 64, .14); color: #ffc0ca; }
+.mk-action-note { color: var(--muted); font-size: 10px; font-weight: 600; }
+.mk-link { margin-left: auto; color: var(--dim); font-size: 10px; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.mk-link:hover { color: var(--text); }
+.mk-dt-desc { margin: 9px 0 0; color: var(--text); font-size: 11px; line-height: 1.55; }
+.mk-note {
+  margin: 9px 0 0;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .025);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.mk-settings-head {
+  margin: 14px 0 2px;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.mk-settings { display: block; }
+.mk-set-group { margin: 11px 0 2px; color: var(--text); font-size: 10px; font-weight: 700; }
+/* Disclosures start closed. A grid row gives both directions a real height
+   animation; visibility is delayed on close so the content does not vanish
+   before the row finishes shrinking. */
+.mk-set-section { display: block; }
+.mk-set-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mk-set-toggle:hover { color: var(--ink); }
+.mk-set-toggle:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+.mk-chev {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: .65;
+  transform: rotate(45deg);
+  transition: transform .22s ease, opacity .18s ease;
+}
+.mk-set-toggle:hover .mk-chev { opacity: 1; }
+.mk-set-toggle[aria-expanded="true"] .mk-chev { transform: rotate(-135deg); }
+.mk-set-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    grid-template-rows .3s cubic-bezier(.22,.61,.36,1),
+    opacity .22s ease,
+    visibility 0s linear .3s;
+}
+.mk-set-collapse.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    grid-template-rows .3s cubic-bezier(.22,.61,.36,1),
+    opacity .22s ease,
+    visibility 0s linear 0s;
+}
+.mk-set-collapse > .mk-set-rows {
+  min-height: 0;
+  overflow: hidden;
+}
+.mk-set {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.mk-set[hidden] { display: none !important; }
+.mk-set.is-disabled { opacity: .42; }
+.mk-set-main { flex: 1; min-width: 0; }
+.mk-set-label { display: block; color: var(--text); font-size: 10.5px; font-weight: 600; line-height: 1.35; }
+.mk-set-hint { display: block; margin-top: 1px; color: var(--dim); font-size: 9px; line-height: 1.35; }
+.mk-set-hint.is-error { color: #ff9aaa; }
+.mk-set .mk-btn { min-height: 0; padding: 3px 7px; font-size: 9px; }
+.mk-btn[hidden] { display: none; }
+.mk-set-ctl { display: flex; align-items: center; gap: 5px; flex: none; }
+.mk-set-value { min-width: 38px; color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; text-align: right; }
+.mk-set .switch { width: 32px; height: 19px; flex: 0 0 32px; }
+.mk-set .switch::after { top: 2px; left: 2px; width: 15px; height: 15px; }
+.mk-set .switch[aria-checked="true"]::after { transform: translateX(13px); }
+.mk-range {
+  width: 105px;
+  height: 3px;
+  border-radius: 4px;
+  outline: 0;
+  background: linear-gradient(90deg, var(--red) var(--v, 50%), rgba(255, 255, 255, .16) var(--v, 50%));
+  appearance: none;
+}
+.mk-range::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #141417;
+  border-radius: 50%;
+  background: #fff;
+  appearance: none;
+}
+.mk-range::-moz-range-thumb { width: 10px; height: 10px; border: 2px solid #141417; border-radius: 50%; background: #fff; }
+.mk-select,
+.mk-text {
+  height: 25px;
+  border: 0;
+  border-radius: 5px;
+  background: #1b1b1f;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 9.5px;
+  outline: 0;
+}
+.mk-select { width: 118px; padding: 0 18px 0 6px; }
+.mk-text { width: 132px; padding: 0 6px; }
+.mk-select:focus,
+.mk-text:focus { box-shadow: inset 0 0 0 1px var(--line-strong); }
+.mk-reset {
+  display: block;
+  margin: 11px 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.mk-reset:hover { color: var(--text); }
+.mk-empty { margin: 0; padding: 24px 8px; color: var(--dim); font-size: 11px; line-height: 1.5; text-align: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mk-row { transition: none; }
+  .mk-set-collapse,
+  .mk-chev { transition: none; }
 }
 
 /* -- what's new ------------------------------------------------------------ */

@@ -10,23 +10,41 @@
         <img class="logo" src="../../assets/manifest-logo.webp" alt="" />
         <span class="name">Aurora Lyrics</span>
         <span class="ver" id="ver"></span>
+        <div class="embed-toggle" title="Show add-ons inside this popup">
+          <span>Embedded UI</span>
+          <button class="switch" id="embedSwitch" type="button" role="switch" aria-checked="false" aria-label="Show embedded add-ons UI" aria-controls="mk"></button>
+        </div>
       </header>
 
       <div class="tabs" role="tablist" aria-label="Popup sections">
-        <button class="tab" id="tabWhatsNew" type="button" role="tab" data-page="whatsnew" aria-selected="true" aria-controls="pageWhatsNew">What's new</button>
-        <button class="tab" id="tabAddons" type="button" role="tab" data-page="addons" aria-selected="false" aria-controls="pageAddons" tabindex="-1">Add-ons</button>
+        <button class="tab" id="tabWhatsNew" type="button" role="tab" data-page="whatsnew" aria-selected="false" aria-controls="pageWhatsNew" tabindex="-1">What's new</button>
+        <button class="tab" id="tabAddons" type="button" role="tab" data-page="addons" aria-selected="true" aria-controls="pageAddons">Add-ons</button>
         <button class="tab" id="tabDiagnostics" type="button" role="tab" data-page="diagnostics" aria-selected="false" aria-controls="pageDiagnostics" tabindex="-1">Diagnostics</button>
       </div>
 
       <div class="pages" id="pages">
         <div class="pages-track" id="pagesTrack">
-          <section class="page current" id="pageWhatsNew" role="tabpanel" data-page="whatsnew" aria-labelledby="tabWhatsNew">
+          <section class="page" id="pageWhatsNew" role="tabpanel" data-page="whatsnew" aria-labelledby="tabWhatsNew" aria-hidden="true">
             <div class="wn-scroll" id="whatsNew"></div>
           </section>
 
-          <section class="page" id="pageAddons" role="tabpanel" data-page="addons" aria-labelledby="tabAddons" aria-hidden="true">
-            <div class="addons-scroll" id="addonsScroll"></div>
-            <p class="addons-empty" id="addonsEmpty">Open YouTube Music to change add-ons.</p>
+          <section class="page current" id="pageAddons" role="tabpanel" data-page="addons" aria-labelledby="tabAddons" aria-hidden="false">
+            <div class="mk" id="mk" hidden>
+              <div class="mk-list" id="mkList">
+                <div class="mk-tools">
+                  <div class="mk-tabs" id="mkTabs" role="tablist" aria-label="Add-on categories"></div>
+                  <label class="mk-search">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                    <input id="mkSearch" type="search" placeholder="Search add-ons" aria-label="Search add-ons" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="mk-rows" id="mkRows"></div>
+              </div>
+            </div>
+            <div class="mk-off" id="mkOff">
+              <p>The embedded panel is off. A waffle next to Cast in YouTube Music opens the full marketplace.</p>
+              <button class="btn primary" id="mkOffOpen" type="button">Open full marketplace</button>
+            </div>
           </section>
 
           <section class="page" id="pageDiagnostics" role="tabpanel" data-page="diagnostics" aria-labelledby="tabDiagnostics" aria-hidden="true">
@@ -60,6 +78,16 @@
       </div>
     </div>
 
+    <div class="mk-detail" id="mkDetailView" role="dialog" aria-modal="true" aria-label="Add-on details" aria-hidden="true">
+      <div class="mk-detail-bar">
+        <button class="mk-back" id="mkBack" type="button" aria-label="Close add-on details">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="mk-detail-scroll" id="mkDetail"></div>
+    </div>
+
+    <script src="../content/addons-catalog.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

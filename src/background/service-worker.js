@@ -1,9 +1,9 @@
 /* Minimal JSON POST proxy for reports and feedback.
  *
- * Why this exists (AJ, 2026-10-19): in MV3 a content script makes requests "on
+ * Why this exists: in MV3 a content script makes requests "on
  * behalf of the page origin", so it is bound by the page's CORS policy. Most
  * APIs we use send `Access-Control-Allow-Origin: *` (LRCLIB, Unison,
- * MusicBrainz) and work directly from the content script, so they need no
+ * services) and work directly from the content script, so they need no
  * worker at all.
  *
  * A worker runs on the EXTENSION origin and carries host_permissions, so it is
@@ -12,7 +12,7 @@
  *
  * The general JSON-fetch proxy that used to sit beside this was built for
  * api.deezer.com, which sent no Allow-Origin header. That host permission is
- * gone (AJ, 2026-11-16), so the proxy went with it: this worker can now only
+ * gone, so the proxy went with it: this worker can now only
  * reach the reporting endpoint, by host AND path.
  */
 

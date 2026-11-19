@@ -2,10 +2,10 @@
     // NEVER fall back to a document-wide `document.querySelector("video")`.
     // While fullscreen is open, YTM's video has been reparented into
     // fsMediaHost — so both container selectors below stop matching, and that
-    // fallback picked up the FIRST <video> in the document instead. On AJ's
+    // fallback picked up the FIRST <video> in the document instead. On the
     // Chrome that is another extension's 720x960 element, which reports
     // videoWidth > 0, so findPlayerVideo() claimed "a video is live" forever
-    // (AJ, 2026-09-28; the trace caught vids[0] as a chrome-extension: source
+    // (the trace caught vids[0] as a chrome-extension: source
     // alongside our own pane node at 0x0).
     // Consequence of the false positive: syncFsVideoMode() never got past its
     // `liveVideo && hasAttached` early return, so the MV -> cover-art detach
@@ -18,7 +18,7 @@
     // #song-image, and the old loose selector picked that first because it had
     // 2160x2160 frames while YTM's own element stayed 0x0 on an audio track.
     // That put the square cover into the music-video layout and pushed the
-    // controls past the bottom of the screen (AJ, 2026-11-13).
+    // controls past the bottom of the screen.
     const saved = fsSavedVideo && fsSavedVideo.node;
     const video =
       (saved && saved.matches("video.html5-main-video") ? saved : null) ||
@@ -157,7 +157,7 @@
 
   // Map the on-screen lyric band to sample-canvas coordinates.
   // The <video> fills the overlay and paints with object-fit: cover (changed
-  // from contain on 2026-09-27 so the fullscreen MV pane no longer shows the
+  // from contain on so the fullscreen MV pane no longer shows the
   // two black letterbox bands). Cover means the frame OVERFLOWS the overlay
   // instead of being letterboxed, so the scale factor is max() rather than
   // min() and the horizontal offset is negative. Sampling the raw frame by
@@ -278,10 +278,6 @@
     }
   }
 
-  function formatFullscreenOffset(ms) {
-    const sign = ms > 0 ? "+" : "";
-    return sign + (ms / 1000).toFixed(1) + "s";
-  }
 
   // Paint the live <video> into the ambient backdrop canvas at ~1/6 overlay
   // resolution. The CSS blur on the canvas then smooths + scales it to fill
@@ -319,7 +315,7 @@
       const ar = v.videoWidth + " / " + v.videoHeight;
       if (fsOverlay.style.getPropertyValue("--ym-sl-fs-video-ar") !== ar) {
         fsOverlay.style.setProperty("--ym-sl-fs-video-ar", ar);
-        // ⭐ A plain NUMBER alongside the ratio (AJ, 2026-10-21). CSS can divide
+        // ⭐ A plain NUMBER alongside the ratio. CSS can divide
         // by a number but NOT by a "1920 / 960" token, so without this the chrome
         // could not be anchored to the video's bottom edge — it had to be
         // bottom-anchored to the viewport, which is why the gap under the video
@@ -331,7 +327,7 @@
             String(v.videoWidth / v.videoHeight)
           );
         }
-        // No re-measure here any more (AJ, 2026-10-20): the chrome positions are
+        // No re-measure here any more: the chrome positions are
         // fixed lengths, so a new aspect ratio only resizes the pane itself.
       }
     }
@@ -348,7 +344,7 @@
       // the result is deterministic. Blurring a ~320x180 backing store costs
       // almost nothing, and the upscale to fullscreen multiplies the radius:
       // 10px here renders as roughly 70px of blur on a 1080p overlay (turned
-      // down from 18px / ~130px at AJ's request — still clearly blurred but
+      // down from 18px / ~130px at the request — still clearly blurred but
       // less heavy). Brightness is now user-controlled: the "Music video
       // backdrop brightness" slider in AURORA BLOOM feeds
       // currentSettings.backdropBrightness (default 1.15), delivered
@@ -652,6 +648,51 @@
     return rect;
   }
 
+  /* ---- canvas-switch chrome FLIP ------------------------------------------
+     Stage puts the play chip and the scrubber in a dock inside the picture;
+     Video Background lays them out across the bottom of the screen. Both are
+     absolutely positioned in one composition and flow children in the other,
+     so the browser teleports them the instant the mode class flips - measured
+     before this existed: chip left 38 -> 960 and scrubber left 38 -> 0 on the
+     same frame, then both drifted while their dock resized underneath them.
+     Nothing about that is interpolable, so measure both homes and animate the
+     difference with the independent `translate` property (it composes with
+     whatever transform each button already carries) plus an opacity dip that
+     covers the box-size change. */
+  function captureFsChromeFlip() {
+    if (!fsOverlay) return null;
+    const targets = [
+      fsOverlay.querySelector(".ym-sl-fs-play-chip"),
+      fsOverlay.querySelector(".ym-sl-fs-scrubber"),
+      fsOverlay.querySelector(".ym-sl-fs-title"),
+    ].filter(Boolean);
+    if (!targets.length) return null;
+    return targets.map((el) => ({ el, rect: el.getBoundingClientRect() }));
+  }
+
+  function animateFsChromeFlip(start) {
+    for (const { el, rect } of start) {
+      if (!el.isConnected) continue;
+      const end = el.getBoundingClientRect();
+      // The title is hidden in Video Background (and a credit that is not on
+      // screen has no box): nothing to fly, and 0-size elements make a
+      // meaningless start frame.
+      if (!end.width || !end.height) continue;
+      const dx = rect.left - end.left;
+      const dy = rect.top - end.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+      try {
+        el.animate(
+          [
+            { translate: dx + "px " + dy + "px", opacity: .25 },
+            { translate: "0px 0px", opacity: 1 },
+          ],
+          { duration: 520, easing: "cubic-bezier(.22, .61, .36, 1)" }
+        );
+      } catch (_) {}
+    }
+  }
+
   function applyFullscreenLayout(mode, persist) {
     if (!fsOverlay) return;
     // A second switch can land while the card is still flying; finish/cancel
@@ -679,7 +720,7 @@
     // is measured from that header, so it is not an available composition while
     // the empty state is up. Coerce rather than merely hiding the option, so a
     // stored Hits choice or a click on the cycle button cannot land there
-    // (AJ, 2026-11-16). persist=false keeps the stored preference intact for
+    //. persist=false keeps the stored preference intact for
     // when lyrics return.
     if (!video && mode === "hits" && fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) {
       mode = "side";
@@ -694,6 +735,9 @@
     const wasBackground = fsOverlay.classList.contains("ym-sl-fs-mode-background");
     const wasSide = fsLayoutApplied && !wasHits &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") && !video;
+    // Video Background (the immersive canvas) is the one switch that moves the
+    // media from a side pane to full-bleed. Everything below is timed off it.
+    const backgroundSwitch = wasBackground !== (mode === "background");
     const reduceMotion = window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let hitsArtStart = null;
@@ -741,7 +785,14 @@
     // is the panel-only stutter in the Hits handoff. Snap the final geometry
     // once, then FLIP a compositor-only translate from the old box below.
     // AMLL is a canvas and keeps the existing full geometry transition.
-    if (!reduceMotion && (animateHitsToSide || animateSideToHits) &&
+    // The canvas switch moves the lyrics column too, and animating its WIDTH
+    // re-wraps and re-measures every DOM line on every frame - the stutter the
+    // Hits handoff already had to avoid. Snap the final geometry and FLIP a
+    // compositor-only translate instead (AMLL is a canvas, so it can keep the
+    // plain geometry transition).
+    if (!reduceMotion &&
+        (animateHitsToSide || animateSideToHits ||
+          (backgroundSwitch && (fsLayoutApplied || wasBackground))) &&
         fsLyricsHost && !document.body.classList.contains("amll-active")) {
       lyricsFlipStart = fsLyricsHost.getBoundingClientRect();
       fsOverlay.classList.add("ym-sl-fs-lyrics-flip");
@@ -755,17 +806,25 @@
       // No paint happens between this flush and the class flip below.
       void fsOverlay.offsetWidth;
     }
-    // Leaving Video Background is the asymmetric case: entry to the full-bleed
-    // video reads as a fill, but removing the class used to cut the video back
-    // to its side column in one frame. Arm the media host's geometry transition
-    // while it is still full-bleed, then flip the layout class below.
-    if (wasBackground && mode !== "background" && !reduceMotion) {
+    // Both directions of the Video Background switch slide. Leaving used to be
+    // the only one armed, so entering cut the media host straight to full-bleed
+    // in a single frame while exiting eased back. Arm the same geometry
+    // transition before the class flip either way.
+    const animateMediaLayout = backgroundSwitch && !reduceMotion &&
+      (fsLayoutApplied || wasBackground);
+    if (animateMediaLayout) {
       fsOverlay.classList.add("ym-sl-fs-media-layout-out");
       void fsOverlay.offsetWidth;
     }
+    // The chip and the scrubber live in a dock on the left of the stage and
+    // are absolutely positioned across the bottom in Video Background: two
+    // different homes, and nothing about moving between them is interpolable.
+    // Measure them here (before the class flip) so they can FLIP.
+    const chromeFlipStart = animateMediaLayout ? captureFsChromeFlip() : null;
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
     fsOverlay.classList.toggle("ym-sl-fs-mode-hits", fsLayoutMode === "hits");
+    placeFsArtUi();
     if (lyricsFlipStart && fsLyricsHost) {
       // Hits positions the column from its measured header height. Make sure
       // that height exists before measuring the final lyrics box, or the FLIP
@@ -786,6 +845,15 @@
             ],
             { duration: 550, easing: "cubic-bezier(.22, .61, .36, 1)" }
           );
+          // The flip class turns the column's own transition off so the target
+          // geometry can snap before the transform animation starts. It has to
+          // come back OFF afterwards: left on, it would keep transition:none on
+          // the column for the rest of the session - including the canvas
+          // switch's own opacity fades. Idempotent if a later switch already
+          // cleaned it up.
+          fsLyricsFlipAnim.finished.then(() => {
+            if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-lyrics-flip");
+          }, () => {});
         } catch (_) {
           fsLyricsFlipAnim = null;
         }
@@ -798,13 +866,16 @@
     // Background and Video + Lyrics both keep the readability layer on.
     syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
-    // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
+    // re-home them once per layout switch. Positions themselves
     // are static — this only moves the volume node between the chip and the
     // scrubber row, and re-pins the two edge buttons. Skip it during the reverse
     // handoff: Hits hides this chrome anyway, and pulling the title out of the
     // fading side column (or the volume into the scrubber) would rearrange it
     // visibly mid-flight.
     if (!animateSideToHits) syncFsChromeStructure();
+    // Runs AFTER the chrome re-homing, so the measured end rect is the one the
+    // switch actually settles on.
+    if (chromeFlipStart) animateFsChromeFlip(chromeFlipStart);
     // The Hits dock stays in the cover-art header flow; music videos never use
     // this composition, so there is no bottom-left placement any more.
     placeFsHitsDock();
@@ -853,15 +924,17 @@
       requestAnimationFrame(syncFsHitsGeometry);
     }
     fsLayoutApplied = true;
-    if (wasBackground && mode !== "background" && !reduceMotion) {
+    if (animateMediaLayout) {
+      // Outlives the .52s geometry transition (and the chrome FLIP it covers),
+      // so the class can never be pulled mid-animation.
       fsMediaLayoutAnimTimer = window.setTimeout(() => {
         fsMediaLayoutAnimTimer = 0;
         if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
-      }, 540);
+      }, 620);
     }
   }
 
-  /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------
+  /* ---- cover-art side -----------------------------------
      The cover-art side layout has two mirror images, and the artwork's own
      hover surface is where the choice belongs: pointing at the cover dims it a
      touch and fades in ONE round button at its top edge. The button cycles -
@@ -893,7 +966,7 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
-  // The artwork's like affordance (AJ, 2026-11-16). It used to be Spicy's
+  // The artwork's like affordance. It used to be Spicy's
   // heart; it is a thumbs-up now, drawn in the same stroke language as the rest
   // of the fullscreen icons - one silhouette path in a 24-unit box with round
   // caps and joins - instead of a stack of 1000-unit ellipses.
@@ -917,7 +990,7 @@
     // than the heart it replaced — that glyph filled its box edge to edge.
     // Scaling the groups about the centre brings it up to the same presence
     // without touching the geometry; the stroke is divided by the same factor
-    // so its optical weight stays put (AJ, 2026-11-16).
+    // so its optical weight stays put.
     const ART_THUMB_SCALE = 1.35;
     const ART_THUMB_TRANSFORM =
       "translate(12 12) scale(" + ART_THUMB_SCALE + ") translate(-12 -12)";
@@ -943,6 +1016,182 @@
     fill.appendChild(solid);
     svg.appendChild(fill);
     return svg;
+  }
+
+  /* ---- stage layout -------------------------------------------------------
+     The cover stops being a card: it runs the full height of the overlay on its
+     side and feathers into the Kawarp backdrop, the way Spicy's canvas stage
+     does. COVER ART ONLY — a music video owns its own layout and its own side,
+     so every CSS rule for this is gated on :not(.ym-sl-fs-has-video) and the
+     class is simply ignored while a video is attached. */
+  const FS_STAGE_KEY = "aurora.fs.stage";
+  let fsStage = false;
+  let fsStageBtn = null;
+
+  function readStoredFsStage() {
+    try {
+      return localStorage.getItem(FS_STAGE_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /* The stage toggle is the biggest geometry change in fullscreen: the pane
+     goes from a centred 16:9 card (measured live: 38,216 960x540) to a
+     full-height left column (0,0 998x1080), and the dock's chip, scrubber and
+     title all move with it. None of that is interpolable in CSS - one side is
+     height:auto + aspect-ratio + translateY(-50%), the other height:100% +
+     top:0 + a feathered mask - so the pane is tweened in explicit px and the
+     chrome rides a FLIP. The lyrics column and the shade do NOT move (both
+     measured identical in and out of stage), so nothing else is touched. */
+  const FS_STAGE_ANIM_MS = 520;
+
+  function applyFsStage(on, persist) {
+    const next = !!on;
+    const animate = next !== fsStage && !!fsOverlay && fsLayoutApplied &&
+      !!fsMediaHost &&
+      !(window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const mediaStart = animate ? fsMediaHost.getBoundingClientRect() : null;
+    const chromeStart = animate ? captureFsChromeFlip() : null;
+    fsStage = next;
+    if (fsOverlay) fsOverlay.classList.toggle("ym-sl-fs-stage", fsStage);
+    if (persist) {
+      try {
+        localStorage.setItem(FS_STAGE_KEY, fsStage ? "1" : "0");
+      } catch (_) {}
+    }
+    if (fsStageBtn) {
+      fsStageBtn.setAttribute("aria-pressed", fsStage ? "true" : "false");
+      fsStageBtn.classList.toggle("is-on", fsStage);
+    }
+    if (!mediaStart) return;
+    // The pane's corner radius is the one piece CSS can animate on its own; it
+    // lives on the <video>, so arm it for the length of the switch.
+    fsOverlay.classList.add("ym-sl-fs-stage-anim");
+    if (fsStageAnimTimer) window.clearTimeout(fsStageAnimTimer);
+    fsStageAnimTimer = window.setTimeout(() => {
+      fsStageAnimTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-stage-anim");
+    }, FS_STAGE_ANIM_MS + 100);
+    void fsOverlay.offsetWidth;
+    animateFsMediaGeometry(mediaStart, FS_STAGE_ANIM_MS);
+    if (chromeStart) animateFsChromeFlip(chromeStart);
+  }
+
+  let fsStageAnimTimer = 0;
+
+  const FS_MEDIA_ANIM_PROPS = [
+    "left", "top", "right", "bottom", "width", "height", "max-height",
+    "transform", "translate",
+  ];
+
+  /* Tween the media host's box between two measured rects, then hand the box
+     straight back to CSS. Inline geometry is set to the FINAL rect first (so a
+     cancelled or interrupted run can never leave the pane mid-flight), and the
+     two things that move it without changing its box - the -50% centring
+     transform and the stage's zero translate - are pinned for the duration.
+     On finish every property we touched is put back exactly as it was; other
+     inline styles on the host (opacity, from the video-mode dissolve) are left
+     alone. */
+  function animateFsMediaGeometry(startRect, duration) {
+    if (!fsMediaHost || !startRect || !startRect.width || !startRect.height) return;
+    const el = fsMediaHost;
+    const end = el.getBoundingClientRect();
+    if (!end.width || !end.height) return;
+    const moved = Math.abs(end.left - startRect.left) > 0.5 ||
+      Math.abs(end.top - startRect.top) > 0.5 ||
+      Math.abs(end.width - startRect.width) > 0.5 ||
+      Math.abs(end.height - startRect.height) > 0.5;
+    if (!moved) return;
+    const saved = {};
+    for (const prop of FS_MEDIA_ANIM_PROPS) {
+      saved[prop] = [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
+    }
+    // NOT "important": an important inline declaration outranks a WAAPI
+    // animation, so the pane snapped straight to the end box and the tween was
+    // invisible (measured: every sampled frame already at 38,216 960x540).
+    // Inline beats the stylesheet anyway - none of these geometry rules use
+    // !important - and the animation outranks inline.
+    el.style.setProperty("right", "auto");
+    el.style.setProperty("bottom", "auto");
+    el.style.setProperty("max-height", "none");
+    el.style.setProperty("transform", "none");
+    el.style.setProperty("translate", "0px 0px");
+    el.style.setProperty("left", end.left + "px");
+    el.style.setProperty("top", end.top + "px");
+    el.style.setProperty("width", end.width + "px");
+    el.style.setProperty("height", end.height + "px");
+    let anim = null;
+    try {
+      anim = el.animate(
+        [
+          {
+            left: startRect.left + "px", top: startRect.top + "px",
+            width: startRect.width + "px", height: startRect.height + "px",
+          },
+          {
+            left: end.left + "px", top: end.top + "px",
+            width: end.width + "px", height: end.height + "px",
+          },
+        ],
+        { duration, easing: "cubic-bezier(.22, .61, .36, 1)", fill: "both" }
+      );
+    } catch (_) {
+      anim = null;
+    }
+    const restore = () => {
+      if (anim) { try { anim.cancel(); } catch (_) {} }
+      for (const prop of FS_MEDIA_ANIM_PROPS) {
+        const pair = saved[prop];
+        if (pair[0]) el.style.setProperty(prop, pair[0], pair[1]);
+        else el.style.removeProperty(prop);
+      }
+    };
+    if (anim) anim.finished.then(restore, restore);
+    else restore();
+  }
+
+  // Frame with a feathered edge: three bars losing strength, so the glyph reads
+  // as "picture dissolving into the backdrop" rather than a generic rectangle.
+  function fsStageIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-art-swap-icon ym-sl-fs-stage-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const frame = document.createElementNS(NS, "rect");
+    frame.setAttribute("x", "2.5");
+    frame.setAttribute("y", "4.5");
+    frame.setAttribute("width", "19");
+    frame.setAttribute("height", "15");
+    frame.setAttribute("rx", "3");
+    frame.setAttribute("class", "ym-sl-fs-stage-frame");
+    svg.appendChild(frame);
+    [[9.5, 1], [13.25, 0.6], [17, 0.28]].forEach((pair) => {
+      const bar = document.createElementNS(NS, "rect");
+      bar.setAttribute("x", String(pair[0]));
+      bar.setAttribute("y", "4.5");
+      bar.setAttribute("width", "3.5");
+      bar.setAttribute("height", "15");
+      bar.setAttribute("opacity", String(pair[1]));
+      bar.setAttribute("class", "ym-sl-fs-stage-fade");
+      svg.appendChild(bar);
+    });
+    return svg;
+  }
+
+  // Hits draws the cover in its own header card, so the artwork's hover
+  // cluster has to move there with it — otherwise the card stayed a static
+  // thumbnail while the side layout had both affordances.
+  function placeFsArtUi() {
+    if (!fsCoverSwitch || !fsOverlay || !fsMediaHost) return;
+    const ui = fsCoverSwitch.ui;
+    const card = fsOverlay.querySelector(".ym-sl-fs-hits-artwrap");
+    const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits") && card;
+    const parent = hits ? card : fsMediaHost;
+    if (ui.parentElement !== parent) parent.appendChild(ui);
   }
 
   function buildFsCoverSwitch() {
@@ -979,9 +1228,16 @@
       // click is a layout choice, never a play/seek.
       ev.preventDefault();
       ev.stopPropagation();
-      applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
+      const nextSide = fsCoverSide === "left" ? "right" : "left";
+      // Hits has no side to swap: the cover is its header. A swap asked for
+      // from there means "show me the split layout, with the words on this
+      // side", so leave Hits first — otherwise the click would look inert.
+      if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+        applyFullscreenLayout("side", true);
+      }
+      applyFsCoverSide(nextSide, true);
     });
-    // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
+    // The cover layout's like affordance. Unlike the edge
     // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
     // the hover surface for music videos and portrait.
     const like = h("button", {
@@ -1006,19 +1262,47 @@
       window.setTimeout(() => like.classList.remove("is-press", "is-release"), 160);
       clickFsRating("like");
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, like);
+    // Stage toggle: turns the cover into a full-height panel that feathers into
+    // the backdrop. Lives with the other hover affordances on the artwork.
+    const stageBtn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-swap ym-sl-fs-stage-toggle",
+      "aria-pressed": fsStage ? "true" : "false",
+      title: "Stage layout",
+      "aria-label": "Stage layout",
+    }, fsStageIcon());
+    fsStageBtn = stageBtn;
+    stageBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const turningOn = !fsStage;
+      applyFsStage(turningOn, true);
+      // Stage is a side-layout composition; from Hits it has to leave the
+      // header behind or the toggle would flip state with nothing on screen.
+      if (turningOn && fsOverlay && fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+        applyFullscreenLayout("side", true);
+      }
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, stageBtn, like);
     fsMediaHost.appendChild(ui);
-    fsCoverSwitch = { ui, btn };
+    fsCoverSwitch = { ui, btn, stageBtn };
     syncFsCoverSwitch();
+    placeFsArtUi();
     applyFsRatingToButtons(getCurrentFsVideoId());
+    // Restore the saved choice before the first paint.
+    applyFsStage(readStoredFsStage(), false);
   }
 
   // The shade changes sides on its OWN clock, after it has faded out. Flipping
   // it with the layout would move the gradient's dark end to the panel's other
   // edge on the first frame - at 44% of the screen, i.e. the middle - while the
   // panel is still opaque, which reads as the shadow jumping to the centre
-  // before it disappears. 120ms is just past the 96ms fade-out.
-  const FS_SHADE_SIDE_DELAY_MS = 120;
+  // before it disappears. 120ms was meant to be "just past the 96ms fade-out",
+  // but measured live the fade still sits at 0.66 opacity at 120ms and only
+  // reaches 0 around 150ms - so the flip was teleporting a two-thirds visible
+  // band to the other half of the screen. 240ms clears the real fade with room
+  // for the frame budget.
+  const FS_SHADE_SIDE_DELAY_MS = 240;
   function setFsShadeSide(side) {
     if (fsLyricsShade) fsLyricsShade.classList.toggle("ym-sl-fs-shade-left", side === "left");
   }
@@ -1187,7 +1471,7 @@
   // This used to key off `document.activeElement !== fsPlayerSeekRange`, but a
   // range KEEPS focus after a click, so the guard never lifted: the thumb froze
   // wherever it was clicked while --slider-fill (written outside the guard)
-  // kept advancing underneath it. Exactly AJ's 2026-09-28 report - "the dot
+  // kept advancing underneath it. Exactly the report - "the dot
   // just stays there and doesnt follow the fill".
   //
   // The timestamp alone is not enough: holding the pointer still for longer

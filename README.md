@@ -16,9 +16,10 @@ add-ons.
   files can be dropped or picked in, re-exported with your sync, and saved per
   track so they survive a reload.
 - **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
-  the Spicy Lyrics API is keyed by one. Aurora resolves it through
-  **ListenBrainz** (free, keyless, no backend) using a variant ladder over
-  title/artist/album, so the Spicy source works for ordinary YT Music tracks
+  the Spicy Lyrics API is keyed by one. Aurora asks **Spicy Lyrics search** for
+  it, sending the title, artist and duration, and only accepts a match the API
+  ranks `exact` (or `likely` for small padding). One request per track, no
+  second catalogue, and the Spicy source works for ordinary YT Music tracks
   rather than only hand-matched ones.
 - **Timing calibration** — a global and a per-video offset, plus a pause-sync
   point, so the lyrics line up with any source.
@@ -78,13 +79,13 @@ Aurora Lyrics/
 ├── changelog.json             # Release notes for the in-app update card
 ├── icons/                     # 16/32/48/128 toolbar and store icons
 ├── assets/
-│   ├── art/                   # Add-on showcase clips and stills
+│   ├── ambient-gradient.png   # Backdrop the store mockups render against
 │   └── manifest-logo.webp     # Logo used by the update card
 ├── scripts/
 │   └── build-aurora-lyrics.mjs # Concatenates the renderer fragments
 └── src/
     ├── aurora-lyrics/         # SOURCE fragments for the renderer (edit these)
-    │   └── NN-*.jsfrag        #   01 … 23, concatenated in the order the build lists
+    │   └── NN-*.jsfrag        #   01 … 24, concatenated in the order the build lists
     ├── content/               # Isolated-world injector + marketplace UI
     │   ├── content.js         # Content script: registry, marketplace, settings, panel
     │   ├── announcements.js   # Top-bar announcement pill and detail card
@@ -111,7 +112,7 @@ Aurora Lyrics/
 
 The Aurora Lyrics renderer is assembled from ordered fragments. Edit the
 numbered files in `src/aurora-lyrics/` (`01-bootstrap.jsfrag` …
-`23-auto-translate.jsfrag`) and rebuild the injected script:
+`24-braccato-renderer.jsfrag`) and rebuild the injected script:
 
 ```sh
 node scripts/build-aurora-lyrics.mjs          # writes src/extensions/aurora-lyrics.js

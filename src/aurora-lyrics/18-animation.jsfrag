@@ -18,6 +18,10 @@
   // resting letter was already producing byte-identical values every frame.
   function animateLetters(word, wordState, lineState, positionMs, deltaTime) {
     if (!word.Letters) return false;
+    // Background-vocal letter words used the lead's full 185x / 16px letter
+    // glow, which read as a halo around the smaller bg text. Keep the lead
+    // untouched and soften only the bg row to the lead word's strength.
+    const backgroundWord = word.BGWord === true;
     let activeIndex = -1;
     let activeProgress = 0;
     if (wordState === "Active") {
@@ -97,7 +101,7 @@
       } else if (letterState === "Sung" && activeIndex === -1) {
         targetScale = LetterScaleSpline.at(1);
         targetYOffset = LetterYOffsetSpline.at(1);
-        // DELIBERATE DIVERGENCE FROM UPSTREAM (AJ, 2026-09-20).
+        // DELIBERATE DIVERGENCE FROM UPSTREAM.
         //
         // Upstream uses targetGlow = GlowSpline.at(SungLetterGlow /* 0.2 */) for
         // a sung letter in an active word where no letter is currently active
@@ -153,8 +157,18 @@
       // letter-group word always matches its neighbours. Upstream Spicy Lyrics
       // only animates --gradient-position, scale/transform and the glow
       // variables on a letter; everything else is CSS.
-      setStyleIfChanged(letter.HTMLElement, "--text-shadow-blur-radius", `${4 + 12 * glow}px`, 0.5);
-      setStyleIfChanged(letter.HTMLElement, "--text-shadow-opacity", `${glow * 185}%`, 1);
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "--text-shadow-blur-radius",
+        `${4 + (backgroundWord ? 7 : 12) * glow}px`,
+        0.5
+      );
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "--text-shadow-opacity",
+        `${glow * (backgroundWord ? 110 : 185)}%`,
+        1
+      );
     }
     return anyAwake;
   }

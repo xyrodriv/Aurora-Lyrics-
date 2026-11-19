@@ -1501,7 +1501,7 @@ return Kawarp;
   // Collapse the rail when the resize cursor is dragged within this many px of
   // the RIGHT edge of the viewport (covers a classic scrollbar), NOT when the
   // width bottoms out — so you can hold at WIDTH_MIN freely and only collapse
-  // by flinging the cursor to the edge (AJ, 2026-10-19).
+  // by flinging the cursor to the edge.
   const COLLAPSE_EDGE_MARGIN = 20;
   // Collapsed peek, in px. PEEK_W is the sliver that stays on screen and is also
   // the amount the page content is docked away from the right edge, so the tab
@@ -1529,7 +1529,7 @@ return Kawarp;
   let npvCloseTimer = 0; // clears the ym-npv-closing class after the slide-out
   let npvShiftTimer = 0; // scopes the page-content transition to the toggle
   let kawarpOn = true; // EFFECTIVE state: the user's toggle AND the performance mode
-  // Performance modes (AJ, 2026-10-26), mirrored into every add-on's settings by
+  // Performance modes, mirrored into every add-on's settings by
   // the content script. Low removes the rail's backdrop entirely; Normal keeps it
   // at 24fps and stops it sampling the live video. Ultra is the untouched theme.
   let kawarpUserOn = true; // the add-on's own "Ambient background" toggle
@@ -1604,7 +1604,7 @@ return Kawarp;
   let artistMoreEl = null;
   let artistCurrentId = "";
   // True for the whole artist switch (skeleton + cached + fetch render): no
-  // whole-card entrance may play over the shimmer (AJ, 2026-10-20).
+  // whole-card entrance may play over the shimmer.
   let artistSkeletonActive = false;
 
   /* ---------- tiny DOM helpers (no innerHTML: Trusted Types safe) ---------- */
@@ -1657,7 +1657,7 @@ return Kawarp;
     return icon(expanded ? ICON_FULLSCREEN_EXIT : ICON_FULLSCREEN);
   }
 
-  // Share (copy song link) and "open in song view" icons for the NPV header (AJ, 2026-10-19).
+  // Share (copy song link) and "open in song view" icons for the NPV header.
   const ICON_SHARE = ["M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5", "M12 16V4", "M8 8l4-4 4 4"];
   const ICON_GO_SONG = ["M15 4h5v5", "M20 4l-8 8", "M19 14v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"];
 
@@ -1669,7 +1669,7 @@ return Kawarp;
     style.id = STYLE_ID;
     style.textContent = `
 /* Registered so the readability shade INTERPOLATES instead of hard-cutting to
-   black every time the 700ms brightness sample lands (AJ, 2026-10-19). */
+   black every time the 700ms brightness sample lands. */
 @property --ym-npv-shade {
   syntax: "<number>";
   inherits: true;
@@ -1695,7 +1695,7 @@ return Kawarp;
   font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn", "Roboto", "YouTube Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 /* The lyrics fullscreen overlay is its own full-screen surface; the rail used to
-   keep floating above it and punched through the composition (AJ, 2026-10-21).
+   keep floating above it and punched through the composition.
    Keyed off the overlay's existence rather than an add-on id, so it hides for
    fullscreen no matter which add-on put the overlay up, and costs nothing when
    there is no overlay. */
@@ -1719,7 +1719,7 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
   pointer-events: none;
   /* Straight black backing behind the card. The band stays a straight vertical
      seam; the card's own rounded corners sit inside it. (A wrapped/curved band
-     was tried and reverted — AJ, 2026-10-19.) */
+     was tried and reverted —.) */
   background: #000;
   box-sizing: border-box;
   /* NO permanent transform here. A transform on the rail's wrapper turns the
@@ -1741,12 +1741,12 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
 }
 @keyframes ym-npv-slide-in {
   /* Start from the COLLAPSED position so expanding is a full slide out of the
-     edge, mirroring the close (AJ, 2026-10-20). */
+     edge, mirroring the close. */
   from { transform: translateX(calc(100% - var(--ym-npv-peek, 18px))); opacity: 0; filter: blur(7px); }
   to   { transform: none; opacity: 1; filter: blur(0); }
 }
 /* Close motion: the rail slides out with a short blur while its content sinks,
-   so collapsing reads like the add-on panel instead of a hard snap (AJ, 2026-10-20). */
+   so collapsing reads like the add-on panel instead of a hard snap. */
 #${ROOT_ID} .ym-npv-frame.ym-npv-closing {
   animation: ym-npv-slide-out .38s cubic-bezier(.4,0,.2,1) both;
 }
@@ -1772,7 +1772,7 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
   from { opacity: 0; transform: translateY(12px); }
   to   { opacity: 1; transform: none; }
 }
-/* Matte black surface (AJ, 2026-10-19). It used to be fully transparent, which
+/* Matte black surface. It used to be fully transparent, which
    let page content bleed through on views the rail does not narrow (Library,
    channel pages, etc.) — artist cards and lyrics overlapped. An opaque backdrop
    is page-agnostic: nothing can show under the rail anywhere. */
@@ -1787,7 +1787,7 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
   /* Same radius as the plate: the gap between the two arcs is the band, and it
      curves with the card instead of running straight past the corner. */
   border-radius: 14px 0 0 14px;
-  /* NO box-shadow (AJ, 2026-10-20): the rail is DOCKED — the page content is
+  /* NO box-shadow: the rail is DOCKED — the page content is
      shifted beside it, not underneath it — so a left-cast shadow read as a drop
      shadow floating over the content. */
   pointer-events: none;
@@ -1817,12 +1817,10 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
   display: flex;
   flex-direction: column;
   /* Extra top padding (was 16px) so the hover-revealed collapse button and the
-     share button at the top never overlap the hero cover art / parked video
-     (AJ, 2026-10-19). */
+     share button at the top never overlap the hero cover art / parked video. */
   /* Symmetric 14px. The panel is ALREADY inset 8px by the seam, so the padding
      must match on both sides — a 6px left padding made the content sit 6px from
-     the card's left edge but 14px from its right, which read as shifted left
-     (AJ, 2026-10-19). */
+     the card's left edge but 14px from its right, which read as shifted left. */
   padding: 56px 14px 14px;
   /* Match the glass so the content cannot square off the corner the card
      curves away from. */
@@ -1836,7 +1834,7 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  /* No visible scrollbar (AJ, 2026-10-19): the rail still scrolls, but the
+  /* No visible scrollbar: the rail still scrolls, but the
      6px track read as a second column edge next to YTM's own. */
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -1846,7 +1844,7 @@ body:has(.ym-sl-fs-overlay) #${ROOT_ID} {
 /* YTM's page scrollbar: hidden on the document and on every container YouTube
    uses as a scroller, so it stops reserving a gutter next to the rail (it was
    showing through the seam gap as a second bar). Wheel/keyboard scrolling is
-   unaffected (AJ, 2026-10-19). */
+   unaffected. */
 html, body,
 ytmusic-app, ytmusic-app-layout, #layout, #content, #main-panel,
 ytmusic-browse-response, ytmusic-section-list-renderer,
@@ -1908,7 +1906,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   transition: opacity .2s ease, background .18s ease, color .18s ease, scale .22s cubic-bezier(.34,1.56,.64,1);
 }
 /* Kawarp on/off now lives in the add-on's Settings (marketplace), not on the
-   panel (AJ, 2026-10-19). */
+   panel. */
 #${ROOT_ID} .ym-npv-topzone {
   position: absolute;
   top: 0;
@@ -1928,7 +1926,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 /* Stretch (fullscreen lyrics) toggle — pinned to the TOP-RIGHT of the panel so
    it can never sit under the collapse chevron, which owns the top-left. */
 #${ROOT_ID} .ym-npv-stretch {
-  /* Now anchored to .ym-npv-lyrics (it lives inside the lyrics card, AJ 2026-10-19). */
+  /* Now anchored to.ym-npv-lyrics (it lives inside the lyrics card). */
   position: absolute;
   top: 8px;
   right: 8px;
@@ -1961,7 +1959,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   right: 8px;
   bottom: 8px;
   /* Above the parked #movie_player's own chrome, which otherwise eats the
-     click (AJ, 2026-10-19: the button did nothing). */
+     click (the button did nothing). */
   z-index: 8;
   pointer-events: auto;
   opacity: 0;
@@ -2011,7 +2009,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 }
 #${ROOT_ID} .ym-npv-art-slot > .ym-npv-art { min-height: 0; }
 /* Song view: YTM's own player page already owns the video/artwork, so the rail
-   shows the title, artist card and queue only (AJ, 2026-10-19). */
+   shows the title, artist card and queue only. */
 #${ROOT_ID}[data-song-view="true"] .ym-npv-art-slot {
   grid-template-rows: 0fr;
   opacity: 0;
@@ -2031,7 +2029,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   /* Smooth shape morph when the slot switches between the square cover (1:1)
      and the parked MV (16:9). Driven by the [data-video-hero] rules below: the
      width + aspect-ratio both transition, so the box grows from a 240px square
-     into a full-width 16:9 without snapping (AJ, 2026-10-18). */
+     into a full-width 16:9 without snapping. */
   transition: aspect-ratio .34s cubic-bezier(.22,1,.36,1),
               width .34s cubic-bezier(.22,1,.36,1);
 }
@@ -2088,8 +2086,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 #${ROOT_ID} .ym-npv-title-row {
   /* Full-width row: the title keeps the row's centre, the copy button is pinned
      to the right edge. min-height must clear the 28px button, otherwise the
-     meta block's overflow:hidden (used by the credit swap) clips its top
-     (AJ, 2026-10-19). */
+     meta block's overflow:hidden (used by the credit swap) clips its top. */
   position: relative;
   display: flex;
   align-items: center;
@@ -2145,7 +2142,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 /* Exit animation played when the artist card is swapped for a new artist: the
    old card fades/blurs/slips down, then renderArtistCard() swaps content and
    the enter animation (above) brings the new card in. No exit before? The user
-   reported only the IN animation existed (AJ, 2026-10-19). */
+   reported only the IN animation existed. */
 @keyframes ym-npv-artist-out {
   from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
   to   { opacity: 0; transform: translateY(10px) scale(.985); filter: blur(6px); }
@@ -2170,11 +2167,11 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   margin-top: 12px;
   /* No margin-bottom: the artist card already owns its own 12px margin-top, and
      flex margins do not collapse — the old 12px here made the lyrics↔artist gap
-     24px while artist↔queue stayed 12px (AJ, 2026-10-19). */
+     24px while artist↔queue stayed 12px. */
   margin-bottom: 0;
   border-radius: 16px; /* round card, not a square */
   /* No border AND no background tint — on a see-through panel either one
-     paints the box's edge as a stray thin line (AJ, 2026-10-18). The renderer
+     paints the box's edge as a stray thin line. The renderer
      supplies its own visual surface. */
   overflow: hidden;
   /* THE lag fix (measured, live): contain:strict (size+layout+paint+style)
@@ -2186,12 +2183,12 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
      With it: p50 12ms / p95 37ms — as smooth as the Lyrics tab itself. */
   contain: strict;
   /* Card surface: faint on all four sides so the slot reads as a distinct
-     rounded card on the transparent rail (AJ, 2026-10-18: "floating without
+     rounded card on the transparent rail (floating without
      a clear card shape" when it was bare). Kept low-alpha so it never reads
      as the old stray-line artifact. */
   /* Dynamic readability shade behind the lyrics: a black wash whose strength is
      driven by --ym-npv-shade (0 on dark Kawarp frames, up to ~0.6 on bright
-     ones). Set from the live Kawarp brightness sample (AJ, 2026-10-19). */
+     ones). Set from the live Kawarp brightness sample. */
   background:
     linear-gradient(rgba(0, 0, 0, var(--ym-npv-shade, 0)), rgba(0, 0, 0, var(--ym-npv-shade, 0))),
     rgba(255, 255, 255, 0.035);
@@ -2215,7 +2212,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   padding: 0 !important;
   /* A 0-height box still paints its border, and contain: strict keeps that
      border box alive even at height 0 — that was the stray 1px line left after
-     the panel moved to the Lyrics tab (AJ, 2026-10-19). Kill the border itself,
+     the panel moved to the Lyrics tab. Kill the border itself,
      not just its colour; opacity still fades the whole card out. */
   border: 0 !important;
   background: none !important;
@@ -2293,7 +2290,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 #${ROOT_ID} .ym-npv-artist[hidden] { display: none; }
 /* Loading skeleton: overlays the card while the next artist resolves, so the
    card keeps its footprint and the queue below never jumps up. Covers the
-   banner image, artist name, monthly audience and the description (AJ, 2026-10-20). */
+   banner image, artist name, monthly audience and the description. */
 #${ROOT_ID} .ym-npv-artist-skeleton {
   position: absolute;
   inset: 0;
@@ -2377,7 +2374,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   color: rgba(255,255,255,.75);
   /* Collapsed = ~2 lines, clipped by max-height (animatable, unlike
      -webkit-line-clamp). The SHOW MORE click animates max-height to the real
-     content height via JS, so the reveal is smooth (AJ, 2026-10-19). */
+     content height via JS, so the reveal is smooth. */
   display: block;
   overflow: hidden;
   max-height: 35px;
@@ -2393,8 +2390,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
   padding: 0;
   border: 0;
   background: none;
-  /* Buttons don't inherit font-family by default, so force SpicyLyrics here
-     (AJ, 2026-10-19). */
+  /* Buttons don't inherit font-family by default, so force SpicyLyrics here. */
   font-family: inherit;
   color: rgba(255,255,255,.85);
   font-size: 11px;
@@ -2405,7 +2401,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 /* Any NPV button inherits the SpicyLyrics family (the artist-card "show more"
    button is the only one with text; the icon buttons are covered too). */
 #${ROOT_ID} button { font-family: inherit; }
-/* ─── Up Next queue (AJ, 2026-10-19) ─────────────────────────────────────────
+/* ─── Up Next queue ─────────────────────────────────────────
    Sits UNDER the artist card and inherits the SpicyLyrics family from #${ROOT_ID}.
    "Open queue" expands the list (smooth height + staggered row fade); "Show more"
    reveals a long queue. */
@@ -2472,7 +2468,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 }
 /* Collapse: fade the old rows out, swap, fade back in. */
 #${ROOT_ID} .ym-npv-queue-list.is-swapping { opacity: 0; }
-/* Same entrance language as the add-ons panel cards (AJ, 2026-10-19):
+/* Same entrance language as the add-ons panel cards:
    a short lift + micro-scale on a springy curve, staggered via --d. */
 #${ROOT_ID} .ym-npv-queue-row {
   display: flex;
@@ -2605,9 +2601,9 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
 #${ROOT_ID}[data-lyrics-stretch="true"] .ym-npv-artist { display: none; }
 
 /* Collapsed edge: a thicker, rounded tab at the screen edge so the rail is
-   clearly discoverable, with a larger chevron (AJ, 2026-10-20). */
+   clearly discoverable, with a larger chevron. */
 #${ROOT_ID} .ym-npv-edge {
-  /* Anchored to the FRAME's left edge, not the viewport (AJ, 2026-10-20). The
+  /* Anchored to the FRAME's left edge, not the viewport. The
      frame carries the collapse transform, so the tab now rides the rail's leading
      edge out and back, instead of standing still at the screen edge while the
      rail fades in underneath it. */
@@ -2627,13 +2623,12 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
      glass seam show through, which read as a grey line / colour leak. */
   background: #000;
   color: rgba(255,255,255,.85);
-  /* NO box-shadow (AJ, 2026-10-20) — see the card rule above. */
+  /* NO box-shadow — see the card rule above. */
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   /* Expanding: keep the tab visible while the rail slides away, THEN fade — the
-     delay is the whole point, so the fade no longer races the slide
-     (AJ, 2026-10-20). */
+     delay is the whole point, so the fade no longer races the slide. */
   transition: opacity .16s ease .24s, width .22s ease, background .22s ease;
   display: flex;
   align-items: center;
@@ -2664,7 +2659,7 @@ ytmusic-player-page::-webkit-scrollbar, #tab-renderer::-webkit-scrollbar {
    icons stay clear of the rail's top.
 
    The shift comes from --ym-npv-offset, NOT --ym-npv-w, and that distinction is
-   the whole fix (AJ, 2026-10-20):
+   the whole fix:
      open      -> the rail width, var(--ym-npv-w)
      collapsed -> PEEK_W (18px), the sliver that stays on screen
      hover     -> PEEK_W_HOVER (24px) while the collapsed tab is hovered
@@ -2721,7 +2716,7 @@ body.ym-npv-docked ytmusic-section-list-renderer {
 /* Page-content shift, scoped to the open/close toggle: the nav bar, player bar,
    bands and #content glide left/right with the rail instead of snapping.
 
-   PERF (AJ, 2026-10-20): this is the one genuinely expensive animation in the
+   PERF: this is the one genuinely expensive animation in the
    add-on. Animating right/width is not compositable — the browser re-lays-out
    the WHOLE feed on every frame, so a 380ms glide was ~23 full reflows of #content.
    Two changes cut the cost a lot without changing how it looks:
@@ -2768,7 +2763,7 @@ body.ym-npv-animating ytmusic-player-page#player-page {
   width: 10px;
   cursor: ew-resize;
   z-index: 2;
-  /* Hidden by default — no persistent divider bar (AJ, 2026-10-19). The custom
+  /* Hidden by default — no persistent divider bar. The custom
      coloured line only appears on hover/drag, via ::after below. */
   background: transparent;
   border-radius: 5px;
@@ -2827,7 +2822,7 @@ body.ym-npv-animating ytmusic-player-page#player-page {
 
   function loadState() {
     // ALWAYS start collapsed on page load: the rail is a tool you open, not
-    // something that should greet you on every reload (AJ, 2026-10-19). The
+    // something that should greet you on every reload. The
     // stored value is still written by applyCollapsed so the collapse can be
     // persisted for future use, but it is deliberately not restored here.
     collapsed = true;
@@ -2866,7 +2861,7 @@ body.ym-npv-animating ytmusic-player-page#player-page {
      One variable owns how far the YTM chrome is pushed away from the right edge.
      It is ALWAYS a length, which is what makes the open/close glide work: the old
      model dropped the dock class when collapsed, so `right` fell back to
-     YouTube's own value and px -> auto cannot be transitioned (the snap AJ saw).
+     YouTube's own value and px -> auto cannot be transitioned (the snap saw).
      Collapsed it holds the peek width, so the tab sits BESIDE the content instead
      of hovering over it. */
   function beginNpvShift() {
@@ -2882,7 +2877,7 @@ body.ym-npv-animating ytmusic-player-page#player-page {
   }
 
   function applyNpvOffset(animate) {
-    // Deliberately ignores the hover peek now (AJ, 2026-10-20). Changing the dock
+    // Deliberately ignores the hover peek now. Changing the dock
     // offset re-lays-out the entire feed, and hover fires constantly — a 6px
     // reflow on every mouseover was the worst value-per-cost item in the add-on.
     // The tab still widens and the rail edge still follows on hover (both are
@@ -2986,7 +2981,7 @@ body.ym-npv-animating ytmusic-player-page#player-page {
   // Which of YTM's player-page tabs is selected right now ("lyrics", "up next",
   // "related", "comments", …). Used to decide whether the rail may take the
   // lyrics: on the song view the Lyrics tab already owns them, but every other
-  // tab leaves them free for the rail (AJ, 2026-10-19).
+  // tab leaves them free for the rail.
   function activePlayerTab() {
     try {
       const bar =
@@ -3023,7 +3018,6 @@ body.ym-npv-animating ytmusic-player-page#player-page {
     // on its own cadence, so without this the text can grow as the rail widens.
     // We pin to savedLyricsScale (captured at dock time = the user's setting), not
     // the live value, so the docked size stays constant at any rail width
-    // (AJ, 2026-10-19).
     const normal = (savedLyricsScale && savedLyricsScale !== "")
       ? savedLyricsScale
       : (sc.style.getPropertyValue("--ym-sl-lyrics-scale") || "1");
@@ -3042,7 +3036,7 @@ function updateLyricsSlotEmpty() {
   // Expanded lyrics only mean anything while the card actually holds the live
   // lyrics. Handing them back to YTM's Lyrics tab (song view), collapsing, or
   // simply never docking left the rail in take-over mode with no hero, no
-  // artist and no words - just the Kawarp backdrop (AJ, 2026-10-21). The mode
+  // artist and no words - just the Kawarp backdrop. The mode
   // goes with the content it was covering, and the normal rail comes back.
   if (!hasPanel && root && root.dataset.lyricsStretch === "true") applyLyricsStretch(false);
 }
@@ -3054,7 +3048,7 @@ function updateLyricsSlotEmpty() {
   // and washes the lyrics card with black in proportion to how bright the
   // background is — dark frames get nothing, vivid/bright frames get up to ~0.6.
   // Same HSV-value "bright pixel" idea as the fullscreen lyric shade
-  // (07-fullscreen-layout.jsfrag). AJ, 2026-10-19.
+  // (07-fullscreen-layout.jsfrag).
   let npvShadeBusy = false;
   function updateNpvShade() {
     if (!lyricsSlotEl) return;
@@ -3101,7 +3095,7 @@ function syncLyricsDock() {
     // On the song view the YTM Lyrics tab must show OUR renderer. The panel can
     // only live in one place, so while that tab is active the rail gives it back
     // (with reveal=true) instead of keeping it docked — otherwise the tab falls
-    // back to YTM's native lyrics (AJ, 2026-10-19). Every other tab leaves the
+    // back to YTM's native lyrics. Every other tab leaves the
     // lyrics free for the rail.
     const ytmLyricsTab = onSongView && isLyricsTabActive();
 
@@ -3114,7 +3108,7 @@ function syncLyricsDock() {
     if (ytmLyricsTab && root && root.dataset.lyricsStretch === "true") applyLyricsStretch(false);
 
     // With the lyrics card empty (Lyrics tab owns the lyrics), the queue can
-    // take the freed space and list everything (AJ, 2026-10-19).
+    // take the freed space and list everything.
     const wantQueueAll = ytmLyricsTab && !collapsed;
     if (wantQueueAll !== queueAll) {
       queueAll = wantQueueAll;
@@ -3348,7 +3342,7 @@ function syncLyricsDock() {
 
   // Hand the panel back to the Lyrics tab behind a short crossfade. A raw DOM
   // move reads as a glitch: the lyrics vanish from the rail and pop into the
-  // tab in the same frame (AJ, 2026-10-19).
+  // tab in the same frame.
   let lyricsTransferBusy = false;
   function transferLyricsToTab(reveal) {
     if (lyricsTransferBusy || !lyricsDocked) return;
@@ -3361,7 +3355,7 @@ function syncLyricsDock() {
     let moved = false;
     // Blank the Lyrics tab IMMEDIATELY: YTM renders its own lyrics the moment the
     // tab flips, and our panel only lands ~110ms later, which read as a flash of
-    // the native renderer (AJ, 2026-10-19). `ym-sl-panel-active` is the engine's
+    // the native renderer. `ym-sl-panel-active` is the engine's
     // own rule that hides every non-panel child of #tab-renderer; it is removed
     // again by syncNativePanel(false) when the rail docks the lyrics back.
     const tabRenderer = document.querySelector("#tab-renderer");
@@ -3462,14 +3456,14 @@ function syncLyricsDock() {
       const desc = runsText(h.description).replace(/\n\n(?:From Wikipedia|Source:|Provided by|\(c\)|©)[\s\S]*$/i, "").trim();
       const sb = h.subscriptionButton || {};
       const subR = sb.subscribeButtonRenderer || (sb.params ? sb : null);
-      // Subscriber count (display only — the subscribe button was removed, AJ 2026-10-19).
+      // Subscriber count (display only — the subscribe button was removed).
       const rawSubs = subR
         ? (subR.subscriberCountText && (subR.subscriberCountText.simpleText || runsText(subR.subscriberCountText))) || ""
         : "";
       // YouTube is inconsistent here: channel pages usually give "1.2M subscribers",
       // but artist channels often give a bare "1.2M". Add the word only when it is
       // missing, so the line never reads as a naked number under the monthly
-      // audience (AJ, 2026-10-21).
+      // audience.
       const subs = rawSubs && !/subscriber/i.test(rawSubs)
         ? rawSubs + " subscribers"
         : rawSubs;
@@ -3487,7 +3481,7 @@ function syncLyricsDock() {
 
   // Open the watch page THROUGH YTM's router. A location.assign() is a real
   // page load: Chrome raises its "Leave site?" beforeunload prompt and the app
-  // shell is rebuilt from scratch (AJ, 2026-10-19). Clicking one of YTM's own
+  // shell is rebuilt from scratch. Clicking one of YTM's own
   // links routes inside the SPA, so playback and the rail survive.
   function openSongView(id) {
     const selectors = [
@@ -3543,7 +3537,7 @@ function syncLyricsDock() {
     window.open("/channel/" + browseId, "_blank");
   }
 
-  // Shared InnerTube plumbing for the artist-info browse call (AJ, 2026-10-19).
+  // Shared InnerTube plumbing for the artist-info browse call.
   function getKey() {
     const cfg = window.ytcfg && window.ytcfg.data_;
     let key = cfg && cfg.INNERTUBE_API_KEY;
@@ -3621,7 +3615,7 @@ function syncLyricsDock() {
       artistNameEl.textContent = info.name;
       artistMonthlyEl.textContent = info.monthly || "";
       artistMonthlyEl.hidden = !info.monthly;
-      // Standalone subscriber-count line (the Subscribe button was removed, AJ 2026-10-19).
+      // Standalone subscriber-count line (the Subscribe button was removed).
       if (artistSubsEl) {
         artistSubsEl.textContent = info.subs || "";
         artistSubsEl.hidden = !info.subs;
@@ -3660,7 +3654,6 @@ function syncLyricsDock() {
       // Do NOT fade/rise the whole card when it came from the skeleton: the
       // entrance animation plays OVER the shimmer, which made the skeleton look
       // broken/flickery on a track switch. The skeleton itself is the transition
-      // (AJ, 2026-10-20).
       if (animate && !isLoading && !artistSkeletonActive) {
         // Restart the rise-in animation by removing the class, forcing reflow, then
         // re-adding it (a no-op re-add won't replay). Drop any leftover OUT class.
@@ -3694,7 +3687,7 @@ function syncLyricsDock() {
     if (!artistCardEl) return;
     const empty = artistCardEl.hidden || !artistCardEl.dataset.browseId;
     // Cancel any in-flight entrance/exit: the skeleton must render at full
-    // opacity, not inherit a half-faded card (AJ, 2026-10-20).
+    // opacity, not inherit a half-faded card.
     artistCardEl.classList.remove("ym-npv-artist-out", "ym-npv-artist-enter");
     artistCardEl.hidden = false;
     artistCardEl.setAttribute("data-loading", "true");
@@ -3713,7 +3706,7 @@ function syncLyricsDock() {
 
     // ALWAYS hold the footprint with the skeleton while the authoritative info
     // is fetched. Rendering the cache first and then the fetch caused TWO
-    // content swaps / height glides (AJ, 2026-10-20); the skeleton covers the
+    // content swaps / height glides; the skeleton covers the
     // wait and the card renders exactly once.
     showArtistSkeleton();
 
@@ -3769,7 +3762,7 @@ function syncLyricsDock() {
 
   // Right after a route change the player page is still animating in, so a
   // single fit can latch a stale (tiny) box and leave the video small with
-  // black bars until the rail is toggled (AJ, 2026-10-19). Re-fit on the next
+  // black bars until the rail is toggled. Re-fit on the next
   // frames so the last measurement always wins.
   function fitVideoSettled() {
     fitVideo();
@@ -3836,7 +3829,7 @@ function syncLyricsDock() {
   /* Collapse triggered by flinging the cursor to the right edge. Keeps the size
      the rail was at when the gesture fired (held at WIDTH_MIN while dragging past
      the minimum) so re-opening remembers it, instead of snapping back to a
-     previously-saved width (AJ, 2026-10-19). */
+     previously-saved width. */
   function collapseFromResize() {
     if (resizeHandle) resizeHandle.classList.remove("dragging");
     document.body.style.userSelect = "";
@@ -3877,7 +3870,7 @@ function syncLyricsDock() {
       // Collapse ONLY when the cursor reaches the right edge of the viewport —
       // not when the width bottoms out. So dragging past WIDTH_MIN just holds the
       // rail at its minimum (nothing happens) until you fling the cursor to the
-      // edge (AJ, 2026-10-19).
+      // edge.
       if (e.clientX >= (window.innerWidth || 1200) - COLLAPSE_EDGE_MARGIN) {
         collapseFromResize();
         return;
@@ -3894,7 +3887,6 @@ function syncLyricsDock() {
       // Fire a synthetic window resize (throttled to one per frame) so YTM's own
       // layout — and the dynamic.js divider between the tabs and the video/art on
       // the watch page — reflows LIVE during the drag instead of only on mouseup
-      // (AJ, 2026-10-19).
       if (!resizeRaf) {
         resizeRaf = requestAnimationFrame(() => {
           resizeRaf = 0;
@@ -3938,7 +3930,7 @@ function syncLyricsDock() {
 
   // Mirror the Aurora blooms settings that dynamic.js applies to the page-wide
   // backdrop, so the rail's Kawarp matches it instead of using hard-coded values
-  // (AJ, 2026-10-19). Cheap: only writes when a value actually changed.
+  //. Cheap: only writes when a value actually changed.
   let kawarpApplied = "";
   function syncKawarpSettings() {
     if (!bgKawarp) return;
@@ -4044,7 +4036,7 @@ function syncLyricsDock() {
     if (!bgKawarp) return;
     syncKawarpSettings();
     // Dynamic's "Cover art only" toggle applies to the rail's Kawarp too: skip
-    // the held video and fall through to the cover image (AJ, 2026-10-20).
+    // the held video and fall through to the cover image.
     let coverOnly = false;
     try {
       const dyn = window.__ymAuroraDynamic;
@@ -4054,9 +4046,13 @@ function syncLyricsDock() {
     // Outside "ultra" the rail never follows the live video (see the mode doc at
     // kawarpOn above).
     if (!videoSamplingAllowed()) coverOnly = true;
-    const node = !coverOnly && heldVideo && heldVideo.isConnected
+    // Prefer the animated album cover: it is what sits behind the artwork on
+    // screen, so the rail's backdrop should move with it. Falls back to a held
+    // music video, then the still cover.
+    const animated = coverOnly ? null : findAnimatedArtworkVideo();
+    const node = animated || (!coverOnly && heldVideo && heldVideo.isConnected
       ? heldVideo.querySelector("video")
-      : null;
+      : null);
     if (node && node.readyState >= 2) {
       if (force || bgVideoEl !== node) {
         try {
@@ -4083,6 +4079,16 @@ function syncLyricsDock() {
     }
   }
 
+  function findAnimatedArtworkVideo() {
+    try {
+      const bridge = window.__ymAuroraAnimatedArt;
+      const video = bridge && typeof bridge.getVideo === "function" ? bridge.getVideo() : null;
+      return video && video.isConnected && video.readyState >= 2 ? video : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function build() {
     if (document.getElementById(ROOT_ID)) return;
     injectStyle();
@@ -4103,11 +4109,11 @@ function syncLyricsDock() {
       applyCollapsed();
     });
 
-    // Title row: plain centered title (like/dislike buttons removed at AJ's
+    // Title row: plain centered title (like/dislike buttons removed at the
     // request — they're redundant with YTM's own player bar).
     const titleRow = h("div", { class: "ym-npv-title-row" }, titleEl);
 
-    // Copy-link button: lives at the right edge of the TITLE ROW (AJ, 2026-10-19)
+    // Copy-link button: lives at the right edge of the TITLE ROW
     // and only ever copies — no native share sheet.
     const shareBtn = h(
       "button",
@@ -4152,7 +4158,7 @@ function syncLyricsDock() {
     stretchBtnEl = stretchBtn;
 
     // "Open in song view" — floats over the hero video; shown when we're NOT
-    // already on the watch page (AJ, 2026-10-19).
+    // already on the watch page.
     const goSongBtn = h(
       "button",
       { class: "ym-npv-icon-btn ym-npv-go-song", type: "button", title: "Open in song view", "aria-label": "Open in song view" },
@@ -4179,7 +4185,7 @@ function syncLyricsDock() {
 
     // Empty slot — the live Synced Lyrics panel (#ym-sl-panel) is moved into
     // it by dockLyrics() when the rail is open on a non-song page. The stretch
-    // toggle rides along at its top-right (AJ, 2026-10-19).
+    // toggle rides along at its top-right.
     const lyricsSlot = h("div", { class: "ym-npv-lyrics" }, stretchBtn);
     lyricsSlotEl = lyricsSlot;
 
@@ -4201,7 +4207,7 @@ function syncLyricsDock() {
       if (expanded) {
         // Smoothly reveal: keep it clipped while growing max-height to the real
         // content height, then release the cap so the bio can reflow if the font
-        // or layout shifts (AJ, 2026-10-19).
+        // or layout shifts.
         artistDescEl.style.overflow = "hidden";
         artistDescEl.style.maxHeight = artistDescEl.scrollHeight + "px";
         artistMoreEl.textContent = "SHOW LESS";
@@ -4241,7 +4247,7 @@ function syncLyricsDock() {
       ),
       // Shimmer placeholder shown while the next artist loads. It overlays the
       // card so the card's footprint never collapses and the queue below never
-      // jumps up (AJ, 2026-10-20).
+      // jumps up.
       h(
         "div",
         { class: "ym-npv-artist-skeleton", "aria-hidden": "true" },
@@ -4258,7 +4264,7 @@ function syncLyricsDock() {
       )
     );
 
-    // Up Next queue section — UNDER the artist card (AJ, 2026-10-19).
+    // Up Next queue section — UNDER the artist card.
     const queueToggle = h(
       "button",
       { class: "ym-npv-queue-toggle", type: "button", "aria-pressed": "false", title: "Open queue" },
@@ -4268,7 +4274,7 @@ function syncLyricsDock() {
       ev.stopPropagation();
       queueOpen = !queueOpen;
       // Closing must forget the revealed batches, otherwise the list stays long
-      // and the button appears dead (AJ, 2026-10-19).
+      // and the button appears dead.
       if (!queueOpen) queueExtra = 0;
       queueToggle.textContent = queueOpen ? "Close queue" : "Open queue";
       queueToggle.setAttribute("aria-pressed", queueOpen ? "true" : "false");
@@ -4308,7 +4314,7 @@ function syncLyricsDock() {
         "div",
         { class: "ym-npv-hero" },
         // The art lives in a collapsible grid slot so hiding it on the song
-        // view animates the height instead of snapping (AJ, 2026-10-19).
+        // view animates the height instead of snapping.
         // artImg's parent MUST stay .ym-npv-art: the video parking code
         // inserts the parked player relative to it.
         h("div", { class: "ym-npv-art-slot" },
@@ -4353,7 +4359,7 @@ function syncLyricsDock() {
     });
     // Hover peek is CSS-only now (see the :has() rule on .ym-npv-edge). It used to
     // also push the page 6px, which cost a full feed reflow per mouseover — removed
-    // for performance (AJ, 2026-10-20). The tab and the rail edge still respond.
+    // for performance. The tab and the rail edge still respond.
 
     // The tab lives INSIDE the frame so it inherits the collapse transform and
     // rides the rail's leading edge (see the .ym-npv-edge rule). Appended last so
@@ -4468,7 +4474,7 @@ function syncLyricsDock() {
     }, 200);
   }
 
-  /* ---- Up Next queue (AJ, 2026-10-19) ------------------------------------
+  /* ---- Up Next queue ------------------------------------
      Reads the live YTM queue model (the same source next-up.js uses) and lists the
      tracks that come AFTER the one currently playing. Sits under the artist card.
      "Open queue" expands it; "Show more" reveals a long queue. */
@@ -4547,7 +4553,7 @@ function syncLyricsDock() {
   // (its playEndpoint). That internal call fires `onVideoDataChange`, which is
   // what refreshes the player bar (title / artist / art / views), the queue's
   // selected row and the app state. `loadVideoById` only swaps the media, so the
-  // bar stayed on the old song (AJ, 2026-10-20).
+  // bar stayed on the old song.
   function queuePlayerParams(id) {
     try {
       const host = document.querySelector("ytmusic-player-queue");
@@ -4568,7 +4574,7 @@ function syncLyricsDock() {
   // subscribes to the current endpoint and runs playEndpoint ->
   // loadVideoByPlayerVars, which updates the player bar, artwork, views and the
   // queue selection WITHOUT changing the route. This is the only path that
-  // makes the bar follow the click (AJ, 2026-10-20).
+  // makes the bar follow the click.
   function playViaQueueStore(id) {
     try {
       const el = document.querySelector("ytmusic-player-queue");
@@ -4667,7 +4673,7 @@ function syncLyricsDock() {
   // A normal track change (next / skip) does NOT rebuild the list any more. The
   // old top row slides out, the surviving rows FLIP upward, the newly-revealed
   // row enters from below, and the list gives a slight zoom-in/out pulse
-  // (AJ, 2026-10-20). "Show more", a collapse, a reorder or a previous jump
+  //. "Show more", a collapse, a reorder or a previous jump
   // still fall back to the full staggered cascade.
   function renderQueue(force) {
     if (!queueEl || !queueListEl || !queueMoreEl) return;
@@ -4693,7 +4699,7 @@ function syncLyricsDock() {
 
     // Collapsed = next 5. Open = next 5 + a batch of 5 per "Show more" press.
     // On the Lyrics tab the lyrics card is empty, so the queue fills the rail
-    // instead of leaving a gap (AJ, 2026-10-19).
+    // instead of leaving a gap.
     const limit = queueAll
       ? upcoming.length
       : (queueOpen ? QUEUE_DEFAULT + queueExtra * QUEUE_BATCH : QUEUE_DEFAULT);
@@ -4766,7 +4772,7 @@ function syncLyricsDock() {
         if (!queueListEl) return;
         // A hidden card (expanded lyrics hide the queue outright) measures 0,
         // and caching that number clipped the list to a sliver the moment the
-        // normal rail came back (AJ, 2026-10-21). The rows already carry the
+        // normal rail came back. The rows already carry the
         // right COUNT, so unclipping is always correct content - only the
         // height glide is lost - and we look again a beat later.
         if (!queueListEl.scrollHeight) {
@@ -5120,7 +5126,7 @@ function syncLyricsDock() {
     if (!armed) return;
     armed = false;
     if (poll) { window.clearInterval(poll); poll = 0; }
-    // This one was never cleared (found 2026-10-20): startNpvShadeLoop() creates a
+    // This one was never cleared (found): startNpvShadeLoop creates a
     // 700ms interval and nothing released it, so disabling the add-on left a timer
     // and its closure alive for the life of the tab. It no longer threw because
     // updateNpvShade() early-returns on !lyricsSlotEl, but it still woke the main

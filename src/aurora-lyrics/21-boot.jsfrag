@@ -2,7 +2,7 @@
      The first-run onboarding tour used to live above this line: a modal card, a
      pulsing highlight on the waffle icon, a localStorage completion flag and a
      second kickoff IIFE that re-ran it on DOMContentLoaded. Removed entirely
-     (AJ, 2026-10-21) — a brand-new install opens straight into the app, which
+      — a brand-new install opens straight into the app, which
      also retires the four #1ed760 green rules that were the last non-crimson
      colours in the project. */
   whenYTMod(() => {

@@ -300,11 +300,7 @@
   margin: 0; padding: 18px 12px; font-size: 13px; line-height: 1.55; color: var(--dim);
 }
 /* the design has no monograms, checks, category headings or source chips */
-#ym-market.ym-mk2 .ym-mk-mono,
 #ym-market.ym-mk2 .ym-mk-check,
-#ym-market.ym-mk2 .ym-mk-cat,
-#ym-market.ym-mk2 .ym-mk-sources,
-#ym-market.ym-mk2 .ym-mk-sweep,
 #ym-market.ym-mk2 .ym-mk-dmono { display: none; }
 
 /* ---- detail ------------------------------------------------------------ */

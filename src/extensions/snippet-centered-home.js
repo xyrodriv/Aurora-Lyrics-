@@ -1,7 +1,7 @@
 /*
  * Snippet — "Centered home" (v0.1.1).
  *
- * AJ, 2026-10-19. Two home-page layout tweaks, CSS-only:
+ *. Two home-page layout tweaks, CSS-only:
  *
  *   1. SHELF HEADERS — the artist avatar now sits INLINE with the strapline
  *      ("ALPHAMP5"), and that pair is centered above the title. Before this the
@@ -13,7 +13,7 @@
  * The soft blur seam at the left guide edge used to live here; it moved into
  * the NPV snippet because the hard cut is caused by the rail's layout.
  *
- * DOM notes (verified live on music.youtube.com, 2026-10-19):
+ * DOM notes (verified live on music.youtube.com):
  *   ytmusic-carousel-shelf-basic-header-renderer
  *     > .image                      (56px artist avatar, optional)
  *     > #content-group
@@ -46,7 +46,7 @@
 /* ---- 0. gutter off the left guide ------------------------------------ */
 /* YTM butts the first card straight against the Home / Explore rail. A small
    gutter makes the layout read as intentional and gives the NPV's blur seam
-   somewhere to fade into (AJ, 2026-10-19). */
+   somewhere to fade into. */
 ytmusic-section-list-renderer {
   padding-left: 24px !important;
 }
@@ -168,7 +168,7 @@ ytmusic-chip-cloud-renderer > #chips {
    becomes the row's ONLY in-flow item, justify-content:center parks it dead
    centre, and the absolutely-positioned box paints straight over it. That is
    both reported symptoms — the logo vanishing on focus, and showing up centred
-   behind the bar on a search page (AJ, 2026-10-22; measured live with the
+   behind the bar on a search page (measured live with the
    browser bridge, the logo's box sat INSIDE the search box's box in both
    states).
 
@@ -192,7 +192,7 @@ ytmusic-nav-bar .center-content ytmusic-logo {
 
 /* ---- 3b. expanded search: no square frame, no drop shadow -------------- */
 /* Both are YOUTUBE's, and both switch on only while the field is FOCUSED
-   (measured on the live page with the browser bridge, 2026-10-22 — a clean
+   (measured on the live page with the browser bridge — a clean
    profile has neither): the host element draws a 1px border at
    border-radius: 2px around the .search-box that is rounded to 8px, so the
    frame reads as a square line drawn around a rounded pill; and

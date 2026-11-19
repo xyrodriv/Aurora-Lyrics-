@@ -3,7 +3,7 @@
  *
  * v0.1.0.
  *
- * AJ asked for a real WINDOWS notification on every track change, with the cover
+ * asked for a real WINDOWS notification on every track change, with the cover
  * art. That is reachable directly from the page: `new Notification(title, opts)`
  * raises a genuine OS notification, and `icon` takes a URL — so the player bar's
  * own artwork can be passed straight through. No extension permission and no
@@ -104,8 +104,8 @@
         return;
       }
       // NO tag, on purpose. A tag makes Windows UPDATE the existing notification
-      // in place: it shows the new song but never pops again — exactly what AJ
-      // hit ("it just changes that existing notification ... and never shows").
+      // in place: it shows the new song but never pops again — exactly what 
+      // hit ("it just changes that existing notification ... and never shows).
       // Without a tag every change is a fresh notification that actually alerts.
       // To stop them piling up when skipping fast, the previous one is closed
       // explicitly instead — one visible notification, and it re-alerts each time.

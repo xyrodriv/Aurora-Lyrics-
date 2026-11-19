@@ -70,7 +70,7 @@
 
     // No real per-word sync: show the line as a static block that lights up when
     // active/sung instead of running syllable/letter karaoke springs — the
-    // dominant per-frame cost on partially-synced TTML imports (AJ, 2026-09-17).
+    // dominant per-frame cost on partially-synced TTML imports.
     if (word.NoKaraoke) {
       const lit = state !== "NotSung";
       setStyleIfChanged(word.HTMLElement, "--gradient-position", lit ? "100%" : "-20%", 0.1);
@@ -148,7 +148,7 @@
     // false the moment they "settle" — but the word's gradient sweep still needs a
     // per-frame write while the word is being sung. Keep Active words awake in
     // this mode, or the gradient freezes at its state-flip value: that was the
-    // "flash of fill at the line end, then dim" AJ saw (2026-10-02). In normal
+    // "flash of fill at the line end, then dim" saw. In normal
     // mode the glow spring chases a progress-driven goal and never sleeps during
     // a line, which is what kept these writes flowing before the stubs existed.
     const selfAwake =
@@ -192,21 +192,17 @@
       setStyleIfChanged(word.HTMLElement, "color", "inherit");
     } else {
       setStyleIfChanged(word.HTMLElement, "--gradient-position", `${gradient}%`, 0.1);
-      // A LINE-TIMED word's glow IS the line-fill highlight, and at the shared 35x
-      // multiplier it read too faint next to the letter glow's 185x. AJ asked for
-      // a little more (2026-10-02): 50x peaks near 50% opacity at the glow's
-      // natural peak of 1.0. Background-vocal words (word.BGWord) get 70x plus a
-      // wider radius, because the bg line no longer dims its glow via a <1 line
-      // opacity — so the glow now has to read as bright/white on its own (AJ,
-      // 2026-10-02 late: "the glow isnt bright or white still"). The letter-group
-      // bg path already peaks at 100% white at L12473.
-      const glowMultiplier = word.BGWord ? 60 : (word.LineTimed ? 50 : 35);
-      // Line-timed words get a slightly wider glow to match the boosted opacity
-      // (AJ, 2026-10-02: "up the radius a little bit").
+      // A LINE-TIMED word's glow IS the line-fill highlight; 50x peaks near
+      // 50% opacity at the glow's natural peak of 1.0. Background vocals used
+      // to get 60x and a wider radius, which read hotter than the lead row on a
+      // real track. They now use the lead word's own multiplier and radius, so
+      // bg vocals sit behind the main line instead of glowing over it.
+      const glowMultiplier = word.LineTimed ? 50 : 35;
+      // Line-timed words get a slightly wider glow to match the boosted opacity.
       setStyleIfChanged(
         word.HTMLElement,
         "--text-shadow-blur-radius",
-        `${word.BGWord ? 4 + 4 * glow : (word.LineTimed ? 4 + 3 * glow : 4 + 2 * glow)}px`,
+        `${word.LineTimed ? 4 + 3 * glow : 4 + 2 * glow}px`,
         0.5
       );
       setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${Math.min(glow * glowMultiplier, 100)}%`, 1);
@@ -268,7 +264,7 @@
     if (!currentSettings.adaptiveSpacing) return;
     // Apple Music style lyrics skips the shrink pass entirely: its words rest at
     // a static 0.95 scale, and this pass's inward pull read as "some rows are
-    // shifted to the right" on wrapped word-by-word lines (AJ, 2026-10-02). The
+    // shifted to the right" on wrapped word-by-word lines. The
     // reset is cheap per frame -- setStyleIfChanged's cache makes it a no-op
     // once everything is back at 1 -- and it guarantees nothing stays
     // half-squeezed from before the toggle was flipped.
@@ -423,6 +419,31 @@
     return found;
   }
 
+  // A finished line leaves no active window until the next lyric begins, so the
+  // normal target is -1 and the camera used to sit on the line that had just
+  // faded. If the next lyric is still a real pause away, target it as soon as
+  // the old line clears. When it starts almost immediately, let the normal
+  // active-line move handle it once instead of pre-scrolling into a duplicate.
+  const GAP_SCROLL_MIN_MS = 750;
+  function findGapScrollTarget(positionMs) {
+    let next = -1;
+    let nextStart = Infinity;
+    let hasFinishedLine = false;
+    for (let index = 0; index < scrollCandidateIndices.length; index++) {
+      const candidateIndex = scrollCandidateIndices[index];
+      const candidate = modelLines[candidateIndex];
+      if (!candidate || candidate.DotLine) continue;
+      if (candidate.EndTime <= positionMs) hasFinishedLine = true;
+      if (candidate.StartTime > positionMs && candidate.StartTime < nextStart) {
+        next = candidateIndex;
+        nextStart = candidate.StartTime;
+      }
+    }
+    // No previous lyric is the intro; no next lyric is the end of the song.
+    if (!hasFinishedLine || next < 0) return -1;
+    return nextStart - positionMs > GAP_SCROLL_MIN_MS ? next : -1;
+  }
+
   function lineNeedsAnimation(line) {
     if (!line.Syllables || !line.Syllables.Lead) return false;
     const words = line.Syllables.Lead;
@@ -430,6 +451,100 @@
       if (wordNeedsAnimation(words[index])) return true;
     }
     return false;
+  }
+
+  /* ---- lyric paint window --------------------------------------------------
+     Spicy keeps the WHOLE song in one long text layer. Repainting 45-80 lines
+     whenever the karaoke fill moves is what holds the panel near 60 fps on a
+     170 Hz display (measured: hide the lines -> 170 fps; paint them all -> 60).
+     Skip every line outside a window around the active one, keeping its exact
+     height so the scroller cannot move. The window is far wider than the
+     scrollport, so the visible lyrics are unchanged. Manual browsing shows all
+     lines again, so scrolling never lands on a blank one. */
+  const LYRIC_PAINT_WINDOW = 8;
+  let lyricCullLines = null;
+  let lyricCullHeights = null;
+  let lyricCullHidden = null;
+  let lyricCullActive = null;
+  let lyricCullManual = null;
+
+  function clearLyricCulling() {
+    if (lyricCullLines && lyricCullHidden) {
+      for (let index = 0; index < lyricCullLines.length; index++) {
+        if (!lyricCullHidden[index]) continue;
+        lyricCullLines[index].style.contentVisibility = "";
+        lyricCullLines[index].style.containIntrinsicSize = "";
+      }
+    }
+    lyricCullLines = null;
+    lyricCullHeights = null;
+    lyricCullHidden = null;
+    lyricCullActive = null;
+    lyricCullManual = null;
+  }
+
+  function applyLyricCulling(activeIndex) {
+    if (!lineElements.length) {
+      clearLyricCulling();
+      return;
+    }
+    if (
+      lyricCullLines &&
+      (lyricCullLines[0] !== lineElements[0] || lyricCullLines.length !== lineElements.length)
+    ) {
+      clearLyricCulling();
+    }
+    if (manualScrollActive || activeIndex < 0) {
+      if (lyricCullManual !== true) {
+        clearLyricCulling();
+        lyricCullManual = true;
+      }
+      return;
+    }
+    if (lyricCullActive === activeIndex) return;
+    lyricCullActive = activeIndex;
+    lyricCullManual = false;
+    if (!lyricCullLines) {
+      // Every line is visible on this pass, so these are real heights. They are
+      // the height each skipped line keeps while it is not painted.
+      lyricCullLines = lineElements.slice();
+      // contain-intrinsic-size is the CONTENT box, while offsetHeight includes
+      // the line's vertical padding (5.46px top/bottom on a live line) and
+      // border. Passing offsetHeight straight through made every skipped line
+      // ~11px TALLER than the real one, so the scroller snapped when the window
+      // moved past a line. Store offsetHeight minus that vertical box. Margins
+      // are outside the box and stay on the element, so they need no handling.
+      lyricCullHeights = lineElements.map((element) => {
+        const box = getComputedStyle(element);
+        const vertical = (parseFloat(box.paddingTop) || 0) +
+          (parseFloat(box.paddingBottom) || 0) +
+          (parseFloat(box.borderTopWidth) || 0) +
+          (parseFloat(box.borderBottomWidth) || 0);
+        return Math.max(0, (element.offsetHeight || 0) - vertical);
+      });
+      lyricCullHidden = new Array(lineElements.length).fill(false);
+    }
+    for (let index = 0; index < lineElements.length; index++) {
+      const element = lineElements[index];
+      // Dot lines change height with their play state (0 while idle, a short
+      // band while the three dots are showing), so a height cached at mount
+      // would leave a stale gap after one stops playing. They are only a few
+      // short rows; keep them painted instead of culling them.
+      const hide = Math.abs(index - activeIndex) > LYRIC_PAINT_WINDOW &&
+        !element.classList.contains("musical-line");
+      // A zero height means layout was not ready when we measured; keep the
+      // line painted rather than collapsing the scroller around a 0px block.
+      if (hide && !lyricCullHeights[index]) continue;
+      if (lyricCullHidden[index] === hide) continue;
+      lyricCullHidden[index] = hide;
+      if (hide) {
+        element.style.containIntrinsicSize = lyricCullHeights[index] + "px";
+        element.style.contentVisibility = "hidden";
+      } else {
+        element.style.contentVisibility = "";
+        element.style.containIntrinsicSize = "";
+      }
+    }
   }
 
   function animate(positionMs, positionSampledAtMs) {
@@ -453,7 +568,7 @@
 
     // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
     // tracks playback — top at song start, bottom at song end. Paused while the
-    // user scrolls manually (AJ, 2026-09-18).
+    // user scrolls manually.
     if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl && !braccatoOwnsTrack()) {
       driveStaticAutoScroll(positionMs);
       setJumpButtonVisible(false);
@@ -474,7 +589,7 @@
     // pass has NO active line until the first lyric starts, so the normal
     // line-follow retarget has nothing to aim at — the panel used to sit at the
     // bottom for the whole intro and then sweep the entire song height once
-    // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
+    // line 1 began. Place it on the new position immediately.
     if (
       lastLyricPositionMs >= 0 &&
       lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS &&
@@ -493,6 +608,7 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    if (!braccatoOwnsTrack()) applyLyricCulling(activeIndex);
     // Better Lyrics owns its whole timeline, scroll and word animation. The
     // built-in model above is kept in step only for Aurora's shared surfaces
     // (fullscreen dimming, active-line bus, jump-to-current), so stop here and
@@ -535,9 +651,19 @@
     const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !amllSimpleLookActive())
       ? currentSettings.scrollLeadMs
       : 0;
-    const scrollIndex = scrollLeadMs > 0
+    let scrollIndex = scrollLeadMs > 0
       ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
       : activeIndex;
+    // The previous line has faded and nothing is active yet. Move to the next
+    // lyric now, so a pause does not leave the camera parked on empty space.
+    if (
+      activeIndex < 0 &&
+      scrollIndex < 0 &&
+      currentSettings.fadePreviousLines &&
+      !staticLyricsActive
+    ) {
+      scrollIndex = findGapScrollTarget(lyricPositionMs);
+    }
     // Gated on the target changing rather than on the active line changing: with
     // a lead these differ, and this keeps scrollActiveLineIntoView — which reads
     // layout via getBoundingClientRect — off the per-frame path.
@@ -571,14 +697,16 @@
       }
     }
 
+    let anyLineUnsung = false;
     for (let index = 0; index < modelLines.length; index++) {
       const line = modelLines[index];
       const lineState = getState(lyricPositionMs, line.StartTime, line.EndTime);
+      if (!line.DotLine && lineState !== "Sung") anyLineUnsung = true;
       const stateChanged = line.RenderState !== lineState;
       if (stateChanged) {
         line.RenderState = lineState;
         // Static (unsynced) lines keep the .static CSS state so they stay bright
-        // and never get the per-state opacity/alpha overrides (AJ, 2026-09-18).
+        // and never get the per-state opacity/alpha overrides.
         if (!staticLyricsActive) {
           line.HTMLElement.classList.toggle("Active", lineState === "Active");
           line.HTMLElement.classList.toggle("NotSung", lineState === "NotSung");
@@ -591,7 +719,7 @@
         // (lyricPositionMs = positionMs - offset), so using the raw position
         // here made the dots bounce out and vanish at a time that ignored the
         // sync offset - early or late by exactly the offset, while the pause
-        // itself was still running (AJ, 2026-09-28).
+        // itself was still running.
         const nearEnd = lyricPositionMs > line.EndTime - PRE_HIDDEN_DOT_LINE_MS;
         const playing = lineState === "Active" && !nearEnd;
         line.HTMLElement.classList.toggle("playing", playing);
@@ -608,15 +736,14 @@
       // an interlude's dots. The built-in renderer used to grow its unsung
       // TEXT-SHADOW halo with distance instead, which read as a dirty haze
       // around the words rather than as focus, so the halo is retired with the
-      // same write (AJ, 2026-10-23).
+      // same write.
       //
       // Background vocals are ranked by the LEAD line they belong to, not by
       // their own slot: they are separate .line.bg-line entries pushed right
       // after that lead, so their own index put them at distance 1 from the
       // line being sung — blurred underneath the words the user was reading
-      // (AJ, 2026-10-23).
       //
-      // Two rules keep that ranking honest at a line boundary (AJ, 2026-10-26):
+      // Two rules keep that ranking honest at a line boundary:
       //
       // 1. ANY line that is still being sung stays crisp, background vocals
       //    included. A bg phrase routinely runs past the start of the next lead
@@ -628,18 +755,19 @@
       //    the last line of an overlapping block sat in focus — as sharp as the
       //    line being read — until the reader reached the next line.
       //
-      // Low performance mode gets a cheaper reading of the same cue: radius
-      // capped at 2px, and only the four nearest rows are filtered at all. A
-      // filtered line is its own compositor surface, so the NUMBER of blurred
-      // lines is what this costs, not the radius — and past four rows the text
-      // is already dimmed by its own state, where a 4-5px blur just reads as
-      // haze (AJ, 2026-10-26).
+      // Low performance mode keeps the same cue but caps the radius at 2px.
+      // It used to skip every row beyond the four nearest, which left the
+      // partially cut rows at the top and bottom sharp; when the song advanced
+      // one of those rows entered the four-row window and visibly popped into
+      // blur. Every non-focus row now gets the small blur, so the rack stays
+      // consistent all the way to both edges. The culling pass already removes
+      // rows far outside the paint window, so this does not grow the painted
+      // stack.
       if ((activeLineChanged || stateChanged || depthModeChanged) && activeIndex >= 0) {
         const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
         const distance = Math.abs(anchorIndex - activeIndex);
         const inFocus = line.DotLine || distance === 0 || lineState === "Active";
-        const pastLowRange = lowPerfMode && !inFocus && distance > 3;
-        const depthBlur = inFocus || pastLowRange
+        const depthBlur = inFocus
           ? 0
           : Math.min(lowPerfMode ? 2 : 5, 1 + distance);
         setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
@@ -707,105 +835,26 @@
       }
     }
 
+    // Upstream's all-sung cue: once the last line has been sung, stop hiding
+    // finished lines and show the whole lyric again at its resting brightness.
+    // Written only when the answer changes, so it never lands on the hot path.
+    const allLinesSung = !anyLineUnsung;
+    if (allLinesSung !== lastAllLinesSung) {
+      lastAllLinesSung = allLinesSung;
+      if (lineScrollEl) {
+        lineScrollEl.classList.toggle("ym-sl-lines-all-sung", allLinesSung);
+      }
+    }
+
     applyAdaptiveSpacing(activeIndex, activeLineChanged);
   }
 
-  // TEMP PERF PROBE (2026-10-22) - diagnosis only, remove once the lag is
-  // pinned. Publishes one-second totals as attributes on <html> so the numbers
-  // can be read through the browser bridge without opening DevTools:
-  //   data-aurora-fps          rAF callbacks per second (two loops would double it)
-  //   data-aurora-frame-ms     mean gap between rAF callbacks
-  //   data-aurora-worst-ms     worst gap in the window
-  //   data-aurora-animate-ms   mean time inside animate() (the built-in renderer)
-  //   data-aurora-amll-ms      mean time inside amllDrive() (the AMLL renderer)
-  //   data-aurora-tick-ms      mean time inside the WHOLE tick() body
-  //   data-aurora-long-ms      total long-task (>50ms) time in the window
-  //   data-aurora-long-n       number of long tasks in the window
-  //   data-aurora-anims        live CSS/Web animations on the document
-  //   data-aurora-rejections   unhandled promise rejections in the window
-  const perfProbe = {
-    frames: 0,
-    frameSum: 0,
-    frameWorst: 0,
-    animateSum: 0,
-    animateFrames: 0,
-    amllSum: 0,
-    amllFrames: 0,
-    tickSum: 0,
-    longMs: 0,
-    longN: 0,
-    rejections: 0,
-    lastTs: 0,
-    lastPublish: 0,
-    addAmll(ms) { this.amllSum += ms; this.amllFrames++; },
-    report() {
-      const now = performance.now();
-      if (!this.lastPublish) this.lastPublish = now;
-      if (now - this.lastPublish < 1000) return;
-      const span = now - this.lastPublish;
-      const el = document.documentElement;
-      try {
-        el.setAttribute("data-aurora-fps", ((this.frames * 1000) / span).toFixed(1));
-        el.setAttribute("data-aurora-frame-ms", (this.frames ? this.frameSum / this.frames : 0).toFixed(2));
-        el.setAttribute("data-aurora-worst-ms", this.frameWorst.toFixed(1));
-        el.setAttribute("data-aurora-animate-ms", (this.animateFrames ? this.animateSum / this.animateFrames : 0).toFixed(2));
-        el.setAttribute("data-aurora-amll-ms", (this.amllFrames ? this.amllSum / this.amllFrames : 0).toFixed(2));
-        el.setAttribute("data-aurora-tick-ms", (this.frames ? this.tickSum / this.frames : 0).toFixed(2));
-        el.setAttribute("data-aurora-long-ms", this.longMs.toFixed(0));
-        el.setAttribute("data-aurora-long-n", String(this.longN));
-        el.setAttribute("data-aurora-anims", String(document.getAnimations().length));
-        el.setAttribute("data-aurora-rejections", String(this.rejections));
-        el.setAttribute("data-aurora-simple", amllSimpleLookActive() ? "1" : "0");
-      } catch (e) {}
-      this.frames = 0;
-      this.frameSum = 0;
-      this.frameWorst = 0;
-      this.animateSum = 0;
-      this.animateFrames = 0;
-      this.amllSum = 0;
-      this.amllFrames = 0;
-      this.tickSum = 0;
-      this.longMs = 0;
-      this.longN = 0;
-      this.rejections = 0;
-      this.lastPublish = now;
-    },
-  };
-  window.__auroraPerf = perfProbe;
-  window.addEventListener("unhandledrejection", () => { perfProbe.rejections++; });
-  // Anything the browser spends >50ms on in one chunk is a long task, whether it
-  // came from our callback or from style/layout/paint it triggered. If our JS is
-  // 0.3ms/frame and long tasks are still stacking up, the cost is the browser
-  // reacting to what we wrote, not the writing itself.
-  try {
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        perfProbe.longMs += entry.duration;
-        perfProbe.longN++;
-      }
-    }).observe({ type: "longtask", buffered: false });
-  } catch (e) {}
-
   function tick() {
     raf = requestAnimationFrame(tick);
-    const tickStartedAt = performance.now();
-    try {
-      tickBody();
-    } finally {
-      perfProbe.tickSum += performance.now() - tickStartedAt;
-    }
+    tickBody();
   }
 
   function tickBody() {
-    const probeNow = performance.now();
-    if (perfProbe.lastTs) {
-      const gap = probeNow - perfProbe.lastTs;
-      perfProbe.frames++;
-      perfProbe.frameSum += gap;
-      if (gap > perfProbe.frameWorst) perfProbe.frameWorst = gap;
-    }
-    perfProbe.lastTs = probeNow;
-    perfProbe.report();
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
@@ -831,13 +880,10 @@
     // transparent for one frame: the black flicker. It lands hardest on the
     // active line and on bg words because those have their text-shadow faded to
     // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
-    // springs simply advance on the next good frame. (AJ: "some lines just
+    // springs simply advance on the next good frame. (some lines just
     // flicker black for a very very short time".)
     if (Number.isFinite(position)) {
-      const animStartedAt = performance.now();
       animate(position, positionSampledAt);
-      perfProbe.animateSum += performance.now() - animStartedAt;
-      perfProbe.animateFrames++;
     }
   }
 
@@ -852,7 +898,7 @@
      Official lyric timings do not match a music video's edit (cold opens, cut
      verses, re-ordered choruses), so when a player video is live the lyrics are
      likely desynced through no fault of the sync data. A pill at the top of the
-     panel says so (AJ, 2026-10-02): "Music video lyrics may be out of sync",
+     panel says so: "Music video lyrics may be out of sync",
      with a DISPLAYED 5-second timer bar, then it fades out and is removed.
      Latched on the video ELEMENT so it shows once per video, not once per
      housekeeping pass. Absolutely positioned, pointer-events:none, so it never
@@ -868,40 +914,6 @@
     if (mvSyncChip) { mvSyncChip.remove(); mvSyncChip = null; }
   }
 
-  /* Source warning chip — same component as the music-video one above, used
-     when the lyrics came from a source whose timing is machine-aligned rather
-     than hand-synced (lrc.red). Reusing .ym-sl-mv-sync-chip keeps one visual
-     language and inherits the shrinking timer bar for free (AJ, 2026-10-19). */
-  let sourceChip = null;
-  let sourceChipFadeTimer = 0;
-  let sourceChipRemoveTimer = 0;
-  const SOURCE_NOTICE_MS = 6500;
-  const SOURCE_FADE_MS = 450;
-
-  function removeSourceChip() {
-    if (sourceChip) { sourceChip.remove(); sourceChip = null; }
-  }
-
-  function showSourceNotice(text) {
-    if (!panelEl || !text) return;
-    if (sourceChipFadeTimer) { clearTimeout(sourceChipFadeTimer); sourceChipFadeTimer = 0; }
-    if (sourceChipRemoveTimer) { clearTimeout(sourceChipRemoveTimer); sourceChipRemoveTimer = 0; }
-    removeSourceChip();
-    sourceChip = h("div", { class: "ym-sl-mv-sync-chip ym-sl-source-chip" },
-      h("span", { text }),
-      h("span", { class: "ym-sl-mv-sync-chip-timer" })
-    );
-    panelEl.appendChild(sourceChip);
-    sourceChipFadeTimer = setTimeout(() => {
-      sourceChipFadeTimer = 0;
-      if (!sourceChip) return;
-      sourceChip.classList.add("ym-sl-fading");
-      sourceChipRemoveTimer = setTimeout(() => {
-        sourceChipRemoveTimer = 0;
-        removeSourceChip();
-      }, SOURCE_FADE_MS);
-    }, SOURCE_NOTICE_MS);
-  }
 
   function syncMvSyncNotice() {
     if (!panelEl) return;

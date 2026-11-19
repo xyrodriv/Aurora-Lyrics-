@@ -36,6 +36,7 @@
     fsKawarpCanvas = null;
     fsKawarpArtUrl = "";
     fsKawarpVideoEl = null;
+    fsKawarpSoftWarp = false;
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
@@ -44,7 +45,7 @@
      run with the same numbers. It used to be constructed with the hard-coded
      FS_KAWARP_OPTIONS (saturation 1.5, no brightness/contrast at all), which
      made fullscreen read flat and dull next to the page the user had tuned
-     (AJ, 2026-10-23). Bloom publishes its live settings on
+. Bloom publishes its live settings on
      window.__ymAuroraDynamic.getSettings() for exactly this kind of reuse; the
      hard-coded block stays only as the value before that lands. */
   function bloomSettings() {
@@ -88,11 +89,42 @@
     try {
       fsKawarp.setOptions({
         saturation: opts.saturation,
-        warpIntensity: opts.warpIntensity,
+        warpIntensity: fsKawarpSoftWarp
+          ? Math.min(opts.warpIntensity, FS_KAWARP_VIDEO_WARP)
+          : opts.warpIntensity,
         blurPasses: opts.blurPasses,
       });
     } catch (_) {}
   }
+
+  /* Cross-add-on bridge for the standalone Animated Artwork add-on. That add-on
+     owns the artwork <video> (inside a closed shadow root), so it hands the
+     element over by reference and Kawarp samples it exactly like a music video.
+     The perf gate lives here: video sampling stays an Ultra-only feature. */
+  window.__ymAuroraKawarp = {
+    adopt(video) {
+      if (!fsActive || !fsKawarp || !fsKawarpActive || !video) return false;
+      if (!videoSamplingAllowed()) return false;
+      if (fsKawarpVideoEl === video) return true;
+      try {
+        const job = fsKawarp.loadVideo(video, {
+          sampleWidth: 72,
+          sampleHeight: 128,
+          smoothing: 120,
+          frameRate: 30,
+        });
+        const done = () => {
+          fsKawarpVideoEl = video;
+          fsKawarpArtUrl = "";
+        };
+        if (job && typeof job.then === "function") job.then(done).catch(() => {});
+        else done();
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+  };
 
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
@@ -116,6 +148,8 @@
     // fsOverlay.firstChild, so a restart that left the old one in place put the
     // stale canvas LATER in document order - where it painted over the new art.
     if (fsKawarpCanvas || fsKawarp) stopFullscreenKawarp();
+    // A live video is a whole frame of motion; still artwork is not.
+    fsKawarpSoftWarp = !!videoEl;
     fsKawarpActive = true;
     const seq = ++fsKawarpSeq;
     fsKawarpCanvas = h("canvas", { class: "ym-sl-fs-kawarp", "aria-hidden": "true" });
@@ -133,8 +167,7 @@
       applyFullscreenKawarpLook();
       if (videoEl) {
         // Music videos: feed the LIVE <video> so the backdrop reacts to the
-        // picture instead of a heavily blurred + dimmed copy of it (AJ,
-        // 2026-10-19). Kawarp samples a small colour map, so this is far
+        // picture instead of a heavily blurred + dimmed copy of it. Kawarp samples a small colour map, so this is far
         // cheaper than the old full-viewport canvas blur.
         await fsKawarp.loadVideo(videoEl, {
           sampleWidth: 72,
@@ -192,7 +225,7 @@
   function syncFullscreenKawarpArt(artUrl) {
     // Never replace a LIVE video feed with a still. The 2s artwork refresh used
     // to do exactly that, so a music video's backdrop froze on the first frame
-    // it had sampled (AJ, 2026-10-19). The video path owns the instance until
+    // it had sampled. The video path owns the instance until
     // stopFullscreenKawarp() clears fsKawarpVideoEl.
     if (fsKawarpVideoEl) return;
     if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
@@ -238,7 +271,7 @@
     const raw = getRawVideoTitle();
     // Music videos now ALWAYS use Kawarp fed by the live video: it replaces the
     // old full-viewport blurred/dimmed canvas copy, which was both heavier and
-    // visually muddier (AJ, 2026-10-19).
+    // visually muddier.
     const liveVideo = fsSavedVideo.node
       ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
       : null;
@@ -266,7 +299,7 @@
         // new canvas is inserted as firstChild, so the OLD one ends up LATER in
         // document order and paints straight over the new art (both are
         // z-index 0). That is why the Kawarp backdrop stopped changing on a
-        // track change (AJ, 2026-09-28).
+        // track change.
         if (artUrl) syncFullscreenKawarpArt(hiResArt(artUrl));
       } else {
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
@@ -295,7 +328,7 @@
   // enterFullscreenMode() decides once at entry; this catches the transitions.
   // A guard timer prevents re-entry while a swap is already in flight.
   //
-  // ===== INTENT vs READINESS (AJ, 2026-10-20) ==============================
+  // ===== INTENT vs READINESS ==============================
   // This used to key off findPlayerVideo(), which requires videoWidth > 0 — a
   // READINESS test. On an MV -> audio skip YTM's recycled <video> keeps its old
   // dimensions for a beat, so the detach could not fire until the new (audio)
@@ -309,7 +342,7 @@
   // unavailable AND the recycled <video> reports videoWidth 0 at the same time —
   // that pair used to read as "this track is audio", so the video was detached
   // mid-reload. That is what made the CONTROLS restack into the cover-art
-  // arrangement between two music videos and then snap back (AJ, 2026-10-21).
+  // arrangement between two music videos and then snap back.
   // Holding the previous answer until a new one arrives makes the mode decision
   // stable across a reload. Reset on fullscreen exit.
   let fsLastKnownHasVideo = null;
@@ -368,13 +401,12 @@
     }
     // Attaching still needs a real, decoded element; detaching does not.
     if (wantVideo && !liveVideo) {
-      // ⭐ INTENT FIRST (AJ, 2026-10-20). Flip the LAYOUT to video geometry the
+      // ⭐ INTENT FIRST. Flip the LAYOUT to video geometry the
       // moment the track is KNOWN to have a video — not when its element is
       // decodable. Without this the pane stayed in cover geometry (tall, ~960x862)
       // for the whole load window, so the new video first appeared in a tall
       // cover-art-shaped box and then snapped to its real aspect ratio: exactly
-      // the "it shows in the cover art format, then as a regular video" AJ
-      // reported. Readiness is handled separately (the video stays at opacity 0
+      // the "cover art format, then regular video" symptom. Readiness is handled separately (the video stays at opacity 0
       // until frames advance), so this cannot show a stale frame.
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         // This is the cover-art composition changing to video geometry.
@@ -397,8 +429,7 @@
     // as a real MV <-> cover change would. So the swap timer below RE-EVALUATES
     // and only COMMITS a swap once it has a decisive answer. The chrome dissolve
     // is applied INSIDE the commit branches (attach / detach), not up here — that
-    // is what keeps an MV -> MV reload from fading the controls out at all (AJ,
-    // 2026-10-21). The media is already dissolving from fsFadeOutMedia(), so the
+    // is what keeps an MV -> MV reload from fading the controls out at all. The media is already dissolving from fsFadeOutMedia(), so the
     // wait here only delays the layout restructure, not the track-change effect.
     fsVideoModeSwapTimer = setTimeout(() => {
       fsVideoModeSwapTimer = 0;
@@ -468,7 +499,7 @@
         lv.style.setProperty("object-fit", "cover", "important");
         lv.style.setProperty("background", "transparent", "important");
         try { lv.play().catch(() => {}); } catch (_) {}
-        // The static card STAYS (AJ, 2026-10-20): removing it here left the pane
+        // The static card STAYS: removing it here left the pane
         // empty for the whole video-ready wait. It is now the outgoing image the
         // cut happens FROM — awaitFsVideoReady()'s finish() removes it at the same
         // moment the video is revealed, so the swap is one hard cut.
@@ -479,10 +510,10 @@
         // Hide the whole PANE, not just the video. The pane still carries the
         // cover-art geometry and animates to the video's aspect ratio, so
         // revealing it here showed a SQUARE card with the old art's shape
-        // (AJ, 2026-09-28). awaitFsVideoReady() reveals the pane and the video
+        //. awaitFsVideoReady() reveals the pane and the video
         // together, once frames are actually advancing.
         // Hidden until frames advance (the ready gate below), but with NO
-        // transition: the reveal is a cut, not a fade (AJ, 2026-10-20).
+        // transition: the reveal is a cut, not a fade.
         lv.style.setProperty("opacity", "0", "important");
         awaitFsVideoReady(lv);
         return;
@@ -516,11 +547,11 @@
         // (cancelVideoFrameCallback vs cancelAnimationFrame), and
         // cancelAnimationFrame CANNOT cancel a requestVideoFrameCallback
         // handle — clearing fsSavedVideo first left the video-frame loop
-        // running forever on a detached video (AJ's 1 fps symptom).
+        // running forever on a detached video (the 1 fps symptom).
         stopBgDrawLoop();
         // Restore the video to the slot it came from so YTM keeps ownership
         // and can reuse it for the next music video. Orphaning it here is
-        // what broke MV loading after a skip (AJ-confirmed).
+        // what broke MV loading after a skip (-confirmed).
         if (saved && saved.node && saved.parent) {
           if (saved.next && saved.next.parentNode === saved.parent) {
             saved.parent.insertBefore(saved.node, saved.next);
@@ -544,11 +575,11 @@
         fsOverlay.style.removeProperty("--ym-sl-fs-video-ratio");
         // The video is gone, so any pending "waiting for it to be ready" is moot
         // — drop it, or its spinner could appear over the cover art that is
-        // about to load (AJ, 2026-09-28).
+        // about to load.
         cancelFsVideoReady();
         // If we were in Video Background, it has nothing to blur now - drop
         // back to Video + Lyrics so a non-MV skip can't strand a broken
-        // backdrop (AJ 2026-09-28). This is a fallback, not a preference, so
+        // backdrop. This is a fallback, not a preference, so
         // do not rewrite the stored audio layout.
         if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
         if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -564,14 +595,13 @@
         if (artUrl) {
           // Reuse the card the reconcile tick may already have made — creating a
           // second one here left the pane showing the cover twice, side by side
-          // (AJ, 2026-09-28).
           const img = ensureFsArtImg();
           // instant = no decode fade: this is a mode swap, so the card must
-          // appear in the same frame the video leaves (AJ, 2026-10-20).
+          // appear in the same frame the video leaves.
           if (img) setFsArtSrc(img, hiResArt(artUrl));
         }
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
-        // No band re-publish (AJ, 2026-10-20): the chrome sits at fixed offsets,
+        // No band re-publish: the chrome sits at fixed offsets,
         // so a pane geometry change no longer has to move it.
       }
       // Fade back in. The MV attach path returns above and reveals once frames
@@ -584,7 +614,7 @@
     }, FS_MEDIA_SWAP_MS);
   }
 
-  // ===== event-driven track detection (AJ, 2026-10-20) =====================
+  // ===== event-driven track detection =====================
   // ⭐ The track watcher that calls refreshTrack() -> syncFsVideoMode() lives in
   // housekeeping(), which runs on a 500ms INTERVAL. That interval was the last
   // real source of the cover -> MV delay: the skip had to wait up to half a
@@ -625,7 +655,7 @@
     // The player response may still describe the OLD track, so give it a couple
     // of frames before asking which mode this track wants. reconcileFsMediaArt()
     // runs here too so a COVER -> COVER skip swaps the artwork on the same beat
-    // instead of waiting for the 500ms housekeeping pass (AJ, 2026-10-20).
+    // instead of waiting for the 500ms housekeeping pass.
     window.setTimeout(() => {
       if (!fsActive) return;
       syncFsVideoMode();
@@ -662,7 +692,7 @@
   // findPlayerVideo() reports real dimensions, and that happens when the NEW
   // stream's metadata lands — anywhere from ~80ms to over a second after the
   // skip. Leaving that to the 2s refresh tick is what made cover -> MV feel
-  // slow (AJ, 2026-10-20). 60ms cadence, 5s ceiling, and it stops the instant
+  // slow. 60ms cadence, 5s ceiling, and it stops the instant
   // the intent stops being "video".
   let fsVideoWaitTimer = 0;
   function retryVideoModeUntilReady() {
@@ -683,7 +713,7 @@
   // ---- music-video ready gate -------------------------------------------
   // A skip attaches YTM's ONE recycled <video>, which still reports readyState /
   // videoWidth / !paused from the PREVIOUS track — so those alone revealed a
-  // stale or poster frame (the "thumbnail" AJ kept seeing, 2026-09-28). The gate
+  // stale or poster frame (the "thumbnail" kept seeing). The gate
   // therefore ALSO requires the playback clock to move, the only reliable proof
   // that the NEW content is rendering.
   //
@@ -696,7 +726,7 @@
   //
   // 350 -> 60 -> 140. Originally the media fade duration; then a couple of frames
   // for the DOM to settle. Now it must also outlast the CHROME fade (.14s) so the
-  // control column is invisible when it restructures (AJ, 2026-10-21). The media
+  // control column is invisible when it restructures. The media
   // dissolve is 220ms, so the swap still happens inside the dark window and costs
   // nothing perceptible.
   const FS_MEDIA_SWAP_MS = 140;
@@ -712,20 +742,18 @@
   // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
   // ready (which on a cover -> MV skip is the same tick the fade-out started), and
   // without this floor the class is removed before it paints — so the dissolve is
-  // invisible. A touch above the .22s fade-out so the out always completes (AJ,
-  // 2026-10-21).
+  // invisible. A touch above the .22s fade-out so the out always completes.
   const FS_CHROME_FADE_MIN_MS = 280;
   const FS_VIDEO_READY_MAX_MS = 8000;
   const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
   let fsVideoSpinnerEl = null;
 
-  // FS_MEDIA_SETTLE_MS / fsMediaSwapAt / fsPaneRevealSeq are GONE (AJ,
-  // 2026-10-20): they existed to hold the pane hidden until its geometry had
+  // FS_MEDIA_SETTLE_MS / fsMediaSwapAt / fsPaneRevealSeq are GONE: they existed to hold the pane hidden until its geometry had
   // animated, and the geometry is static now. The media is revealed by the
   // track-change dissolve instead.
 
-  // ===== track-change media dissolve (AJ, 2026-10-20) ====================
+  // ===== track-change media dissolve ====================
   // "When the song ends fade the video out, then when the next song starts fade
   // it back in" — and the same for every combination of cover art / music video.
   //
@@ -751,7 +779,7 @@
     } catch (_) {}
   }
 
-  // ===== chrome dissolve, MODE CHANGES ONLY (AJ, 2026-10-21) ==============
+  // ===== chrome dissolve, MODE CHANGES ONLY ==============
   // Between the cover and MV layouts the whole control column restructures: the
   // credit moves from under the artwork to under the video, the transport swaps
   // between a centred row and a spread row, and the volume changes rows. None of
@@ -766,7 +794,7 @@
   // to make an MV -> MV skip fade the controls out (the element reuses itself on a
   // track change, so only its source changes) and, through a race in the
   // detach/re-attach, sometimes strand them invisible until fullscreen was
-  // reopened (AJ, 2026-10-21).
+  // reopened.
   // The heal timer is the backstop: a real swap restores the chrome through
   // fsFadeInMedia() -> fsChromeFadeIn(). If that path is ever missed, the timer
   // force-restores it after the longest legitimate swap (a cover -> MV wait is
@@ -834,7 +862,7 @@
     // and the control column together. A swap that lands AFTER the media has
     // settled calls this with nothing to fade in, and returning early skipped
     // the chrome half of the deal: the controls stayed dissolved until
-    // fsChromeFadeOut's 9s heal timer restored them (AJ, 2026-10-23).
+    // fsChromeFadeOut's 9s heal timer restored them.
     if (!fsOverlay) return;
     if (!fsMediaFadingOut) {
       fsChromeFadeIn();
@@ -870,7 +898,7 @@
   //    On a COVER -> * skip that is immediate. On an MV -> COVER skip the element
   //    is not reloaded until WE restore it, so the first event lands AFTER the new
   //    cover is already on screen — which is exactly the "cover shows first, then
-  //    disappears, then fades in" AJ reported (2026-10-20).
+  // disappears, then fades in" reported.
   //  - the player response's videoId changes on every skip, immediately.
   // Both funnel through here, and only ONE fade-out is allowed per track change.
   const FS_MEDIA_FADE_DEDUPE_MS = 1200;
@@ -879,7 +907,7 @@
     // Repeat-one restarts the SAME stream, and YTM reloads it, so we get the
     // same emptied/loadstart a real skip produces. Nothing on screen is being
     // replaced, so dissolving the cover and the chrome is pure noise — the
-    // user sees a pointless dip once per loop (AJ, 2026-10-22).
+    // user sees a pointless dip once per loop.
     //
     // Identity is the URL's ?v=. It does not change when the loop restarts, and
     // it DOES change on a real skip. fsFadeTrackId holds the id of the last
@@ -916,7 +944,7 @@
   // Kept as the call-site name, but no longer gated on FS_MEDIA_SETTLE_MS: that
   // gate existed to let the pane's geometry transition finish before revealing,
   // and the geometry is static now. Holding the fade-in for it added up to 800ms
-  // of black between the outgoing and incoming media (AJ, 2026-10-20).
+  // of black between the outgoing and incoming media.
   function revealFsMediaPane() {
     revealFsMediaPaneNow();
   }
@@ -975,7 +1003,7 @@
       if (done || seq !== fsVideoReadySeq) return;
       cleanup();
       hideFsVideoSpinner();
-      // HARD CUT (AJ, 2026-10-20): the outgoing cover card is removed in the SAME
+      // HARD CUT: the outgoing cover card is removed in the SAME
       // frame the video becomes visible, so there is no cross-dissolve and no
       // empty pane in between. Guarded on the video actually living in the pane,
       // because the give-up timer can fire after a teardown.
@@ -994,7 +1022,7 @@
       const t = video.currentTime;
       // A recycled element reports NaN until the NEW stream has metadata. Letting
       // that reach lastTime poisoned every later comparison, so the gate could
-      // only be satisfied by the 8s give-up timer (AJ, 2026-10-20).
+      // only be satisfied by the 8s give-up timer.
       if (!Number.isFinite(t)) return;
       // A NEW SOURCE resets the clock. MV -> MV keeps the same element, so
       // currentTime jumps back to ~0 — without this the gate kept comparing
@@ -1003,14 +1031,14 @@
       if (t > lastTime + 0.02) progressed = true;
       lastTime = t;
       if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) { finish(); return; }
-      // PAUSED SKIP (AJ, 2026-10-20): a paused video never advances, so the
+      // PAUSED SKIP: a paused video never advances, so the
       // progress test above can never pass and the pane would stay dissolved to
       // the backdrop until the 8s give-up. A paused element with metadata already
       // has its frame decoded, so show it after a short grace.
       if (video.paused && video.readyState >= 2 && video.videoWidth > 0 &&
           performance.now() - startedAt > 400) finish();
     }
-    // ⭐ Frame-accurate detection (AJ, 2026-10-20). timeupdate is throttled to
+    // ⭐ Frame-accurate detection. timeupdate is throttled to
     // ~4Hz and the poll is one timer tick, so both can sit on an already-ready
     // video for a whole interval — that interval is the "the video is hidden"
     // delay on cover -> MV. requestVideoFrameCallback fires on the next PRESENTED
@@ -1060,7 +1088,7 @@
   // Artwork fallback straight off the player bar's own thumbnail. It is always
   // in step with what YTM is playing, whereas getCurrentTrack() can lag a skip
   // by a beat - and a lagging read is exactly what left the fullscreen pane
-  // empty after a skip (AJ, 2026-09-28).
+  // empty after a skip.
   function getDomArtworkUrl() {
     const img = document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
       document.querySelector("ytmusic-miniplayer img") ||
@@ -1071,23 +1099,23 @@
     return img.getAttribute("src") || img.currentSrc || "";
   }
 
-  // Set fsArtImg.src with a cover-card crossfade (2026-09-28). The sharp card
+  // Set fsArtImg.src with a cover-card crossfade. The sharp card
   // and the Kawarp canvas both load the new art independently, and the
   // browser keeps painting the OLD decoded bitmap during the decode window
   // — so for a beat the pane showed the old sharp card alongside the new
-  // Kawarp output (AJ, 2026-09-28). Marking the card as loading drops it
+  // Kawarp output. Marking the card as loading drops it
   // to opacity 0; removing the mark on the img's load event lets it fade
   // back in, by which point Kawarp also has the new art and the two
   // reveal together. fsArtImgSeq invalidates stale onloads when src changes
   // mid-decode; the timeout is the belt that prevents a hung decode from
   // stranding the card at opacity:0.
-  // ⭐ NO PER-CARD FADE AT ALL (AJ, 2026-10-21). This used to toggle
+  // ⭐ NO PER-CARD FADE AT ALL. This used to toggle
   // `.ym-sl-fs-art-loading` (card opacity 0 -> 1 over .28s) to hide the old
   // bitmap while the new one decoded. That was a SECOND opacity animation
   // competing with the host dissolve, and reconcile can re-set the src
   // (bar thumbnail -> real artwork) up to 2s after a skip — outside any
   // "recently faded" window — so the card blinked on its own. That blink is the
-  // "cover art flashes for some ms" AJ kept seeing.
+  // "cover art flashes for some ms" kept seeing.
   // The dissolve owns every reveal now. The browser keeps painting the previous
   // bitmap until the new one decodes, and outside a track change that bitmap is
   // the SAME artwork (a resolution variant), so nothing wrong is ever shown.
@@ -1099,6 +1127,28 @@
     const reveal = () => { if (seq === fsArtImgSeq) fsFadeInMedia(); };
     img.onload = reveal;
     img.onerror = reveal;
+    // STAGE crossfade: an <img> clears its bitmap the instant `src` changes, so
+    // the pane went blank for a frame and the Kawarp showed through the seam.
+    // Hold the outgoing picture as a ghost above the new one and fade it out
+    // once it has had time to paint. Only in stage mode; the card layouts are
+    // already covered by the host dissolve.
+    if (
+      fsOverlay &&
+      fsOverlay.classList.contains("ym-sl-fs-stage") &&
+      !fsOverlay.classList.contains("ym-sl-fs-no-anim") &&
+      img.getAttribute("src") &&
+      img.parentElement
+    ) {
+      const ghost = img.cloneNode(false);
+      ghost.className = "ym-sl-fs-art ym-sl-fs-art-ghost";
+      ghost.removeAttribute("style");
+      ghost.setAttribute("aria-hidden", "true");
+      img.parentElement.insertBefore(ghost, img);
+      window.requestAnimationFrame(() => ghost.classList.add("is-out"));
+      window.setTimeout(() => {
+        if (ghost.parentElement) ghost.parentElement.removeChild(ghost);
+      }, 460);
+    }
     img.setAttribute("src", src);
     // A cached image can already be complete here; onload still fires, but rAF
     // covers the same-frame gap so a cached cover does not wait a task.
@@ -1109,12 +1159,11 @@
   // it — the 2s reconcile tick and the MV -> cover swap in syncFsVideoMode — and
   // when both ran for the same skip the second overwrote fsArtImg while the
   // first stayed in the DOM, so the pane showed the cover TWICE, side by side
-  // (AJ, 2026-09-28). This is now the single create-or-reuse entry point.
+  //. This is now the single create-or-reuse entry point.
   // A YouTube video thumbnail is NOT cover art — it is the music video's own
   // hqdefault (letterboxed, low-res) and the real video is about to fill the
   // pane. Rendering it put that thumbnail in a square card for the ~1s before
-  // the video attached (AJ, 2026-09-28: the reconcile resolved
-  // i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
+  // the video attached (the reconcile resolved i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
   // lives on yt3/lh3.googleusercontent.com, so the /vi/ path is the tell.
   function isVideoThumbnailUrl(url) {
     return typeof url === "string" && /^https?:\/\/i\.ytimg\.com\/vi\//.test(url);
@@ -1146,14 +1195,13 @@
     // fsSavedVideo flag: YTM recycles the <video> element between tracks, so the
     // flag can say "a video owns the pane" while the element is already dead.
     // That mismatch is what left the pane on a stale video instead of loading
-    // the new cover art after an MV -> song skip (AJ, 2026-09-28).
+    // the new cover art after an MV -> song skip.
     // Bail when a video is attached AT ALL. findPlayerVideo() additionally
     // requires dimensions, so during a skip it reports null while the video is
     // still sitting in the pane — and creating the card then put a cover image
     // (clamped to the MV pane's short height, hence cropped and small) beside
-    // the video until the detach (AJ, 2026-09-28; the trace caught
-    // reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
-    // ⭐ Decide from the SAME intent signal syncFsVideoMode uses (AJ, 2026-10-21).
+    // the video until the detach (the trace caught reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
+    // ⭐ Decide from the SAME intent signal syncFsVideoMode uses.
     // `findPlayerVideo()` alone is transient during a reload — the recycled
     // element reports videoWidth 0 for a beat — so this branch used to flip on
     // and off mid-skip, removing and re-creating the cover card (the art that
@@ -1167,7 +1215,7 @@
       // Symmetric teardown: never leave a cover card sitting on top of a video.
       // MV -> MV returns early inside syncFsVideoMode, so nothing else clears it.
       // EXCEPT while a cover -> MV swap is holding the card as its outgoing image
-      // (AJ, 2026-10-20) — finish() clears it in the same frame the video shows.
+      // — finish() clears it in the same frame the video shows.
       if (fsArtImg && !fsHoldCoverCard) {
         if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
         fsArtImg = null;
@@ -1180,7 +1228,7 @@
     if (!hi) return;
     if (isVideoThumbnailUrl(hi)) {
       // The MV's own thumbnail, not cover art: drop any card. The pane is NOT
-      // hidden (AJ, 2026-10-20) — hiding it faded to black and then faded the
+      // hidden — hiding it faded to black and then faded the
       // video back in. It now keeps its blurred backdrop until the video attaches
       // and the reveal is a cut.
       if (fsArtImg) {

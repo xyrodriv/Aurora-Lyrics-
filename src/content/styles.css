@@ -1,7 +1,7 @@
 /* Aurora Lyrics — injected base styles (Trusted-Types safe; loaded by the manifest)
    v0.5.1: Spicetify-style marketplace (tabs + sort/search + grid|list + glass + toasts). */
 
-/* ---- brand accent tokens (AJ, 2026-10-20) --------------------------------
+/* ---- brand accent tokens --------------------------------
    Every solid accent in the panel and the report modal now reads from these, so
    the next palette change is one edit instead of a 60-site find/replace.
    Sampled from the logo's crimson glow (#cd1038) and lifted to #e01040 so it
@@ -19,22 +19,22 @@
 #ym-market.hidden { display: none; }
 #ym-market {
   /* Pinned to YouTube's own root size, which content.js captures before it
-     applies the YouTube page's Interface text size (AJ, 2026-10-22). Without
+     applies the YouTube page's Interface text size. Without
      this an inherited `font: inherit` node would ride along with the site's
      scale, and Aurora's panel would inflate with YouTube instead of keeping
      its own type. */
   font-size: var(--ym-yt-root-fs, 10px);
-  /* Monitor-relative scaling knob (AJ, 2026-09-28). Every layout metric in the
+  /* Monitor-relative scaling knob. Every layout metric in the
      panel is a multiple of this, so the WHOLE surface scales with the display
      instead of only its outer box. Before this, the shell shrank to fit a small
      monitor while the type, gutters and 220px card columns stayed desktop-sized,
-     so a 1024x600 laptop clipped the cards (AJ's screenshot).
+     so a 1024x600 laptop clipped the cards (the screenshot).
      Driven by vmin because the panel is bounded by the SHORTER axis: a 1024x600
      laptop is short, not narrow. 16px == the original design (scale 1.0).
-     GROWTH ON BIG DISPLAYS (AJ, 2026-09-28): the first pass capped this at 16px,
+     GROWTH ON BIG DISPLAYS: the first pass capped this at 16px,
      which meant every display above ~941px on its short axis — 1080p, 1440p and
      4K alike — rendered at exactly the original size, so the panel read as small
-     on a big screen (AJ: "a little too small"). The ramp is steeper now and the
+     on a big screen (a little too small"). The ramp is steeper now and the
      ceiling is 20px (+25%).
      The two magic numbers: the ramp gives 13.1px at 1024x600 — UNCHANGED from
      the first pass, so small displays are untouched — and exactly 20px at
@@ -91,7 +91,7 @@
      bottom of this file, which re-declares #ym-market.ym-floating and therefore
      wins here. Do NOT add width/height/max-* back — a duplicate that silently
      loses is the trap that made the shell-scaling change look like it had no
-     effect (AJ, 2026-09-28). */
+     effect. */
   transform: translate(-50%, -50%);
   overflow: hidden;
   background: transparent;
@@ -131,10 +131,7 @@
   touch-action: none;
 }
 #ym-market.ym-floating.ym-dragging .ym-head { cursor: grabbing; }
-#ym-market.ym-floating .ym-tabs-row {
-  position: sticky;
-  top: 0;
-}
+
 #ym-market.ym-floating .ym-section {
   min-height: 0;
 }
@@ -175,37 +172,12 @@
 }
 
 /* Tabs row */
-#ym-market .ym-tabs-row {
-  flex: 0 0 auto;
-  display: flex; align-items: center;
-  padding: 0 calc(var(--ym-u) * 1.75);
-  border-bottom: 1px solid rgba(255,255,255,.08);
-  background: rgba(8,8,8,.92);
-  z-index: 2;
-  flex-wrap: wrap;
-  transition: background-color .24s ease, border-color .24s ease, box-shadow .24s ease;
-}
-#ym-market .ym-tab {
-  background: none; border: 0;
-  padding: calc(var(--ym-u) * .875) 0;
-  margin-right: calc(var(--ym-u) * 1.625);
-  color: #aaaaaa;
-  font-size: calc(var(--ym-u) * .875);
-  font-weight: 500;
-  cursor: pointer;
-  position: relative;
-  transition: color .18s ease;
-}
-#ym-market .ym-tab:hover { color: #f1f1f1; }
-#ym-market .ym-tab.active { color: #f1f1f1; }
-#ym-market .ym-tab.active::after {
-  content: '';
-  position: absolute; left: 0; right: 0; bottom: -1px;
-  height: 3px; background: var(--mk-accent); border-radius: 2px;
-  transform: scaleX(1); transform-origin: center;
-  transition: transform .24s cubic-bezier(.2,.7,.3,1);
-}
-#ym-market .ym-tab:not(.active)::after { transform: scaleX(0); }
+
+
+
+
+
+
 #ym-market .ym-market-toolbar {
   margin-left: auto;
   display: flex; align-items: center; gap: 12px;
@@ -298,7 +270,7 @@
   border-color: rgba(224,16,64,.5);
   box-shadow: 0 8px 24px rgba(0,0,0,.45), 0 0 18px rgba(224,16,64,.18);
 }
-#ym-market .ym-card.coming-soon { opacity: .8; }
+
 
 /* List-view layout tweaks */
 #ym-market .ym-card-list .ym-thumb {
@@ -334,7 +306,7 @@
 #ym-market .ym-thumb-badge {
   position: absolute; top: calc(var(--ym-u) * .5); left: calc(var(--ym-u) * .5);
   font-size: calc(var(--ym-u) * .625); font-weight: 700; letter-spacing: .1em;
-  /* White on a dark plate with a red outline (AJ, 2026-10-20). It was BLACK text
+  /* White on a dark plate with a red outline. It was BLACK text
      on a solid red fill, which read as an alert rather than a status. The dark
      plate also keeps it readable over any thumbnail, which the flat red could not. */
   background: rgba(8,8,12,.82); color: #fff;
@@ -419,30 +391,16 @@
   margin: 0 4px 0 0;
   opacity: .88;
   transition: background-color .16s ease, opacity .16s ease, transform .12s ease;
-  /* Custom affordance (AJ, 2026-09-28): the injected launcher glows softly so
-     it reads as something Aurora Lyrics added, not a native YTM control.
-     drop-shadow (not box-shadow) because the button has no opaque background —
-     it haloes the visible waffle glyph. Swap the rgb() for a red for the other
-     option AJ floated. */
-  animation: ym-nav-glow 3.2s ease-in-out infinite;
-}
-@keyframes ym-nav-glow {
-  0%, 100% { filter: drop-shadow(0 0 3px rgba(255,255,255,.5)); }
-  50%      { filter: drop-shadow(0 0 9px rgba(255,255,255,.95)); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ym-icon-btn#ym-nav-btn { animation: none; filter: drop-shadow(0 0 6px rgba(255,255,255,.7)); }
 }
 .ym-icon-btn#ym-nav-btn:hover { opacity: 1; }
 .ym-icon-btn#ym-nav-btn:active { transform: scale(.92); }
 .ym-icon-btn#ym-nav-btn:focus-visible { outline: 2px solid rgba(255,255,255,.72); outline-offset: 2px; }
 
-/* Popup -> page hint (AJ, 2026-09-28): opening the toolbar popup flashes the
+/* Popup -> page hint: opening the toolbar popup flashes the
    launcher, because the popup can only TELL you where to click, not show you.
-   Deliberately louder and much faster than the resting ym-nav-glow (coloured
-   halo + a scale bounce) so it reads as "click me" rather than as the ambient
-   glow it sits on top of. Finite iteration count, so a missed timer can never
-   leave it pulsing forever. */
+   A coloured halo and scale bounce make it read as "click me" without leaving
+   a permanent glow on the resting icon. Finite iteration count, so a missed
+   timer can never leave it pulsing forever. */
 .ym-icon-btn#ym-nav-btn.ym-nav-hint {
   opacity: 1;
   animation: ym-nav-hint .85s ease-in-out 5;
@@ -477,7 +435,7 @@
   box-sizing: border-box;
   overflow: hidden;
   /* No entrance animation: the detail is re-rendered in place on every toggle /
-     setting change, so a replay made the text vanish then fade back (AJ, 2026-09-28). */
+     setting change, so a replay made the text vanish then fade back. */
 }
 #ym-market .ym-detail-head {
   display: flex; align-items: flex-start; gap: calc(var(--ym-u) * .75);
@@ -537,7 +495,7 @@
   font-size: calc(var(--ym-u) * 1.125);
   font-weight: 600;
 }
-/* Info button + "what it does / pros / cons" panel (AJ, 2026-10-19). */
+/* Info button + "what it does / pros / cons" panel. */
 #ym-market .ym-detail-settings-titlerow {
   display: flex;
   align-items: center;
@@ -847,15 +805,12 @@
     animation: none !important;
   }
   #ym-market .ym-card, #ym-market .ym-detail { animation: none; }
-  #ym-market .ym-card-grid,
-  #ym-market .ym-card-list,
-  #ym-market .ym-tab,
-  #ym-market .ym-tab::after,
-  #ym-market .ym-head,
-  #ym-market .ym-tabs-row,
-  #ym-market .ym-detail-link,
-  #ym-market .ym-detail-settings-reset,
-  #ym-market tp-yt-paper-button.ym-install { transition: none; }
+#ym-market .ym-card-grid,
+#ym-market .ym-card-list,
+#ym-market .ym-head,
+#ym-market .ym-detail-link,
+#ym-market .ym-detail-settings-reset,
+#ym-market tp-yt-paper-button.ym-install { transition: none; }
   #ym-market .ym-toast { transition: opacity .2s ease; transform: none; }
 }
 @media (max-width: 620px) {
@@ -897,7 +852,7 @@
   flex-direction: column;
   overflow: hidden;
   border-radius: 20px;
-  /* Opaque graphite on a hairline, like the panel (AJ, 2026-11-04): the glass
+  /* Opaque graphite on a hairline, like the panel: the glass
      card was the last surface still reading as the pre-redesign UI. */
   border: 0;
   background: #17171a;
@@ -909,7 +864,7 @@
   animation: ym-upd-pop-in .26s cubic-bezier(.22,.61,.36,1);
 }
 /* The mark: a 30px tile in the header, the same chip the top-bar banner uses.
-   No blurred wash behind the card (AJ, 2026-11-04): on the panel's graphite the
+   No blurred wash behind the card: on the panel's graphite the
    notice should read as one of the panel's own surfaces, not a separate ad. */
 .ym-upd-mark {
   width: 30px; height: 30px;
@@ -1033,7 +988,7 @@
 .ym-upd-btn.primary {
   background: #e01040;
   color: #fff;
-  /* Flat, not glowing: the panel's accent never blooms (AJ, 2026-11-04). */
+  /* Flat, not glowing: the panel's accent never blooms. */
   box-shadow: none;
 }
 .ym-upd-btn.primary:hover { filter: brightness(1.1); }
@@ -1116,20 +1071,19 @@
 
 
 /* =====================================================================
-   GLASS SKIN (AJ, 2026-09-28)
+   GLASS SKIN
    The marketplace is now ALWAYS the centred glass card: .ym-floating is pinned
    on and the toolbar (view / density / float) was removed. This block only
    overrides visuals — no structure changes — so search, install / enable /
    remove, dev-mode settings and the Support modal all keep working.
-   The accent stays the existing green (var(--mk-accent)), per AJ.
+   The accent stays the existing green (var(--mk-accent)), by request.
    ===================================================================== */
-/* Spicy Lyrics font across the whole panel (AJ, 2026-09-28). */
+/* Spicy Lyrics font across the whole panel. */
 #ym-market {
   font-family: "SpicyLyrics", "Roboto", "YouTube Sans", system-ui, -apple-system, sans-serif;
 }
 #ym-market.ym-floating {
-  /* The shell TRACKS --ym-u instead of sitting on its own px caps (AJ,
-     2026-09-28). 57.5 and 51.25 are the design's own ratios — 920/16 and
+  /* The shell TRACKS --ym-u instead of sitting on its own px caps. 57.5 and 51.25 are the design's own ratios — 920/16 and
      820/16 — so the card is still exactly 920x820 at scale 1.0, and grows or
      shrinks in lockstep with everything inside it. That lockstep is the point:
      when the unit grows but the shell does not, the contents overflow and the
@@ -1149,7 +1103,7 @@
 #ym-market.ym-floating::before {
   border: 1px solid rgba(255,255,255,.12);
   border-radius: 24px;
-  background: #0f1116; /* AJ: no transparency (backdrop-filter dropped — pointless when opaque) */
+  background: #0f1116; /* no transparency (backdrop-filter dropped — pointless when opaque) */
   box-shadow: 0 40px 120px -40px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15);
 }
 /* Brand watermark: the logo, large, blurred and dimmed behind the glass.
@@ -1163,7 +1117,7 @@
   pointer-events: none;
 }
 /* When it is the now-playing COVER rather than the logo, let a little more
-   colour through so the panel reads as ambient (AJ, 2026-09-28). */
+   colour through so the panel reads as ambient. */
 #ym-market .ym-watermark.is-cover {
   filter: blur(30px) saturate(1.4) brightness(.72);
   opacity: .2;
@@ -1181,24 +1135,13 @@
 #ym-market .ym-head h1 { font-weight: 600; letter-spacing: -.02em; }
 #ym-market .ym-head .ym-sub { color: rgba(244,241,238,.6); }
 /* tabs */
-#ym-market .ym-tabs-row {
-  position: relative;
-  background: transparent;
-  border-bottom: 1px solid rgba(255,255,255,.08);
-}
-#ym-market .ym-tab { color: rgba(244,241,238,.6); }
-#ym-market .ym-tab:hover,
-#ym-market .ym-tab.active { color: #fff; }
+
+
+
 /* the old per-tab underline is replaced by ONE sliding indicator */
-#ym-market .ym-tab.active::after { display: none; }
-#ym-market .ym-tab-thumb {
-  position: absolute; bottom: -1px; left: 0;
-  height: 3px; width: 0; border-radius: 2px;
-  background: linear-gradient(90deg, var(--mk-accent), var(--mk-accent-dark), var(--mk-accent-dim));
-  transition: transform .3s cubic-bezier(0.32,0.72,0,1), width .3s cubic-bezier(0.32,0.72,0,1);
-  pointer-events: none;
-}
-/* Settings sliders (AJ, 2026-09-28): custom track + a brand-gradient thumb. */
+
+
+/* Settings sliders: custom track + a brand-gradient thumb. */
 #ym-market .ym-detail-setting-input[type="range"] {
   -webkit-appearance: none; appearance: none;
   width: 150px; height: 4px; border-radius: 999px;
@@ -1206,7 +1149,7 @@
   background-image: linear-gradient(90deg, var(--mk-accent), var(--mk-accent-dark), var(--mk-accent-dim));
   background-repeat: no-repeat;
   /* No transition on the fill: it tracks the thumb EXACTLY. A transition eased it
-     behind the thumb, which read as "delayed" rather than smooth (AJ, 2026-09-28). */
+     behind the thumb, which read as "delayed" rather than smooth. */
   background-size: var(--val, 50%) 100%;
   outline: none; cursor: pointer;
 }
@@ -1278,7 +1221,7 @@
 #ym-market .ym-author { color: rgba(244,241,238,.6); }
 #ym-market .ym-desc { color: rgba(244,241,238,.78); }
 
-/* ---- detail sheet: morphs out of the card's thumb (AJ, 2026-09-28) ---- */
+/* ---- detail sheet: morphs out of the card's thumb ---- */
 #ym-market .ym-sheet { position: absolute; inset: 0; z-index: 20; display: none; overflow: hidden; }
 #ym-market .ym-sheet.open { display: block; }
 #ym-market .ym-sheet-bg { position: absolute; inset: 0; overflow: hidden; background: #08090c; }
@@ -1319,19 +1262,19 @@
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: cover; border-radius: inherit;
 }
-/* Monogram for an add-on with no art — mirrors the list tile (AJ, 2026-09-28). */
+/* Monogram for an add-on with no art — mirrors the list tile. */
 #ym-market .ym-sheet-mono {
   position: absolute; inset: 0; display: grid; place-items: center;
   font-size: calc(var(--ym-u) * 6); font-weight: 700; letter-spacing: -.03em;
   color: rgba(255,255,255,.92);
   text-shadow: 0 2px 12px rgba(0,0,0,.25);
 }
-/* The list thumb plays the showcase loop too (AJ, 2026-09-28). */
+/* The list thumb plays the showcase loop too. */
 #ym-market .ym-thumb-video {
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: cover; display: block;
 }
-/* Portrait poster thumbs (AJ records vertical art) so the morph keeps one aspect;
+/* Portrait poster thumbs (records vertical art) so the morph keeps one aspect;
    the source card's thumb hides while its sheet is open. */
 #ym-market .ym-thumb { aspect-ratio: 3 / 4; }
 #ym-market .ym-card.is-open .ym-thumb { visibility: hidden; }
@@ -1345,12 +1288,12 @@
 }
 
 /* =====================================================================
-   PLAYER-BAR + FULLSCREEN PRESS / SPRING-BACK (AJ, 2026-10-07)
+   PLAYER-BAR + FULLSCREEN PRESS / SPRING-BACK
    Every player-bar button and the fullscreen transport controls shrink on
    press and spring back on release.
 
    Deliberately in the ALWAYS-INJECTED content stylesheet rather than in the
-   Smooth Motion add-on: AJ wants this "in general", i.e. with that add-on off.
+   Smooth Motion add-on: wants this "in general", i.e. with that add-on off.
    The add-on's micro module also had to give up its player-bar transitions,
    because its selectors are more specific and its plain .16s transition would
    have won and silently killed the spring.
@@ -1408,7 +1351,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 
 /* =====================================================================
-   MARKETPLACE V2 (AJ, 2026-10-19)
+   MARKETPLACE V2
    Rail + master–detail surface. Every selector is scoped to .ym-mk2 so the
    old tabs/grid/sheet rules stay inert rather than being deleted blind.
    ===================================================================== */
@@ -1434,7 +1377,7 @@ ytmusic-player-bar .ym-pb-btn:active,
    the pane and the bottom of the page is clipped (and Home will not scroll). */
 #ym-market.ym-mk2, #ym-market.ym-mk2 * { box-sizing: border-box; }
 #ym-market.ym-mk2.ym-floating {
-  /* Proportional to the WINDOW, not near-full-bleed (AJ, 2026-10-20). The old
+  /* Proportional to the WINDOW, not near-full-bleed. The old
      min(1060px, 96vw) / min(740px, 92vh) meant that on a narrower browser window
      96vw won the min() and the "floating" box very nearly filled it — so it read
      as a takeover rather than a panel, and the fixed 1060/740 caps stopped it
@@ -1454,7 +1397,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market.ym-mk2.ym-floating::before { display: none; }
 #ym-market.ym-mk2 > * { min-height: 0; }
 /* Ambient wash: the brand gradient, blurred behind both panels. Raised from
-   .22/0.8 — it read as almost black (AJ, 2026-10-19). */
+.22/0.8 — it read as almost black. */
 #ym-market .ym-mk-bg {
   position: absolute; inset: -60px; z-index: 0; pointer-events: none;
   background-position: center; background-size: cover; background-repeat: no-repeat;
@@ -1488,7 +1431,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-cbtn svg { width: 18px; height: 18px; }
 #ym-market .ym-mk-cbtn:hover { background: rgba(255,255,255,.08); color: #fff; }
-/* Settings: a header BUTTON, not a rail row (AJ, 2026-10-26). It opens an
+/* Settings: a header BUTTON, not a rail row. It opens an
    app-wide page, so it must not read as another add-on to install. Same 26px
    target as the close button, outline glyph, sits with it at the right edge. */
 #ym-market .ym-mk-setbtn {
@@ -1503,7 +1446,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 /* Settings and Close read as one control pair at the edge: the settings button
    takes the free space (margin-left:auto above), so the close only needs the
    header's own gap — the old margin-left:auto on BOTH split the slack between
-   them and parked the sliders out in the middle of the header (AJ, 2026-10-26). */
+   them and parked the sliders out in the middle of the header. */
 #ym-market.ym-mk-collapsed .ym-mk-setbtn { opacity: 0; pointer-events: none; }
 #ym-market .ym-mk-settings-page .ym-mk-setmono { color: rgba(255,255,255,.82); }
 #ym-market .ym-mk-logo {
@@ -1516,8 +1459,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   /* Explicitly NOT auto: the legacy `#ym-market #ym-close` rule above still
      carries margin-left:auto, and leaving this unset let it through — two auto
      margins split the header's free space, which is what parked the settings
-     button in the middle of the rail instead of beside the close (AJ,
-     2026-10-26). The settings button owns the only auto margin now. */
+     button in the middle of the rail instead of beside the close. The settings button owns the only auto margin now. */
   margin-left: 2px;
   color: rgba(255,255,255,.5);
 }
@@ -1582,14 +1524,9 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-card-blocked:hover { background: transparent; }
 #ym-market .ym-mk-card-blocked.sel { background: rgba(255,255,255,.075); }
 #ym-market .ym-mk-card:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
-#ym-market .ym-mk-mono {
-  width: 38px; height: 38px; border-radius: 10px; flex: 0 0 auto;
-  display: grid; place-items: center;
-  background: var(--mk-surf2); border: 1px solid var(--mk-line);
-  font-weight: 700; font-size: 16px; color: var(--mk-dim);
-}
-#ym-market .ym-mk-mono svg { width: 18px; height: 18px; fill: currentColor; }
-#ym-market .ym-mk-card.sel .ym-mk-mono { color: #fff; border-color: var(--mk-line2); }
+
+
+
 #ym-market .ym-mk-name {
   flex: 1; min-width: 0; font-size: 14px; font-weight: 600;
   letter-spacing: -.01em; color: var(--mk-dim);
@@ -1598,16 +1535,11 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-card.sel .ym-mk-name { color: #fff; }
 #ym-market .ym-mk-check { width: 16px; height: 16px; flex: 0 0 auto; fill: var(--mk-accent); opacity: 0; }
 #ym-market .ym-mk-card.installed .ym-mk-check { opacity: 1; }
-#ym-market .ym-mk-cat {
-  margin: 14px 8px 7px;
-  font-size: 10.5px; font-weight: 700; letter-spacing: .14em;
-  text-transform: uppercase; color: var(--mk-dim2);
-}
+
 /* Collapsed rail: the inner layout keeps its expanded width and is clipped by
    the rail, so the monograms never slide sideways while the column animates. */
 /* Labels fade instead of popping when the rail collapses. */
 #ym-market .ym-mk-name,
-#ym-market .ym-mk-cat,
 #ym-market .ym-mk-seg,
 #ym-market .ym-mk-check,
 #ym-market .ym-mk-logo,
@@ -1620,7 +1552,6 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market.ym-mk-collapsed .ym-mk-railtop,
 #ym-market.ym-mk-collapsed .ym-mk-rows { width: 322px; min-width: 322px; }
 #ym-market.ym-mk-collapsed .ym-mk-seg,
-#ym-market.ym-mk-collapsed .ym-mk-cat,
 #ym-market.ym-mk-collapsed .ym-mk-name,
 #ym-market.ym-mk-collapsed .ym-mk-check,
 #ym-market.ym-mk-collapsed .ym-mk-head h1,
@@ -1630,7 +1561,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market.ym-mk-collapsed .ym-mk-head { justify-content: flex-start; }
 #ym-market.ym-mk-collapsed .ym-mk-card { padding: 6px 10px; }
-/* No visible scrollbars in either pane (AJ, 2026-10-19). */
+/* No visible scrollbars in either pane. */
 #ym-market .ym-mk-rows, #ym-market .ym-mk-detail { scrollbar-width: none; -ms-overflow-style: none; }
 #ym-market .ym-mk-rows::-webkit-scrollbar,
 #ym-market .ym-mk-detail::-webkit-scrollbar { width: 0; height: 0; display: none; }
@@ -1670,7 +1601,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market .ym-mk-status { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mk-dim); }
 #ym-market .ym-mk-pill {
-  /* Matches the INSTALLED badge on the cards (AJ, 2026-10-20): white text, red
+  /* Matches the INSTALLED badge on the cards: white text, red
      outline. The background tint was still the OLD green rgba(56,207,146) while
      the text had already gone red, so this pill was red-on-green. */
   font-size: 11px; font-weight: 700; color: #fff;
@@ -1678,19 +1609,11 @@ ytmusic-player-bar .ym-pb-btn:active,
   padding: 2px 9px; border-radius: 7px;
 }
 #ym-market .ym-mk-pill.avail { color: var(--mk-dim); background: rgba(255,255,255,.06); border-color: var(--mk-line); }
-#ym-market .ym-mk-sweep {
-  position: relative; height: 2px; width: 120px;
-  margin: 22px 0 26px; background: var(--mk-line);
-  border-radius: 2px; overflow: hidden;
-}
-#ym-market .ym-mk-sweep::after {
-  content: ""; position: absolute; inset: 0;
-  background: var(--mk-grad); border-radius: 2px;
-  transform-origin: left; animation: ym-mk-sweep .62s cubic-bezier(.32,.72,0,1) both;
-}
+
+
 @keyframes ym-mk-sweep { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 /* Quiet re-render (install/uninstall): the accent rule must not replay. */
-#ym-market .ym-mk-quiet .ym-mk-sweep::after { animation: none; transform: scaleX(1); }
+
 #ym-market .ym-mk-lead { margin: 0 0 30px; font-size: 16px; line-height: 1.6; color: var(--mk-dim); }
 #ym-market .ym-mk-providers {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
@@ -1714,41 +1637,26 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-provider-mark[src*="provider-aurora"] { border-radius: 5px; }
 
 /* attribution */
-#ym-market .ym-mk-sources {
-  margin: -12px 0 30px; padding: 13px 15px;
-  border: 1px solid var(--mk-line); border-radius: 11px;
-  background: rgba(255,255,255,.025);
-  display: grid; gap: 7px;
-}
-#ym-market .ym-mk-srclab { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--mk-dim2); }
-#ym-market .ym-mk-srcrow { display: grid; grid-template-columns: 104px 1fr; gap: 14px; align-items: baseline; font-size: 12.5px; color: var(--mk-dim); }
-#ym-market .ym-mk-srcrow b { font-weight: 600; color: rgba(255,255,255,.7); }
-#ym-market .ym-mk-srclinks { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
-#ym-market .ym-mk-srclinks i { font-style: normal; color: var(--mk-dim2); font-size: 11px; }
-#ym-market .ym-mk-lnk {
-  text-decoration: none; position: relative; color: transparent;
-  background-image: linear-gradient(100deg,#fff 0%,#fff 34%,var(--mk-la,var(--mk-accent-soft)) 46%,var(--mk-lb,var(--mk-accent-deep)) 56%,#fff 68%,#fff 100%);
-  background-size: 260% 100%;
-  -webkit-background-clip: text; background-clip: text;
-  animation: ym-mk-sweep-link 5s linear infinite, ym-mk-glow 5.5s ease-in-out infinite;
-}
+
+
+
+
+
+
+
 @keyframes ym-mk-sweep-link { from { background-position: 0% 0; } to { background-position: 162.5% 0; } }
 @keyframes ym-mk-glow {
   0%,100% { filter: drop-shadow(0 0 4px var(--mk-lg, rgba(255,77,106,.6))) drop-shadow(0 0 9px transparent); }
   50% { filter: drop-shadow(0 0 9px var(--mk-lg, rgba(255,77,106,.6))) drop-shadow(0 0 20px var(--mk-lg, rgba(255,77,106,.6))); }
 }
-#ym-market .ym-mk-lnk::after {
-  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
-  background: var(--mk-grad); transform: scaleX(0); transform-origin: left;
-  transition: transform .34s cubic-bezier(.32,.72,0,1);
-}
-#ym-market .ym-mk-lnk:hover::after, #ym-market .ym-mk-lnk:focus-visible::after { transform: scaleX(1); }
-#ym-market .ym-mk-lnk-spicy { --mk-la:#FF5C9E; --mk-lb:#59A9FF; --mk-lg:rgba(255,92,158,.62); }
-#ym-market .ym-mk-lnk-lrclib { --mk-la:#6F6CFF; --mk-lb:#B0AEFF; --mk-lg:rgba(111,108,255,.72); }
-#ym-market .ym-mk-lnk-mb { --mk-la:#B84088; --mk-lb:#E87038; --mk-lg:rgba(184,64,136,.68); }
-#ym-market .ym-mk-lnk-lb { --mk-la:#EB743B; --mk-lb:#8F86E8; --mk-lg:rgba(235,116,59,.66); }
+
+
+
+
+
+
 @media (prefers-reduced-motion: reduce) {
-  #ym-market .ym-mk-lnk { animation: none; filter: none; }
+
 }
 
 /* settings */
@@ -1789,7 +1697,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] {
   -webkit-appearance: none; appearance: none;
   width: 170px; height: 4px; border-radius: 99px; outline: none;
-  /* Red fill up to the thumb, dim track after it (AJ, 2026-10-20). This used to be
+  /* Red fill up to the thumb, dim track after it. This used to be
      a flat WHITE fill, which ignored the palette entirely. background-size gives a
      hard stop at the thumb so the fill tracks it exactly - deliberately NO
      transition, or the fill eases behind the thumb and reads as laggy.
@@ -1819,7 +1727,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-settings .ym-detail-setting-input[type="checkbox"] {
   -webkit-appearance: none; appearance: none;
   width: 46px; height: 27px; border-radius: 99px; margin: 0; position: relative;
-  /* border: 0 is LOAD-BEARING (AJ, 2026-10-20). The base checkbox rule further up
+  /* border: 0 is LOAD-BEARING. The base checkbox rule further up
      sets `border: 1px solid #555` and this rule never reset it. Under border-box
      that left only 25px of usable height instead of 27, so the 21px knob at
      top: 3px had 3px above and just 1px below — which reads as "the circle sits a
@@ -1841,22 +1749,27 @@ ytmusic-player-bar .ym-pb-btn:active,
   background: none; border: 1px solid var(--mk-line);
   color: var(--mk-dim); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
 }
-/* Nested settings row (AJ, 2026-10-20): indented under its parent toggle, with
+/* Nested settings row: indented under its parent toggle, with
    smaller, dimmer text. Collapsed = zero height + faded, so opening AND closing
    are a transition on the row itself rather than a layout jump. `overflow:
    hidden` plus border-box (the mk2 reset sets it globally) is what lets
    max-height: 0 collapse the row to nothing including its padding. */
 #ym-market .ym-mk-settings .ym-detail-setting-child {
-  margin-left: 20px;
-  padding-left: 14px;
+  /* No indent and no left rule. The 20px/14px indent plus a 2px border-left
+     drew a vertical line down the side of every nested row (Wavy letters,
+     Glow on sung words, Satoshi font), which read as the three toggles being
+     wired together into one block instead of three settings under their
+     parent. They now line up with the rows above them; the hierarchy is
+     carried by the dimmer label colour alone. */
+  margin-left: 0;
+  padding-left: 0;
   padding-top: 6px;
   padding-bottom: 6px;
-  border-left: 2px solid rgba(255,255,255,.10);
   overflow: hidden;
   /* min-height MUST be 0 here. The base row sets min-height: 2.875u and
      min-height BEATS max-height in CSS, so a "collapsed" child kept its full
      ~57px and left a big empty gap between the parent row and the next one
-     (AJ, 2026-10-20). Padding gives the row its height back instead, and unlike
+. Padding gives the row its height back instead, and unlike
      min-height it can animate to 0. */
   min-height: 0;
   max-height: 120px;
@@ -1872,8 +1785,8 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-mk-settings .ym-detail-setting-child .ym-detail-setting-label {
   /* Matches the parent row exactly (14px). The first pass used .86em and the
      second .95em (13.3px) — both still read as a footnote next to a 14px parent,
-     so the hierarchy is now carried by the indent + rule + a slightly dimmer
-     colour instead of by type size (AJ, 2026-10-20). */
+     so the hierarchy is carried by a slightly dimmer colour instead of by type
+     size. The indent and its rule are gone (see the row rule above). */
   font-size: 1em;
   color: rgba(255,255,255,.9);
 }
@@ -1905,7 +1818,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   transition-duration: .26s;
 }
 #ym-market .ym-mk-btn-un.busy, #ym-market .ym-mk-btn-in.busy { opacity: .7; pointer-events: none; }
-/* Install button for an add-on Low mode refuses to run (AJ, 2026-10-26). */
+/* Install button for an add-on Low mode refuses to run. */
 #ym-market .ym-mk-btn-off { background: rgba(255,255,255,.1); color: var(--mk-dim); cursor: not-allowed; }
 #ym-market .ym-mk-btn-off:hover { transform: none; background: rgba(255,255,255,.1); }
 #ym-market .ym-mk-btn-off:active { transform: none; }
@@ -1920,7 +1833,7 @@ ytmusic-player-bar .ym-pb-btn:active,
    The rail owns the catalog. Home is the page that knows what is playing, what
    changed in this build and where the two useful controls are. One cover, one
    heading, no card grid and no inventory. */
-#ym-market .ym-mk-home { max-width: 860px; }
+
 #ym-market .ym-home-now {
   display: grid;
   grid-template-columns: minmax(132px, 196px) minmax(0, 1fr);
@@ -1929,184 +1842,44 @@ ytmusic-player-bar .ym-pb-btn:active,
   padding: 4px 0 34px;
   border-bottom: 1px solid var(--mk-line);
 }
-#ym-market .ym-home-art {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  border-radius: 12px;
-  background-color: #18181f;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
-  overflow: hidden;
-}
-#ym-market .ym-home-art-img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
+
+
 /* No cover yet: the mark, centred and small. Not a category gradient. */
-#ym-market .ym-home-art.is-fallback {
-  background-color: #15151b;
-  background-size: 46%;
-}
-#ym-market .ym-home-copy { min-width: 0; padding-bottom: 4px; }
-#ym-market .ym-home-kicker {
-  font-size: 10.5px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: .15em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,.62);
-}
-#ym-market .ym-home-track {
-  margin: 9px 0 0;
-  font-size: clamp(30px, 3.3vw, 44px);
-  font-weight: 700;
-  line-height: 1.1;
-  padding-bottom: .1em;
-  letter-spacing: -.035em;
-  color: #fff;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-#ym-market .ym-home-artist {
-  margin: 8px 0 0;
-  max-width: 44ch;
-  font-size: 14.5px;
-  line-height: 1.5;
-  color: rgba(255,255,255,.64);
-  overflow-wrap: anywhere;
-}
-#ym-market .ym-home-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 22px;
-}
-#ym-market .ym-home-btn {
-  min-height: 44px;
-  padding: 10px 18px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 700;
-  line-height: 1.2;
-  cursor: pointer;
-  transition: background .2s ease, border-color .2s ease, color .2s ease, transform .18s ease;
-}
-#ym-market .ym-home-btn.primary {
-  background: var(--mk-accent);
-  color: #fff;
-}
-#ym-market .ym-home-btn.primary:hover { background: var(--mk-accent-dim); }
-#ym-market .ym-home-btn.primary:active { background: var(--mk-accent-deep); transform: translateY(1px); }
-#ym-market .ym-home-btn.quiet {
-  background: transparent;
-  border-color: rgba(255,255,255,.22);
-  color: rgba(255,255,255,.82);
-}
-#ym-market .ym-home-btn.quiet:hover { background: rgba(255,255,255,.06); color: #fff; }
-#ym-market .ym-home-btn.quiet:active { transform: translateY(1px); }
-#ym-market .ym-home-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
-#ym-market .ym-home-btn:disabled {
-  background: rgba(255,255,255,.07);
-  border-color: rgba(255,255,255,.08);
-  color: rgba(255,255,255,.48);
-  cursor: not-allowed;
-}
-#ym-market .ym-home-btn:disabled:hover { background: rgba(255,255,255,.07); transform: none; }
 
-#ym-market .ym-home-news {
-  max-width: 720px;
-  margin-top: 34px;
-}
-#ym-market .ym-home-news[hidden] { display: none; }
-#ym-market .ym-home-news-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 20px;
-}
-#ym-market .ym-home-news-title {
-  margin: 0;
-  font-size: 19px;
-  font-weight: 700;
-  letter-spacing: -.02em;
-  color: #fff;
-}
-#ym-market .ym-home-news-version {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .04em;
-  color: rgba(255,255,255,.6);
-  font-variant-numeric: tabular-nums;
-}
-#ym-market .ym-home-news-lead {
-  margin: 5px 0 20px;
-  max-width: 58ch;
-  font-size: 14px;
-  line-height: 1.5;
-  color: rgba(255,255,255,.82);
-}
-#ym-market .ym-home-news-group + .ym-home-news-group { margin-top: 17px; }
-#ym-market .ym-home-news-label {
-  margin: 0 0 7px;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.2;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,.56);
-}
-#ym-market .ym-home-news-list {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-#ym-market .ym-home-news-list li {
-  position: relative;
-  max-width: 66ch;
-  padding-left: 16px;
-  font-size: 13.5px;
-  line-height: 1.55;
-  color: rgba(255,255,255,.66);
-  overflow-wrap: anywhere;
-}
-#ym-market .ym-home-news-list li::before {
-  content: "\2014";
-  position: absolute;
-  left: 0;
-  color: rgba(255,255,255,.36);
-}
 
-#ym-market .ym-home-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-  margin-top: 40px;
-  padding-top: 18px;
-  border-top: 1px solid var(--mk-line);
-  font-size: 11.5px;
-  line-height: 1.4;
-  color: rgba(255,255,255,.56);
-}
-#ym-market .ym-home-foot-item { white-space: nowrap; }
-#ym-market .ym-home-foot-item b { font-weight: 700; color: rgba(255,255,255,.78); }
-#ym-market .ym-home-foot-sep { color: rgba(255,255,255,.24); }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @media (prefers-reduced-motion: reduce) {
-  #ym-market .ym-home-btn { transition: none; }
-  #ym-market .ym-home-btn:active { transform: none; }
+
+
 }
 @media (max-width: 1100px), (max-height: 720px) {
   #ym-market .ym-home-now {
@@ -2114,18 +1887,18 @@ ytmusic-player-bar .ym-pb-btn:active,
     gap: 26px;
     padding-bottom: 26px;
   }
-  #ym-market .ym-home-track { font-size: 34px; }
-  #ym-market .ym-home-news { margin-top: 26px; }
-  #ym-market .ym-home-news-lead { margin-bottom: 16px; }
-  #ym-market .ym-home-foot { margin-top: 30px; }
+
+
+
+
 }
 @media (max-width: 860px) {
   #ym-market .ym-home-now { grid-template-columns: 132px minmax(0, 1fr); gap: 20px; }
-  #ym-market .ym-home-track { font-size: 30px; }
-  #ym-market .ym-home-actions { gap: 8px; margin-top: 18px; }
-  #ym-market .ym-home-btn { padding: 9px 14px; font-size: 12.5px; }
-  #ym-market .ym-home-news-title { font-size: 17px; }
-  #ym-market .ym-home-news-list li { font-size: 13px; }
+
+
+
+
+
 }
 @media (max-height: 560px) {
   #ym-market .ym-home-now {
@@ -2133,11 +1906,11 @@ ytmusic-player-bar .ym-pb-btn:active,
     gap: 20px;
     padding-bottom: 20px;
   }
-  #ym-market .ym-home-track { font-size: 28px; }
-  #ym-market .ym-home-news { margin-top: 22px; }
-  #ym-market .ym-home-news-lead { margin: 4px 0 14px; }
-  #ym-market .ym-home-news-group + .ym-home-news-group { margin-top: 14px; }
-  #ym-market .ym-home-foot { margin-top: 24px; padding-top: 14px; }
+
+
+
+
+
 }
 
 /* ---- compact / narrow / short ---- */
@@ -2146,16 +1919,16 @@ ytmusic-player-bar .ym-pb-btn:active,
   #ym-market .ym-mk-detail { padding: 28px 30px 34px; }
   #ym-market .ym-mk-dtitles h1 { font-size: 28px; }
   #ym-market .ym-mk-dmono { width: 56px; height: 56px; font-size: 26px; border-radius: 14px; }
-  #ym-market .ym-mk-sweep { margin: 18px 0 20px; }
+
   #ym-market .ym-mk-lead { font-size: 14.5px; margin-bottom: 22px; }
-  #ym-market .ym-mk-sources { margin: -8px 0 22px; padding: 11px 13px; }
+
   #ym-market .ym-mk-dcols { grid-template-columns: minmax(0,1fr) 228px; gap: 24px; }
   #ym-market .ym-mk-settings .ym-detail-setting-row { padding: 12px 2px; }
   #ym-market .ym-mk-settings .ym-detail-setting-label { font-size: 13.5px; }
   #ym-market .ym-mk-settings .ym-detail-setting-input[type="range"] { width: 150px; }
   #ym-market .ym-mk-btn-un, #ym-market .ym-mk-btn-in { padding: 10px 16px; font-size: 13px; }
   #ym-market .ym-mk-acts { margin-top: 24px; gap: 11px; }
-  #ym-market .ym-mk-mono { width: 34px; height: 34px; font-size: 14px; border-radius: 9px; }
+
   #ym-market .ym-mk-card { padding: 8px 9px; gap: 10px; }
   #ym-market .ym-mk-name { font-size: 13.5px; }
 }
@@ -2166,7 +1939,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 @media (max-height: 560px) {
   #ym-market .ym-mk-detail { padding: 20px 24px 24px; }
-  #ym-market .ym-mk-sweep { margin: 14px 0 16px; }
+
   #ym-market .ym-mk-lead { margin-bottom: 16px; }
   #ym-market .ym-mk-acts { margin-top: 20px; }
 }
@@ -2195,7 +1968,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 }
 #ym-market.ym-mk2 .ym-toast.show { transform: none; }
 
-/* ---- Report a problem modal (AJ, 2026-10-19) ---- */
+/* ---- Report a problem modal ---- */
 .ym-report-scrim {
   position: fixed;
   inset: 0;
@@ -2418,7 +2191,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   max-height: 220px;
   overflow: hidden;
   /* Default mode collapses the upload/size card instead of hard-hiding it, so
-     switching Default <-> Custom animates (AJ, 2026-10-20). The hidden file
+     switching Default <-> Custom animates. The hidden file
      input still works from a 0-height parent. */
   transition: max-height .38s cubic-bezier(.22,.61,.36,1), opacity .26s ease,
     padding-top .38s cubic-bezier(.22,.61,.36,1),
@@ -2614,7 +2387,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 .ym-cfont-apply:hover { filter: brightness(1.08); }
 .ym-cfont-apply:active { transform: scale(.98); }
 
-/* ===== "restart required" notice (AJ, 2026-10-21) =========================
+/* ===== "restart required" notice =========================
    Shown after an add-on is uninstalled. A page-world script cannot reliably
    undo everything it attached — observers, timers, injected <style> nodes and
    patched prototypes all outlive their own teardown — so the panel asks for a
@@ -2715,7 +2488,7 @@ ytmusic-player-bar .ym-pb-btn:active,
   outline-offset: 2px;
 }
 
-/* ===== motion pass (AJ, 2026-10-21) =======================================
+/* ===== motion pass =======================================
    "Make literally everything have smooth animations." The toggles, sliders and
    the sliding segment pill were already spring-driven; these were the surfaces
    that still snapped:
@@ -2750,12 +2523,8 @@ ytmusic-player-bar .ym-pb-btn:active,
 
 /* Rail cards: the tile lifts a hair on hover and the label/check ease in step
    with the card's own background. */
-#ym-market .ym-mk-mono {
-  transition: color .22s ease, border-color .22s ease,
-              background-color .22s ease,
-              transform .22s cubic-bezier(.34,1.4,.5,1);
-}
-#ym-market .ym-mk-card:hover .ym-mk-mono { transform: translateY(-1px); }
+
+
 #ym-market .ym-mk-card:active { transform: scale(.985); }
 #ym-market .ym-mk-card { transition: background .22s, transform .18s cubic-bezier(.34,1.4,.5,1); }
 #ym-market .ym-mk-name { transition: color .22s ease; }
@@ -2772,7 +2541,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 
 /* Section headings inside the settings column fade with the rest of the block
    instead of appearing fully formed. */
-#ym-market .ym-detail-setting-header { animation: ymRowFadeIn .28s ease both; }
+
 @keyframes ymRowFadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: none; }
@@ -2780,121 +2549,48 @@ ytmusic-player-bar .ym-pb-btn:active,
 
 /* Respect the OS setting: kill the transforms, keep the colour changes. */
 @media (prefers-reduced-motion: reduce) {
-  #ym-market .ym-mk-card:active,
-  #ym-market .ym-mk-card:hover .ym-mk-mono,
-  #ym-market .ym-detail-settings-reset:active { transform: none; }
+#ym-market .ym-mk-card:active,
+#ym-market .ym-detail-settings-reset:active { transform: none; }
   #ym-market .ym-mk-check { transform: none; }
-  #ym-market .ym-detail-setting-header { animation: none; }
+
 }
 
-/* ===== Aurora Lyrics: grouped sub-rail (AJ, 2026-10-21) ===================
+/* ===== Aurora Lyrics: grouped sub-rail ===================
    A second, smaller rail inside the detail pane. It only exists for this one
    add-on — every other add-on keeps the plain settings column — because this is
    the only one with 19 settings.
    The tab strip is the same visual language as the main rail (dim label, white
    when active, tinted surface) at a smaller scale, so the two read as one system
    rather than two competing navigations. */
-#ym-market .ym-lr {
-  display: grid;
-  /* The rail is pulled 10px LEFT and its column widened by the same 10px, so the
-     LABELS line up with the "SETTINGS" heading above them (AJ, 2026-10-21) while
-     the content column keeps its exact x. The pill therefore overhangs 10px to
-     the left of the heading, which is the usual sidebar look: the surface bleeds
-     past the text, the text does not bleed past the surface. */
-  grid-template-columns: 128px minmax(0, 1fr);
-  gap: 22px;
-  align-items: start;
-  margin: 4px 0 6px -10px;
-}
-#ym-market .ym-lr-rail {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  position: sticky;
-  top: 0;
-}
-#ym-market .ym-lr-tab {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--mk-dim);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -.01em;
-  /* Flex, because every tab now starts with a rendered DOT. The labels looked
-     misaligned even though all five boxes measure identically (x 721, width 128,
-     padding-left 10) — the shift is the GLYPH SIDE BEARING: "L" and "F" start
-     tighter to their advance box than "W", "M" and "T", so Look/Font read a pixel
-     to the left of the rest. Padding cannot fix that, because the difference is
-     inside the letters. A dot is a real box at a fixed x, so it gives the eye the
-     anchor the letters never will (AJ, 2026-10-21). */
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  text-align: left;
-  padding: 7px 10px;
-  /* Rounded highlight (AJ, 2026-10-21 — squared it by mistake, he wanted the
-     pill kept). */
-  border-radius: 9px;
-  cursor: pointer;
-  transition: color .2s ease, background-color .2s ease,
-              transform .16s cubic-bezier(.34,1.4,.5,1);
-}
-#ym-market .ym-lr-tab::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: rgba(255,255,255,.16);
-  transition: background-color .2s ease,
-              transform .2s cubic-bezier(.34,1.4,.5,1);
-}
-#ym-market .ym-lr-tab:hover { background: rgba(255,255,255,.045); color: #fff; }
-#ym-market .ym-lr-tab:hover::before { background: rgba(255,255,255,.4); }
-#ym-market .ym-lr-tab.active::before {
-  background: var(--mk-accent);
-  transform: scale(1.3);
-}
-#ym-market .ym-lr-tab:active { transform: scale(.97); }
-#ym-market .ym-lr-tab.active { background: rgba(255,255,255,.075); color: #fff; }
-#ym-market .ym-lr-tab:focus-visible { outline: 2px solid var(--mk-accent-soft); outline-offset: -2px; }
+
+
+
+
+
+
+
+
+
+
 /* The panels are ABSOLUTE and the container carries an explicit height that JS
    keeps in sync. That combination is what lets a taller incoming panel OVERFLOW
    instead of being clipped: animating the container's height with overflow:hidden
-   cut the bottom off the new content for the length of the animation
-   (AJ, 2026-10-21). */
-#ym-market .ym-lr-panels {
-  min-width: 0;
-  position: relative;
-  transition: height .32s cubic-bezier(.22,1,.36,1);
-}
-#ym-market .ym-lr-panel {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  display: none;
-}
-#ym-market .ym-lr-panel.active { display: block; }
+   cut the bottom off the new content for the length of the animation. */
+
+
+
 /* The font disclosure used to sit under a long column; alone in its group it no
    longer needs the top margin that separated it, and it must sit in the SAME box
    as the setting rows or the group reads as shifted (rows are 20px wider and
    start 10px further left because of their hover tint). */
-#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-more,
-#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-collapse {
-  width: calc(100% + 20px);
-  margin-left: -10px;
-  margin-right: -10px;
-}
-#ym-market .ym-lr-panel[data-panel="font"] .ym-cfont-more { margin-top: 0; }
+
+
 @media (max-width: 1100px) {
-  #ym-market .ym-lr { grid-template-columns: 106px minmax(0, 1fr); gap: 16px; }
-  #ym-market .ym-lr-tab { font-size: 12px; padding: 6px 8px; }
+
+
 }
 
-/* ===== home screen: Discord banner + no open-flash (AJ, 2026-10-21) ====== */
+/* ===== home screen: Discord banner + no open-flash ====== */
 
 /* mkRenderDetail() adds this while it builds and drops it in the same tick that
    mkAnimateIn() creates the stagger, so the pane never paints at full opacity
@@ -2915,7 +2611,7 @@ ytmusic-player-bar .ym-pb-btn:active,
      This is an <a>, and without these two lines it kept the browser defaults:
      color rgb(0,0,238) (indigo) and text-decoration underline. The underline
      inherits the ANCHOR's colour, not the label's, so it painted an indigo line
-     under "Discord" no matter what the label was set to (AJ, 2026-10-21). */
+     under "Discord" no matter what the label was set to. */
   color: #f3f3f5;
   text-decoration: none;
   background: rgba(88,101,242,.08);
@@ -2927,32 +2623,13 @@ ytmusic-player-bar .ym-pb-btn:active,
   background: rgba(88,101,242,.16);
   box-shadow: inset 0 0 0 1px rgba(88,101,242,.9);
 }
-#ym-market .ym-mk-card-discord .ym-mk-mono {
-  color: #fff;
-  background: #5865F2;
-  border-color: rgba(255,255,255,.22);
-}
-#ym-market .ym-mk-card-discord:hover .ym-mk-mono { background: #6873f5; }
+
+
 #ym-market .ym-mk-card-discord .ym-mk-name { color: var(--mk-dim); }
 #ym-market .ym-mk-card-discord:hover .ym-mk-name { color: #fff; }
-#ym-market .ym-mk-out {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  /* WHITE, not inherited: at 55% of the dim label colour it read as a purple
-     smudge rather than an arrow (AJ, 2026-10-21). */
-  fill: #fff;
-  opacity: .85;
-  /* Points to the TOP-RIGHT: an arrow that leaves the app should read as
-     "external", not as "next". */
-  transform: rotate(-45deg);
-  transition: opacity .2s ease, transform .2s cubic-bezier(.34,1.4,.5,1);
-}
-#ym-market .ym-mk-card-discord:hover .ym-mk-out {
-  opacity: 1;
-  transform: rotate(-45deg) translateY(-2px);
-}
-#ym-market.ym-mk-collapsed .ym-mk-card-discord .ym-mk-out { display: none; }
+
+
+
 
 /* YouTube Modifications: the Discord row's "not an add-on" treatment, in
    YouTube red (#FF0033) instead of blurple. Same tinted surface, same 1px inset
@@ -2960,8 +2637,7 @@ ytmusic-player-bar .ym-pb-btn:active,
    entries above the add-on list read as a pair. It deliberately does NOT get
    .ym-mk-out: the Discord row's arrow means "leaves the app", and this one is a
    page inside the panel. Its own rules are needed because the base .sel /
-   :hover rules are more specific than a plain .ym-mk-card-yt one (AJ,
-   2026-10-22). */
+   :hover rules are more specific than a plain .ym-mk-card-yt one. */
 #ym-market .ym-mk-card-yt {
   --yt-red: #ff0033;
   color: #f3f3f5;
@@ -2981,23 +2657,15 @@ ytmusic-player-bar .ym-pb-btn:active,
   background: rgba(255,0,51,.18);
   box-shadow: inset 0 0 0 1px rgba(255,0,51,.92);
 }
-#ym-market .ym-mk-card-yt .ym-mk-mono {
-  color: #fff;
-  background: var(--yt-red);
-  border-color: rgba(255,255,255,.22);
-}
+
 /* The tile keeps the Discord tile's crisp .22 white edge even while selected —
    the generic `.sel` rule would otherwise swap it for the dimmer neutral line. */
-#ym-market .ym-mk-card-yt:hover .ym-mk-mono,
-#ym-market .ym-mk-card-yt.sel .ym-mk-mono {
-  background: #ff2b4d;
-  border-color: rgba(255,255,255,.22);
-}
+
 #ym-market .ym-mk-card-yt .ym-mk-name { color: var(--mk-dim); }
 #ym-market .ym-mk-card-yt.sel .ym-mk-name,
 #ym-market .ym-mk-card-yt:hover .ym-mk-name { color: #fff; }
 
-/* ===== custom image picker (AJ, 2026-10-21) ==============================
+/* ===== custom image picker ==============================
    Fully custom chrome: the row stacks its label above a card holding a raw
    thumbnail, the filename + dimensions, and two buttons. The only native part is
    the OS file dialog, which cannot be styled. */
@@ -3076,7 +2744,7 @@ ytmusic-player-bar .ym-pb-btn:active,
 #ym-market .ym-file-btn-quiet:hover { background: rgba(255,255,255,.14); }
 #ym-market .ym-file-btn-quiet.is-off { opacity: .32; pointer-events: none; }
 
-/* ===== YouTube page: page-wide font swap (AJ, 2026-10-22) ==================
+/* ===== YouTube page: page-wide font swap ==================
    The panel's own YouTube page (not an add-on) toggles `ym-yt-font` on <html>.
    The swap has to reach YTM's components because every one of them declares its
    own family, so it needs a universal selector and !important — there is no
@@ -3094,7 +2762,7 @@ html.ym-yt-font ytmusic-app *:not(#ym-sl-panel, #ym-sl-panel *, iron-icon, yt-ic
 }
 
 /* The YouTube page is a short single column, not a catalogue: without a cap the
-   rows stretch label-to-control across the whole pane (AJ, 2026-10-22). */
+   rows stretch label-to-control across the whole pane. */
 #ym-market .ym-mk-yt .ym-mk-lead,
 #ym-market .ym-mk-yt .ym-detail-settings { max-width: 620px; }
 /* Two settings blocks on one page (Apple Music Style) would otherwise sit flush:
@@ -3102,7 +2770,7 @@ html.ym-yt-font ytmusic-app *:not(#ym-sl-panel, #ym-sl-panel *, iron-icon, yt-ic
    rather than landing straight on it. */
 #ym-market .ym-mk-yt .ym-mk-settings + .ym-mk-settings { margin-top: 30px; }
 
-/* ===== YouTube page: player chrome (AJ, 2026-10-22) ========================
+/* ===== YouTube page: player chrome ========================
    YouTube Music sizes its top bar and player bar from two custom properties on
    <html>, so overriding them shrinks the chrome AND everything laid out around
    it — no component rules and no fixed heights of our own to keep in sync. */
@@ -3209,7 +2877,7 @@ html.ym-yt-dark-bar ytmusic-player-bar tp-yt-paper-icon-button:hover {
    right) AND pads the box 6px around the glyph, so the three icons sat ~35px
    apart no matter what the margins said. The margins go to zero and the boxes
    shrink to glyph + 8px: 32px around a 24 icon, 48 around the 40 play, which
-   leaves one even ~15px lane between the painted shapes (AJ, 2026-10-23).
+   leaves one even ~15px lane between the painted shapes.
    Gated on the icon switch: with YouTube's own glyphs back, so is its spacing. */
 html.ym-yt-custom-icons ytmusic-player-bar .left-controls-buttons > yt-icon-button {
   margin: 0 !important;
@@ -3254,7 +2922,7 @@ html.ym-yt-dock ytmusic-player-bar .middle-controls {
   /* public-api.js pads this row by one extra button-track (96px) so the CENTRED
      title stays put when the right track widens for add-on buttons. The dock
      sizes the bar as 1fr | auto | 1fr and centres the transport itself, so that
-     padding is nothing but dead space at the left end of the bar — the gap AJ
+     padding is nothing but dead space at the left end of the bar — the gap 
      saw. Here the song row starts at its own 16px margin instead. */
   padding-left: 0 !important;
 }
@@ -3342,7 +3010,7 @@ html.ym-yt-no-dividers .ym-sl-page-bg-root.ym-sl-topbar-scrolled #nav-bar-backgr
   box-shadow: none !important;
 }
 
-/* ===== YouTube page: home layout (AJ, 2026-10-22) =========================
+/* ===== YouTube page: home layout =========================
    Three independent levers over the browse pages, each one class on <html>, so
    YouTube's constant re-rendering cannot drop them. Measured on the live page:
    the chip row is 112px tall for a 36px strip — 48px of padding above, 16px
@@ -3419,7 +3087,7 @@ html.ym-yt-small-titles ytmusic-carousel-shelf-basic-header-renderer > #content-
   text-align: left !important;
 }
 
-/* ===== YouTube page: section picker (AJ, 2026-10-22) =====================
+/* ===== YouTube page: section picker =====================
    The tab is two levels now: a tile per part of YouTube Music, then that
    part's settings. The tiles are the whole map of what the tab can change, so
    they carry the motion — lift on hover, a real press, and the chevron sliding
@@ -3723,7 +3391,7 @@ html.ym-yt-small-titles ytmusic-carousel-shelf-basic-header-renderer > #content-
 }
 #ym-market .ym-yt-art-chips i:nth-child(2) { background: rgba(255, 86, 116, .7); }
 
-/* ===== YouTube page: library levers (AJ, 2026-10-22) =====================
+/* ===== YouTube page: library levers =====================
    The Library grid is capped and indented like the home shelves (1478px with
    265px of gutter each side at 2122px wide) and its artwork is square at the
    ITEM's width, so "bigger cards" is really "wider columns + a square aspect
@@ -3797,7 +3465,7 @@ html.library.ym-yt-lib-wide ytmusic-side-aligned-item-renderer {
   margin-right: 0 !important;
 }
 
-/* ===== YouTube page: Explore page (AJ, 2026-10-23) =========================
+/* ===== YouTube page: Explore page =========================
    Explore has no route class on <html> (only the Library page gets one), so
    these are scoped by COMPONENTS only Explore renders rather than by route.
    They are inert on every other page, which is exactly why no route check is
@@ -3880,7 +3548,7 @@ html.ym-yt-explore-moods ytmusic-carousel-shelf-renderer:has(ytmusic-navigation-
      into double gutters, so the gap is the only spacing in the wall. */
   margin: 0 !important;
 }
-/* ===== YouTube page: the song view's tab column (AJ, 2026-10-23) ==========
+/* ===== YouTube page: the song view's tab column ==========
    The watch page is the cover or video, then a column whose four tabs swap the
    panel underneath it (Up next / Lyrics / Comments / Related). Measured at a
    2122px window: #main-panel ends at x=1250, #side-panel runs from x=1346 to
@@ -3985,7 +3653,7 @@ html.ym-yt-song-tabs ytmusic-player-page #side-panel > tp-yt-paper-tabs #selecti
   }
 }
 
-/* ===== YouTube page: the song view's layout switcher (AJ, 2026-10-23) =====
+/* ===== YouTube page: the song view's layout switcher =====
    The player page is ONE flex row — #main-panel (cover or video) and #side-panel
    (the tab strip and the panel under it) — and the four layouts are that row's
    geometry and nothing else:
@@ -4266,7 +3934,7 @@ ytmusic-player-page .content > #side-panel.ym-song-panel-swap {
   }
 }
 
-/* ---- Settings page: performance modes (AJ, 2026-10-26) ------------------- */
+/* ---- Settings page: performance modes ------------------- */
 /* Three choices, each carrying its consequence in a line of body copy, so the
    trade-off is legible without a tooltip. Cards rather than a native <select>:
    the current mode has to be readable at a glance from across the panel. */

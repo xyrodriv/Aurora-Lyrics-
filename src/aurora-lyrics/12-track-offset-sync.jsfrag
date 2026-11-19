@@ -6,7 +6,7 @@
     refreshFsTitle();
     // Decide the media MODE first, on the track change itself. It used to run
     // only from the 2s fullscreen tick, so a cover <-> music-video skip could
-    // take up to two seconds to switch — the delay AJ reported (2026-10-20).
+    // take up to two seconds to switch — the delay reported.
     // syncFsVideoMode() is cheap and self-guarding: it early-returns unless the
     // intent actually differs from what is attached.
     if (fsActive) syncFsVideoMode();
@@ -985,7 +985,7 @@
   }
 
   // (G) Delete the permanently-saved TTML for the current track. Lets the user
-  // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  // undo an accidental "Permanent" import.
   //
   // The file being deleted is the one RENDERED right now, so deleting it has to
   // take it off the screen too. Re-resolve the track exactly like a fresh play
@@ -1163,6 +1163,9 @@
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
     braccatoClearForLoad();
+    // New content is on its way: the no-lyrics notice (and the Spicy scroller it
+    // borrows from Better Lyrics) must give the panel back to the live renderer.
+    if (panelEl) panelEl.classList.remove("ym-sl-empty-state");
     lyricsSkeletonShown = false;
     currentLyricsfileArtist = "";
     currentWordSyncQualityWarning = false;
@@ -1222,7 +1225,6 @@
     // A message means the lookup is OVER, so the fullscreen loading spinner has to
     // come down with it. It used to keep spinning over a "No lyrics found." panel
     // forever, because only the success paths ever called hideFsSpinner()
-    // (AJ, 2026-10-01).
     hideFsSpinner();
     // Same for the AMLL loading skeleton: a message is a terminal state, so no
     // shimmer may be left behind. A genuine "no lyrics" / "didn't load" also has
@@ -1245,7 +1247,7 @@
     // Fullscreen Video Background keeps the lyrics panel hidden until the first
     // line actually plays (see the intro-dim rules), so a track with NO lyrics
     // produced no feedback at all there — no panel, no message, nothing
-    // (AJ, 2026-10-01). BOTH failure messages raise the notice: from the user's
+    //. BOTH failure messages raise the notice: from the user's
     // side "no lyrics" and "couldn't load them" are the same dead end.
     // Checked BEFORE the panel guard below, because the notice does not depend on
     // the panel existing.
@@ -1254,6 +1256,12 @@
     }
     if (!lineScrollEl || !linesRoot) return;
     resetLyricsPanelState();
+    // Better Lyrics keeps its own container in front of the panel and that
+    // container has nothing to say here, while the notice is built in the Spicy
+    // scroller it hides - which is why a word-by-word track with no lyrics
+    // showed a blank panel. The class swaps the two for as long as the message
+    // is up (see 05-styles); the next load clears it.
+    if (panelEl) panelEl.classList.add("ym-sl-empty-state");
     // Centred box, the way an empty state should read.
     if (lineScrollEl) lineScrollEl.classList.add("offline");
     const outage = message === LRCLIB_OUTAGE_MESSAGE;
@@ -1291,14 +1299,14 @@
     }
     linesRoot.replaceChildren(empty);
     // Fullscreen has no lines to pair the cover with, so the composition
-    // collapses to a centred cover plus a Search CTA (AJ, 2026-11-16).
+    // collapses to a centred cover plus a Search CTA.
     if (fsActive) {
       setFsNoLyricsState(true);
       watchFsNoLyrics();
     }
   }
 
-  /* ---- fullscreen no-lyrics composition (AJ, 2026-11-16) --------------------
+  /* ---- fullscreen no-lyrics composition --------------------
      With nothing to read, the side-by-side composition leaves the cover pinned
      to one half and an empty column on the other. The overlay gets a class
      instead; the sheet uses it to centre the cover/controls, fade the lyrics
@@ -1314,7 +1322,7 @@
       if (fsNoLyricsOutTimer) window.clearTimeout(fsNoLyricsOutTimer);
       // Return the offset first and drop the class once the panes have arrived:
       // the transition lives on that class, so removing it up front would also
-      // remove the animation and the return would snap (AJ, 2026-11-16).
+      // remove the animation and the return would snap.
       fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", "0px");
       fsNoLyricsOutTimer = window.setTimeout(() => {
         fsNoLyricsOutTimer = 0;
@@ -1332,7 +1340,7 @@
     // Measure BEFORE the class lands: the panes still sit in their normal
     // column, and that is the distance they have to travel. Translating by a
     // measured offset rather than snapping to left:50% is what makes both the
-    // cover and the transport slide (AJ, 2026-11-16: the cover jumped).
+    // cover and the transport slide (the cover jumped).
     const media = fsOverlay.querySelector(".ym-sl-fs-media");
     // Hits is not a valid composition without lyrics (its layout is measured
     // from the header above the column), so an empty-state track in Hits falls
@@ -1340,7 +1348,7 @@
     // measurement: in Hits the media host is a full-bleed, hidden box whose
     // centre IS the screen centre, so measuring there produced dx=0 and the
     // cover only centred once something measured again - the move to the left
-    // edge followed by the jump to the middle (AJ, 2026-11-16).
+    // edge followed by the jump to the middle.
     const forcingSide = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
     let restoreAnim = false;
     if (forcingSide) {
@@ -1399,7 +1407,7 @@
      Video Background hides the lyrics panel until the first line plays, which is
      a nice touch on a normal track — but it means a track with NO lyrics gives
      no feedback whatsoever. This flashes a transient notice instead, so the user
-     is told AND can carry on watching the video (AJ, 2026-10-01).
+     is told AND can carry on watching the video.
      Deliberately non-interactive: it must never block or capture the video. */
   const FS_NO_LYRICS_MS = 5000;
   let fsNoLyricsEl = null;

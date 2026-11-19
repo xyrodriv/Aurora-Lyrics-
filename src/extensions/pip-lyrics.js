@@ -47,15 +47,8 @@
     },
   ];
 
-  const ICON_PLAY = "M8 5v14l11-7z";
-  const ICON_PAUSE = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
-  const ICON_PREV = "M6 6h2v12H6zm3.5 6l8.5 6V6z";
-  const ICON_NEXT = "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z";
   // Shuffle / Repeat / Repeat-one — the panel's own glyphs (08-fullscreen-controls),
   // so the PiP's toggles match the fullscreen chip exactly.
-  const ICON_SHUFFLE = "M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z";
-  const ICON_REPEAT = "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z";
-  const ICON_REPEAT_ONE = "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z";
   const ICON_VOLUME = "M3 10v4h4l5 4V6L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12z";
 
   /* ---- fullscreen transport glyphs ---------------------------------------
@@ -557,7 +550,7 @@
       from { opacity: .15; transform: translateY(5px); }
       to { opacity: 1; transform: none; }
     }
-    /* Cover art thumbnail (AJ, 2026-10-07). Hidden until the track supplies
+    /* Cover art thumbnail. Hidden until the track supplies
        artwork, so a track with none leaves no gap. */
     .ym-pip-art {
       width: 40px;
@@ -612,7 +605,7 @@
       -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
       mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
     }
-    /* Top AND bottom dissolve (AJ, 2026-11-16): with the card gone, lines were
+    /* Top AND bottom dissolve: with the card gone, lines were
        ending on a hard cut right above the transport. The bottom band is 72px
        so a line fades out as it approaches the controls instead of being sliced
        by the scrollport edge. */
@@ -638,7 +631,7 @@
       box-sizing: border-box;
       overflow-x: hidden;
       overflow-y: auto;
-      /* NO VISIBLE SCROLLBAR (AJ, 2026-10-07): the draggable thumb on the right
+      /* NO VISIBLE SCROLLBAR: the draggable thumb on the right
          was unwanted. Hiding it also means the gutter must go — with
          scrollbar-gutter:stable a blank strip would still be reserved. The 32px
          right inset STAYS: it is there because the ACTIVE line's glyphs paint past
@@ -759,7 +752,7 @@
     }
     /* Own class: the panel relies on its scroll container plus adaptive spacing
        to fade distant lines, which a small window has no room for. */
-    /* No far-line dimming (AJ, 2026-11-16: "the lyrics that cut off at the bottom
+    /* No far-line dimming (the lyrics that cut off at the bottom
        still get dim which i dont want"). The bottom mask already dissolves a
        line as it leaves; a second opacity cut made the next lines look broken
        rather than faded. Depth blur supplies the distance cue now. */
@@ -767,7 +760,7 @@
        One glass card instead of loose rows: the seek bar, transport and volume
        now read as a single object, which is also what gives the window its
        "floating player" feel. */
-    /* No card (AJ, 2026-11-16: "i dont really want a whole frosted border down
+    /* No card (i dont really want a whole frosted border down
        there"): Apple Music's mini player doesn't box its transport either. The
        controls sit straight on the artwork, only the glyphs and a thin progress
        line carry weight. */
@@ -1004,7 +997,7 @@
     }
     .ym-pip-seek-range:hover::-webkit-slider-thumb,
     .ym-pip-volume:hover::-webkit-slider-thumb { transform: scale(1.25); }
-    /* No knob on the playback bar either (AJ, 2026-11-16). */
+    /* No knob on the playback bar either. */
     .ym-pip-seek-range::-webkit-slider-thumb { width: 0; height: 0; opacity: 0; }
     .ym-pip-seek-range::-moz-range-thumb { width: 0; height: 0; opacity: 0; border: 0; }
     /* ---- sliders: the fullscreen scrubber's dimensions and behaviour --------
@@ -1039,7 +1032,7 @@
       opacity: 0;
       transition: opacity .2s ease;
     }
-    /* The thumb stays invisible even on hover (AJ, 2026-11-16: "a dot shows when
+    /* The thumb stays invisible even on hover (a dot shows when
        hovering over the sliders pls fix that"). The track alone carries the
        value, the same as the volume slider before the fullscreen restyle; the
        drag readout pill already tells you where you are pointing. */
@@ -1257,7 +1250,7 @@
 
     const head = makeEl(doc, "div", "ym-pip-head");
     head.id = "ym-pip-head";
-    // Cover art (AJ, 2026-10-07): a small square thumbnail beside the title, like
+    // Cover art: a small square thumbnail beside the title, like
     // the fullscreen header. The src is set in setHeader() from the track's
     // artworkUrl; it stays empty (and collapses) until a track is known.
     const art = makeEl(doc, "img", "ym-pip-art");
@@ -1271,7 +1264,7 @@
     meta.appendChild(artist);
     head.appendChild(meta);
     // The dim "Aurora Lyrics" source label that used to sit at the far right of
-    // the header is gone (AJ, 2026-11-16): the window already says what it is,
+    // the header is gone: the window already says what it is,
     // and the corner read as clutter next to the Apple-Music-style header.
     board.appendChild(head);
 
@@ -1356,7 +1349,7 @@
         pipTip.classList.add("ym-pip-tip-on");
       };
       const hideTip = () => pipTip.classList.remove("ym-pip-tip-on");
-      // ---- seek row (AJ, 2026-10-07) --------------------------------------
+      // ---- seek row --------------------------------------
       // Times either side of a range, mirroring the fullscreen scrubber. The range
       // is a 0..1000 RATIO, so it never depends on the duration arriving first.
       const seekRow = makeEl(doc, "div", "ym-pip-seek");
@@ -1470,7 +1463,7 @@
         const p = player();
         // setVolume takes 0..1 (it clamps), while the range is 0..100 — passing the
         // raw 0..100 made every value >= 1 clamp to FULL volume, so nudging the
-        // slider up jumped straight to max (AJ, 2026-10-07).
+        // slider up jumped straight to max.
         if (p && typeof p.setVolume === "function") p.setVolume(Number(vol.value) / 100);
         setRangeFill(vol);
         repositionTip(vol, Math.round(Number(vol.value)) + "%");
@@ -1499,11 +1492,11 @@
   }
 
   /* ---- AMLL renderer ------------------------------------------------------
-     Line-by-line tracks are drawn by the Apple-Music engine in the panel, and
-     the PiP now runs that SAME engine instead of approximating it with the
-     built-in renderer. The panel publishes which renderer owns the track
-     ("lyrics:settings" / "lyrics:lines" -> renderer), so the two surfaces can
-     never disagree about what the song should look like.
+     When the panel draws a line-by-line track with the Apple-Music engine, the
+     PiP runs that SAME engine instead of approximating it with the built-in
+     renderer. The panel publishes which renderer owns the track
+     ("lyrics:settings" / "lyrics:lines" -> renderer). Better Lyrics has no PiP
+     implementation yet, so those tracks use the built-in renderer here.
 
      The engine is imported in the PAGE's realm (the same module URL the panel
      uses) and its element is appended into the PiP document, which adopts it.
@@ -2404,7 +2397,7 @@
       // animateLine can promote the right line. Bg-vocal words live in a SEPARATE
       // .line.bg-line sibling, so promoting only the lead line left every bg line
       // unpromoted — which is why bg vocals stayed visibly steppy after the lead
-      // fix (AJ, 2026-10-07).
+      // fix.
       rec.lineEl = parent;
       if (rec.letters) rec.letters.forEach((letter) => { letter.lineEl = parent; });
       records.push(rec);
@@ -2838,14 +2831,14 @@
     // no-op, because toggling will-change per word churns the background-clip:text
     // layer — and that class is added by the PANEL's rAF, which cannot see this
     // document. The PiP therefore called a no-op and its word transforms animated
-    // UNPROMOTED, which is the pixel-stepping AJ reports (AJ, 2026-10-07). The
+    // UNPROMOTED, which is the pixel-stepping reports. The
     // panel's stylesheet (copied in wholesale) already carries the
     // .line.ym-sl-animating .word/.letter rules, so toggling the class is all it
     // takes — and it comes off the moment every spring on the line has slept.
     // Promote EVERY line that owns an awake word this frame. It cannot be a single
     // "active line" toggle: background vocals render as their own .line.bg-line
     // siblings, so they need their own promotion or they animate unpromoted and
-    // stay steppy while the lead line is smooth (AJ, 2026-10-07). Clearing is
+    // stay steppy while the lead line is smooth. Clearing is
     // driven by the same set, so a line drops its hint the moment its springs sleep.
     const setLineEls = (set && set.elements) || [];
     for (let i = 0; i < setLineEls.length; i++) {
@@ -3063,7 +3056,7 @@
     return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
   }
 
-  // Seek / volume / shuffle / repeat, refreshed each frame (AJ, 2026-10-07).
+  // Seek / volume / shuffle / repeat, refreshed each frame.
   // Everything is read from the LIVE player, never from local toggle state, so
   // the controls can never disagree with what YTM is actually doing.
   function syncPipControls(p, pos) {
@@ -3085,7 +3078,7 @@
     if (pipVolumeEl && p && typeof p.getVolume === "function" && pipDoc.activeElement !== pipVolumeEl) {
       // getVolume() returns an OBJECT ({ media, slider, muted }), not a number.
       // media.volume is 0..1 — the range is 0..100. Reading it as a number gave
-      // "[object Object]", which the range coerced to 0 (AJ, 2026-10-07).
+      // "[object Object]", which the range coerced to 0.
       const info = p.getVolume();
       const vol01 = info && typeof info.media === "number"
         ? info.media
@@ -3128,7 +3121,7 @@
       // inherits its lead line's distance and never blurs while it is still the
       // phrase being played.
       const distance = activeIdx >= 0 ? Math.abs(i - activeIdx) : 0;
-      // Softer than the panel (AJ, 2026-11-16: "turn the blur a little down a
+      // Softer than the panel (turn the blur a little down a
       // bit but keep it") AND bounded: a filtered line is its own compositor
       // surface, so blurring every row of a 33-line song is exactly the kind of
       // per-line cost that made this window stutter before. Only the five rows
@@ -3220,7 +3213,7 @@
   //
   // The camera glide is the PANEL'S OWN spring — kit.Spring, the analytic spr port
   // — with the panel's constants, replacing the hand-integrated Euler spring this
-  // used to run ("pip has the old one", AJ, 2026-10-07). Same model as the panel:
+  // used to run ("pip has the old one"). Same model as the panel:
   // critically damped, ~0.8s settle, and a retarget KEEPS the velocity so
   // back-to-back line changes read as one continuous glide.
   const CAMERA_GLIDE_FREQ = 1;
@@ -3231,7 +3224,7 @@
   // following on its own. Upstream's model (their USER_SCROLL_COOLDOWN); the old
   // rule demanded they scroll the active line fully out of view AND back, so a
   // small nudge paused the camera for the rest of the song and only the Jump
-  // button could restore it (AJ, 2026-10-07).
+  // button could restore it.
   const PIP_MANUAL_RESUME_MS = 1200;
   let centerTargetY = null;
   let pipManualScrollPaused = false;
@@ -3246,7 +3239,7 @@
   // Last whole-pixel value written to scrollTop. scrollTop is integer-only, so
   // the camera writes the whole part there and carries the remainder as a
   // translate (see setCameraFraction) — otherwise the whole text block ticks one
-  // pixel at a time and the motion reads as pixels stepping (AJ, 2026-10-07).
+  // pixel at a time and the motion reads as pixels stepping.
   let cameraLastWhole = null;
   let cameraFraction = 0;
   // Seek / volume controls (built in buildChrome, synced in syncLoop).
@@ -3385,7 +3378,7 @@
     // active line is in view. The old rule ALSO demanded they scroll the line
     // fully out of view and back, so a small nudge that kept it visible paused the
     // camera for the rest of the song and only "Jump to current" could restore it
-    // (AJ, 2026-10-07). The cooldown is upstream's model; the wasAway path is kept
+    //. The cooldown is upstream's model; the wasAway path is kept
     // too, so a real scroll-away resumes the moment the line returns rather than
     // waiting out the timer.
     const idle = performance.now() - pipManualScrollAt;
@@ -3694,7 +3687,7 @@
       }, { replay: true });
       // Live scroll/motion settings. Without this a toggle only reached the PiP on
       // the NEXT lyrics payload, so "Smooth Scrolling off" and "Apple Music style
-      // lyrics" appeared to do nothing here (AJ, 2026-10-07).
+      // lyrics" appeared to do nothing here.
       unsubscribeSettings = window.YTMod.bus.on("lyrics:settings", onSettings, { replay: true });
     }
     applySettings(settings);

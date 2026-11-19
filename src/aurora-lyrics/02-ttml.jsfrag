@@ -99,7 +99,7 @@
         // A line written with begin="00:00.000" end="00:00.000" is unsynced,
         // not a real timestamp at t=0. Treat all-zero timing as absent,
         // otherwise every such line pins to the top and renders karaoke at
-        // once for the length of the fallback window (AJ, 2026-11-01).
+        // once for the length of the fallback window.
         const hasRealTiming =
           (!!beginAttr && beginValue > 0) ||
           (!!endAttr && endValue > 0) ||
@@ -121,7 +121,7 @@
           end,
           // True only when this span carried real timing. Drives the
           // no-karaoke decision so partially-synced TTML lines that lack
-          // genuine timing are rendered as a static block (AJ, 2026-09-17).
+          // genuine timing are rendered as a static block.
           timed: hasRealTiming,
           node,
           hasSpaceBefore: false,
@@ -149,7 +149,7 @@
         word.isPartOfWord = !/\s/.test(between);
         // INFERRED, not declared. The join only trusts explicit markers: the
         // inference says "no whitespace between the tags", which is also true
-        // for adjacent whole words and was merging entire lines (AJ, 2026-10-20).
+        // for adjacent whole words and was merging entire lines.
         word.partOfWordExplicit = false;
       } else {
         word.isPartOfWord = false;
@@ -167,87 +167,13 @@
   // lrc.red TTML often splits one word into syllable spans ("shi" + "ning").
   // Merge each part-of-word run back into its head word so the renderer fills
   // and glows the WHOLE word instead of per syllable. The settings toggle can
-  // turn this off (AJ, 2026-10-20).
-  function joinPartOfWordRuns(words) {
-    const merged = [];
-    for (const word of words || []) {
-      const prev = merged[merged.length - 1];
-      // Only EXPLICIT part-of-word markers merge. The whitespace-inferred flag
-      // is true for any two adjacent spans, including separate words, and was
-      // producing "don'twan na talkto" (AJ, 2026-10-20). A real space at either
-      // edge always wins.
-      const canJoin =
-        !!prev &&
-        word.isPartOfWord &&
-        word.partOfWordExplicit &&
-        !/\s$/.test(prev.text) &&
-        !/^\s/.test(word.text);
-      if (canJoin) {
-        prev.text += word.text;
-        prev.end = word.end;
-        prev.timed = !!(prev.timed || word.timed);
-      } else {
-        merged.push(Object.assign({}, word, { isPartOfWord: false }));
-      }
-    }
-    return merged;
-  }
+  // turn this off.
 
   // Group spans by the line's OWN whitespace: a run of non-space characters is
   // one word, so "Un"+"der" merges and " con" starts a new word. This follows
   // the text instead of the tag adjacency (which is true for every adjacent
   // span and was merging whole lines). Falls back to explicit markers when the
   // line has no usable word boundary (CJK, or a single word).
-  function joinWordsByWhitespace(words) {
-    const list = words || [];
-    if (list.length < 2) return list;
-    let full = "";
-    const ranges = [];
-    for (const word of list) {
-      // The space between spans lives in hasSpaceBefore, NOT in the span text.
-      // Put it back so the tokenizer sees the real word boundary.
-      if (word.hasSpaceBefore && full.length) full += " ";
-      const start = full.length;
-      full += word.text;
-      ranges.push({ word, start, end: full.length });
-    }
-    const tokens = [];
-    const re = /\S+/g;
-    let match;
-    while ((match = re.exec(full))) {
-      tokens.push({ start: match.index, end: match.index + match[0].length });
-    }
-    if (tokens.length < 2) return joinPartOfWordRuns(list);
-    const out = [];
-    for (const token of tokens) {
-      const parts = [];
-      for (const range of ranges) {
-        if (range.end <= token.start || range.start >= token.end) continue;
-        const from = Math.max(0, token.start - range.start);
-        const to = Math.min(range.word.text.length, token.end - range.start);
-        const piece = range.word.text.slice(from, to);
-        if (piece) parts.push({ piece, word: range.word });
-      }
-      if (!parts.length) continue;
-      out.push(Object.assign({}, parts[0].word, {
-        text: parts.map((part) => part.piece).join(""),
-        start: parts[0].word.start,
-        end: parts[parts.length - 1].word.end,
-        timed: parts.some((part) => part.word.timed),
-        isPartOfWord: false,
-      }));
-    }
-    return out.length ? out : joinPartOfWordRuns(list);
-  }
-
-  function joinTTMLSyllables(parsed) {
-    return (parsed || []).map((line) => Object.assign({}, line, {
-      words: joinWordsByWhitespace(line.words),
-      background: (line.background || []).map((bg) => Object.assign({}, bg, {
-        words: joinWordsByWhitespace(bg.words),
-      })),
-    }));
-  }
 
   // Each singer is named once, in the head, and the timed lines point at them
   // with ttm:agent. Apple exports put the stage name in <ttm:name type="full">
@@ -362,7 +288,7 @@
       if (!end && lineDuration) end = start + lineDuration;
       // Real line timing needs at least one positive timestamp. An all-zero
       // <p begin="00:00.000" end="00:00.000"> is an unsynced line, and the
-      // gap-fill below must be allowed to place it (AJ, 2026-11-01).
+      // gap-fill below must be allowed to place it.
       const lineHasTiming = !!(
         (lineBeginAttr && start > 0) ||
         (lineEndAttr && end > 0) ||
@@ -454,7 +380,7 @@
           // from the body so the line SURVIVES — otherwise empty plainText hits the
           // `continue` below, the parse returns nothing, and loadTTML reports a
           // failure. That is why lrc.red fetched line-level TTML and then silently
-          // fell through to the next source (AJ, 2026-10-19).
+          // fell through to the next source.
           decodeEntities(String(body).replace(/<[^>]*>/g, " "))
             .replace(/\s+/g, " ")
             .trim();
@@ -472,12 +398,12 @@
         agent,
         oppositeAligned: !!agent && !!primaryAgent && agent !== primaryAgent,
         // True when the line carried at least one genuinely-timed span. Lines
-        // without it are rendered as a static block, not karaoke (AJ, 2026-09-17).
+        // without it are rendered as a static block, not karaoke.
         timed: hasSpanTiming,
         // True when the line had any real, positive timing (a <p> begin/end/dur
         // or a timed span). All-zero timing counts as absent: those lines get a
         // synthesized t=0 and would pile at the top of the panel, burying the
-        // synced lines - see the gap-fill pass below (AJ, 2026-11-01).
+        // synced lines - see the gap-fill pass below.
         positioned: !!(pTiming || hasSpanTiming),
       });
     }
@@ -489,7 +415,7 @@
     // line into the gap between the timed neighbours it actually sits between
     // (an untimed line that follows S1 in the file must land between S1 and S2,
     // not get swept to the top by a t=0 sort). The final time sort happens
-    // after the gap-fill (see just before the return) — AJ, 2026-09-17.
+    // after the gap-fill (see just before the return).
     for (let i = 0; i < parsed.length; i++) {
       const line = parsed[i];
       const nextStart = parsed[i + 1] ? parsed[i + 1].start : 0;
@@ -526,7 +452,7 @@
     // the fallback above, so they all pile at the top of the panel and bury the
     // synced lines underneath. Slide each one into the gap between the nearest
     // timed line before and after it so it sits roughly where it belongs in the
-    // song (AJ, 2026-09-17).
+    // song.
     {
       const timedIdx = [];
       parsed.forEach((line, idx) => {
@@ -546,7 +472,7 @@
           // Trailing unsynced lines have no following timed line, so the old
           // fixed 4s window packed a whole unsynced verse into four seconds
           // (and into overlapping 1s windows). Give each line its own 1.5s
-          // slot instead, and never overlap two unsynced lines (AJ, 2026-11-01).
+          // slot instead, and never overlap two unsynced lines.
           const trailing = nextTimedIdx >= parsed.length;
           const gap = trailing
             ? Math.max(4, untimed.length * 1.5)
@@ -574,7 +500,7 @@
     // timed neighbours), but the array is still in document order. Sort by start
     // here so untimed lines interleave with the synced lines at their real
     // position in the song instead of piling on top and burying the synced
-    // words (AJ, 2026-09-17).
+    // words.
     parsed.sort((a, b) => a.start - b.start);
 
     // Labels go on after the sort, so "the first line of a part" means the first

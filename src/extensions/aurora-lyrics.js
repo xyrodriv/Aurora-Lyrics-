@@ -30,7 +30,10 @@
   const EXT_ID = "ytmod-spicy-lyrics";
   const LRCLIB_API = "https://lrclib.net/api/get";
   const LRCLIB_SEARCH_API = "https://lrclib.net/api/search";
-  const SPICY_LYRICS_API = "https://api.spicylyrics.org/v1/lyrics";
+  // One host for both routes: /lyrics/{id} and /tracks/search. The search is
+  // how a Spotify id is found in the first place (see resolveSpotifyIdUncached).
+  const SPICY_LYRICS_BASE = "https://api.spicylyrics.org/v1";
+  const SPICY_LYRICS_API = `${SPICY_LYRICS_BASE}/lyrics`;
   // PUBLISHABLE key only (sl_pk_…). Never embed the secret sl_sk_ here — it is
   // server-side only and would be exposed in this client-side extension.
   const SPICY_LYRICS_PUBLISHABLE_KEY = "sl_pk_R2hLeH1gpObvT6Dugj8pf54sVFMWdtH1vu2w8rWHcMA";
@@ -47,26 +50,22 @@
   // before that field existed, whose Discord avatar URL still carries the id.
   const AURORA_PROFILE_ORIGIN = "https://aurora-lyrics.mitsyonsp.workers.dev";
   // YTM -> Spotify id resolver. Song.link/Odesli was shut down
-  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The free resolver is layered:
-  // resolver cache -> ListenBrainz direct mapping -> MusicBrainz recording
-  // search + Spotify URL relations. MusicBrainz is deliberately last in the ID
-  // layer because it is slower/rate-limited, but it covers mappings LB misses.
-  //
-  // ListenBrainz runs `labs.api.listenbrainz.org`, MetaBrainz's free dataset
-  // hoster. It publishes the recording->Spotify mapping directly — no key, no
-  // account, no backend, and CORS `*` so we can call it from here.
-  const LISTENBRAINZ_LABS_API = "https://labs.api.listenbrainz.org";
-  // Per-request cap. This sits on the critical path of a track change, so it
-  // must never be the reason a song hangs.
-  const LB_TIMEOUT_MS = 5000;
-  // Bounds the total work across the whole variant ladder. Without this, a
-  // pathological title (lots of parens variants) could issue dozens of calls
-  // and stall the panel while the user is already on the next song.
-  const LB_MAX_ATTEMPTS = 12;
-  // Set when ListenBrainz returns 429/5xx. While it is in the future we stop
-  // trying and report the failure as transient, instead of burning the rest of
-  // the song's budget on calls that cannot succeed.
-  let lbThrottledUntil = 0;
+  // (PUBLIC_API_ACCESS_DEPRECATED, HTTP 401). The Spicy Lyrics API is keyed by
+  // a Spotify track id, which YouTube Music does not expose, so /tracks/search
+  // finds one from the metadata we do have (title, artist, album, duration).
+  // It is the only mapping layer now: one request per track, no variant ladder.
+  const SPICY_SEARCH_TIMEOUT_MS = 5000;
+  const SPICY_SEARCH_LIMIT = 5;
+  // A `likely` result matched title and artist but not the duration. Take it
+  // only for small padding, never for another cut.
+  const SPICY_SEARCH_LIKELY_DELTA_MS = 10_000;
+  // The window `exact` itself uses. A `version` inside it is the same recording
+  // under another credit spelling ("dropout (feat. blackbear)" vs Spotify's
+  // "dropout (w/ blackbear)"), not a live/remix take.
+  const SPICY_SEARCH_EXACT_DELTA_MS = 3_500;
+  // Set when /tracks/search returns 429. Search and /lyrics share one
+  // application window, so backing off here protects the lyrics call too.
+  let spicySearchThrottledUntil = 0;
   // The extension script is injected into the page world, where chrome.runtime
   // is unavailable. Resolve the local font CSS from this script's own extension
   // URL instead of resolving it against music.youtube.com.
@@ -88,7 +87,7 @@
   // Bundled Braccato renderer (the Better Lyrics engine, MIT). Same resolution
   // rule as AMLL: the page world cannot use chrome.runtime.getURL().
   const BRACCATO_CORE_URL = SCRIPT_URL ? new URL("braccato-core.js", SCRIPT_URL).href : "";
-  // FALLBACK ONLY (AJ, 2026-10-23): the live values come from Aurora Bloom via
+  // FALLBACK ONLY: the live values come from Aurora Bloom via
   // window.__ymAuroraDynamic.getSettings() — see fullscreenKawarpOptions().
   // These are what the backdrop uses before that handshake lands, and they
   // match Bloom's shipped defaults. animationSpeed is overridden per playback
@@ -235,7 +234,7 @@
         // A line written with begin="00:00.000" end="00:00.000" is unsynced,
         // not a real timestamp at t=0. Treat all-zero timing as absent,
         // otherwise every such line pins to the top and renders karaoke at
-        // once for the length of the fallback window (AJ, 2026-11-01).
+        // once for the length of the fallback window.
         const hasRealTiming =
           (!!beginAttr && beginValue > 0) ||
           (!!endAttr && endValue > 0) ||
@@ -257,7 +256,7 @@
           end,
           // True only when this span carried real timing. Drives the
           // no-karaoke decision so partially-synced TTML lines that lack
-          // genuine timing are rendered as a static block (AJ, 2026-09-17).
+          // genuine timing are rendered as a static block.
           timed: hasRealTiming,
           node,
           hasSpaceBefore: false,
@@ -285,7 +284,7 @@
         word.isPartOfWord = !/\s/.test(between);
         // INFERRED, not declared. The join only trusts explicit markers: the
         // inference says "no whitespace between the tags", which is also true
-        // for adjacent whole words and was merging entire lines (AJ, 2026-10-20).
+        // for adjacent whole words and was merging entire lines.
         word.partOfWordExplicit = false;
       } else {
         word.isPartOfWord = false;
@@ -303,87 +302,13 @@
   // lrc.red TTML often splits one word into syllable spans ("shi" + "ning").
   // Merge each part-of-word run back into its head word so the renderer fills
   // and glows the WHOLE word instead of per syllable. The settings toggle can
-  // turn this off (AJ, 2026-10-20).
-  function joinPartOfWordRuns(words) {
-    const merged = [];
-    for (const word of words || []) {
-      const prev = merged[merged.length - 1];
-      // Only EXPLICIT part-of-word markers merge. The whitespace-inferred flag
-      // is true for any two adjacent spans, including separate words, and was
-      // producing "don'twan na talkto" (AJ, 2026-10-20). A real space at either
-      // edge always wins.
-      const canJoin =
-        !!prev &&
-        word.isPartOfWord &&
-        word.partOfWordExplicit &&
-        !/\s$/.test(prev.text) &&
-        !/^\s/.test(word.text);
-      if (canJoin) {
-        prev.text += word.text;
-        prev.end = word.end;
-        prev.timed = !!(prev.timed || word.timed);
-      } else {
-        merged.push(Object.assign({}, word, { isPartOfWord: false }));
-      }
-    }
-    return merged;
-  }
+  // turn this off.
 
   // Group spans by the line's OWN whitespace: a run of non-space characters is
   // one word, so "Un"+"der" merges and " con" starts a new word. This follows
   // the text instead of the tag adjacency (which is true for every adjacent
   // span and was merging whole lines). Falls back to explicit markers when the
   // line has no usable word boundary (CJK, or a single word).
-  function joinWordsByWhitespace(words) {
-    const list = words || [];
-    if (list.length < 2) return list;
-    let full = "";
-    const ranges = [];
-    for (const word of list) {
-      // The space between spans lives in hasSpaceBefore, NOT in the span text.
-      // Put it back so the tokenizer sees the real word boundary.
-      if (word.hasSpaceBefore && full.length) full += " ";
-      const start = full.length;
-      full += word.text;
-      ranges.push({ word, start, end: full.length });
-    }
-    const tokens = [];
-    const re = /\S+/g;
-    let match;
-    while ((match = re.exec(full))) {
-      tokens.push({ start: match.index, end: match.index + match[0].length });
-    }
-    if (tokens.length < 2) return joinPartOfWordRuns(list);
-    const out = [];
-    for (const token of tokens) {
-      const parts = [];
-      for (const range of ranges) {
-        if (range.end <= token.start || range.start >= token.end) continue;
-        const from = Math.max(0, token.start - range.start);
-        const to = Math.min(range.word.text.length, token.end - range.start);
-        const piece = range.word.text.slice(from, to);
-        if (piece) parts.push({ piece, word: range.word });
-      }
-      if (!parts.length) continue;
-      out.push(Object.assign({}, parts[0].word, {
-        text: parts.map((part) => part.piece).join(""),
-        start: parts[0].word.start,
-        end: parts[parts.length - 1].word.end,
-        timed: parts.some((part) => part.word.timed),
-        isPartOfWord: false,
-      }));
-    }
-    return out.length ? out : joinPartOfWordRuns(list);
-  }
-
-  function joinTTMLSyllables(parsed) {
-    return (parsed || []).map((line) => Object.assign({}, line, {
-      words: joinWordsByWhitespace(line.words),
-      background: (line.background || []).map((bg) => Object.assign({}, bg, {
-        words: joinWordsByWhitespace(bg.words),
-      })),
-    }));
-  }
 
   // Each singer is named once, in the head, and the timed lines point at them
   // with ttm:agent. Apple exports put the stage name in <ttm:name type="full">
@@ -498,7 +423,7 @@
       if (!end && lineDuration) end = start + lineDuration;
       // Real line timing needs at least one positive timestamp. An all-zero
       // <p begin="00:00.000" end="00:00.000"> is an unsynced line, and the
-      // gap-fill below must be allowed to place it (AJ, 2026-11-01).
+      // gap-fill below must be allowed to place it.
       const lineHasTiming = !!(
         (lineBeginAttr && start > 0) ||
         (lineEndAttr && end > 0) ||
@@ -590,7 +515,7 @@
           // from the body so the line SURVIVES — otherwise empty plainText hits the
           // `continue` below, the parse returns nothing, and loadTTML reports a
           // failure. That is why lrc.red fetched line-level TTML and then silently
-          // fell through to the next source (AJ, 2026-10-19).
+          // fell through to the next source.
           decodeEntities(String(body).replace(/<[^>]*>/g, " "))
             .replace(/\s+/g, " ")
             .trim();
@@ -608,12 +533,12 @@
         agent,
         oppositeAligned: !!agent && !!primaryAgent && agent !== primaryAgent,
         // True when the line carried at least one genuinely-timed span. Lines
-        // without it are rendered as a static block, not karaoke (AJ, 2026-09-17).
+        // without it are rendered as a static block, not karaoke.
         timed: hasSpanTiming,
         // True when the line had any real, positive timing (a <p> begin/end/dur
         // or a timed span). All-zero timing counts as absent: those lines get a
         // synthesized t=0 and would pile at the top of the panel, burying the
-        // synced lines - see the gap-fill pass below (AJ, 2026-11-01).
+        // synced lines - see the gap-fill pass below.
         positioned: !!(pTiming || hasSpanTiming),
       });
     }
@@ -625,7 +550,7 @@
     // line into the gap between the timed neighbours it actually sits between
     // (an untimed line that follows S1 in the file must land between S1 and S2,
     // not get swept to the top by a t=0 sort). The final time sort happens
-    // after the gap-fill (see just before the return) — AJ, 2026-09-17.
+    // after the gap-fill (see just before the return).
     for (let i = 0; i < parsed.length; i++) {
       const line = parsed[i];
       const nextStart = parsed[i + 1] ? parsed[i + 1].start : 0;
@@ -662,7 +587,7 @@
     // the fallback above, so they all pile at the top of the panel and bury the
     // synced lines underneath. Slide each one into the gap between the nearest
     // timed line before and after it so it sits roughly where it belongs in the
-    // song (AJ, 2026-09-17).
+    // song.
     {
       const timedIdx = [];
       parsed.forEach((line, idx) => {
@@ -682,7 +607,7 @@
           // Trailing unsynced lines have no following timed line, so the old
           // fixed 4s window packed a whole unsynced verse into four seconds
           // (and into overlapping 1s windows). Give each line its own 1.5s
-          // slot instead, and never overlap two unsynced lines (AJ, 2026-11-01).
+          // slot instead, and never overlap two unsynced lines.
           const trailing = nextTimedIdx >= parsed.length;
           const gap = trailing
             ? Math.max(4, untimed.length * 1.5)
@@ -710,7 +635,7 @@
     // timed neighbours), but the array is still in document order. Sort by start
     // here so untimed lines interleave with the synced lines at their real
     // position in the song instead of piling on top and burying the synced
-    // words (AJ, 2026-09-17).
+    // words.
     parsed.sort((a, b) => a.start - b.start);
 
     // Labels go on after the sort, so "the first line of a part" means the first
@@ -926,7 +851,7 @@
   // This REPLACED a Catmull-Rom / finite-difference Hermite implementation that
   // looked equivalent — same control points, same shape — but is a genuinely
   // different curve. A natural cubic spline OVERSHOOTS its own control points on
-  // a sharp kink; Catmull-Rom does not. Measured 2026-09-20:
+  // a sharp kink; Catmull-Rom does not. Measured:
   //
   //   range              old Catmull-Rom      new natural         what it changed
   //   Scale              1.0509 @ t=0.718     1.0536 @ t=0.615    shrink starts 10% sooner
@@ -935,7 +860,7 @@
   //   LetterYOffset     -0.01786 @ t=0.901   -0.04000 @ t=0.599    2.24x deeper rise
   //   Glow               1.1611 @ t=0.356     1.4330 @ t=0.340    1.23x brighter
   //
-  // The YOffset row is AJ's "it does go up a little but barely": -1/60 is only a
+  // The YOffset row rises only slightly: -1/60 is only a
   // CONTROL POINT, the real curve reaches -0.0372. Equally important, the peak
   // TIME moves 0.901 -> 0.600, so the old curve held the word flat for 90% of its
   // life and then twitched at the very end — which is why it read as "just zooms
@@ -1036,7 +961,7 @@
   // (LyricsAnimator.ts, v6.3.20). They are the entire "feel" of the karaoke
   // motion — the spring tuning only governs how fast a value chases its target,
   // while these curves define what the target IS. Keep them in lockstep with
-  // upstream or the animation visibly diverges (AJ, 2026-09-20).
+  // upstream or the animation visibly diverges.
   // Resting scale is IdleLyricsScale = 0.95 upstream.
   const ScaleSpline = getSpline([
     { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.0505 }, { Time: 1, Value: 1 },
@@ -1045,8 +970,8 @@
   // variant upstream, so they are `let` and get re-pointed when the mode changes
   // (see applySimpleLyricsSplines). Simple mode's whole point is GENTLER CURVES:
   // the letter scale peaks at 1.07 instead of 1.175, and the line Y offset becomes
-  // a straight drift to -0.033 instead of a dip-and-return. That is what AJ
-  // describes as "smoothly move up a bit" instead of a bounce (2026-10-01).
+  // a straight drift to -0.033 instead of a dip-and-return: the word rises
+  // smoothly instead of bouncing.
   // Our 0 resting value is kept in BOTH variants — it is the twice-confirmed fix
   // for the "word glitches slightly down as it starts" bug documented below, and
   // it is independent of which curve set is active.
@@ -1065,7 +990,7 @@
   // the new value. There is no spring resting at +1/100 beforehand, so the word
   // is sitting at its natural position (translateY 0) and then JUMPS DOWN by 1%
   // of the font size (0.48px at 48px) the instant it first animates. That is a
-  // step discontinuity, and it is what AJ reports as "as soon as a word starts,
+  // step discontinuity: as soon as a word starts,
   // it kinda glitches and goes very slightly down."
   //
   // With Time:0 = 0 the snap is a no-op, so the word simply begins at rest and
@@ -1137,7 +1062,7 @@
   // 0 -> 1 rise), NOT a small dim value — see the letter branch in
   // animateLetters() for why we deliberately do NOT apply it. Kept here as the
   // documented upstream value so an A/B can flip the behaviour in one line.
-  // (Was documented as ~1.07 before the 2026-09-20 spline fix; the corrected
+  // (Was documented as ~1.07 before the spline fix; the corrected
   // curve moves it to 1.21, which is 18.5px blur / 224% opacity, not less.)
   const SungLetterGlow = 0.2;
 
@@ -1145,8 +1070,7 @@
   // out in this mode. createWordSprings and createDotSprings both return no-ops
   // for them and keep only the positional spring. That is exactly what removes the
   // per-word ZOOM and the wavy GLOW while leaving the smooth rise intact
-  // (AJ, 2026-10-01: "the words still like zoom … they have that wavy glowy
-  // animation too when a word is longer than a second").
+  // (words longer than a second still zoom and glow).
   // The LETTER springs are deliberately NOT stubbed — upstream leaves those alone
   // and only gives them the gentler Simple splines.
   // The stubs RETURN THE RESTING VALUE rather than undefined: our animator feeds
@@ -1156,7 +1080,7 @@
   // CanSleep() on every channel, and a stub without it threw a TypeError on every
   // frame — which aborted animate() right after the scroll step. That was the
   // whole "it scrolls but nothing animates or highlights once the toggle is on"
-  // symptom (AJ, 2026-10-01). CanSleep returns TRUE: a stub is always settled.
+  // symptom. CanSleep returns TRUE: a stub is always settled.
   const simpleSpring = (resting) => ({
     Step: () => resting,
     SetGoal: () => {},
@@ -1169,13 +1093,11 @@
         // A LINE-TIMED word must rest at scale 1, not the 0.95 word resting
         // value: its scale goal is a constant 1 (animateWord pins it), and with
         // a stub holding 0.95 the whole line-span rendered 5% small and its
-        // wrapped rows pulled inward -- AJ's "some rows shifted to the right"
-        // on line-synced tracks (2026-10-02).
+        // wrapped rows pulled inward on line-synced tracks.
         Scale: simpleSpring(word && word.LineTimed ? 1 : ScaleSpline.at(0)),
         YOffset: new Spring(YOffsetSpline.at(0), 1.45, 0.4),
         // A LINE-TIMED word keeps a real Glow spring: its goal tracks the line's
-        // sweep progress, and that glow IS the line-fill highlight AJ expects
-        // ("they dont have glow when simple lyrics are on", 2026-10-02). The
+        // sweep progress, and that glow IS the line-fill highlight there too. The
         // no-glow rule stays for word-synced words, where the glow is the
         // per-syllable bounce this mode exists to remove.
         Glow: word && word.LineTimed
@@ -1191,8 +1113,7 @@
   }
 
   function createLetterSprings() {
-    // Simple lyrics: the letters KEEP their motion springs (the wavy drift AJ
-    // wants to stay) and already read the gentler SIMPLE splines via
+    // Simple lyrics: the letters KEEP their motion springs (the wavy drift stays) and already read the gentler SIMPLE splines via
     // applySimpleLyricsSplines, but the Glow channel is stubbed — the letter glow
     // is the per-syllable highlight this mode exists to remove. The springs stay
     // real otherwise, so the progress-driven goals keep the letters awake and
@@ -1216,8 +1137,7 @@
       return {
         // Scale stays REAL in Simple mode: the dots' entrance zoom (0.75 -> 1) is
         // how they arrive, and stubbing it made them hard-pop in with no
-        // animation at all (AJ, 2026-10-02: "they still snap when the 3 dots come
-        // in"). The bounce this mode removes is the WORD karaoke, not the dots'
+        // animation at all: they snap in abruptly. The bounce this mode removes is the WORD karaoke, not the dots'
         // arrival. YOffset/Glow stay stubbed -- the dots must not drift.
         Scale: new Spring(DotScaleSpline.at(0), 0.7, 0.6),
         YOffset: simpleSpring(DotYOffsetSpline.at(0)),
@@ -1327,7 +1247,7 @@
   // A search result the user PICKED is stored wrapped (`{ manual, data }`).
   // That flag is the difference between "this is one automatic answer among
   // several sources" and "the user told us this is the right file" — the
-  // resolver serves a manual entry before it asks any API again (AJ, 2026-10-22).
+  // resolver serves a manual entry before it asks any API again.
   // Automatic entries keep the bare data shape older installs already hold, so
   // nothing stored earlier needs a migration.
   const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";
@@ -1456,7 +1376,6 @@
   let panelHost = null;
   let fontLinkEl = null;
   let panelVisible = false;
-  let nativeTabAtOpen = null;
   let lyricsTabObserver = null;
   /* ---- external host (NPV dock) ----
      The Now Playing snippet can claim the live panel and dock it inside its own
@@ -1489,11 +1408,10 @@
   let fsSavedVideo = null; // { node, parent, next }
   let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
   // True while the OLD cover card is deliberately kept on screen across a
-  // cover -> music-video swap, so the cut has something to cut FROM (AJ,
-  // 2026-10-20). Cleared the moment the video is revealed, so the 2s reconcile
+  // cover -> music-video swap, so the cut has something to cut FROM. Cleared the moment the video is revealed, so the 2s reconcile
   // can resume tearing stray cards down.
   let fsHoldCoverCard = false;
-  // ---- track-change media dissolve (AJ, 2026-10-20) ----------------------
+  // ---- track-change media dissolve ----------------------
   // ONE opacity value on the media host drives every transition: fade out on the
   // track change, fade back in when the incoming media can paint. Deliberately
   // sequential (out -> in), not a crossfade, so it works identically for
@@ -1516,7 +1434,7 @@
   let fsVideoZeroSince = 0;
   // True while the CHROME (credit + transport + scrubber) is dissolved for a
   // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
-  // chrome completely still (AJ, 2026-10-21).
+  // chrome completely still.
   let fsChromeFading = false;
   // Backstop watchdog handle: force-restores the chrome if a mode-change fade is
   // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
@@ -1525,7 +1443,7 @@
   // Timestamp of the last fsChromeFadeOut, so fsChromeFadeIn can enforce a minimum
   // visible hold (see FS_CHROME_FADE_MIN_MS). Without it an MV -> MV-style instant
   // media-ready wipes the chrome-out class the same tick it was added and the
-  // dissolve is never seen (AJ, 2026-10-21).
+  // dissolve is never seen.
   let fsChromeFadeOutAt = 0;
   // Deferred restore handle for the minimum-hold above; cleared on fullscreen exit.
   let fsChromeFadeHoldTimer = 0;
@@ -1537,14 +1455,14 @@
   let fsLayoutApplied = false;
   // Media host geometry transition used only while leaving Video Background.
   let fsMediaLayoutAnimTimer = 0;
-  // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
+  // Cover-art side: which side the ARTWORK takes in the
   // cover-art side layout. "right" is the composition the overlay shipped
   // with (art left, words right); "left" mirrors it. Cover art only — the
   // hover button that sets it is not built for music videos.
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
   let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
-  // ---- Hits fullscreen layout (AJ, 2026-11-09) ---------------------------
+  // ---- Hits fullscreen layout ---------------------------
   // Built once per entry in 08. fsHits is the header model (root plus the
   // nodes that change); the header's measured height is what positions the
   // lyrics column beneath it.
@@ -1601,6 +1519,10 @@
   let fsKawarpVideoEl = null; // live <video> currently feeding the Kawarp instance
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
+  // Music videos push a full frame of motion through the warp; even a little
+  // displacement reads as smearing, so the shader runs with warp off for them.
+  let fsKawarpSoftWarp = false;
+  const FS_KAWARP_VIDEO_WARP = 0;
   let fsKawarpResizeObserver = null;
   let fsLyricsShade = null; // always-on readability shade + blur behind the lyrics
   let fsLyricsShadeTimer = 0;
@@ -1615,7 +1537,7 @@
   let fsLyricsShadeCapture = null;
   let fsLyricsShadeReader = null;
   let fsLyricsShadeSampleInFlight = false;
-  // Bright-video controls scrim (AJ, 2026-09-28 QoL). The fullscreen controls
+  // Bright-video controls scrim (QoL). The fullscreen controls
   // are deliberately surface-less, so over a bright / near-white music video
   // (especially once the lyrics — and their readability shade — are hidden)
   // they wash out completely. This flag drives a dark scrim behind the chrome
@@ -1629,7 +1551,7 @@
   // Fullscreen "Next up" list (bottom-left). Its OWN element, separate from the
   // next-up add-on's pill (which hides in fullscreen).
   let fsNextUp = null;
-  // Long-title marquee state (2026-09-28). fsTitleInner is the nowrap wrapper
+  // Long-title marquee state. fsTitleInner is the nowrap wrapper
   // that gets the translateX animation; the shift is passed in via the
   // --ym-sl-fs-title-shift CSS variable on the inner. fsTitleRO watches
   // fsTitleEl for resize and re-measures (text width or container width
@@ -1649,14 +1571,14 @@
   let fsBgLastDrawAt = 0;
   // The ambient layer is blurred beyond recognition, so 24fps and a very small
   // backing store are visually close to 60fps while costing a fraction of the
-  // draw + upload work. AJ asked for 60fps anyway (2026-09-27) - the canvas is
+  // draw + upload work. asked for 60fps anyway - the canvas is
   // only ever created for music videos, so this raises the MV backdrop refresh
   // rate without touching cover-art tracks (they use the static blurred image
   // or Kawarp, not this loop). The loop is driven by requestVideoFrameCallback,
   // so it draws once per real video frame and cannot outrun the source.
   const FS_BG_RENDER_FPS = 60;
   const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
-  // NOTE (AJ, 2026-10-20): FS_BAND_GAP was removed with the measured band anchor.
+  // NOTE: FS_BAND_GAP was removed with the measured band anchor.
   // Chrome positions are fixed lengths in 05-styles.jsfrag now, so nothing needs
   // the old 18px pane-to-title gap as a variable.
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
@@ -1707,6 +1629,9 @@
   // the pass writes (see 19-animation-modes), so it has to re-rank every line
   // immediately instead of waiting for the next line boundary.
   let lastDepthBlurLow = false;
+  // Last answer from the all-lines-sung check, so the class is only written
+  // when the answer changes instead of on every animation frame.
+  let lastAllLinesSung = null;
   // Last offset-adjusted playhead. A large backwards step between frames is a
   // seek or a repeat-one restart, handled by restartPlayheadScroll().
   let lastLyricPositionMs = -1;
@@ -1814,10 +1739,10 @@
   let currentLyricsFromSavedTTML = false;
   // True when the currently displayed lyrics are plain (unsynced) text loaded
   // from an LRCLIB result that had no synced lyrics. Static lines render fully
-  // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
+  // filled and never auto-scroll — see loadLRCLyrics / makeWord.
   let staticLyricsActive = false;
   // For static (unsynced) lyrics: when the user manually scrolls, auto-scroll is
-  // paused and a "Auto scroll" popup is shown to resume it (AJ, 2026-09-18).
+  // paused and a "Auto scroll" popup is shown to resume it.
   let autoScrollUserPaused = false;
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
@@ -1886,19 +1811,19 @@
   const lrclibCache = new Map();
   let adaptiveLayoutLastAt = 0;
   // Defaults track the Synced Lyrics settings popup so a fresh install (and the
-  // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
+  // host's "Reset to defaults" button) open at the preferred look: big lyrics,
   // pushed up, full-strength background vocals, adaptive spacing
   // on. The popup schema in src/content/content.js mirrors these values; if you
   // change one, change both.
   //
   // These three intensity sliders multiply together and then scale a curve that
   // is already upstream-shaped, so they are a pure amplitude boost. See
-  // blendSyllableAnimation. Current defaults (AJ, 2026-09-26) are 1.0 / 1.0 /
+  // blendSyllableAnimation. Current defaults are 1.0 / 1.0 /
   // 1.25, i.e. scale+glow are at EXACT upstream parity (1.0 x 1.0) while the
-  // vertical rise is x1.25 — deliberately, that is the one place he wants more
-  // travel than Spicy Lyrics. All three at 1.0 is full parity.
+  // vertical rise is x1.25 — deliberately more travel than Spicy Lyrics.
+  // All three at 1.0 is full parity.
   const DEFAULT_SETTINGS = {
-    // 1.30 (AJ, 2026-10-07). Was 1.45 (2026-09-28); that read too big, so it is
+    // 1.30. Was 1.45 ; that read too big, so it is
     // back to the original 130% look. The slider ceiling stays at 600%.
     size: 1.30,
     offset: -80,
@@ -1911,14 +1836,18 @@
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
     // On-device English translation of non-English lines (Chrome 138+ desktop).
-    // ON by default (AJ, 2026-10-26): a song in a language you don't read is the
+    // ON by default: a song in a language you don't read is the
     // one case where the second line is the point. The model download is what
     // the switch costs, and only a foreign line starts it.
     autoTranslate: true,
     legibilityBackdrop: false,
-    // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
-    // prefers the eased glide into the active line. (It was flipped OFF on
-    // 2026-09-28 to match an older screenshot; that is reverted.) The Apple
+    // Fade the line that has just ended out and recede it slightly, so the eye
+    // follows the line being sung. ON by default; matches Apple Music and
+    // Spicy Lyrics' fullscreen "Fade Away Previous Lines" option.
+    fadePreviousLines: true,
+    // Scroll behaviour. smoothScrolling ON by default: the eased glide into
+    // the active line. Earlier builds turned it off to match a screenshot,
+    // but that no longer applies. The Apple
     // engine springs its own scroll and ignores it; the Spicy renderer honours
     // it, whichever kind of track Spicy is drawing.
     smoothScrolling: true,
@@ -1927,7 +1856,7 @@
     // MV ambient backdrop brightness. Drives the baked ctx.filter in
     // drawBgFrame() — the blurred live-video canvas behind the MV in
     // fullscreen. The SLIDER lives in the Aurora Bloom add-on (ytmod-dynamic),
-    // NOT here (AJ, 2026-09-28): music videos don't use Kawarp, so this is a
+    // NOT here: music videos don't use Kawarp, so this is a
     // separate control from Bloom's "Brightness" (which drives Kawarp). This
     // value is the fallback used until Aurora Bloom's setting arrives — see
     // handleHostMessage(), which accepts ytmod-dynamic settings and picks out
@@ -1937,19 +1866,19 @@
     // duplicated blurred-video backdrop. The toggle lives in Aurora Bloom
     // (cross-add-on); this is the fallback. Off = only still uploads
     // (Official Audio / Lyric Video) use Kawarp — see FS_STATIC_VIDEO_RE.
-    // AJ, 2026-09-28.
+    //
     preferKawarpAlways: false,
     // Fullscreen without the Fullscreen API: the overlay is a fixed, inset-0
     // surface already, so requesting native fullscreen is the ONLY thing that
     // takes over the display. OFF by default, which keeps the previous behaviour
     // (and Chrome's Escape/F11 path) exactly as it was. ON keeps the tab strip
-    // and every other tab usable while the fullscreen view is up (AJ, 2026-10-22).
+    // and every other tab usable while the fullscreen view is up.
     fullscreenInPage: false,
     // Apple-Music-style rendering (schema row lives in content.js). OFF by default
     // so the existing karaoke look is unchanged until the user opts in. When ON,
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
-    // PINNED, not user-facing (AJ, 2026-10-23). "Apple style" stopped being a
+    // PINNED, not user-facing. "Apple style" stopped being a
     // master switch when the renderer became per-kind; what is left of it is the
     // LOOK question (which splines, which body class), and that is derived from
     // who owns the track. Pinned like `offset` below, so a value stored back when
@@ -1961,12 +1890,13 @@
     // amllWordTracks/spicyLineTracks booleans are still read once to migrate an
     // existing install, then ignored.
     wordRenderer: "spicy",
-    lineRenderer: "amll",
+    // Better Lyrics is the main line-by-line renderer: line-synced tracks are
+    // the engine's native case. Spicy and Apple Music remain selectable.
+    lineRenderer: "braccato",
     // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
     // exposes it so a quieter karaoke look is one switch away.
-    // OFF (AJ, 2026-11-16): the per-letter rise/fall is an opt-in look now.
-    braccatoLetterWave: false,
-    // "Glow on sung words": ON (AJ, 2026-11-16). Shipped off first on the theory
+    braccatoLetterWave: true,
+    // "Glow on sung words": ON. Shipped off first on the theory
     // that the halos were the cost; A/B/A then measured glow-on FASTER than
     // glow-off, so the cost is inside the noise and this is purely the look.
     braccatoGlow: true,
@@ -1977,31 +1907,31 @@
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
     // per-letter syllable karaoke, so a word lights up whole with no syllable
-    // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
+    // stepping (the Spicy Lyrics toggle;). OFF by default so the
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
     // Whether the whole-word join above also applies to BACKGROUND-vocal lines.
     // ON by default, which is the historical behaviour (bg lines joined too);
     // turning it off keeps per-syllable karaoke on the bg lines while the lead
-    // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
+    // lines stay joined. Only meaningful while joinSyllables is
     // ON — joinApplies() checks the master switch first.
     joinBgSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
     // `url(https://...) format("woff2")`. A scale multiplier on top lets a font
-    // nudge bigger/smaller without touching the size slider (AJ, 2026-10-20).
+    // nudge bigger/smaller without touching the size slider.
     customFont: "",
-    // AJ wants a newly-uploaded face to start at 200% (2026-10-20). size-adjust
+    // A newly-uploaded face starts at 200%. size-adjust
     // is a percentage of the font's own advance width, so 2.0 doubles it.
     customFontScale: 2.0,
     // Which lyrics source is tried first. The resolver walks this list top to
     // bottom and stops at the first source that has the track. (The user-facing
-    // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
+    // reordering UI was removed, but the value is still used
     // as the resolver fallback order.)
     sourceOrder: ["community", "spicy", "unison", "lrclib"],
-    // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
+    // Performance mode. ONE global governor, stored by the
     // content script (not by this add-on) and mirrored into every add-on's
     // settings payload, so the page backdrop, the Now Playing rail and this
     // fullscreen view all agree. "ultra" is the untouched product; "normal"
@@ -2051,7 +1981,16 @@
 
   function kawarpFpsForPerformance() {
     const mode = currentSettings.performanceMode;
-    return mode === "low" ? 24 : mode === "normal" ? 30 : 0; // 0 = uncapped
+    // 60 in Ultra, NOT uncapped. The identical function in dynamic.js has capped
+    // the page-wide backdrop at 60 for a while, with the note that past ~60 the
+    // slow drift looks identical while the GPU work starves the compositor. The
+    // fullscreen instance never got that treatment, so on a 170Hz display it
+    // painted eight full-resolution blur passes 170 times a second behind the
+    // lyrics - and that is the frame-time floor that makes fullscreen scroll and
+    // karaoke feel worse than the docked panel, which runs the 60-capped page
+    // backdrop instead. Uncapped work also cannot be tested by shrinking the
+    // canvas: Kawarp keeps its own full-resolution render targets.
+    return mode === "low" ? 24 : mode === "normal" ? 30 : 60;
   }
 
   function videoSamplingAllowed() {
@@ -2081,7 +2020,7 @@
     applyStaticVideoBackdrop();
   }
 
-  // ---- Custom lyrics font (AJ, 2026-10-20) -----------------------------------
+  // ---- Custom lyrics font -----------------------------------
   // `customFont` is the src descriptor of a user-supplied @font-face (already
   // sanitised in applySettings) or "" for the bundled SpicyLyrics face.
   // `customFontScale` is baked into the @font-face as `size-adjust` so a swapped
@@ -2092,7 +2031,7 @@
   let customFontStyleEl = null;
   function applyCustomFont() {
     const css = currentSettings.customFont || "";
-    // The size slider is PREVIEW-ONLY (AJ, 2026-10-20): the lyrics already have
+    // The size slider is PREVIEW-ONLY: the lyrics already have
     // their own Lyrics size setting, and letting the custom face carry a second
     // size-adjust made the two fight. The face is always registered at 100%.
     const key = css;
@@ -2107,7 +2046,7 @@
       // `src` MUST be a url()/local() function — a bare data:/https: token is an
       // invalid descriptor, so the browser silently drops the whole @font-face
       // and the lyrics fall back to the system font (the "apply does nothing,
-      // it just goes to the Windows font" bug, AJ 2026-10-20). Escape quotes so
+      // it just goes to the Windows font" bug). Escape quotes so
       // a crafted URL can never break out of the descriptor. `format()` hints
       // are optional; the browser sniffs from the URL. Registered at 100% on
       // purpose: the preview slider must NOT resize the real lyrics, which
@@ -2154,7 +2093,7 @@
     // Source order is a user-editable list, so it is normalised on every apply:
     // unknown ids dropped, duplicates dropped, missing sources appended.
     currentSettings.sourceOrder = normalizeSourceOrder(currentSettings.sourceOrder);
-    // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
+    // "Vertical position" is no longer a user setting: its slider
     // is gone and the panel simply sits at the default -80px. PINNED rather than
     // merely defaulted, because a value stored back when the slider existed would
     // otherwise keep shifting the lyrics with no UI left to move it back.
@@ -2188,6 +2127,10 @@
     currentSettings.legibilityBackdrop = booleanValue(
       currentSettings.legibilityBackdrop,
       DEFAULT_SETTINGS.legibilityBackdrop
+    );
+    currentSettings.fadePreviousLines = booleanValue(
+      currentSettings.fadePreviousLines,
+      DEFAULT_SETTINGS.fadePreviousLines
     );
     currentSettings.smoothScrolling = booleanValue(
       currentSettings.smoothScrolling,
@@ -2296,13 +2239,16 @@
     // applySimpleLyricsSplines REPLACES them — so a consumer (the PiP) would keep
     // the NORMAL-mode curves, which is why its Apple Music style motion kept
     // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
-    // re-publish would be a silent no-op (AJ, 2026-10-07).
+    // re-publish would be a silent no-op.
     try { publishRendererKit(true); } catch (e) {}
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // A body class survives fullscreen's reparenting of the panel, so the fade
+    // follows the lyrics into fullscreen for free, like the backdrop class.
+    document.body.classList.toggle("ym-sl-fade-previous-lines", !!currentSettings.fadePreviousLines);
     applyPerformanceMode();
     // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
     // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
-    // being installed (AJ, 2026-10-22).
+    // being installed.
     // Simple lyrics is a RENDER MODE, not a per-element tweak, so it is a BODY
     // class — the same shape as the legibility backdrop above. A body class also
     // covers the fullscreen overlay, which reparents the panel but leaves body
@@ -2329,7 +2275,7 @@
     // toggle IMMEDIATELY instead of waiting for the next lyrics payload. The
     // payload only re-emits on a track/lyrics change, which is exactly why
     // turning Smooth Scrolling off — or Simple Lyrics on — did nothing in the PiP
-    // until the next song (AJ, 2026-10-07).
+    // until the next song.
     try {
       if (window.YTMod && window.YTMod.bus) {
         window.YTMod.bus.emit("lyrics:settings", {
@@ -2394,7 +2340,7 @@
   // less. All three at 1.0 is exact upstream parity.
   // This matters because the defaults were originally tuned AGAINST the old
   // Catmull-Rom curve, whose vertical dip was 2.23x too shallow; the spline fix
-  // (2026-09-20) corrected the curve, so the slider boost now stacks on a
+  // corrected the curve, so the slider boost now stacks on a
   // correct curve instead of compensating for a broken one.
   // resolver-worker/test-animation-parity.mjs guard D prints the live numbers.
   function blendAnimation(resting, target) {
@@ -2436,12 +2382,11 @@
       color: #fff;
       /* Pinned to YouTube's own root size, captured by content.js before it
          applies the YouTube page's Interface text size: the panel keeps the
-         inherited size it has always had and never scales with the site
-         (AJ, 2026-10-22). */
+         inherited size it has always had and never scales with the site. */
       font-size: var(--ym-yt-root-fs, 10px);
       /* The panel's own chrome (credits, chips, buttons, the options overlay)
          keeps the bundled face. The custom font is scoped to .LyricsContent
-         below, so it only reaches the lyric lines (AJ, 2026-10-20). */
+         below, so it only reaches the lyric lines. */
       font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
@@ -2752,7 +2697,7 @@
     }
     */
     /* Options: a pill beside content.js's song-layout switcher, in the empty
-       band above both panels (AJ, 2026-10-26). It replaces the hover-revealed
+       band above both panels. It replaces the hover-revealed
        row that used to live on the panel's own top edge, where nobody who had
        not already found it would look. Every metric is the layout button's own
        (styles.css: .ym-song-layout-btn) so the pair reads as one control group
@@ -2801,7 +2746,7 @@
       overflow: hidden;
       border-radius: 20px;
       border: 1px solid rgba(255,255,255,.12);
-      /* FROSTED GLASS on AJ's call (2026-10-19): a blurred translucent shell so
+      /* FROSTED GLASS: a blurred translucent shell so
          the panel floats over the lyrics instead of being a solid dark slab.
          The inset top highlight still keeps a crisp top edge. */
       background: rgba(16,18,24,.55);
@@ -2828,7 +2773,7 @@
       pointer-events: none;
       transform: translateY(-8px) scale(.97);
     }
-    /* ⭐ A closed overlay was still INTERACTIVE (AJ, 2026-10-20). pointer-events:none
+    /* ⭐ A closed overlay was still INTERACTIVE. pointer-events:none
        on a parent does NOT block a child that sets pointer-events:auto — and
        .ym-sl-options-panel.active does. So the active tab's slider and toggles
        stayed clickable while invisible, swallowing hover over the lyrics underneath
@@ -3108,7 +3053,7 @@
       color: rgba(244,241,238,.6);
       padding: 4px 2px 0;
     }
-    /* Grouped settings-list cards (AJ, 2026-10-19). Each concern lives in a
+    /* Grouped settings-list cards. Each concern lives in a
        frosted inset panel with a title + comfortable rows; replaces the old flat
        <hr>-separated stack. */
     .ym-sl-options-group {
@@ -3138,7 +3083,7 @@
     .ym-sl-options-row .ym-sl-import {
       flex: 0 0 auto;
     }
-    /* Tabbed side-rail layout (AJ, 2026-10-19): vertical tab rail on the LEFT,
+    /* Tabbed side-rail layout: vertical tab rail on the LEFT,
        the active section's controls on the RIGHT, one panel visible at a time. */
     .ym-sl-options-body.ym-sl-options-tabbed {
       flex-direction: row;
@@ -3212,7 +3157,7 @@
       color: #f4f1ee;
       padding: 14px 0 2px;
     }
-    /* Custom dropdown (AJ, 2026-10-19): styled button + popup menu instead of a
+    /* Custom dropdown: styled button + popup menu instead of a
        native <select>, matching the frosted panel. */
     .ym-sl-select { position: relative; }
     .ym-sl-select-button {
@@ -3320,7 +3265,7 @@
     }
     /* This stylesheet has NO global .hidden rule, so the class the JS toggles on
        this button was cosmetic and "Delete saved" stayed on screen even with a
-       track saved. Made it real here, scoped to the button (AJ, 2026-10-22). */
+       track saved. Made it real here, scoped to the button. */
     .ym-sl-delete-permanent-button.hidden { display: none; }
     /* With nothing saved to delete, Upload must not sit in half of a two-column
        row next to an empty cell. */
@@ -3362,7 +3307,7 @@
       align-self: flex-start;
     }
     .ym-sl-cache-clear.hidden { display: none; }
-    /* Confirmation step for "Clear cache" (AJ, 2026-10-19): a red delete action
+    /* Confirmation step for "Clear cache": a red delete action
        so the irreversible wipe is never a single accidental click. */
     .ym-sl-cache-confirm {
       display: flex;
@@ -3433,13 +3378,13 @@
     /* Fullscreen overlay is always block; media + lyrics are absolute so
        layout changes (side / background / lyrics-only) animate via CSS
        transitions instead of snapping. */
-    /* ⭐ STATIC CHROME MODEL (AJ, 2026-10-20).
+    /* ⭐ STATIC CHROME MODEL.
        The title / transport chip / scrubber used to be positioned from
        --ym-sl-fs-band-top and --ym-sl-fs-title-h, both measured in JS off the
        media pane's live rect and both transitioned over .35s. That made the
        whole stack chase the media: every aspect-ratio change, every art swap and
        every video-metadata arrival moved the anchor, so the controls drifted and
-       then settled ("moves a lot, then goes back to normal", AJ 2026-10-20).
+       then settled ("moves a lot, then goes back to normal").
        The band vars, their @property registrations and the transition on them
        are GONE. Every chrome position is now a fixed CSS length below, identical
        on every track. Nothing measures the media to place the controls any more.
@@ -3455,7 +3400,7 @@
       color: #fff;
       overflow: hidden;
       /* Same pin as .ym-sl-panel: the overlay is appended to <body>, which
-         inherits YouTube's scaled root size (AJ, 2026-10-22). */
+         inherits YouTube's scaled root size. */
       font-size: var(--ym-yt-root-fs, 10px);
     }
     /* Media and lyrics are ALWAYS absolute and animate their geometry. The
@@ -3478,7 +3423,7 @@
         padding .45s cubic-bezier(.22, .61, .36, 1);
       will-change: left, width, transform, opacity, padding;
     }
-    /* AJ 2026-10-09: on entry the layout is applied while this class is present,
+    /*: on entry the layout is applied while this class is present,
        so the panes jump straight to their final geometry instead of sliding in
        from the CSS default (the "side layout" cover-art flash). buildFullscreen
        Controls drops the class via a double-rAF once the overlay has painted, so
@@ -3490,7 +3435,7 @@
     .ym-sl-fs-media { z-index: 2; }
     .ym-sl-fs-lyrics { z-index: 3; }
 
-    /* ===== no-lyrics fullscreen composition (AJ, 2026-11-16) ===============
+    /* ===== no-lyrics fullscreen composition ===============
        Nothing to read means nothing for the cover to sit beside: the lyrics
        column fades out, the composition centres, and the Search CTA appears.
        Hits centres its whole block (header + dock) as one unit, because the
@@ -3502,7 +3447,7 @@
     }
     /* Hide the lyrics CONTENT, never the host: the Search sheet is a child of
        #ym-sl-panel, so fading the host made the sheet open inside an opacity:0,
-       pointer-events:none subtree - invisible and unclickable (AJ, 2026-11-16). */
+       pointer-events:none subtree - invisible and unclickable. */
     .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContainer,
     .ym-sl-fs-overlay.ym-sl-fs-no-lyrics .ym-sl-fs-lyrics .LyricsContent {
       opacity: 0 !important;
@@ -3588,7 +3533,7 @@
        z-index 30 was trapped in that stacking context and it painted UNDER the
        transport layer (z-index 21). Lift the host for as long as the sheet is
        open - the lyrics content is hidden in this state, so nothing else moves
-       with it (AJ, 2026-11-16). */
+       with it. */
     .ym-sl-fs-overlay.ym-sl-fs-search-open .ym-sl-fs-lyrics {
       z-index: 25;
     }
@@ -3635,14 +3580,14 @@
          is shaped like — that is the "push it right if it would overlap"
          requirement, guaranteed by construction rather than measured.
          If the media column moves, this number moves with it (51% + 50%).
-         The visible air between the two is the left padding below (AJ asked
-         for the words to sit near the video with a little space, 2026-10-21). */
+         The visible air between the two is the left padding below (asked
+         for the words to sit near the video with a little space). */
       left: 52.5%;
       /* Runs to the right edge, exactly as the old 57.4% / 42.6% pair did, so
          the wider pane only buys space for the words instead of leaving a
          dead strip at the screen edge. */
       width: 47.5%;
-      /* No vertical inset (AJ, 2026-10-23). The pane used to start 84px inside
+      /* No vertical inset. The pane used to start 84px inside
          the screen, so the scrollport ended on a padded edge and a line leaving
          it read as chopped off rather than as leaving the monitor. With the
          inset gone the words run edge to edge and the mask does the fading. */
@@ -3717,13 +3662,17 @@
          gradient: the layer's opacity scales the backdrop-filter output and the
          background together, and the mask clips both to the same left-edge
          fade. No separate element, no second timing to keep in sync. Radius is
-         deliberately LIGHT: AJ tuned it down three times (30-56px, then 24-46px,
+         deliberately LIGHT: tuned it down three times (30-56px, then 24-46px,
          then 16-30px all still read as too much frost over the picture), so this
          is a soft-focus veil rather than a deep blur. Saturation stays lifted so
          colour survives it - a plain blur greys the video out. */
       -webkit-backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
       backdrop-filter: blur(clamp(8px, 0.75vw, 18px)) saturate(1.3);
-      transition: opacity .22s ease;
+      /* left rides with the lyric column on a layout switch: the two are the
+         same visual edge, so a snapped shade under a sliding column reads as a
+         torn mask. It is a plain gradient layer (no backdrop-filter over video,
+         see the has-video rule), so animating it costs nothing. */
+      transition: opacity .22s ease, left .52s cubic-bezier(.22, .61, .36, 1);
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics-shade {
       display: block;
@@ -3749,10 +3698,33 @@
        underneath is a live 24fps picture - so this single rule is the most
        expensive effect left in fullscreen (see DEVELOPERS/RENDERING-CPU-VS-GPU.txt,
        "backdrop-filter (GPU, but expensive)"). The black gradient is what carries
-       readability; the frost is the part that costs (AJ, 2026-10-26). */
+       readability; the frost is the part that costs. */
     body.ym-sl-perf-low .ym-sl-fs-lyrics-shade {
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
+    }
+    /* Low mode had the right idea for every mode. The shade is a full-column
+       backdrop-filter, so it has to re-blur its backdrop whenever that backdrop
+       changes - and in fullscreen the backdrop is the Kawarp canvas, which is
+       an ANIMATED surface (fed by the live video on a music video). Measured
+       on the reference machine, dropping it moved the median frame from 23.3ms
+       to 17.7ms. The black gradient is what carries readability; the frost is
+       the part that costs, so it only survives over a still backdrop. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-kawarp .ym-sl-fs-lyrics-shade,
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-lyrics-shade {
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    /* The fullscreen overlay is opaque and covers the page chrome completely,
+       but Dynamic's player-bar frost and the nav-bar frost keep reading and
+       blurring their backdrop underneath it - live video included. Nothing
+       behind the overlay is visible, so that work is switched off for as long
+       as the overlay exists. */
+    body:has(> .ym-sl-fs-overlay) #player-bar-background,
+    body:has(> .ym-sl-fs-overlay) .ym-dynamic-bar-blur,
+    body:has(> .ym-sl-fs-overlay) #nav-bar-background {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
     }
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-lyrics > * {
       position: relative;
@@ -3774,7 +3746,7 @@
     }
     /* Intro lyrics stay completely hidden until the first real line begins,
        including on hover. Later instrumental gaps retain the 60% hover preview. */
-    /* TTML credits stay visible while the lyrics auto-hide (AJ, 2026-10-01).
+    /* TTML credits stay visible while the lyrics auto-hide.
        The panel is no longer faded out WHOLESALE, because the credits footer lives
        INSIDE it, after the last line — fading the panel took the attribution with
        it. Instead only the LINE elements are hidden, so the credits survive.
@@ -3812,7 +3784,7 @@
        a zero-height anchor pinned to the bottom: an absolutely-positioned
        child resolves top against its containing block, so with the old
        inset: auto 0 0 0 anchor a top of 775px put the chip at y=1855, off
-       the bottom of the screen (AJ: "i dont see the controls at all", 2026-09-28).
+       the bottom of the screen — out of view.
        Full size also keeps every existing bottom value resolving to the same
        pixel, since the container's bottom edge was already the overlay's.
        pointer-events stays none so the layer never blocks the lyrics; the chip
@@ -3832,7 +3804,7 @@
       opacity: 1;
       pointer-events: none;
     }
-    /* ===== chrome dissolve on a MODE CHANGE (AJ, 2026-10-21) ================
+    /* ===== chrome dissolve on a MODE CHANGE ================
        Between cover and MV the whole control column restructures — the credit
        moves from under the artwork to under the video, the transport changes from
        a spread row to a centred one, the volume changes rows. None of that can be
@@ -3849,7 +3821,7 @@
     }
     /* Floating play chip (prev / play / next + volume), centered just above the
        scrubber.
-       NO SURFACE AT ALL (AJ 2026-09-27, then 2026-09-28 x3): the border was
+       NO SURFACE AT ALL (then x3): the border was
        removed, then the inset shadows, then the fill was cut from 7% to 2.5%
        (measured: the 7% fill read as a hard 49 -> 66 step, and
        0.93*49 + 0.07*255 = 63.6 pinned it exactly on the fill). At 2.5% the
@@ -3891,7 +3863,7 @@
     }
     /* The three transport buttons as one group. Spaced 14px to match the chip's
        own gap, so wrapping them changed nothing visually — it exists so the side
-       layout can centre THIS group on the title (AJ, 2026-10-01). */
+       layout can centre THIS group on the title. */
     .ym-sl-fs-transport {
       display: flex;
       align-items: center;
@@ -3899,14 +3871,14 @@
     }
     /* Transient "no lyrics" notice — fullscreen Video Background only. The lyrics
        panel there stays hidden until the first line actually plays, so a track
-       with no lyrics used to fail completely silently (AJ, 2026-10-01). Sits dead
+       with no lyrics used to fail completely silently. Sits dead
        centre, non-interactive, and self-dismissing, so it can never block the
        video it is reporting on. */
     .ym-sl-fs-notice {
       position: absolute;
       /* Right-hand side, aligned with the lyrics column's own right padding so it
          reads as part of that surface rather than a floating banner, and keeps
-         the middle of the video clear (AJ, 2026-10-01). */
+         the middle of the video clear. */
       top: 50%;
       right: clamp(24px, 4vw, 72px);
       z-index: 5;
@@ -3979,7 +3951,7 @@
       stroke: currentColor;
       /* 2.6 on the 24-grid draws at ~2.4px once the glyph is 22px, which is the
          weight of the transport's redrawn shuffle / repeat strokes. At 1.7 the
-         speaker vanished beside the 3px bar (AJ, 2026-10-23). */
+         speaker vanished beside the 3px bar. */
       stroke-width: 2.6;
       stroke-linecap: round;
       stroke-linejoin: round;
@@ -4011,7 +3983,7 @@
       color: rgba(255,255,255,.82);
       /* SpicyLyrics, same family the credit and the lyrics themselves use, so the
          progress readouts are part of the composition rather than browser chrome
-         (AJ, 2026-10-03). Written as longhands instead of the font shorthand:
+. Written as longhands instead of the font shorthand:
          the shorthand RESETS font-variant-numeric, which would drop the
          tabular-nums below and make the clock twitch as the digits change.
          600 maps to the bundled LyricsSemibold face. */
@@ -4024,7 +3996,7 @@
       font-variant-numeric: tabular-nums;
       letter-spacing: .02em;
       user-select: none;
-      /* NO shadow (AJ, 2026-10-03): the times sit in the dark band under the
+      /* NO shadow: the times sit in the dark band under the
          media, so they never need one - and it read as a smudge behind the
          numerals. Spelled out as none rather than deleting the line, because
          text-shadow INHERITS and an ancestor could reintroduce it. */
@@ -4087,8 +4059,8 @@
     .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-track { height: 9px; }
     .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-moz-range-progress { height: 9px; }
     .ym-sl-fs-scrubber:hover .ym-sl-fs-player-seek::-webkit-slider-thumb { margin-top: -1.5px; }
-    /* Slider drag state (AJ's "for tmr" note, 2026-10-03): while a slider is
-       being dragged the cursor hides — an accident AJ found and liked. Scoped
+    /* Slider drag state (the "for tmr" note): while a slider is
+       being dragged the cursor hides — an accident found and liked. Scoped
        to the overlay so the rest of the page keeps its normal cursor. */
     .ym-sl-fs-overlay.ym-sl-fs-dragging,
     .ym-sl-fs-overlay.ym-sl-fs-dragging * {
@@ -4205,7 +4177,7 @@
        The knob shows on hover and for KEYBOARD focus only (:focus-visible) — the
        plain :focus trigger is gone: pointerdown calls .focus(), which used to fade
        the knob in right as the drag hid the cursor, reading as a random circle
-       animation (AJ, 2026-10-03). While a slider is being dragged the knob is
+       animation. While a slider is being dragged the knob is
        suppressed outright: the moving fill edge is the indicator, and with the
        cursor hidden a fading-in circle reads as a glitch. */
     .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume::before,
@@ -4221,7 +4193,7 @@
       height: 14px; border-radius: 999px;
       box-shadow: 0 0 0 2px rgba(255,255,255,.55);
     }
-    /* NO SURFACE (AJ 2026-10-03): the transport buttons float on the backdrop
+    /* NO SURFACE: the transport buttons float on the backdrop
        without a background, border or shadow. The translucent fill was the
        last layer of chrome - removed so they read as icons, not as buttons
        with skins. The hit target keeps its circular min-width/min-height.
@@ -4238,8 +4210,7 @@
       padding: 0;
       border: 0;
       /* No focus ring. Chrome draws a default focus outline on click, which
-         appeared as a "circle border" behind the like/dislike buttons (AJ,
-         2026-10-08). These are fullscreen transport buttons with a dedicated
+         appeared as a "circle border" behind the like/dislike buttons. These are fullscreen transport buttons with a dedicated
          active pill, so the focus ring is redundant. */
       outline: none;
       -webkit-tap-highlight-color: transparent;
@@ -4281,7 +4252,7 @@
       transform: scale(.92);
     }
     .ym-sl-fs-player-controls button:active { transform: scale(.92); }
-    /* Prev / Next flank the play button and AJ wants them BIGGER than the
+    /* Prev / Next flank the play button and wants them BIGGER than the
        40px shuffle/repeat pair, but still smaller than play. Play/pause is the
        primary control so it stays the largest. */
     .ym-sl-fs-player-controls .ym-sl-fs-player-prev,
@@ -4531,7 +4502,7 @@
     }
     /* Like / Dislike are OUR OWN buttons. Inactive = outline thumb; active =
        the GLYPH itself fills (CSS fills the path) — there is NO background pill
-       / circle highlight (AJ, 2026-10-08 evening: "take away the little circle
+       / circle highlight (evening: "take away the little circle
        highlight"). Container-agnostic selectors so the rule works regardless of
        which layer the button is parented to. */
     .ym-sl-fs-player-like.active,
@@ -4597,7 +4568,7 @@
       display: block;
       pointer-events: none;
     }
-    /* Cover-art-only songs: NO rating buttons at all (AJ, 2026-10-18). The
+    /* Cover-art-only songs: NO rating buttons at all. The
        Apple Music stack already carries title, progress, transport and volume;
        two more edge controls read as clutter, and there is no video edge to
        anchor them to. Music videos keep them. */
@@ -4606,7 +4577,7 @@
       display: none;
     }
     /* Video Background layout: the video IS the backdrop, so the edge rating
-       buttons would float over it with nothing to anchor to (AJ, 2026-10-19). */
+       buttons would float over it with nothing to anchor to. */
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-like--edge,
     .ym-sl-fs-overlay.ym-sl-fs-mode-background .ym-sl-fs-player-dislike--edge {
       display: none;
@@ -4681,8 +4652,7 @@
       transform: translateY(0);
     }
     /* Idle state: after a couple of seconds without input, hide the pointer in
-       EVERY layout, and hide the hover controls in EVERY layout too (AJ,
-       2026-10-02 — he originally wanted Side / Lyrics Only to keep the chrome,
+       EVERY layout, and hide the hover controls in EVERY layout too: Side / Lyrics Only used to keep the chrome,
        but the EXIT + LAYOUT buttons need to clear on idle there as well; they
        were the only chrome that stayed). The play chip and scrubber still stay
        put in those layouts (see the end-of-sheet block). Placed AFTER the
@@ -4696,7 +4666,7 @@
       pointer-events: none;
       transform: translateY(-8px);
     }
-    /* Bright-video controls scrim (AJ, 2026-09-28 QoL). The chrome is
+    /* Bright-video controls scrim (QoL). The chrome is
        surface-less by design, so over a bright / near-white music video it
        washes out completely — worst once the lyrics (and their readability
        shade) are hidden. In Video Background only, a high sampled video
@@ -4713,7 +4683,7 @@
        at the cursor that draws itself over the idle delay (a stroke-dashoffset
        tween on an SVG circle, so it reads as a ring filling — NOT a solid
        disc), then fades out and shrinks as the chrome auto-hides. An
-       affordance that the cursor is about to vanish (AJ, 2026-09-28). Driven
+       affordance that the cursor is about to vanish. Driven
        by resetFsIdleRing() / leaveFsIdleRing(); position via CSS vars. */
     .ym-sl-fs-idle-ring {
       position: absolute;
@@ -4770,7 +4740,7 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      /* Borderless (AJ 2026-09-27). */
+      /* Borderless. */
       border: 0;
       border-radius: 7px;
       background: rgba(255,255,255,.08);
@@ -4937,13 +4907,13 @@
       background: none;
       box-shadow: none;
     }
-    /* Idle auto-hide is scoped to Video Background only (AJ, 2026-09-28): the
+    /* Idle auto-hide is scoped to Video Background only: the
        transport chrome stays put in Side and Lyrics Only. */
     .ym-sl-fs-overlay.ym-sl-fs-mode-background:not(.ym-sl-fs-has-video).ym-sl-fs-idle .ym-sl-fs-scrubber {
       opacity: 0;
       pointer-events: none;
     }
-    /* The MUSIC-VIDEO counterpart of the rule above (AJ, 2026-10-01). Without it
+    /* The MUSIC-VIDEO counterpart of the rule above. Without it
        the playbar stayed up on idle whenever the track HAS a video: the rule above
        is scoped to :not(.ym-sl-fs-has-video), and with the pointer still sitting
        inside the window the overlay's own :hover rule kept re-asserting opacity 1.
@@ -4979,17 +4949,17 @@
       font-family: "SpicyLyrics", "Noto Sans Georgian", "Vazirmatn",
         "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system,
         BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
-      /* NO shadow (AJ, 2026-10-03). The credit sits in the dark band UNDER the
+      /* NO shadow. The credit sits in the dark band UNDER the
          media - over the overlay's own backdrop, never over the video itself -
          so it does not need one, and even the tight 3px version read as a smudge
          behind the text. It had already been cut down once, from an 18px blurred
-         layer that read as a dark BACKDROP on bright art (AJ's friend, 2026-09-28). */
+         layer that read as a dark BACKDROP on bright art. */
       text-shadow: none;
       opacity: 0;
       transform: translateX(-50%) translateY(6px);
       animation: ym-sl-fs-title-in .34s cubic-bezier(.22,.61,.36,1) .08s forwards;
       /* Crossfade on a track change - see .ym-sl-fs-title-leaving below.
-         NO top/bottom here (AJ, 2026-10-20): the position is static now, and
+         NO top/bottom here: the position is static now, and
          transitioning it was what made the credit glide after the media. */
       transition: opacity .24s ease, transform .24s ease,
         font-size .35s cubic-bezier(.22,.61,.36,1),
@@ -4997,6 +4967,49 @@
     }
     .ym-sl-fs-title-artist { font-weight: 800; }
     .ym-sl-fs-title-track { font-weight: 400; opacity: .82; }
+    /* The title and its release year are ONE flex item. In the fullscreen
+       compositions .ym-sl-fs-title-inner is a column-reverse stack, so any bare
+       sibling takes a row of its own - a year appended next to the title
+       therefore appeared on the line ABOVE it, reversed. This inline row keeps
+       "Title • 2026" on a single baseline. */
+    .ym-sl-fs-title-line {
+      display: inline-flex;
+      align-items: baseline;
+      min-width: 0;
+      max-width: 100%;
+      white-space: nowrap;
+    }
+    /* Release year, sitting next to the title as "Title • 2026". It carries the
+       TITLE'S weight and brightness rather than the track's default 400/.82, so
+       the year reads as the end of the title instead of a second, dimmer label.
+       The bullet is full white and only a touch larger than the digits - enough
+       to separate them, not enough to become a shape of its own. Read from the
+       player-bar byline - see syncFsTitleYear() in 11-fullscreen-next-up - and
+       absent (no spans at all) on tracks with no album year. */
+    .ym-sl-fs-title-year-sep {
+      margin: 0 .3em;
+      font-size: .78em;
+      font-weight: 700;
+      color: #fff;
+      /* Dimmer than the year either side of it: the separator only has to
+         register as a break, not as a glyph. */
+      opacity: .55;
+      /* OPTICAL nudge, not a layout fix. The bullet's box is already centred on
+         the year's (both report the same centre in the same baseline row), but a
+         bullet's ink sits around the middle of the x-height while digits centre
+         on cap height, so it reads ~1.3px low at this size. -0.07em lands the ink
+         on the digits' middle. */
+      transform: translateY(-.07em);
+    }
+    .ym-sl-fs-title-year {
+      font-weight: 800;
+      /* A step under the title's own brightness and size: the year is
+         secondary information and should read after the song name. */
+      opacity: .48;
+      font-size: .8em;
+      /* Years are compared down the page, not inside a sentence. */
+      font-variant-numeric: tabular-nums;
+    }
     /* Artist + writers share one baseline. The writers have their own viewport
        so a long list never wraps the credit; CSS hides them for MVs, leaving
        the compact artist + track line untouched. */
@@ -5081,21 +5094,28 @@
     }
     /* Rendered empty when there is no track yet: take up no space at all. */
     .ym-sl-fs-title:empty { display: none; }
-    /* Fullscreen "Next up" list, bottom-left. Native queue-row look (rounded
-       thumb + bold track + dimmer artist) in the Spicy Lyrics family. */
+    /* Fullscreen "Next up" list, bottom-right. Native queue-row look (rounded
+       thumb + bold track + dimmer artist) in the Spicy Lyrics family. Anchored
+       by its BOTTOM edge: the container is bottom-pinned, so the panel grows
+       upward as rows unfurl and never drifts when it does. */
     .ym-sl-fs-nextup {
       position: absolute;
-      left: 22px;
-      top: 22px;
+      right: 22px;
+      bottom: 22px;
       z-index: 22;
       display: flex;
       flex-direction: column;
-      max-width: min(340px, 42vw);
+      /* A FIXED box, not shrink-to-fit. The resting row is pushed to the right
+         edge of this box (see the shift below), so the box has to exist before
+         the content does: with max-width the panel would hug the text and the
+         push would have nowhere to go. */
+      width: min(340px, 42vw);
       color: #fff;
-      /* Hoverable: the extra tracks reveal on hover (AJ, 2026-10-03). */
+      /* Hoverable: the extra tracks reveal on hover. */
       pointer-events: auto;
       opacity: 0;
-      transform: translateY(-8px);
+      /* Rises into place from below the screen edge, never drops in. */
+      transform: translateY(10px);
       transition: opacity .3s cubic-bezier(.22,.61,.36,1),
         transform .3s cubic-bezier(.22,.61,.36,1);
     }
@@ -5103,7 +5123,7 @@
       opacity: 1;
       transform: translateY(0);
     }
-    /* Frost panel behind the list, on HOVER only (AJ, 2026-10-03). At rest the
+    /* Frost panel behind the list, on HOVER only. At rest the
        list is one row and clears the artwork; unfurling it to four rows makes it
        overlap the cover art on smaller monitors, and white text over bright art
        is unreadable. So the surface appears with the unfurl.
@@ -5130,19 +5150,19 @@
     .ym-sl-fs-nextup:hover::before {
       opacity: 1;
     }
-    /* Hide with the cursor (AJ, 2026-10-03). The overlay drops into
+    /* Hide with the cursor. The overlay drops into
        .ym-sl-fs-idle after FS_IDLE_HIDE_MS (2s) without input - the same state
        that hides the cursor - so the list goes with it and the corner is clean.
-       It rides back up to its entry offset (-8px) so leaving mirrors arriving.
+       It sinks back to its entry offset (+10px) so leaving mirrors arriving.
        pointer-events: none matters as much as opacity: without it the list stays
        hoverable while invisible, and a pointer left resting on it would pop the
        frost back in on an empty corner. (0,3,0) beats the (0,2,0) -in rule. */
     .ym-sl-fs-overlay.ym-sl-fs-idle .ym-sl-fs-nextup {
       opacity: 0;
-      transform: translateY(-8px);
+      transform: translateY(10px);
       pointer-events: none;
     }
-    /* Next-up rows are display-only (click-to-jump abandoned 2026-10-03): strip
+    /* Next-up rows are display-only (click-to-jump abandoned): strip
        any UA chrome so they keep the box the old rows had. margin is deliberately
        NOT reset - the row rule below supplies margin-top: 10px. */
     .ym-sl-fs-nextup-row {
@@ -5157,23 +5177,32 @@
       width: 100%;
     }
 
-    /* "See all" queue-panel CSS removed 2026-10-03 with the panel itself
-       (click-to-jump was abandoned). The Next up list above is display-only. */
-    .ym-sl-fs-nextup-head {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      color: rgba(255, 255, 255, .55);
-      text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
-      margin-bottom: 10px;
+    /* "See all" queue-panel CSS removed with the panel itself
+       (click-to-jump was abandoned). The Next up list above is display-only.
+       No "Next up" heading any more: the thumbs read as the queue on their own,
+       and the label was just chrome in the corner of the screen.
+
+       RESTING vs HOVER. At rest the row's CONTENT is shifted right by the
+       panel's spare width, so the track title ends at the panel's right edge -
+       i.e. barely off the screen edge. Hovering slides it back to 0, putting
+       the thumb in the panel's top-left corner next to the unfurled rows. The
+       shift is measured in JS (syncFsNextUpShift) because only the browser
+       knows how wide the title renders; it is applied to the row's CHILDREN,
+       not the row, so it does not fight the fold-away transform on rows 2-4. */
+    .ym-sl-fs-nextup-thumb,
+    .ym-sl-fs-nextup-meta {
+      transform: translateX(var(--ym-sl-fs-nu-shift, 0px));
+      transition: transform .34s cubic-bezier(.22,.61,.36,1);
+    }
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-thumb,
+    .ym-sl-fs-nextup:hover .ym-sl-fs-nextup-meta {
+      transform: translateX(0);
     }
     .ym-sl-fs-nextup-row {
       display: flex;
       align-items: center;
       gap: 10px;
       min-width: 0;
-      margin-top: 10px;
     }
     .ym-sl-fs-nextup-thumb {
       width: 42px;
@@ -5211,8 +5240,8 @@
       margin-top: 0;
       opacity: 0;
       overflow: hidden;
-      transform: translateY(-10px) scale(.96);
-      transform-origin: top left;
+      transform: translateY(10px) scale(.96);
+      transform-origin: bottom left;
       transition: max-height .34s cubic-bezier(.22,.61,.36,1),
         margin-top .34s cubic-bezier(.22,.61,.36,1),
         opacity .26s ease,
@@ -5236,9 +5265,9 @@
     /* ===== cover-art fullscreen: Apple Music-style stack ===================
        Title, then progress + time, then transport, then volume — one
        left-aligned column under the artwork, spanning its width. Scoped to
-       NO-VIDEO side mode; music videos keep their own layout (AJ, 2026-10-03). */
+       NO-VIDEO side mode; music videos keep their own layout. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
-      /* FLOW ITEM, not an overlay child (AJ, 2026-10-21). stackFsChrome() moves
+      /* FLOW ITEM, not an overlay child. stackFsChrome() moves
          the credit INTO .ym-sl-fs-player-controls for this layout, so the block
          is one column: art -> 16px -> title -> 14px -> seek -> transport ->
          volume. That is what makes "title directly under the art, controls
@@ -5253,7 +5282,7 @@
       max-width: none;
       /* MUST match the 16px the column is offset from the artwork's bottom edge
          (see .ym-sl-fs-player-controls), or the two gaps read as different by a
-         couple of pixels — which AJ spotted immediately (2026-10-21). */
+         couple of pixels — which spotted immediately. */
       margin: 0 0 16px;
       text-align: left;
       /* Explicit, viewport-relative size so it scales on smaller monitors. */
@@ -5264,7 +5293,7 @@
       animation-name: ym-sl-fs-title-in-l;
     }
     /* COVER ART ONLY: pull the lyrics column in beside the artwork. The base rule
-       keeps MVs at 57.4% (AJ, 2026-10-03). */
+       keeps MVs at 57.4%. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics {
       left: 44%;
       width: 54%;
@@ -5319,7 +5348,7 @@
     }
     /* Cover-art credit swap is a SCROLL-UP, not a fade: the old credit lifts out
        upward and the new one rises up into its place, so the track + artist read
-       as rolling over rather than dissolving (AJ, 2026-10-03). 22px (was 6px) so
+       as rolling over rather than dissolving. 22px (was 6px) so
        the direction actually reads at the cover-art font size. */
     @keyframes ym-sl-fs-title-in-l {
       from { opacity: 0; transform: translateY(22px); }
@@ -5329,7 +5358,7 @@
        the leaving class (0,6,0): the cover rule above sets animation-name at
        (0,5,0), so a plain .ym-sl-fs-title.ym-sl-fs-title-leaving (0,2,0) loses
        to it. That is exactly why MVs animated on a track change and cover art
-       did not - MV has no cover rule to outrank (AJ, 2026-10-03).
+       did not - MV has no cover rule to outrank.
        Ease-IN on the way out: the credit accelerates away, so the new one
        rising from below reads as one continuous roll. Duration matches
        FS_TITLE_SWAP_MS (240ms). */
@@ -5348,14 +5377,14 @@
          margin-bottom) so it can be optically centred between the seek bar and
          the volume. The scrubber's time row sits ABOVE the chip and adds height
          on that side, so a symmetric 12px gap left the transport ~12px low
-         (AJ, 2026-10-18). gap:0 + chip margin-bottom:24px keeps the same total
+. gap:0 + chip margin-bottom:24px keeps the same total
          stack height while equalising the two distances. */
       gap: 0;
-      /* STATIC (AJ, 2026-10-20): pinned to the bottom of the overlay instead of
+      /* STATIC: pinned to the bottom of the overlay instead of
          being stacked off the measured band + title height. 18px matches the
          old gap to the scrubber, so the column composition is unchanged — it
          just no longer moves when the artwork changes size. */
-      /* Anchored to the ARTWORK's bottom edge, not the overlay's (AJ, 2026-10-21).
+      /* Anchored to the ARTWORK's bottom edge, not the overlay's.
          The art is 54vh tall, centred in a pane that stops 218px above the bottom
          and nudged down 4vh, so its bottom edge is at
              (100% - 218px) / 2 + 31vh
@@ -5411,7 +5440,7 @@
       padding: 0;
       /* The whole gap below the transport. Paired with gap:0 on the stack above,
          this centres the transport between the seek bar and the volume even
-         though the time row adds height on the seek side (AJ, 2026-10-18). */
+         though the time row adds height on the seek side. */
       margin-bottom: 16px;
     }
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
@@ -5422,7 +5451,7 @@
       width: 100%;
       /* Room for the two scale glyphs: they sit INSIDE the artwork's width, so
          the bar shortens by their size and gaps rather than spilling past the
-         cover (AJ, 2026-10-23). */
+         cover. */
       gap: 12px;
       pointer-events: auto;
     }
@@ -5436,7 +5465,7 @@
       color: rgba(255, 255, 255, .62);
       pointer-events: none;
     }
-    /* No hover grow on the volume bar here (AJ, 2026-10-03). */
+    /* No hover grow on the volume bar here. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group:hover .ym-sl-fs-player-volume,
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-player-volume {
       transform: none !important;
@@ -5446,7 +5475,7 @@
       width: 100%;
     }
     /* Only SHUFFLE (first) and REPEAT (last) go to the edges; the skip buttons stay
-       grouped around play (AJ, 2026-10-03). */
+       grouped around play. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-transport > :first-child {
       margin-right: auto;
     }
@@ -5470,8 +5499,8 @@
        transition. The entrance animation ends with a forwards fill that keeps
        forcing opacity:1, and releasing that fill in the SAME style recalc as a
        class change did NOT reliably start the opacity transition in Chrome, so
-       the old credit just snapped away instead of fading (AJ: "the title
-       doesn't fade out at the end of a song"). A dedicated ym-sl-fs-title-out
+       the old credit just snapped away instead of fading, so the title
+       never appeared to fade out at the end of a song. A dedicated ym-sl-fs-title-out
        animation overrides the entrance animation outright, so the fade-out
        always runs; its forwards fill holds opacity 0 until paint() drops the
        class and re-arms the entrance. */
@@ -5482,8 +5511,8 @@
       from { opacity: 1; transform: translateX(-50%) translateY(0); }
       to   { opacity: 0; transform: translateX(-50%) translateY(-8px); }
     }
-    /* Long-title marquee + edge fade (2026-09-28). Long artist + title
-       strings used to wrap to two lines (AJ). The inner wrapper is forced
+    /* Long-title marquee + edge fade. Long artist + title
+       strings used to wrap to two lines. The inner wrapper is forced
        to one line with white-space:nowrap; the container clips and
        edge-fades when overflow is detected. The marquee is a ping-pong
        with two 3s pauses: pause at the LEFT, scroll to show the END at
@@ -5491,8 +5520,8 @@
        -(textWidth - containerWidth) puts the END of the text right at
        the container's right edge so the right fade can take it out
        smoothly. Duration stays a flat 12s so the scroll speed scales
-       naturally with how much the title overflows; AJ preferred a
-       constant-pause feel (2026-09-28) over a constant-speed scroll. */
+       naturally with how much the title overflows; preferred a
+       constant-pause feel over a constant-speed scroll. */
     .ym-sl-fs-title {
       overflow: hidden;
     }
@@ -5533,7 +5562,7 @@
        loading, or the media pane when the VIDEO is the sole thing still
        buffering. inset: 0 fills that host, so it follows the host's geometry
        (layout mode + video aspect ratio) with no extra math. Icon is Spicy
-       Lyrics' own; the spin is slowed to 1.4s from their 0.8s per AJ.
+       Lyrics' own; the spin is slowed to 1.4s from their 0.8s by request.
        Fades in and out via the opacity transition below. Deliberately no
        backdrop: any fill is an edge (see the play chip note), so legibility
        comes from a drop shadow instead. */
@@ -5569,7 +5598,7 @@
     /* ===== Video Background: the title rides the chrome's reveal ==========
        In this layout the media is the full-bleed backdrop, so the title has
        nothing to sit under and used to stay on screen permanently over the
-       video (found by AJ's friend, 2026-09-28). It now follows exactly the
+       video (found by). It now follows exactly the
        pattern .ym-sl-fs-controls uses: hidden at rest, fades in on
        hover/focus-within, and hides again on idle - so the hover rule comes
        first and the idle rule after it, since they carry equal specificity.
@@ -5596,8 +5625,8 @@
     /* ===== bottom stack: title -> transport chip -> scrubber pill =========
        BOTH variants put the title under the media and the chrome under the
        title, and BOTH align horizontally to the media pane instead of the
-       overlay centre. AJ reported the group sitting in the middle of the screen
-       while the cover art was off to the left (2026-09-27) - the earlier pass
+       overlay centre. reported the group sitting in the middle of the screen
+       while the cover art was off to the left - the earlier pass
        only applied the pane alignment to the music-video branch, which is why
        the no-video case stayed centred.
        Video Background is excluded: there the media is the full-bleed backdrop
@@ -5607,14 +5636,14 @@
        midpoint of the OLD pane (left: 4% + 50% / 2); the pane has since moved to
        left: 2%, and the stale anchor left the title ~2% (38px at 1920) to the
        RIGHT of the video - and of the transport, which IS centred on the pane
-       (AJ, 2026-10-03: "the title is not directly under the video"). Deriving it
+       , putting the title visibly off-centre. Deriving it
        from the published pane box keeps it centred for any pane width.
        The chip is deliberately NOT listed here: it anchors to the pane's own
        left/width further down (.ym-sl-fs-play-chip), which already outranked
        this rule. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-title {
       /* 27% = the midpoint of the fixed 2% / 50% media column (2 + 50/2).
-         STATIC (AJ, 2026-10-20) — it used to be derived from the measured pane
+         STATIC — it used to be derived from the measured pane
          box, so it re-centred itself whenever the pane's reported width moved. */
       left: 27%;
       max-width: 50%;
@@ -5623,7 +5652,7 @@
        210px clears the bottom-anchored control column (seek row + transport +
        volume, height is content-driven) and keeps the art -> title gap at ~64px.
        Tuned DOWN from 190px + a 14px column in one pass for "slightly more
-       compact" (AJ, 2026-10-21): title up 20, column up 10, transport->volume
+       compact": title up 20, column up 10, transport->volume
        gap 24 -> 16. These three numbers are the whole vertical rhythm. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
       bottom: 210px;
@@ -5646,7 +5675,7 @@
       /* Same stacking ORDER as the full-size rules above (title, then chip, then
          scrubber), just compressed. The previous values were written for the old
          measured band, where the chip sat below the title by construction — kept
-         as-is they overlapped once the positions became fixed (AJ, 2026-10-20). */
+         as-is they overlapped once the positions became fixed. */
       .ym-sl-fs-overlay:not(.ym-sl-fs-has-video) .ym-sl-fs-title {
         bottom: 176px;
         font-size: 32px;
@@ -5784,7 +5813,7 @@
       max-width: none !important;
       max-height: none !important;
       /* Fill the media pane edge-to-edge so the 16:9 video never leaves the
-         two horizontal black bars AJ reported (2026-09-27). The video is
+         two horizontal black bars reported. The video is
          cropped instead of letterboxed - matches what Ableton / Spicy do for
          their fullscreen MV pane, and the host already has rounded corners
          so the cropped edges look intentional rather than truncated. */
@@ -5793,7 +5822,7 @@
       background: transparent;
       /* No drop shadow: .ym-sl-fs-media has overflow:hidden and the pane's
          bottom edge IS the video's bottom edge, so the shadow was cut off dead
-         straight under the media (AJ, 2026-09-28). The blurred ambient backdrop
+         straight under the media. The blurred ambient backdrop
          already separates the frame from its surroundings. */
       box-shadow: none;
     }
@@ -5808,7 +5837,7 @@
     /* Smooth fade when the backdrop swaps between cover-art and the live video
        mid-fullscreen. syncFsVideoMode toggles fsMediaHost opacity around the
        swap so the transition (cover art fading out / new backdrop fading in)
-       replaces the snap AJ reported (2026-09-16). */
+       replaces the snap reported. */
     .ym-sl-fs-media {
       transition: opacity .25s ease;
     }
@@ -5816,19 +5845,22 @@
        the length of the switch, so the full-bleed video shrinks back into the
        side column instead of cutting there. The class is applied before the
        mode class is removed and cleared once the transition has run. */
+    /* .52s to match the chrome FLIP and the lyric column's own transition, so
+       the picture, the words and the controls all come to rest on the same
+       frame instead of three slightly different ones. */
     .ym-sl-fs-overlay.ym-sl-fs-media-layout-out .ym-sl-fs-media {
       transition:
-        left .5s cubic-bezier(.22, .61, .36, 1),
-        width .5s cubic-bezier(.22, .61, .36, 1),
-        top .5s cubic-bezier(.22, .61, .36, 1),
-        transform .5s cubic-bezier(.22, .61, .36, 1),
-        padding .5s cubic-bezier(.22, .61, .36, 1),
+        left .52s cubic-bezier(.22, .61, .36, 1),
+        width .52s cubic-bezier(.22, .61, .36, 1),
+        top .52s cubic-bezier(.22, .61, .36, 1),
+        transform .52s cubic-bezier(.22, .61, .36, 1),
+        padding .52s cubic-bezier(.22, .61, .36, 1),
         opacity .25s ease;
     }
     .ym-sl-fs-overlay.ym-sl-fs-media-layout-out .ym-sl-fs-media > video {
-      transition: border-radius .5s cubic-bezier(.22, .61, .36, 1);
+      transition: border-radius .52s cubic-bezier(.22, .61, .36, 1);
     }
-    /* ===== track-change dissolve (AJ, 2026-10-21) ==========================
+    /* ===== track-change dissolve ==========================
        ⭐ Fading ONLY .ym-sl-fs-media was invisible for music videos. The ambient
        backdrop behind it (Kawarp / the blurred-video canvas) is a blurred copy of
        the SAME frame, so dropping the sharp layer to opacity 0 just revealed a
@@ -5860,7 +5892,7 @@
     /* Cover art: a centered square card sized off the viewport height so it
        never dwarfs the lyrics column. The blurred backdrop fills the space
        around it, so there are no black bars. Reduced 70vh -> 50vh: the cover
-       read too large beside the lyrics (AJ, 2026-10-03). Music videos are a
+       read too large beside the lyrics. Music videos are a
        <video>, and this <img> is only created for cover-art tracks, so MVs are
        untouched by this rule. */
     .ym-sl-fs-media > img {
@@ -5872,14 +5904,14 @@
       aspect-ratio: 1 / 1;
       /* Nudge the centred cover very slightly DOWN: the pane it centres in stops
          short of the overlay bottom (the 218px title/controls band), so pure
-         centring reads a touch high (AJ, 2026-10-03). */
+         centring reads a touch high. */
       transform: translateY(4vh);
       object-fit: cover;
       border-radius: 16px;
       background: #000;
       /* No drop shadow, same reason as the video: the pane has overflow:hidden
          and the cover is bottom-aligned in it, so the shadow was sliced off
-         immediately below the artwork (AJ, 2026-09-28). */
+         immediately below the artwork. */
       box-shadow: none;
     }
     /* In side mode, center the square cover in the media column without
@@ -5894,13 +5926,13 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > img {
       /* MORE specific than the base .ym-sl-fs-media > img rule, so in side mode
          THIS is what actually sizes the cover art — keep it in step with the
-         base (AJ, 2026-10-03). */
+         base. */
       width: min(100%, 54vh);
       max-height: 54vh;
       flex: 0 1 auto;
     }
     /* ===== bottom band: reserve room for the title + playback chrome ======
-       AJ's spec (2026-09-27): everything lives UNDER the media, so the media
+       the spec: everything lives UNDER the media, so the media
        pane stops short of the overlay bottom and the title/controls occupy
        the band that is left. Scoped to side mode only - in Video Background
        the video IS the backdrop and must stay full-bleed, and Lyrics Only has
@@ -5915,15 +5947,15 @@
        on the viewport's vertical middle.
        ASPECT: the pane used to be 50% wide but nearly full height (AR ~1.2)
        while the video is 1.78, so object-fit: cover cropped the sides and
-       contain left letterbox bars - AJ hit both, one round apart. Matching the
+       contain left letterbox bars - hit both, one round apart. Matching the
        ratios makes cover a no-op: full frame AND filled pane. The var comes
        from the real videoWidth/videoHeight in drawBgFrame(); 16/9 is the
        fallback for the frames before metadata arrives.
        POSITION: centred on 50% - the pane's height is width/AR, so a 16:9 video
        in a 50%-wide column is only 540px tall. Bottom-pinning it left a 340px
-       void above (AJ: "too low"); centring on the band midpoint instead put it
-       100px above the screen's middle (AJ: "a little too high"). Dead centre
-       is what he wants. Measured clearance: the title's top edge sits at
+       void above, which read as too low; centring on the band midpoint instead
+       put it 100px above the screen's middle, which read as too high. Dead
+       centre is the intended position. Measured clearance: the title's top edge sits at
        y=904, and a 16:9 pane centred at 540 ends at 810, so there is 94px of
        air; a 4:3 pane ends at 900 and just clears it.
        max-height keeps a very tall / vertical video from covering the whole
@@ -5946,13 +5978,13 @@
       max-height: 100%;
     }
     /* CENTRE the cover inside the shortened pane. The title / controls are at
-       fixed offsets from the overlay bottom (AJ, 2026-10-20), so they no longer
+       fixed offsets from the overlay bottom, so they no longer
        follow the art's bottom edge. */
     .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
       align-items: center;
     }
     /* Both variants: the scrubber spans the MEDIA COLUMN, not the overlay centre,
-       so it sits exactly under the cover art / video. STATIC (AJ, 2026-10-20):
+       so it sits exactly under the cover art / video. STATIC:
        the column is a fixed 2% / 50% box, so the bar reads those numbers directly
        instead of the measured pane rect. box-sizing MUST be border-box: this rule
        is content-box by default, so the base padding of 0 18px used to ADD 36px
@@ -5968,12 +6000,12 @@
       bottom: auto;
       /* NO side padding: the base rule's 0 18px inset the row from the video's
          edges by 18px each side, so the seek bar never lined up with the pane
-         (AJ, 2026-10-21: "same length as the video"). The row now spans the pane
+         (the same length as the video). The row now spans the pane
          exactly and the time labels sit flush against its edges. */
       padding: 0;
     }
 
-    /* ===== MV side layout: ONE flow under the video (AJ, 2026-10-21) ========
+    /* ===== MV side layout: ONE flow under the video ========
        Credit, transport and scrubber are a single flex column starting 20px below
        the VIDEO's bottom edge, not the viewport's. The pane is 50% wide, centred,
        and aspect-ratio'd, so its bottom edge is
@@ -5989,7 +6021,7 @@
       /* STRETCH, not center, and the column IS the media column (2% / 50%). A
          full-width column with align-items:center centred the transport and the
          scrubber on the SCREEN while the title sat under the video — two
-         different axes (AJ, 2026-10-21). */
+         different axes. */
       align-items: stretch;
       justify-content: flex-start;
       top: calc(45% + 25vw / var(--ym-sl-fs-video-ratio, 1.7777778) + 20px);
@@ -6016,7 +6048,7 @@
          animation bakes translateX(-50%) into every frame and ends with a
          forwards fill, so it keeps forcing the shift forever and outranks a
          plain transform: none — that is why the caption sat 480px to the left
-         (measured: box x -442 with translateX(-480), AJ 2026-10-21). The -l
+         (measured: box x -442 with translateX(-480)). The -l
          variant is the same rise without the translate. */
       animation-name: ym-sl-fs-title-in-l;
     }
@@ -6265,7 +6297,7 @@
         margin-bottom: 0;
       }
     }
-    /* The SEPARATOR sits dead under the title (AJ, 2026-10-01). The chip spans the
+    /* The SEPARATOR sits dead under the title. The chip spans the
        pane and lays out as 1fr / auto / 1fr: the transport is pushed to the END of
        the left column and the volume to the START of the right one, so whatever
        either side weighs, the middle column — the divider — lands on the chip's
@@ -6286,13 +6318,13 @@
       gap: 0;
       padding: 10px 0;
     }
-    /* TRANSPORT CENTRED ON THE PANE, VOLUME ON THE SCRUBBER ROW (AJ, 2026-10-01).
+    /* TRANSPORT CENTRED ON THE PANE, VOLUME ON THE SCRUBBER ROW.
        Shuffle and Repeat made the transport five buttons wide — wide enough that
        centring the chip AS A UNIT left the transport visibly left of the title. So
        the middle column carries the transport, and the volume left the chip
        entirely: it now sits on the scrubber row, after the total time. The seek
        range is the flex child that gives up the room, so bar + volume still span
-       the media pane together — which is exactly what AJ asked for.
+       the media pane together — which is exactly what asked for.
        Every item is pinned to grid-row 1 EXPLICITLY: auto-placement walks items in
        SOURCE order with a cursor that only moves forward, so an item whose column
        sits BEHIND the cursor gets pushed onto the next row. */
@@ -6306,7 +6338,7 @@
     .ym-sl-fs-overlay:not(.ym-sl-fs-mode-background) .ym-sl-fs-volume-group {
       margin-left: 0;
       padding-left: 14px;
-      /* The 1px divider is removed too (AJ 2026-10-03) so the volume sits flush
+      /* The 1px divider is removed too so the volume sits flush
          against the scrubber row without a line of chrome between them. */
       border-left: 0;
     }
@@ -6390,8 +6422,7 @@
       z-index: 1;
       pointer-events: none;
     }
-    /* Cover card. It has NO opacity animation of its own any more (AJ,
-       2026-10-21). It used to carry a .ym-sl-fs-art-loading modifier that
+    /* Cover card. It has NO opacity animation of its own any more. It used to carry a .ym-sl-fs-art-loading modifier that
        dropped it to 0 while a new src decoded, to stop the sharp OLD bitmap
        showing next to the new Kawarp backdrop. That modifier was a second
        opacity animation fighting the track-change dissolve, and reconcile can
@@ -6453,7 +6484,7 @@
     .ym-sl-import:disabled:active { transform: none; }
     /* Inside the OPTIONS panel, match the selects they sit beside: same radius,
        slightly larger type. Scoped, so the panel's own toolbar buttons keep their
-       compact sizing (AJ, 2026-10-01). */
+       compact sizing. */
     .ym-sl-options-overlay .ym-sl-import,
     .ym-sl-fs-options-overlay .ym-sl-import {
       min-height: 32px;
@@ -6963,7 +6994,7 @@
     /* The OPTIONS panel's selects are dark, matching its buttons and the rest of
        the panel. color-scheme: dark (not light) so Chrome also draws the native
        arrow and the open dropdown dark — the white select was the single most
-       jarring thing in the panel (AJ, 2026-10-01). */
+       jarring thing in the panel. */
     .ym-sl-options-overlay select,
     .ym-sl-fs-options-overlay select {
       color-scheme: dark;
@@ -7100,8 +7131,8 @@
          NO BACKTICKS ANYWHERE IN THIS COMMENT BLOCK — this CSS lives inside a
          JS template literal, so a stray backtick terminates it early. */
       --ym-sl-bg-vocal-scale: 1;
-      /* Container-relative base, RESTORED 2026-09-26. A fixed rem base was tried
-         for a week to hold the size constant across monitors, but AJ called it
+      /* Container-relative base, RESTORED. A fixed rem base was tried
+         for a week to hold the size constant across monitors, but called it
          out: the pane gets narrower and the type does not, so the lyrics crowd
          the panel. The 7cqw term tracks the pane instead.
 
@@ -7111,7 +7142,7 @@
          Measured live: panel content box 522px => 7cqw = 36.5px, already past
          the 3.5rem ceiling. So on a normal-size pane this sits AT the ceiling
          (35px) and only starts shrinking once the pane drops below ~500px. That
-         is exactly the wanted behaviour.
+         is the intended behaviour.
 
          The fullscreen pane needs no override of its own: it is much wider, so
          its 7cqw is even further past the same ceiling and the two agree.
@@ -7121,7 +7152,7 @@
          JS template literal, so a stray backtick terminates it early. */
       /* px, not rem: the root font-size is now user-scalable from the panel's
          YouTube page, and the lyrics must not grow with YouTube's own UI —
-         their size has its own setting (AJ, 2026-10-22). */
+         their size has its own setting. */
       --DefaultLyricsSize: calc(clamp(17px, calc(1cqw * 7), 35px) * var(--ym-sl-lyrics-scale));
       --amll-lyric-player-font-size: var(--DefaultLyricsSize);
       --vertical-gap: 0px;
@@ -7153,7 +7184,7 @@
          container, without needing an extra wrapper element. */
       transform: translateY(calc(var(--ym-sl-lyrics-offset) + var(--ym-sl-scroll-frac, 0px)));
       transform-origin: center center;
-      /* No top/bottom dissolve (AJ, 2026-11-16). The 64px fades made every line
+      /* No top/bottom dissolve. The 64px fades made every line
          that crossed the panel edge read as DIMMER while the active line played,
          which looks like a state bug, not a fade. The scrollport clips hard now:
          lines stay at full brightness right up to the edge and leave at it. The
@@ -7168,7 +7199,7 @@
        ramp short — it only softens a line climbing out of the top edge — and
        let the bottom keep fading down to the very last pixel, where upcoming
        lines leave for the controls. The active line rests at the halfway point,
-       clear of both (AJ, 2026-10-23). */
+       clear of both. */
     .ym-sl-fs-lyrics #ym-sl-panel.SpicyRenderer .LyricsContent {
       -webkit-mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
       mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.45) 2.5%, #000 9%, #000 82%, rgba(0,0,0,.5) 93%, transparent 100%);
@@ -7213,6 +7244,19 @@
     }
     #ym-sl-panel.BraccatoRenderer .ym-sl-braccato { display: block; }
     #ym-sl-panel.BraccatoRenderer .SpicyLyricsScrollContainer { display: none !important; }
+    /* Better Lyrics owns the panel while it runs, and its own container is empty
+       when a lookup comes back with nothing - so a track with no lyrics showed a
+       blank panel instead of the shared notice. The notice ("No lyrics found." +
+       the LRCLIB Search button) lives in the Spicy scroller that Braccato hides,
+       so while a message is up that scroller comes back and the empty Braccato
+       container steps aside. showLyricsMessage() sets the class and the next load
+       clears it (resetLyricsPanelState). */
+    #ym-sl-panel.BraccatoRenderer.ym-sl-empty-state .SpicyLyricsScrollContainer {
+      display: flex !important;
+    }
+    #ym-sl-panel.BraccatoRenderer.ym-sl-empty-state .ym-sl-braccato {
+      display: none !important;
+    }
     /* Braccato writes scrollTop every frame. The shared smooth-scroll easing
        would restart an animation after each of those writes. */
     #ym-sl-panel.BraccatoRenderer .LyricsContent { scroll-behavior: auto; }
@@ -7272,7 +7316,7 @@
       opacity: 0;
     }
     /* Source warning (lrc.red) — same pill, nudged down so it can coexist with
-       the music-video sync chip instead of covering it (AJ, 2026-10-19). */
+       the music-video sync chip instead of covering it. */
     .ym-sl-source-chip {
       top: 40px;
     }
@@ -7445,8 +7489,7 @@
     /* Static (unsynced) lines: paint at full alpha / opacity and use tighter
        spacing, mirroring Spicy Lyrics' data-lyrics-type="Static" look so an
        unkaraoked LRCLIB result reads like real lyrics rather than dim ghosts.
-       Scoped to .line.static only — synced lyrics keep their own rhythm
-       (AJ, 2026-09-18). */
+       Scoped to .line.static only — synced lyrics keep their own rhythm. */
     #ym-sl-panel.SpicyRenderer .line.static {
       opacity: 1 !important;
       --ym-sl-line-alpha: 1 !important;
@@ -7563,7 +7606,7 @@
       transform: scale(1);
     }
     /* Static (unsynced) lines can't be clicked to seek (no time mapping), so the
-       hover highlight box is misleading — suppress it for them (AJ, 2026-09-18). */
+       hover highlight box is misleading — suppress it for them. */
     #ym-sl-panel.SpicyRenderer .line.static:hover::before {
       opacity: 0;
       transform: scale(.985);
@@ -7603,7 +7646,7 @@
       text-align: right;
       transform-origin: right center;
     }
-    /* Per-kind weight (AJ, 2026-10-22). The bundled face tops out at 700, so
+    /* Per-kind weight. The bundled face tops out at 700, so
        extra weight comes from a hairline text-stroke rather than a synthetic
        bold. The stroke is TRANSPARENT on purpose: a stroke is still part of the
        background-clip:text region, so the clipped gradient grows by the stroke
@@ -7611,7 +7654,7 @@
        paints nothing. A white stroke (at ANY alpha) is painted OVER the clipped
        gradient, so the glyph edge becomes fill + stroke * (1 - fill): on a dim
        .25-alpha word that is .44, almost double — a white outline around grey
-       letters, the "bright outer layer" AJ reported twice (2026-10-22).
+       letters, the "bright outer layer" reported twice.
        Lowering the alpha only scaled that rim down; it cannot remove it.
        #ym-sl-amll-host gets away with a white stroke because its fill is opaque.
        Word-by-word keeps the old, unstroked weight. Line-synced matches AMLL's
@@ -7699,7 +7742,7 @@
     /* The scroll glide's sub-pixel remainder. REGISTERED, and inherits:false is the
        whole point: an UNREGISTERED custom property inherits, so writing it on the
        scroller every frame invalidated the computed style of EVERY descendant
-       (70 lines + 571 words) — the glide ran but the panel crawled (AJ, 2026-10-07).
+       (70 lines + 571 words) — the glide ran but the panel crawled.
        Non-inheriting means only the scroller's own transform is invalidated.
        NO BACKTICKS IN THIS COMMENT — it lives inside a template literal. */
     @property --ym-sl-scroll-frac {
@@ -7725,7 +7768,7 @@
        fade AND recede with distance from the active line, injected per-line as
        --ym-sl-line-alpha / --amll-depth-scale in animate()). Word-synced only —
        line-timed and static lines fill as whole blocks, so the AMLL line motion
-       would just blur them. AJ: make simple lyrics the apple music style. */
+       would just blur them.: make simple lyrics the apple music style. */
     body.ym-sl-simple-lyrics #ym-sl-panel.SpicyRenderer .line:not(.line-timed):not(.static):not(.bg-line) {
       transition:
         transform .5s cubic-bezier(.22, .61, .36, 1),
@@ -7862,6 +7905,114 @@
     #ym-sl-panel.SpicyRenderer .line.Sung .letter {
       --gradient-position: 100% !important;
     }
+    /* "Fade away previous lines": a finished line fades out over 0.4s and
+       recedes to 95%, the motion Apple Music and Spicy's fullscreen Minimal
+       mode use. The individual scale property is separate from transform, so
+       it composes with the Apple depth scale and the duet origin instead of
+       replacing them.
+
+       The fade transition lives on .Sung, not on every line. Keeping opacity
+       and scale transitionable on the active and unsung rows made the browser
+       hold compositor work for the whole panel; only a row that is actually
+       fading needs it.
+
+       Only opacity and scale animate here. The fade used to carry filter and
+       the two line-alpha properties as well, so every clipped-gradient glyph
+       in the row was repainted for the whole 0.4s - on a row already heading
+       to opacity 0, where none of that paint could be seen. */
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .line.Sung:not(.static, .musical-line) {
+      opacity: 0;
+      scale: .95;
+      /* A finished row's inline depth blur is invisible behind opacity 0, but
+         it still asks the compositor for an offscreen surface. Hover always
+         wanted the sharp text, so clearing it costs nothing visually. */
+      filter: none !important;
+      /* Stop painting and compositing the finished row once it has faded. Its
+         box and forced layout size stay in place, so the stack above the
+         current line still occupies the same space. visibility is delayed to
+         the end of the opacity transition; the ::before hitbox below survives
+         it so the empty rows can still be hovered and clicked to seek. */
+      visibility: hidden;
+      transition:
+        opacity .4s linear,
+        scale .4s ease-in-out,
+        visibility 0s linear .4s;
+    }
+    /* A row that is fading away never needs its glyph gradients repainted:
+       --gradient-alpha and the two line alphas only ever showed through an
+       opacity that is on its way to 0. Dropping their transitions removes one
+       clipped-gradient repaint per word from every line ending without
+       changing a visible frame. */
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .line.Sung:not(.static, .musical-line) :is(.word, .letter) {
+      transition: none;
+    }
+    /* The hitbox is a pseudo-element of the line, so it can restore visibility
+       inside a hidden line. That keeps the seek target alive without keeping
+       the lyric text in the paint/compositing path. */
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .line.Sung:not(.static, .musical-line)::before {
+      visibility: visible;
+      pointer-events: auto;
+    }
+    /* Finished lines are invisible but still own their rows, so the empty space
+       above the current line is the click target for seeking back. Reveal the
+       stack as a faint ghost while one of those rows is hovered, and lift the
+       row under the pointer a little more so the target is obvious.
+
+       The reveal is driven by .ym-sl-sung-hover on the scroll container, set by
+       a delegated pointerover listener, NOT by :has(.line.Sung:hover) on that
+       container. The :has() form re-validated the entire lyric subtree every
+       time ANY descendant changed style - and the karaoke writes ~11 word
+       styles per frame - so the panel paid a full subtree invalidation per
+       frame. Measured: 11.8ms/frame with :has(), 5.9ms/frame with this class
+       (74 -> 132 fps). Do not reintroduce :has() here. */
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .LyricsContent.ym-sl-sung-hover:not(.ym-sl-lines-all-sung)
+      .line.Sung:not(.static, .musical-line) {
+      opacity: .32;
+      visibility: visible;
+      /* Hover feedback should be immediate; the fade back out keeps the
+         lyric's slower 0.4s timing. Durations follow the transition list
+         above; visibility itself is instant. */
+      transition-duration: .18s, .4s, 0s;
+      transition-delay: 0s;
+    }
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .LyricsContent.ym-sl-sung-hover:not(.ym-sl-lines-all-sung)
+      .line.Sung:not(.static, .musical-line):hover {
+      opacity: .6;
+    }
+    /* When every line is sung there is no next line to fade into. Show the
+       finished lyric again at its normal dimmed state instead of leaving the
+       panel empty for the outro, matching Spicy's LinesAllSung behaviour. */
+    body.ym-sl-fade-previous-lines
+      #ym-sl-panel.SpicyRenderer
+      .LyricsContent.ym-sl-lines-all-sung
+      .line.Sung:not(.static, .musical-line) {
+      opacity: 1;
+      scale: 1;
+      visibility: visible;
+      transition-delay: 0s;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      body.ym-sl-fade-previous-lines
+        #ym-sl-panel.SpicyRenderer
+        .line:not(.static, .musical-line) {
+        transition: none !important;
+      }
+      body.ym-sl-fade-previous-lines
+        #ym-sl-panel.SpicyRenderer
+        .line.Sung:not(.static, .musical-line) {
+        scale: 1;
+      }
+    }
     /* WordSung keeps the gradient-clip from the base rule; no solid-fill
        override, so weight stays consistent with the active line. */
     /* WordNotSung keeps the gradient-clip from the base rule; no solid-fill
@@ -7888,7 +8039,7 @@
          declares background-image drags that property into the class-toggle
          invalidation set, and re-rasterising a clipped gradient at the instant
          the state class flips is what painted the glyphs black for a frame.
-         (AJ: "when a new word plays the last word gets dimmer" - the bg-word
+         (when a new word plays the last word gets dimmer - the bg-word
          flicker.) Only custom properties are set here: the per-frame sweep
          already animates those without glitching. */
       --gradient-position: -20%;
@@ -7951,7 +8102,9 @@
       --ym-sl-line-alpha: 1 !important;
       cursor: default;
       margin: 0;
-      padding: 0 0.9em;
+      /* Match the lyric text edge. The old 0.9em side padding pushed the dots
+         ~41px inward from the words they sit between. */
+      padding: 0 !important;
       display: grid;
       grid-template-rows: 0fr;
       opacity: 0;
@@ -7961,22 +8114,52 @@
       grid-template-rows: 1fr;
       opacity: 1;
     }
+    /* The dots take 420ms to bounce and shrink, and the next lyric starts
+       500ms after this state begins. Hold the row open through the bounce-in,
+       then collapse it with the shrink; previously it collapsed immediately,
+       so the lyrics below rose while the dots were still growing. */
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out {
+      grid-template-rows: 0fr;
+      opacity: 0;
+      transition:
+        grid-template-rows .25s cubic-bezier(.55, 0, .9, .5) .17s,
+        opacity .25s ease .17s;
+    }
     #ym-sl-panel.SpicyRenderer .line.musical-line .dotGroup {
       --dot-gap: clamp(.05px, 1.7cqw, 1.8px);
       display: flex;
       flex-direction: row;
       gap: var(--dot-gap);
-      padding: 0.45em 0.2em;
+      /* Shrink the group to the three dots instead of stretching it across the
+         whole line. The exit animation scales the group around its own centre;
+         on a stretched group that centre sat far to the right of the dots, so
+         they slid sideways while zooming. */
+      width: max-content;
+      max-width: 100%;
+      /* Idle dot rows take no vertical space. The dots' breathing room lives on
+         .dot below, so this box has no padding that would impose a minimum
+         height when the row collapses. */
+      padding: 0;
       min-height: 0;
       overflow: hidden;
+      /* Keep the cluster centred while the row collapses around it. */
+      align-self: center;
     }
-    #ym-sl-panel.SpicyRenderer .line.musical-line.playing .dotGroup,
-    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+    #ym-sl-panel.SpicyRenderer .line.musical-line.OppositeAligned .dotGroup {
+      margin-left: auto;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.playing .dotGroup {
       overflow: visible;
     }
     #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
-      /* The WHOLE GROUP scales, keeping the dots' spacing -- AJ: "not the
-         individual dots but the group's scale goes down" (2026-10-02). A small
+      overflow: visible;
+      /* No padding here: at 0fr the padding would be a minimum row height and
+         leave an 18px gap under the lyrics after the dots are gone. */
+      padding: 0;
+    }
+    #ym-sl-panel.SpicyRenderer .line.musical-line.bounce-out .dotGroup {
+      /* The WHOLE GROUP scales, keeping the dots' spacing --: "not the
+         individual dots but the group's scale goes down". A small
          bounce-in first, then the group shrinks toward 40% and the line leaves
          with the scroll. Origin pinned centre so the cluster shrinks toward its
          own middle instead of an edge. */
@@ -7992,6 +8175,12 @@
       --font-size: calc(var(--DefaultLyricsSize) * 1.3);
       --opacity-size: .35;
       display: inline-block;
+      /* The old 0.2em vertical padding lived on .dotGroup. There it stayed a
+         minimum row height even at 0fr, leaving an 18px gap after the exit; on
+         the dot itself it is inside the group content, so the 0fr row can still
+         collapse to nothing. .154em of the dot's 1.3x font is the same ~9px
+         band the line-sized 0.2em produced. */
+      padding-block: .154em;
       min-width: .35ch;
       border-radius: 50%;
       scale: .75;
@@ -8041,8 +8230,7 @@
       text-align: left;
       /* Credits are chrome, not lyrics: use the add-ons panel face even though
          the footer sits inside .LyricsContent (which carries the custom lyric
-         font). Covers Written by / Provided by / Uploaded by / Made by
-         (AJ, 2026-10-20). */
+         font). Covers Written by / Provided by / Uploaded by / Made by. */
       font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont,
         "Segoe UI", Roboto, sans-serif;
     }
@@ -8128,7 +8316,7 @@
       min-width: 0;
       font-size: 14px;
     }
-    /* Pill styling lives on the link itself (AJ, 2026-09-28 v8: v7's clip wrapper
+    /* Pill styling lives on the link itself (v8: v7's clip wrapper
        caused the conic to fill the pill interior; reverting to the direct link). */
     #ym-sl-panel.SpicyRenderer .ym-sl-uploader-link {
       pointer-events: auto;
@@ -8191,7 +8379,7 @@
       font-size: 14px;
       color: rgba(255,255,255,.67);
       /* Same add-ons face as the rail: the custom lyric font is for the lyrics
-         themselves, not attribution (AJ, 2026-10-20). */
+         themselves, not attribution. */
       font-family: "Satoshi", Avenir, -apple-system, BlinkMacSystemFont,
         "Segoe UI", Roboto, sans-serif;
     }
@@ -8883,7 +9071,7 @@
       line-height: 1.4;
       color: rgba(255, 255, 255, .62);
     }
-    /* Compact credit rail (AJ, 2026-11-15). The wide rail is built around a
+    /* Compact credit rail. The wide rail is built around a
        roomy pane: 64px people avatars, a 72px Apple mark, and a provider pinned
        to the right. On a small monitor the lyric pane is narrower than those
        pieces, so the credits collide and the card wraps mid-credit. The query
@@ -9212,15 +9400,14 @@
        opacity as the other (unselected) tabs. */
     /* Colour-only dimming with opacity pinned to 1: our cloned tab nests a
        SECOND .tab-content, so an opacity here stacked with itself (0.8 x 0.8 =
-       0.64) and made SYNCED read darker than the native tabs (AJ, 2026-09-28,
-       verified with the browser bridge). The native unselected label is
+       0.64) and made SYNCED read darker than the native tabs(verified with the browser bridge). The native unselected label is
        rgba(255,255,255,.7) at opacity .8, i.e. an effective 0.56 white — bake
        that into the colour and leave opacity alone so it cannot stack. */
     tp-yt-paper-tab.ym-sl-tab .tab-content {
       color: rgba(255,255,255,.56) !important;
       opacity: 1 !important;
     }
-    /* Selected-state parity (AJ, 2026-09-28). Verified live with the browser
+    /* Selected-state parity. Verified live with the browser
        bridge: YTM marks the selected tab with the class iron-selected and its
        label renders rgb(255,255,255) / opacity 1, while unselected labels are
        rgba(255,255,255,.7) / .8. Clicking SYNCED does NOT move that native
@@ -9249,7 +9436,7 @@
     /* The bar ships with NO CSS transition of its own (verified live: computed
        transition-duration 0s, animation-name none — YTM drives it in JS), so a
        transform WE set would snap while the native tabs glide. Give it one so
-       the SYNCED underline animates the same way (AJ, 2026-09-28). This cannot
+       the SYNCED underline animates the same way. This cannot
        disturb the native tabs: YTM's own animation takes precedence over a CSS
        transition. */
     tp-yt-paper-tabs #selectionBar {
@@ -9259,7 +9446,7 @@
        1px white border-bottom is moved + resized onto the selected tab via
        transform: translateX(%) scaleX(fraction) (verified live with the browser
        bridge). We used to hide it and draw a per-tab ::after instead, but that
-       animated as a centre-out scaleX "zoom" (AJ, 2026-09-28). We now keep the
+       animated as a centre-out scaleX "zoom". We now keep the
        real bar and drive it from JS (syncSelectionBar), so the underline moves
        exactly like a native tab switch — same element, same transition. */
     tp-yt-paper-tabs.ym-sl-custom-active
@@ -9285,7 +9472,7 @@
        side and video-background layouts. It is removed; only the lyrics scroll
        clearance that genuinely still applies is kept. */
 
-    /* ===== STATIC SIDE STACK (AJ, 2026-10-20) =============================
+    /* ===== STATIC SIDE STACK =============================
        Every control position is a fixed length. This block used to re-anchor the
        title, chip and scrubber to --ym-sl-fs-band-top (measured from the media's
        live rect and transitioned over .35s), which is what made the controls
@@ -9295,10 +9482,10 @@
        system is simply gone. Animations are rebuilt from this base. */
 
     /* ===== side: transport chip + scrubber never hide ========
-       AJ wants the transport chip and the scrubber permanently visible in the
+        wants the transport chip and the scrubber permanently visible in the
        video-left / lyrics-right (side) layout instead of fading in on hover
-       (2026-09-28), and extended that to Lyrics Only (2026-09-28). The EXIT +
-       LAYOUT controls DO hide on idle in every layout now (2026-10-02 — see the
+       and the same applies to Lyrics Only. The EXIT +
+       LAYOUT controls DO hide on idle in every layout now (see the
        .ym-sl-fs-idle controls rule above). The MOUSE still hides on idle in
        EVERY layout (see the .ym-sl-fs-idle cursor rule above). Placed last in
        the block so it also wins over the .ym-sl-fs-idle rules, which carry the
@@ -9313,7 +9500,7 @@
       pointer-events: auto;
     }
 
-    /* ===== PORTRAIT SIDE LAYOUT (AJ, 2026-10-21) =========================
+    /* ===== PORTRAIT SIDE LAYOUT =========================
        The side composition assumes the artwork is SHORTER than the column it
        sits in. That holds at 16:9 and stops holding on a tall window: the art
        is sized min(50%, 54vh), so past roughly 0.78 the art grows wider than
@@ -9526,7 +9713,7 @@
       }
     }
 
-    /* ===== media-mode swap: NO CROSSFADE (AJ, 2026-10-20) ==================
+    /* ===== media-mode swap: NO CROSSFADE ==================
        The .ym-sl-fs-swapping class and its two rules (title filter fade +
        player-controls opacity fade) are REMOVED. syncFsVideoMode() no longer
        hides the pane either, so a cover <-> music-video switch is a hard cut:
@@ -9536,7 +9723,7 @@
 
     /* NOTE: the page-wide YouTube font swap now lives in content/styles.css
        (html.ym-yt-font) and is driven by the panel's own YouTube page, so it no
-       longer depends on this add-on running at all (AJ, 2026-10-22). */
+       longer depends on this add-on running at all. */
 
     /* ===== PiP control surface ==========================================
        While the lyrics float in a Document Picture-in-Picture window, the
@@ -9869,6 +10056,13 @@
         opacity .25s ease,
         left .45s cubic-bezier(.22, .61, .36, 1);
     }
+    /* A side swap is not a layout move: the shade must go, not travel. The
+       left transition armed above for the layout switches is taken back here,
+       or the flip at 240ms dragged a half-faded black band across the picture
+       instead of the band simply being gone. */
+    .ym-sl-fs-overlay.ym-sl-fs-flipping:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background) .ym-sl-fs-lyrics-shade {
+      transition: opacity .22s ease;
+    }
     /* The readability shade is LIGHT, not an object: it does not slide, drop,
        stretch or pop. It fades out where it is, waits for the columns to
        finish crossing, and only then fades back in on its new side - the move
@@ -10165,7 +10359,7 @@
       }
     }
 
-    /* ===== HITS (AJ, 2026-11-09) ===========================================
+    /* ===== HITS ===========================================
        The default fullscreen composition: a centred header with the artwork,
        title, metadata chips and the song actions, then the lyrics in the same
        centred column beneath it. The header owns the top of the screen; its
@@ -10251,6 +10445,7 @@
       gap: clamp(16px, 2vw, 28px);
     }
     .ym-sl-fs-hits-artwrap {
+      position: relative;
       flex: 0 0 auto;
       width: clamp(92px, 10.5vw, 148px);
       aspect-ratio: 1;
@@ -10266,6 +10461,54 @@
       width: 100%;
       height: 100%;
       object-fit: cover;
+    }
+    /* Hits: the artwork's hover cluster moves onto the header card. Only the
+       two layout affordances — swap the columns, and the stage. */
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap > .ym-sl-fs-art-ui {
+      display: flex;
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 4px;
+      padding: 5px;
+      box-sizing: border-box;
+      background: transparent;
+      opacity: 0;
+      transition: opacity .16s ease;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap:hover > .ym-sl-fs-art-ui,
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap > .ym-sl-fs-art-ui:focus-within {
+      opacity: 1;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+      position: static;
+      flex: none;
+      width: 26px;
+      height: 26px;
+      min-width: 26px;
+      transform: none;
+      opacity: 1;
+      visibility: visible;
+      transition-delay: 0s;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap > .ym-sl-fs-art-ui .ym-sl-fs-art-swap-icon {
+      width: 15px;
+      height: 15px;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-hits-artwrap > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
+      display: none;
+    }
+    /* Animated cover inside the Hits card (the add-on reparents its one host
+       between this card, the stage pane and the page square). */
+    .ym-sl-fs-hits-artwrap > .ym-aa-host {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      z-index: 1;
     }
     .ym-sl-fs-hits-meta {
       flex: 1 1 auto;
@@ -10862,8 +11105,7 @@
       /* No reserved bottom band: the dock lives in the header flow (or the
          left column for MV), so the column runs all the way to the screen
          edge and only the top mask fades. The old 52px inset + 48px padding
-         stacked into ~100px of dead air that read as clipped lyrics
-         (AJ, 2026-11-10). */
+         stacked into ~100px of dead air that read as clipped lyrics. */
       bottom: 0 !important;
       /* The base pane is height:100%; with top+bottom set, that height would
          beat the insets and stop the column ending cleanly at the bottom. */
@@ -10878,7 +11120,7 @@
       /* The column starts directly under the header and runs to the bottom
          edge. Only the top fades into the backdrop: the old bottom fade began
          ~30px above the edge and read as lyrics being cut off too early
-         (AJ, 2026-11-10). Lines now stay lit all the way to the screen edge. */
+. Lines now stay lit all the way to the screen edge. */
       -webkit-mask-image: linear-gradient(to bottom,
         transparent 0,
         rgba(0, 0, 0, .35) clamp(14px, 4vh, 34px),
@@ -10892,7 +11134,7 @@
     /* The general fullscreen scrollport carries its own mask that fades the
        bottom 18% to transparent. Hits already runs to the screen edge, so that
        inner fade made the last lines dissolve well above the bottom and read
-       as clipped (AJ, 2026-11-10). The pane's top-only mask above is the one
+       as clipped. The pane's top-only mask above is the one
        fade Hits keeps; suppress the inner one here. */
     .ym-sl-fs-overlay.ym-sl-fs-mode-hits .ym-sl-fs-lyrics .LyricsContent {
       -webkit-mask-image: none !important;
@@ -12063,6 +12305,249 @@
       .ym-sl-op-close:active { transform: none; }
     }
 
+    /* ---- stage layout (07-fullscreen-layout) -----------------------------
+       Cover art stops being a card: it fills the overlay's full height on its
+       side and dissolves into the Kawarp behind it. COVER ART ONLY — every rule
+       is gated on :not(.ym-sl-fs-has-video), so a music video keeps its own
+       layout and its saved side untouched.
+
+       The blend is a MASK, not a fade to transparent, and it uses eased stops
+       (Spicy's recipe): a straight ramp leaves a visible line where the picture
+       reaches full strength. One mask per element, so the side feather lives on
+       the pane and the top feather on the picture itself. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-media {
+      left: 0;
+      right: auto;
+      top: 0;
+      bottom: 0;
+      width: 52vw;
+      height: 100%;
+      max-height: none;
+      border-radius: 0;
+      -webkit-mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+      mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+    }
+    /* Cover on the right: mirror the feather.
+       The pane is moved with left (52vw wide at 48vw = the right edge), NOT
+       with right:0 / left:auto. 'auto' has nothing to interpolate from, so the
+       side switch snapped the artwork across the screen instead of gliding it
+       - the stage's own feather then had to jump with it. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-media {
+      left: 48vw;
+      right: auto;
+      -webkit-mask-image: linear-gradient(to left, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+      mask-image: linear-gradient(to left, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+    }
+    /* The picture fills the pane, with a top feather so it rises out of the
+       backdrop instead of starting on a hard edge. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art,
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-aa-host {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border-radius: 0;
+      object-fit: cover;
+      object-position: 50% 50%;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,.28) 9%, #000 18%);
+      mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,.28) 9%, #000 18%);
+    }
+    /* Stage: the buttons are part of the composition, always on top of the
+       picture. A full-height artwork has no hover margin at its top edge —
+       moving the pointer up to the buttons crossed the boundary, :hover ended
+       and the cluster vanished mid-click. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+      transition:
+        opacity .4s ease,
+        background .15s ease,
+        border-color .15s ease;
+    }
+    /* Idle (the existing "pointer stopped" state that already hides the queue and
+       the chrome): the buttons stay put but recede, and any movement brings them
+       back on the same .4s curve. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-idle .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap {
+      opacity: .28;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-idle .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap:hover,
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-idle .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap:focus-visible {
+      opacity: 1;
+    }
+    /* The hover cluster follows the picture, anchored to its top-left corner so
+       the two layout buttons sit where the eye starts reading the artwork. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      align-items: flex-start;
+      justify-content: flex-start;
+      gap: 6px;
+      padding: 10px 0 0 10px;
+      box-sizing: border-box;
+    }
+    /* Next up sits in the bottom-right corner in stage as well. It used to be
+       parked under the top-right chrome, which put it in the middle of the
+       lyrics column on a wide pane; the bottom corner is empty in every stage
+       composition (the dock owns bottom-left, mirrored chrome the left edge). */
+    .ym-sl-fs-overlay.ym-sl-fs-stage .ym-sl-fs-nextup {
+      left: auto;
+      right: 22px;
+      top: auto;
+      bottom: 22px;
+    }
+    /* Cover on the right: the chrome moves to the free (lyrics) side. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-cover-left .ym-sl-fs-controls {
+      left: max(18px, env(safe-area-inset-left, 0px));
+      right: auto;
+    }
+    /* Mirror image: the cluster follows the picture to its outer edge (screen
+       right) instead of hugging the pane's left edge, which put it mid-screen
+       under the lyrics column. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      justify-content: flex-end;
+      padding-left: 0;
+      padding-right: 10px;
+    }
+    .ym-sl-fs-stage-frame {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.6;
+    }
+    .ym-sl-fs-stage-fade { fill: currentColor; }
+    .ym-sl-fs-stage-toggle.is-on { color: #fff; }
+    /* Readability veil over the picture, UNDER the hover cluster: a black wash
+       at low alpha, not a per-frame brightness filter, so the video/artwork
+       keeps its own colour and only the region behind the words darkens. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-media::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+      background: linear-gradient(to right, rgba(0,0,0,.20) 0%, rgba(0,0,0,.34) 48%, rgba(0,0,0,.12) 100%);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video) .ym-sl-fs-media::after {
+      background: linear-gradient(to left, rgba(0,0,0,.20) 0%, rgba(0,0,0,.34) 48%, rgba(0,0,0,.12) 100%);
+    }
+    /* Layer order: picture, animated cover, outgoing ghost, veil, buttons. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art { z-index: 0; }
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-aa-host { z-index: 1; }
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ghost {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      width: 100%;
+      height: 100%;
+      border-radius: 0;
+      object-fit: cover;
+      object-position: 50% 50%;
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity .4s ease;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,.28) 9%, #000 18%);
+      mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,.28) 9%, #000 18%);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ghost.is-out { opacity: 0; }
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui { z-index: 4; }
+    /* Transport docks in the stage's bottom-left, the way Spicy stacks its dock
+       on the NowBar: title, scrubber, chip, volume reading bottom-up inside the
+       picture instead of spread across the full frame. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-player-controls {
+      top: auto;
+      bottom: clamp(16px, 3vh, 40px);
+      left: clamp(16px, 3vw, 44px);
+      right: auto;
+      width: min(44vw, 620px);
+      height: auto;
+    }
+    /* ---- stage + music video ------------------------------------------------
+       A video gets the same full-height stage, but never mirrors: the side
+       switch is artwork-only, so the pane is pinned left and the feather always
+       faces the lyrics. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media {
+      left: 0;
+      right: auto;
+      top: 0;
+      bottom: 0;
+      width: 52vw;
+      height: 100%;
+      border-radius: 0;
+      /* The video layout centres its pane with a transform; left in place it
+         shifted this one up by half its height (measured live: 998x880 at
+         y = -440), so only a band of picture showed at the top. Its
+         max-height: calc(100% - 200px) also stopped the pane 200px short of
+         the bottom (880 of 1080). Stage owns its geometry. */
+      transform: none;
+      translate: 0 0;
+      margin: 0;
+      max-height: none;
+      -webkit-mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+      mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
+    }
+    /* Same dock as the cover stage: bottom-left of the column, 620px wide
+       instead of the video layout's 960px spread bar. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-player-controls {
+      left: 38px;
+      right: auto;
+      top: auto;
+      bottom: 32px;
+      width: min(44vw, 620px);
+      max-width: calc(52vw - 76px);
+      height: auto;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > video {
+      border-radius: 0;
+      object-fit: cover !important;
+      object-position: 50% 40%;
+    }
+    /* Armed only while the stage toggle animates: the pane's corners are the
+       one part of that switch CSS can interpolate by itself (14px card -> 0).
+       Kept off the steady state so nothing repaints a radius on a timer. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage-anim .ym-sl-fs-media > video {
+      transition: border-radius .52s cubic-bezier(.22, .61, .36, 1);
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      background: linear-gradient(to right, rgba(0,0,0,.20) 0%, rgba(0,0,0,.34) 48%, rgba(0,0,0,.12) 100%);
+    }
+    /* Stage: the cluster is a hover target, not a scrim. The side layout dims
+       the cover while the pointer is on it; the stage's whole point is the
+       picture, so it stays at full brightness. */
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui,
+    .ym-sl-fs-overlay.ym-sl-fs-stage:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover,
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-flipping:not(.ym-sl-fs-has-video) .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      background: transparent;
+    }
+    /* A video's only hover control is the stage toggle: the side swap is
+       artwork-only, and the artwork like button lives on still art. */
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > .ym-sl-fs-art-ui {
+      display: flex;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      /* The pane's <video> is appended AFTER this cluster and carries its own
+         stacking, so without an explicit level the buttons were painted under
+         the picture — present in the DOM, invisible on screen. */
+      z-index: 4;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-swap:not(.ym-sl-fs-stage-toggle),
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-art-like {
+      display: none;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-has-video .ym-sl-fs-media > .ym-sl-fs-art-ui .ym-sl-fs-stage-toggle {
+      display: block;
+    }
+    .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-cover-left:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-player-controls {
+      left: auto;
+      right: clamp(16px, 3vw, 44px);
+    }
+
   `;
 
   /* Options lives beside the song-layout pill in the empty band above the two
@@ -12205,7 +12690,7 @@
     fontLinkEl.rel = "stylesheet";
     fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
     document.head.appendChild(fontLinkEl);
-    // Segmented control (AJ, 2026-10-19): a compact row of pill buttons for a small
+    // Segmented control: a compact row of pill buttons for a small
     // set of choices — cleaner than a dropdown for 2-3 options. Exposes `.value`
     // (getter) + `.setValue()` so callers that read `el.value` keep working.
     const buildSegmentedControl = (config) => {
@@ -12274,7 +12759,7 @@
 
     const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
     const videoOffsetLabel = h("span", { text: "Offset" });
-    // "Video vs Song" offset-scope picker removed (AJ, 2026-10-19):
+    // "Video vs Song" offset-scope picker removed:
     // recomputeActiveOffsetMode() already auto-switches the control between the
     // video/song slot by track type (music video vs audio-only), so the manual
     // override was redundant. The read-only .ym-sl-offset-applied badge still
@@ -12403,9 +12888,9 @@
     );
 
     // Options is a pill beside the song-layout switcher, in the empty band
-    // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
+    // above both panels. It used to be a hover-revealed row
     // across the panel's own top edge, which only appeared for people who
-    // already knew to sweep the pointer there — AJ's friend went looking and
+    // already knew to sweep the pointer there — went looking and
     // found nothing. Here it is always on screen, on the left of a control
     // that is also about the song view, and it cannot collide with the tab
     // labels or push them aside. content.js builds the container; see
@@ -12425,8 +12910,6 @@
     // containing block for fixed-position descendants and would trap + clip a
     // nested overlay (the panel also has overflow: hidden).
     const optionsOverlay = h("div", { class: "ym-sl-options-overlay ym-sl-op2 hidden" });
-    const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
-    const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
     const exportButton = h("button", {
       class: "ym-sl-import ym-sl-export-button",
@@ -12454,7 +12937,7 @@
     });
     deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
     optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
-    /* MV pause re-sync REMOVED entirely on AJ's call (2026-10-19): the section,
+    /* MV pause re-sync REMOVED entirely: the section,
        the "Set pause point" picker, its editor, and the pick banner are all gone
        from the panel. The low-level offset machinery in 12-track-offset-sync is
        left in place but dormant — nothing calls enterPausePickMode() now, and
@@ -12464,8 +12947,6 @@
     // for up to 30 days; this exposes an explicit purge so a stale or wrong
     // match can be cleared without nuking unrelated LRCLIB data. The community
     // store is separate, so both purge funcs must run here.
-    const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
-    const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
     const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics and Aurora Community results are cached for up to 30 days." });
     const cacheClear = h("button", {
@@ -12477,7 +12958,7 @@
     // The button wipes the cache instantly and irreversibly, so gate it behind an
     // explicit confirmation: clicking "Clear cache" reveals an "Are you sure?" row
     // with a RED delete action (trash icon) + a Cancel. The user expected a
-    // confirm step here and was surprised it fired immediately (AJ, 2026-10-19).
+    // confirm step here and was surprised it fired immediately.
     const cacheConfirm = h("div", { class: "ym-sl-cache-confirm hidden" });
     const cacheConfirmText = h("div", {
       class: "ym-sl-cache-confirm-text",
@@ -12553,7 +13034,7 @@
     });
     cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    // ---- Options body: ADAPTIVE SHELL (AJ, 2026-11-14) -------------------
+    // ---- Options body: ADAPTIVE SHELL -------------------
     // The add-ons panel's split, reused here: one rail, one scrolling pane,
     // and a single red marker that slides between rows. The old build stacked
     // absolutely positioned pages inside a height it measured itself; one missed
@@ -13071,6 +13552,8 @@
     lineScrollEl.addEventListener("touchmove", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("keydown", handleManualScrollKey);
+    lineScrollEl.addEventListener("pointerover", syncSungRowHover, { passive: true });
+    lineScrollEl.addEventListener("pointerleave", clearSungRowHover, { passive: true });
     applySettings(currentSettings);
     document.body.appendChild(panelEl);
     refreshTrack();
@@ -13084,6 +13567,30 @@
       wpObserver = new MutationObserver(onWatchMutations);
       wpObserver.observe(watchRoot, { childList: true, subtree: true });
     }
+  }
+
+  /* ---- fade-away previous lines: hover reveal ------------------------------
+     A finished row's glyphs are visibility:hidden, but its ::before hitbox is
+     deliberately visible, so the pointer still reports the .line as the event
+     target. One delegated listener sets a class on the scroll container; the
+     stylesheet keys the ghost stack off that class instead of off
+     :has(.line.Sung:hover), which re-validated the whole lyric subtree on every
+     descendant style change (i.e. every karaoke frame). */
+  function syncSungRowHover(event) {
+    if (!lineScrollEl) return;
+    const element = event.target instanceof Element ? event.target : null;
+    const line = element ? element.closest(".line") : null;
+    const revealing =
+      !!line &&
+      line.classList.contains("Sung") &&
+      !line.classList.contains("static") &&
+      !line.classList.contains("musical-line");
+    if (lineScrollEl.classList.contains("ym-sl-sung-hover") === revealing) return;
+    lineScrollEl.classList.toggle("ym-sl-sung-hover", revealing);
+  }
+
+  function clearSungRowHover() {
+    if (lineScrollEl) lineScrollEl.classList.remove("ym-sl-sung-hover");
   }
 
   function mountOptionsPill() {
@@ -13112,10 +13619,10 @@
     // NEVER fall back to a document-wide `document.querySelector("video")`.
     // While fullscreen is open, YTM's video has been reparented into
     // fsMediaHost — so both container selectors below stop matching, and that
-    // fallback picked up the FIRST <video> in the document instead. On AJ's
+    // fallback picked up the FIRST <video> in the document instead. On the
     // Chrome that is another extension's 720x960 element, which reports
     // videoWidth > 0, so findPlayerVideo() claimed "a video is live" forever
-    // (AJ, 2026-09-28; the trace caught vids[0] as a chrome-extension: source
+    // (the trace caught vids[0] as a chrome-extension: source
     // alongside our own pane node at 0x0).
     // Consequence of the false positive: syncFsVideoMode() never got past its
     // `liveVideo && hasAttached` early return, so the MV -> cover-art detach
@@ -13128,7 +13635,7 @@
     // #song-image, and the old loose selector picked that first because it had
     // 2160x2160 frames while YTM's own element stayed 0x0 on an audio track.
     // That put the square cover into the music-video layout and pushed the
-    // controls past the bottom of the screen (AJ, 2026-11-13).
+    // controls past the bottom of the screen.
     const saved = fsSavedVideo && fsSavedVideo.node;
     const video =
       (saved && saved.matches("video.html5-main-video") ? saved : null) ||
@@ -13267,7 +13774,7 @@
 
   // Map the on-screen lyric band to sample-canvas coordinates.
   // The <video> fills the overlay and paints with object-fit: cover (changed
-  // from contain on 2026-09-27 so the fullscreen MV pane no longer shows the
+  // from contain on so the fullscreen MV pane no longer shows the
   // two black letterbox bands). Cover means the frame OVERFLOWS the overlay
   // instead of being letterboxed, so the scale factor is max() rather than
   // min() and the horizontal offset is negative. Sampling the raw frame by
@@ -13388,10 +13895,6 @@
     }
   }
 
-  function formatFullscreenOffset(ms) {
-    const sign = ms > 0 ? "+" : "";
-    return sign + (ms / 1000).toFixed(1) + "s";
-  }
 
   // Paint the live <video> into the ambient backdrop canvas at ~1/6 overlay
   // resolution. The CSS blur on the canvas then smooths + scales it to fill
@@ -13429,7 +13932,7 @@
       const ar = v.videoWidth + " / " + v.videoHeight;
       if (fsOverlay.style.getPropertyValue("--ym-sl-fs-video-ar") !== ar) {
         fsOverlay.style.setProperty("--ym-sl-fs-video-ar", ar);
-        // ⭐ A plain NUMBER alongside the ratio (AJ, 2026-10-21). CSS can divide
+        // ⭐ A plain NUMBER alongside the ratio. CSS can divide
         // by a number but NOT by a "1920 / 960" token, so without this the chrome
         // could not be anchored to the video's bottom edge — it had to be
         // bottom-anchored to the viewport, which is why the gap under the video
@@ -13441,7 +13944,7 @@
             String(v.videoWidth / v.videoHeight)
           );
         }
-        // No re-measure here any more (AJ, 2026-10-20): the chrome positions are
+        // No re-measure here any more: the chrome positions are
         // fixed lengths, so a new aspect ratio only resizes the pane itself.
       }
     }
@@ -13458,7 +13961,7 @@
       // the result is deterministic. Blurring a ~320x180 backing store costs
       // almost nothing, and the upscale to fullscreen multiplies the radius:
       // 10px here renders as roughly 70px of blur on a 1080p overlay (turned
-      // down from 18px / ~130px at AJ's request — still clearly blurred but
+      // down from 18px / ~130px at the request — still clearly blurred but
       // less heavy). Brightness is now user-controlled: the "Music video
       // backdrop brightness" slider in AURORA BLOOM feeds
       // currentSettings.backdropBrightness (default 1.15), delivered
@@ -13762,6 +14265,51 @@
     return rect;
   }
 
+  /* ---- canvas-switch chrome FLIP ------------------------------------------
+     Stage puts the play chip and the scrubber in a dock inside the picture;
+     Video Background lays them out across the bottom of the screen. Both are
+     absolutely positioned in one composition and flow children in the other,
+     so the browser teleports them the instant the mode class flips - measured
+     before this existed: chip left 38 -> 960 and scrubber left 38 -> 0 on the
+     same frame, then both drifted while their dock resized underneath them.
+     Nothing about that is interpolable, so measure both homes and animate the
+     difference with the independent `translate` property (it composes with
+     whatever transform each button already carries) plus an opacity dip that
+     covers the box-size change. */
+  function captureFsChromeFlip() {
+    if (!fsOverlay) return null;
+    const targets = [
+      fsOverlay.querySelector(".ym-sl-fs-play-chip"),
+      fsOverlay.querySelector(".ym-sl-fs-scrubber"),
+      fsOverlay.querySelector(".ym-sl-fs-title"),
+    ].filter(Boolean);
+    if (!targets.length) return null;
+    return targets.map((el) => ({ el, rect: el.getBoundingClientRect() }));
+  }
+
+  function animateFsChromeFlip(start) {
+    for (const { el, rect } of start) {
+      if (!el.isConnected) continue;
+      const end = el.getBoundingClientRect();
+      // The title is hidden in Video Background (and a credit that is not on
+      // screen has no box): nothing to fly, and 0-size elements make a
+      // meaningless start frame.
+      if (!end.width || !end.height) continue;
+      const dx = rect.left - end.left;
+      const dy = rect.top - end.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+      try {
+        el.animate(
+          [
+            { translate: dx + "px " + dy + "px", opacity: .25 },
+            { translate: "0px 0px", opacity: 1 },
+          ],
+          { duration: 520, easing: "cubic-bezier(.22, .61, .36, 1)" }
+        );
+      } catch (_) {}
+    }
+  }
+
   function applyFullscreenLayout(mode, persist) {
     if (!fsOverlay) return;
     // A second switch can land while the card is still flying; finish/cancel
@@ -13789,7 +14337,7 @@
     // is measured from that header, so it is not an available composition while
     // the empty state is up. Coerce rather than merely hiding the option, so a
     // stored Hits choice or a click on the cycle button cannot land there
-    // (AJ, 2026-11-16). persist=false keeps the stored preference intact for
+    //. persist=false keeps the stored preference intact for
     // when lyrics return.
     if (!video && mode === "hits" && fsOverlay.classList.contains("ym-sl-fs-no-lyrics")) {
       mode = "side";
@@ -13804,6 +14352,9 @@
     const wasBackground = fsOverlay.classList.contains("ym-sl-fs-mode-background");
     const wasSide = fsLayoutApplied && !wasHits &&
       !fsOverlay.classList.contains("ym-sl-fs-mode-background") && !video;
+    // Video Background (the immersive canvas) is the one switch that moves the
+    // media from a side pane to full-bleed. Everything below is timed off it.
+    const backgroundSwitch = wasBackground !== (mode === "background");
     const reduceMotion = window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let hitsArtStart = null;
@@ -13851,7 +14402,14 @@
     // is the panel-only stutter in the Hits handoff. Snap the final geometry
     // once, then FLIP a compositor-only translate from the old box below.
     // AMLL is a canvas and keeps the existing full geometry transition.
-    if (!reduceMotion && (animateHitsToSide || animateSideToHits) &&
+    // The canvas switch moves the lyrics column too, and animating its WIDTH
+    // re-wraps and re-measures every DOM line on every frame - the stutter the
+    // Hits handoff already had to avoid. Snap the final geometry and FLIP a
+    // compositor-only translate instead (AMLL is a canvas, so it can keep the
+    // plain geometry transition).
+    if (!reduceMotion &&
+        (animateHitsToSide || animateSideToHits ||
+          (backgroundSwitch && (fsLayoutApplied || wasBackground))) &&
         fsLyricsHost && !document.body.classList.contains("amll-active")) {
       lyricsFlipStart = fsLyricsHost.getBoundingClientRect();
       fsOverlay.classList.add("ym-sl-fs-lyrics-flip");
@@ -13865,17 +14423,25 @@
       // No paint happens between this flush and the class flip below.
       void fsOverlay.offsetWidth;
     }
-    // Leaving Video Background is the asymmetric case: entry to the full-bleed
-    // video reads as a fill, but removing the class used to cut the video back
-    // to its side column in one frame. Arm the media host's geometry transition
-    // while it is still full-bleed, then flip the layout class below.
-    if (wasBackground && mode !== "background" && !reduceMotion) {
+    // Both directions of the Video Background switch slide. Leaving used to be
+    // the only one armed, so entering cut the media host straight to full-bleed
+    // in a single frame while exiting eased back. Arm the same geometry
+    // transition before the class flip either way.
+    const animateMediaLayout = backgroundSwitch && !reduceMotion &&
+      (fsLayoutApplied || wasBackground);
+    if (animateMediaLayout) {
       fsOverlay.classList.add("ym-sl-fs-media-layout-out");
       void fsOverlay.offsetWidth;
     }
+    // The chip and the scrubber live in a dock on the left of the stage and
+    // are absolutely positioned across the bottom in Video Background: two
+    // different homes, and nothing about moving between them is interpolable.
+    // Measure them here (before the class flip) so they can FLIP.
+    const chromeFlipStart = animateMediaLayout ? captureFsChromeFlip() : null;
     // The column's left/width are CSS-transitioned (no frost re-measure needed).
     fsOverlay.classList.toggle("ym-sl-fs-mode-background", fsLayoutMode === "background");
     fsOverlay.classList.toggle("ym-sl-fs-mode-hits", fsLayoutMode === "hits");
+    placeFsArtUi();
     if (lyricsFlipStart && fsLyricsHost) {
       // Hits positions the column from its measured header height. Make sure
       // that height exists before measuring the final lyrics box, or the FLIP
@@ -13896,6 +14462,15 @@
             ],
             { duration: 550, easing: "cubic-bezier(.22, .61, .36, 1)" }
           );
+          // The flip class turns the column's own transition off so the target
+          // geometry can snap before the transform animation starts. It has to
+          // come back OFF afterwards: left on, it would keep transition:none on
+          // the column for the rest of the session - including the canvas
+          // switch's own opacity fades. Idempotent if a later switch already
+          // cleaned it up.
+          fsLyricsFlipAnim.finished.then(() => {
+            if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-lyrics-flip");
+          }, () => {});
         } catch (_) {
           fsLyricsFlipAnim = null;
         }
@@ -13908,13 +14483,16 @@
     // Background and Video + Lyrics both keep the readability layer on.
     syncFullscreenLyricsShade();
     // The volume group's home and the edge buttons follow the composition, so
-    // re-home them once per layout switch (AJ, 2026-10-20). Positions themselves
+    // re-home them once per layout switch. Positions themselves
     // are static — this only moves the volume node between the chip and the
     // scrubber row, and re-pins the two edge buttons. Skip it during the reverse
     // handoff: Hits hides this chrome anyway, and pulling the title out of the
     // fading side column (or the volume into the scrubber) would rearrange it
     // visibly mid-flight.
     if (!animateSideToHits) syncFsChromeStructure();
+    // Runs AFTER the chrome re-homing, so the measured end rect is the one the
+    // switch actually settles on.
+    if (chromeFlipStart) animateFsChromeFlip(chromeFlipStart);
     // The Hits dock stays in the cover-art header flow; music videos never use
     // this composition, so there is no bottom-left placement any more.
     placeFsHitsDock();
@@ -13963,15 +14541,17 @@
       requestAnimationFrame(syncFsHitsGeometry);
     }
     fsLayoutApplied = true;
-    if (wasBackground && mode !== "background" && !reduceMotion) {
+    if (animateMediaLayout) {
+      // Outlives the .52s geometry transition (and the chrome FLIP it covers),
+      // so the class can never be pulled mid-animation.
       fsMediaLayoutAnimTimer = window.setTimeout(() => {
         fsMediaLayoutAnimTimer = 0;
         if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-media-layout-out");
-      }, 540);
+      }, 620);
     }
   }
 
-  /* ---- cover-art side (AJ, 2026-10-26) -----------------------------------
+  /* ---- cover-art side -----------------------------------
      The cover-art side layout has two mirror images, and the artwork's own
      hover surface is where the choice belongs: pointing at the cover dims it a
      touch and fades in ONE round button at its top edge. The button cycles -
@@ -14003,7 +14583,7 @@
   // Built once per fullscreen entry and parked inside the media host, so it
   // moves with the artwork for free — the hover box mirrors the cover's box
   // (see the art-ui rules in 05-styles).
-  // The artwork's like affordance (AJ, 2026-11-16). It used to be Spicy's
+  // The artwork's like affordance. It used to be Spicy's
   // heart; it is a thumbs-up now, drawn in the same stroke language as the rest
   // of the fullscreen icons - one silhouette path in a 24-unit box with round
   // caps and joins - instead of a stack of 1000-unit ellipses.
@@ -14027,7 +14607,7 @@
     // than the heart it replaced — that glyph filled its box edge to edge.
     // Scaling the groups about the centre brings it up to the same presence
     // without touching the geometry; the stroke is divided by the same factor
-    // so its optical weight stays put (AJ, 2026-11-16).
+    // so its optical weight stays put.
     const ART_THUMB_SCALE = 1.35;
     const ART_THUMB_TRANSFORM =
       "translate(12 12) scale(" + ART_THUMB_SCALE + ") translate(-12 -12)";
@@ -14053,6 +14633,182 @@
     fill.appendChild(solid);
     svg.appendChild(fill);
     return svg;
+  }
+
+  /* ---- stage layout -------------------------------------------------------
+     The cover stops being a card: it runs the full height of the overlay on its
+     side and feathers into the Kawarp backdrop, the way Spicy's canvas stage
+     does. COVER ART ONLY — a music video owns its own layout and its own side,
+     so every CSS rule for this is gated on :not(.ym-sl-fs-has-video) and the
+     class is simply ignored while a video is attached. */
+  const FS_STAGE_KEY = "aurora.fs.stage";
+  let fsStage = false;
+  let fsStageBtn = null;
+
+  function readStoredFsStage() {
+    try {
+      return localStorage.getItem(FS_STAGE_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /* The stage toggle is the biggest geometry change in fullscreen: the pane
+     goes from a centred 16:9 card (measured live: 38,216 960x540) to a
+     full-height left column (0,0 998x1080), and the dock's chip, scrubber and
+     title all move with it. None of that is interpolable in CSS - one side is
+     height:auto + aspect-ratio + translateY(-50%), the other height:100% +
+     top:0 + a feathered mask - so the pane is tweened in explicit px and the
+     chrome rides a FLIP. The lyrics column and the shade do NOT move (both
+     measured identical in and out of stage), so nothing else is touched. */
+  const FS_STAGE_ANIM_MS = 520;
+
+  function applyFsStage(on, persist) {
+    const next = !!on;
+    const animate = next !== fsStage && !!fsOverlay && fsLayoutApplied &&
+      !!fsMediaHost &&
+      !(window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const mediaStart = animate ? fsMediaHost.getBoundingClientRect() : null;
+    const chromeStart = animate ? captureFsChromeFlip() : null;
+    fsStage = next;
+    if (fsOverlay) fsOverlay.classList.toggle("ym-sl-fs-stage", fsStage);
+    if (persist) {
+      try {
+        localStorage.setItem(FS_STAGE_KEY, fsStage ? "1" : "0");
+      } catch (_) {}
+    }
+    if (fsStageBtn) {
+      fsStageBtn.setAttribute("aria-pressed", fsStage ? "true" : "false");
+      fsStageBtn.classList.toggle("is-on", fsStage);
+    }
+    if (!mediaStart) return;
+    // The pane's corner radius is the one piece CSS can animate on its own; it
+    // lives on the <video>, so arm it for the length of the switch.
+    fsOverlay.classList.add("ym-sl-fs-stage-anim");
+    if (fsStageAnimTimer) window.clearTimeout(fsStageAnimTimer);
+    fsStageAnimTimer = window.setTimeout(() => {
+      fsStageAnimTimer = 0;
+      if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-stage-anim");
+    }, FS_STAGE_ANIM_MS + 100);
+    void fsOverlay.offsetWidth;
+    animateFsMediaGeometry(mediaStart, FS_STAGE_ANIM_MS);
+    if (chromeStart) animateFsChromeFlip(chromeStart);
+  }
+
+  let fsStageAnimTimer = 0;
+
+  const FS_MEDIA_ANIM_PROPS = [
+    "left", "top", "right", "bottom", "width", "height", "max-height",
+    "transform", "translate",
+  ];
+
+  /* Tween the media host's box between two measured rects, then hand the box
+     straight back to CSS. Inline geometry is set to the FINAL rect first (so a
+     cancelled or interrupted run can never leave the pane mid-flight), and the
+     two things that move it without changing its box - the -50% centring
+     transform and the stage's zero translate - are pinned for the duration.
+     On finish every property we touched is put back exactly as it was; other
+     inline styles on the host (opacity, from the video-mode dissolve) are left
+     alone. */
+  function animateFsMediaGeometry(startRect, duration) {
+    if (!fsMediaHost || !startRect || !startRect.width || !startRect.height) return;
+    const el = fsMediaHost;
+    const end = el.getBoundingClientRect();
+    if (!end.width || !end.height) return;
+    const moved = Math.abs(end.left - startRect.left) > 0.5 ||
+      Math.abs(end.top - startRect.top) > 0.5 ||
+      Math.abs(end.width - startRect.width) > 0.5 ||
+      Math.abs(end.height - startRect.height) > 0.5;
+    if (!moved) return;
+    const saved = {};
+    for (const prop of FS_MEDIA_ANIM_PROPS) {
+      saved[prop] = [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
+    }
+    // NOT "important": an important inline declaration outranks a WAAPI
+    // animation, so the pane snapped straight to the end box and the tween was
+    // invisible (measured: every sampled frame already at 38,216 960x540).
+    // Inline beats the stylesheet anyway - none of these geometry rules use
+    // !important - and the animation outranks inline.
+    el.style.setProperty("right", "auto");
+    el.style.setProperty("bottom", "auto");
+    el.style.setProperty("max-height", "none");
+    el.style.setProperty("transform", "none");
+    el.style.setProperty("translate", "0px 0px");
+    el.style.setProperty("left", end.left + "px");
+    el.style.setProperty("top", end.top + "px");
+    el.style.setProperty("width", end.width + "px");
+    el.style.setProperty("height", end.height + "px");
+    let anim = null;
+    try {
+      anim = el.animate(
+        [
+          {
+            left: startRect.left + "px", top: startRect.top + "px",
+            width: startRect.width + "px", height: startRect.height + "px",
+          },
+          {
+            left: end.left + "px", top: end.top + "px",
+            width: end.width + "px", height: end.height + "px",
+          },
+        ],
+        { duration, easing: "cubic-bezier(.22, .61, .36, 1)", fill: "both" }
+      );
+    } catch (_) {
+      anim = null;
+    }
+    const restore = () => {
+      if (anim) { try { anim.cancel(); } catch (_) {} }
+      for (const prop of FS_MEDIA_ANIM_PROPS) {
+        const pair = saved[prop];
+        if (pair[0]) el.style.setProperty(prop, pair[0], pair[1]);
+        else el.style.removeProperty(prop);
+      }
+    };
+    if (anim) anim.finished.then(restore, restore);
+    else restore();
+  }
+
+  // Frame with a feathered edge: three bars losing strength, so the glyph reads
+  // as "picture dissolving into the backdrop" rather than a generic rectangle.
+  function fsStageIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ym-sl-fs-art-swap-icon ym-sl-fs-stage-icon");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const frame = document.createElementNS(NS, "rect");
+    frame.setAttribute("x", "2.5");
+    frame.setAttribute("y", "4.5");
+    frame.setAttribute("width", "19");
+    frame.setAttribute("height", "15");
+    frame.setAttribute("rx", "3");
+    frame.setAttribute("class", "ym-sl-fs-stage-frame");
+    svg.appendChild(frame);
+    [[9.5, 1], [13.25, 0.6], [17, 0.28]].forEach((pair) => {
+      const bar = document.createElementNS(NS, "rect");
+      bar.setAttribute("x", String(pair[0]));
+      bar.setAttribute("y", "4.5");
+      bar.setAttribute("width", "3.5");
+      bar.setAttribute("height", "15");
+      bar.setAttribute("opacity", String(pair[1]));
+      bar.setAttribute("class", "ym-sl-fs-stage-fade");
+      svg.appendChild(bar);
+    });
+    return svg;
+  }
+
+  // Hits draws the cover in its own header card, so the artwork's hover
+  // cluster has to move there with it — otherwise the card stayed a static
+  // thumbnail while the side layout had both affordances.
+  function placeFsArtUi() {
+    if (!fsCoverSwitch || !fsOverlay || !fsMediaHost) return;
+    const ui = fsCoverSwitch.ui;
+    const card = fsOverlay.querySelector(".ym-sl-fs-hits-artwrap");
+    const hits = fsOverlay.classList.contains("ym-sl-fs-mode-hits") && card;
+    const parent = hits ? card : fsMediaHost;
+    if (ui.parentElement !== parent) parent.appendChild(ui);
   }
 
   function buildFsCoverSwitch() {
@@ -14089,9 +14845,16 @@
       // click is a layout choice, never a play/seek.
       ev.preventDefault();
       ev.stopPropagation();
-      applyFsCoverSide(fsCoverSide === "left" ? "right" : "left", true);
+      const nextSide = fsCoverSide === "left" ? "right" : "left";
+      // Hits has no side to swap: the cover is its header. A swap asked for
+      // from there means "show me the split layout, with the words on this
+      // side", so leave Hits first — otherwise the click would look inert.
+      if (fsOverlay && fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+        applyFullscreenLayout("side", true);
+      }
+      applyFsCoverSide(nextSide, true);
     });
-    // The cover layout's like affordance (AJ, 2026-10-30). Unlike the edge
+    // The cover layout's like affordance. Unlike the edge
     // thumbs, this belongs to the ARTWORK, so it is hidden with the rest of
     // the hover surface for music videos and portrait.
     const like = h("button", {
@@ -14116,19 +14879,47 @@
       window.setTimeout(() => like.classList.remove("is-press", "is-release"), 160);
       clickFsRating("like");
     });
-    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, like);
+    // Stage toggle: turns the cover into a full-height panel that feathers into
+    // the backdrop. Lives with the other hover affordances on the artwork.
+    const stageBtn = h("button", {
+      type: "button",
+      class: "ym-sl-fs-art-swap ym-sl-fs-stage-toggle",
+      "aria-pressed": fsStage ? "true" : "false",
+      title: "Stage layout",
+      "aria-label": "Stage layout",
+    }, fsStageIcon());
+    fsStageBtn = stageBtn;
+    stageBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const turningOn = !fsStage;
+      applyFsStage(turningOn, true);
+      // Stage is a side-layout composition; from Hits it has to leave the
+      // header behind or the toggle would flip state with nothing on screen.
+      if (turningOn && fsOverlay && fsOverlay.classList.contains("ym-sl-fs-mode-hits")) {
+        applyFullscreenLayout("side", true);
+      }
+    });
+    const ui = h("div", { class: "ym-sl-fs-art-ui" }, btn, stageBtn, like);
     fsMediaHost.appendChild(ui);
-    fsCoverSwitch = { ui, btn };
+    fsCoverSwitch = { ui, btn, stageBtn };
     syncFsCoverSwitch();
+    placeFsArtUi();
     applyFsRatingToButtons(getCurrentFsVideoId());
+    // Restore the saved choice before the first paint.
+    applyFsStage(readStoredFsStage(), false);
   }
 
   // The shade changes sides on its OWN clock, after it has faded out. Flipping
   // it with the layout would move the gradient's dark end to the panel's other
   // edge on the first frame - at 44% of the screen, i.e. the middle - while the
   // panel is still opaque, which reads as the shadow jumping to the centre
-  // before it disappears. 120ms is just past the 96ms fade-out.
-  const FS_SHADE_SIDE_DELAY_MS = 120;
+  // before it disappears. 120ms was meant to be "just past the 96ms fade-out",
+  // but measured live the fade still sits at 0.66 opacity at 120ms and only
+  // reaches 0 around 150ms - so the flip was teleporting a two-thirds visible
+  // band to the other half of the screen. 240ms clears the real fade with room
+  // for the frame budget.
+  const FS_SHADE_SIDE_DELAY_MS = 240;
   function setFsShadeSide(side) {
     if (fsLyricsShade) fsLyricsShade.classList.toggle("ym-sl-fs-shade-left", side === "left");
   }
@@ -14297,7 +15088,7 @@
   // This used to key off `document.activeElement !== fsPlayerSeekRange`, but a
   // range KEEPS focus after a click, so the guard never lifted: the thumb froze
   // wherever it was clicked while --slider-fill (written outside the guard)
-  // kept advancing underneath it. Exactly AJ's 2026-09-28 report - "the dot
+  // kept advancing underneath it. Exactly the report - "the dot
   // just stays there and doesnt follow the fill".
   //
   // The timestamp alone is not enough: holding the pointer still for longer
@@ -14356,7 +15147,7 @@
   }
 
   // Where the spinner belongs. It is armed by the lyrics skeleton, so while it
-  // is showing the LYRICS are still loading, and the rule (AJ 2026-09-28) puts
+  // is showing the LYRICS are still loading, and the rule puts
   // it with the lyrics then — covering both "lyrics not loaded" and "both not
   // loaded". It only sits over the video pane when the VIDEO is the sole thing
   // still buffering (lyrics already landed). A track with no MV has nothing
@@ -14515,7 +15306,7 @@
     // Mirrors play state and our rating onto the Hits header. Cheap: it only
     // rewrites a glyph/label when the state actually flips.
     syncFsHitsLive();
-    // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
+    // NOTE: the edge Like / Dislike buttons are no longer
     // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
     // so there is nothing to chase; re-pinning was itself a source of the
     // "controls move a lot" behaviour. They are positioned once on entry and once
@@ -14659,7 +15450,7 @@
     { tag: "rect", attrs: { x: "3", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
     { tag: "rect", attrs: { x: "14", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
   ];
-  // Sliders/adjust icon — reads as "options" (AJ, 2026-10-19). Opens the SAME
+  // Sliders/adjust icon — reads as "options". Opens the SAME
   // tabbed options overlay the normal panel uses, so fullscreen has it too.
   const FS_ICON_OPTIONS = [
     { tag: "line", attrs: { x1: "4", y1: "6", x2: "20", y2: "6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
@@ -14673,9 +15464,6 @@
   // Next). The path data is byte-for-byte from Icons.ts; only the wrapping
   // <svg> viewBox is normalised so the chip's square buttons can render it
   // without distorting the aspect ratio.
-  const FS_ICON_PREV = [
-    { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
   const FS_ICON_NEXT = [
     { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
   ];
@@ -14863,7 +15651,7 @@
   }
 
   /* ---- like / dislike buttons in fullscreen --------------------------------
-     AJ (2026-10-08, evening): drop the YTM-native mirroring entirely. The old
+      Drop the YTM-native mirroring entirely. The old
      build cloned YTM's icon and mirrored its like-status every 500ms, which
      flickered and showed a permanently-filled thumb (YTM's aria-pressed is
      unreliable). These buttons are now 100% OURS: our own glyph, our own state,
@@ -14881,7 +15669,7 @@
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
   let fsRatingSeedBlockUntil = 0;           // skip a stale YTM seed after our own rating
-  // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
+  // Transient arrow-key readout. One pill, used for both
   // gestures: above the scrubber for seeks, under the volume bar for volume.
   let fsHudEl = null;
   let fsHudTimer = 0;
@@ -14914,13 +15702,13 @@
   }
 
   // Pin the Like / Dislike to the MEDIA PANE's left/right edges, but on the
-  // CONTROLS ROW's vertical centre (AJ, 2026-10-18).
+  // CONTROLS ROW's vertical centre.
   //
   // The buttons live in .ym-sl-fs-player-controls (inset:0 over the overlay,
   // z-index 21) rather than inside .ym-sl-fs-media. Two reasons:
   //   1. .ym-sl-fs-media is z-index 2 and .ym-sl-fs-lyrics is z-index 3, so a
   //      button parented to the media is painted UNDER the lyrics pane and the
-  //      dislike disappeared behind the lyrics in side layout (AJ's report).
+  // dislike disappeared behind the lyrics in side layout (the report).
   //      The controls layer is above everything.
   //   2. The controls layer is a full-overlay layer, so we can compute BOTH the
   //      media's horizontal edges and the transport chip's vertical centre in
@@ -14968,7 +15756,7 @@
     // chip is faded out (opacity does not affect layout). Fall back to the
     // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
     //
-    // ⭐ LAYOUT offsets, not getBoundingClientRect (AJ, 2026-10-20). The chip
+    // ⭐ LAYOUT offsets, not getBoundingClientRect. The chip
     // animates with a TRANSFORM during fullscreen entry and on track change, and
     // a rect includes that transform — so measuring mid-animation pinned the
     // buttons to a half-slid position ("sometimes random, sometimes lower") until
@@ -15132,9 +15920,9 @@
   }
   // (Like/Dislike handlers are defined above: clickFsRating() and
   // refreshFsRatingState(). The old YTM-mirroring functions were removed
-  // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+  // — our buttons no longer read YTM's renderer for display.)
 
-  /* ---- transient HUD for the arrow keys (AJ, 2026-10-30) -----------------
+  /* ---- transient HUD for the arrow keys -----------------
      The keys are otherwise silent: a seek only moves the thumb and a volume
      step only moves a 3px line. Each press writes what it did into one small
      pill that fades on its own. Positions come from the live rects inside
@@ -15190,7 +15978,7 @@
     }, FS_HUD_HOLD_MS);
   }
 
-  /* ---- Hits fullscreen layout (AJ, 2026-11-09) -----------------------------
+  /* ---- Hits fullscreen layout -----------------------------
      The default fullscreen composition. Album art, track title, byline and the
      real sync / provider chips sit in a centred header; the control dock under
      it carries seek, transport, volume and the utilities. The lyrics start
@@ -15245,11 +16033,6 @@
   const FS_HITS_ICON_PAUSE = [
     { tag: "rect", attrs: { x: "6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
     { tag: "rect", attrs: { x: "13.6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
-  ];
-  const FS_HITS_ICON_MORE = [
-    { tag: "circle", attrs: { cx: "5", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
-    { tag: "circle", attrs: { cx: "12", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
-    { tag: "circle", attrs: { cx: "19", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
   ];
   const FS_HITS_LIKE_PATH = "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
   function fsHitsThumbSvg(kind) {
@@ -15346,7 +16129,7 @@
     if (!fsHits) return;
     // Hits is the cover-art layout. It shows the source, not whether the track
     // is word- or line-synced; that technical label belongs in the old info
-    // rail, not over the artwork (AJ, 2026-11-16).
+    // rail, not over the artwork.
     const providerLabel = currentProvider || "Aurora";
     if (!force && providerLabel === fsHitsMetaKey) return;
     fsHitsMetaKey = providerLabel;
@@ -15426,49 +16209,6 @@
     }
   }
 
-  // "Like" becomes "Liked" when the rating lands. Snapping the width would
-  // make the pill's border jump, so measure the new natural width and animate
-  // the inline width between the two. The inline width is cleared afterwards
-  // so auto layout (wrapped rows, zoom) keeps working; reduced motion skips it.
-  function animateFsHitsLikeLabel(next) {
-    if (!fsHits || !fsHits.like) return;
-    const button = fsHits.like;
-    const label = button.querySelector(".ym-sl-fs-hits-btn-label");
-    if (!label || label.textContent === next) return;
-    if (!fsMotionOK() || typeof button.animate !== "function") {
-      label.textContent = next;
-      return;
-    }
-    if (fsHits.likeAnim) {
-      try { fsHits.likeAnim.cancel(); } catch (_) {}
-      fsHits.likeAnim = null;
-    }
-    button.style.width = "";
-    // offsetWidth, not the bounding rect: the pressed state applies a scale
-    // transform, and the border animation must start from the layout width.
-    const from = button.offsetWidth;
-    label.textContent = next;
-    button.style.width = "auto";
-    const to = button.offsetWidth;
-    button.style.width = from + "px";
-    void button.offsetWidth;
-    const anim = button.animate(
-      [{ width: from + "px" }, { width: to + "px" }],
-      { duration: 260, easing: "cubic-bezier(.22, .61, .36, 1)" }
-    );
-    fsHits.likeAnim = anim;
-    button.style.width = to + "px";
-    const done = () => {
-      // A rapid Like -> Unlike click cancels this animation and starts another.
-      // The cancelled promise settles afterwards; it must not clear the newer
-      // animation's inline width.
-      if (fsHits && fsHits.likeAnim && fsHits.likeAnim !== anim) return;
-      if (fsHits) fsHits.likeAnim = null;
-      button.style.width = "";
-    };
-    if (anim && anim.finished) anim.finished.then(done, done);
-    else window.setTimeout(done, 280);
-  }
 
   function syncFsHitsGeometry() {
     if (!fsOverlay || !fsHits) return;
@@ -15871,7 +16611,7 @@
       h("span", { class: "ym-sl-fs-btn-label", text: "Hide lyrics" }),
       fsSvgIcon(FS_ICON_LYRICS),
     );
-    // Options button (AJ, 2026-10-19): fullscreen now reuses the SAME tabbed
+    // Options button: fullscreen now reuses the SAME tabbed
     // options overlay as the normal panel (it is a <body> child floated at a higher
     // z-index), so no duplicate FS overlay is needed. offsetWrap (built above) stays
     // a local unused variable; the overlay's Sync tab carries the offset.
@@ -15914,7 +16654,7 @@
     fsPlayerShuffleButton = shuffleButton;
     fsPlayerRepeatButton = repeatButton;
     // Like / Dislike sit on the MEDIA PANE's left/right edges, but on the
-    // CONTROLS ROW's vertical centre (AJ, 2026-10-18). They are appended into
+    // CONTROLS ROW's vertical centre. They are appended into
     // .ym-sl-fs-player-controls (z-index 21) so they paint above the lyrics
     // pane; positionFsEdgeButtons() computes the media's horizontal edges and
     // the transport chip's vertical centre. These are our OWN buttons (see the
@@ -15991,7 +16731,7 @@
     const playChip = h("div", { class: "ym-sl-fs-play-chip" }, transportGroup);
     fsTimeCurrent = h("span", { class: "ym-sl-fs-time", "data-time": "current", text: "0:00" });
     fsTimeTotal = h("span", { class: "ym-sl-fs-time", "data-time": "total", text: "0:00" });
-    // The volume lives on the SCRUBBER row, not the transport row (AJ, 2026-10-01):
+    // The volume lives on the SCRUBBER row, not the transport row:
     // it sits after the total time, and the seek range is the flex child that gives
     // up the room. The row's box is still exactly the media pane, so bar + volume
     // together span the video — which is the point of putting it here.
@@ -16001,19 +16741,19 @@
     fsOverlay.append(fsControls, fsPlayerControls);
     // Hits header. Built after the classic chrome so its buttons can
     // reuse the existing play / rating / options handlers instead of cloning
-    // their logic (AJ, 2026-11-09).
+    // their logic.
     buildFsHits();
     // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
     // The media is z-index 2 and the lyrics pane is z-index 3, so a button
     // parented to the media was painted UNDER the lyrics and the dislike
-    // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
+    // vanished behind them in side layout. The controls layer
     // is above both; positionFsEdgeButtons() then pins them to the media's
     // horizontal edges and the transport row's vertical centre.
     fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
       .forEach((n) => n.remove());
     fsPlayerControls.appendChild(likeButton);
     fsPlayerControls.appendChild(dislikeButton);
-    // Bootstrap transient (AJ 2026-10-08): the media/lyrics panes settle from a
+    // Bootstrap transient: the media/lyrics panes settle from a
     // stale side layout + stale art over ~1s while native fullscreen opens. Fade
     // them in over the existing .35s opacity transition instead of snapping them
     // on, so that flash is hidden behind the fade. The rating buttons live in the
@@ -16041,7 +16781,7 @@
     fsSeekDragging = false;
     fsSeekUserAt = 0;
     // The ResizeObserver that re-pinned the edge buttons whenever the media
-    // resized is REMOVED (AJ, 2026-10-20). It fired repeatedly while the pane
+    // resized is REMOVED. It fired repeatedly while the pane
     // animated its width, which slid the buttons along with it — one of the
     // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
@@ -16049,7 +16789,7 @@
     // Wrapped, not passed by reference: a listener receives the MouseEvent as
     // its first argument, and exitFullscreenMode() reads a truthy `immediate`
     // as "skip the close animation". This is why the overlay used to vanish
-    // without its fade (AJ, 2026-10-22).
+    // without its fade.
     exit.addEventListener("click", () => exitFullscreenMode());
     previousButton.addEventListener("click", () => {
       clickPlayerButton("previous");
@@ -16082,8 +16822,8 @@
       // Shared with the overlay's arrow keys, so both paths clamp and paint alike.
       setFullscreenVolumePercent(v);
     }
-    // ---- drag affordances (AJ's "for tmr" note, 2026-10-03) ----------------
-    // While a slider is dragged: hide the cursor (an accident AJ liked), and
+    // ---- drag affordances (the "for tmr" note) ----------------
+    // While a slider is dragged: hide the cursor (an accident liked), and
     // on the seek bar show a time bubble above the thumb. The counter lets the
     // two sliders nest without one drag's pointerup un-hiding the other's.
     let fsDragCount = 0;
@@ -16282,10 +17022,10 @@
      at the cursor and DRAWS ITSELF (a stroke-dashoffset tween on an SVG
      circle — a ring filling up, NOT a solid disc) over the idle delay. As the
      chrome auto-hides, the ring fades out and shrinks. Purely an affordance
-     that the cursor is about to vanish (AJ, 2026-09-28). Any input hides it
+     that the cursor is about to vanish. Any input hides it
      and restarts the countdown. */
   // Movement must pause this long before the ring appears. Raised 260 -> 700
-  // (AJ, 2026-09-28): at 260ms it fired constantly during ordinary mouse use,
+  //: at 260ms it fired constantly during ordinary mouse use,
   // which read as noise. 700ms only triggers on a genuine stop.
   const FS_IDLE_RING_DELAY_MS = 700;
   const FS_IDLE_RING_FILL_MS = Math.max(400, FS_IDLE_HIDE_MS - FS_IDLE_RING_DELAY_MS);
@@ -16523,6 +17263,7 @@
     fsKawarpCanvas = null;
     fsKawarpArtUrl = "";
     fsKawarpVideoEl = null;
+    fsKawarpSoftWarp = false;
     if (fsOverlay) fsOverlay.classList.remove("ym-sl-fs-has-kawarp");
   }
 
@@ -16531,7 +17272,7 @@
      run with the same numbers. It used to be constructed with the hard-coded
      FS_KAWARP_OPTIONS (saturation 1.5, no brightness/contrast at all), which
      made fullscreen read flat and dull next to the page the user had tuned
-     (AJ, 2026-10-23). Bloom publishes its live settings on
+. Bloom publishes its live settings on
      window.__ymAuroraDynamic.getSettings() for exactly this kind of reuse; the
      hard-coded block stays only as the value before that lands. */
   function bloomSettings() {
@@ -16575,11 +17316,42 @@
     try {
       fsKawarp.setOptions({
         saturation: opts.saturation,
-        warpIntensity: opts.warpIntensity,
+        warpIntensity: fsKawarpSoftWarp
+          ? Math.min(opts.warpIntensity, FS_KAWARP_VIDEO_WARP)
+          : opts.warpIntensity,
         blurPasses: opts.blurPasses,
       });
     } catch (_) {}
   }
+
+  /* Cross-add-on bridge for the standalone Animated Artwork add-on. That add-on
+     owns the artwork <video> (inside a closed shadow root), so it hands the
+     element over by reference and Kawarp samples it exactly like a music video.
+     The perf gate lives here: video sampling stays an Ultra-only feature. */
+  window.__ymAuroraKawarp = {
+    adopt(video) {
+      if (!fsActive || !fsKawarp || !fsKawarpActive || !video) return false;
+      if (!videoSamplingAllowed()) return false;
+      if (fsKawarpVideoEl === video) return true;
+      try {
+        const job = fsKawarp.loadVideo(video, {
+          sampleWidth: 72,
+          sampleHeight: 128,
+          smoothing: 120,
+          frameRate: 30,
+        });
+        const done = () => {
+          fsKawarpVideoEl = video;
+          fsKawarpArtUrl = "";
+        };
+        if (job && typeof job.then === "function") job.then(done).catch(() => {});
+        else done();
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+  };
 
   async function startFullscreenKawarp(artUrl, videoEl) {
     if (!fsOverlay) return false;
@@ -16603,6 +17375,8 @@
     // fsOverlay.firstChild, so a restart that left the old one in place put the
     // stale canvas LATER in document order - where it painted over the new art.
     if (fsKawarpCanvas || fsKawarp) stopFullscreenKawarp();
+    // A live video is a whole frame of motion; still artwork is not.
+    fsKawarpSoftWarp = !!videoEl;
     fsKawarpActive = true;
     const seq = ++fsKawarpSeq;
     fsKawarpCanvas = h("canvas", { class: "ym-sl-fs-kawarp", "aria-hidden": "true" });
@@ -16620,8 +17394,7 @@
       applyFullscreenKawarpLook();
       if (videoEl) {
         // Music videos: feed the LIVE <video> so the backdrop reacts to the
-        // picture instead of a heavily blurred + dimmed copy of it (AJ,
-        // 2026-10-19). Kawarp samples a small colour map, so this is far
+        // picture instead of a heavily blurred + dimmed copy of it. Kawarp samples a small colour map, so this is far
         // cheaper than the old full-viewport canvas blur.
         await fsKawarp.loadVideo(videoEl, {
           sampleWidth: 72,
@@ -16679,7 +17452,7 @@
   function syncFullscreenKawarpArt(artUrl) {
     // Never replace a LIVE video feed with a still. The 2s artwork refresh used
     // to do exactly that, so a music video's backdrop froze on the first frame
-    // it had sampled (AJ, 2026-10-19). The video path owns the instance until
+    // it had sampled. The video path owns the instance until
     // stopFullscreenKawarp() clears fsKawarpVideoEl.
     if (fsKawarpVideoEl) return;
     if (!fsKawarpActive || !fsKawarp || !artUrl || artUrl === fsKawarpArtUrl) return;
@@ -16725,7 +17498,7 @@
     const raw = getRawVideoTitle();
     // Music videos now ALWAYS use Kawarp fed by the live video: it replaces the
     // old full-viewport blurred/dimmed canvas copy, which was both heavier and
-    // visually muddier (AJ, 2026-10-19).
+    // visually muddier.
     const liveVideo = fsSavedVideo.node
       ? fsSavedVideo.node.querySelector("video") || fsSavedVideo.node
       : null;
@@ -16753,7 +17526,7 @@
         // new canvas is inserted as firstChild, so the OLD one ends up LATER in
         // document order and paints straight over the new art (both are
         // z-index 0). That is why the Kawarp backdrop stopped changing on a
-        // track change (AJ, 2026-09-28).
+        // track change.
         if (artUrl) syncFullscreenKawarpArt(hiResArt(artUrl));
       } else {
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
@@ -16782,7 +17555,7 @@
   // enterFullscreenMode() decides once at entry; this catches the transitions.
   // A guard timer prevents re-entry while a swap is already in flight.
   //
-  // ===== INTENT vs READINESS (AJ, 2026-10-20) ==============================
+  // ===== INTENT vs READINESS ==============================
   // This used to key off findPlayerVideo(), which requires videoWidth > 0 — a
   // READINESS test. On an MV -> audio skip YTM's recycled <video> keeps its old
   // dimensions for a beat, so the detach could not fire until the new (audio)
@@ -16796,7 +17569,7 @@
   // unavailable AND the recycled <video> reports videoWidth 0 at the same time —
   // that pair used to read as "this track is audio", so the video was detached
   // mid-reload. That is what made the CONTROLS restack into the cover-art
-  // arrangement between two music videos and then snap back (AJ, 2026-10-21).
+  // arrangement between two music videos and then snap back.
   // Holding the previous answer until a new one arrives makes the mode decision
   // stable across a reload. Reset on fullscreen exit.
   let fsLastKnownHasVideo = null;
@@ -16855,13 +17628,12 @@
     }
     // Attaching still needs a real, decoded element; detaching does not.
     if (wantVideo && !liveVideo) {
-      // ⭐ INTENT FIRST (AJ, 2026-10-20). Flip the LAYOUT to video geometry the
+      // ⭐ INTENT FIRST. Flip the LAYOUT to video geometry the
       // moment the track is KNOWN to have a video — not when its element is
       // decodable. Without this the pane stayed in cover geometry (tall, ~960x862)
       // for the whole load window, so the new video first appeared in a tall
       // cover-art-shaped box and then snapped to its real aspect ratio: exactly
-      // the "it shows in the cover art format, then as a regular video" AJ
-      // reported. Readiness is handled separately (the video stays at opacity 0
+      // the "cover art format, then regular video" symptom. Readiness is handled separately (the video stays at opacity 0
       // until frames advance), so this cannot show a stale frame.
       if (fsOverlay && !fsOverlay.classList.contains("ym-sl-fs-has-video")) {
         // This is the cover-art composition changing to video geometry.
@@ -16884,8 +17656,7 @@
     // as a real MV <-> cover change would. So the swap timer below RE-EVALUATES
     // and only COMMITS a swap once it has a decisive answer. The chrome dissolve
     // is applied INSIDE the commit branches (attach / detach), not up here — that
-    // is what keeps an MV -> MV reload from fading the controls out at all (AJ,
-    // 2026-10-21). The media is already dissolving from fsFadeOutMedia(), so the
+    // is what keeps an MV -> MV reload from fading the controls out at all. The media is already dissolving from fsFadeOutMedia(), so the
     // wait here only delays the layout restructure, not the track-change effect.
     fsVideoModeSwapTimer = setTimeout(() => {
       fsVideoModeSwapTimer = 0;
@@ -16955,7 +17726,7 @@
         lv.style.setProperty("object-fit", "cover", "important");
         lv.style.setProperty("background", "transparent", "important");
         try { lv.play().catch(() => {}); } catch (_) {}
-        // The static card STAYS (AJ, 2026-10-20): removing it here left the pane
+        // The static card STAYS: removing it here left the pane
         // empty for the whole video-ready wait. It is now the outgoing image the
         // cut happens FROM — awaitFsVideoReady()'s finish() removes it at the same
         // moment the video is revealed, so the swap is one hard cut.
@@ -16966,10 +17737,10 @@
         // Hide the whole PANE, not just the video. The pane still carries the
         // cover-art geometry and animates to the video's aspect ratio, so
         // revealing it here showed a SQUARE card with the old art's shape
-        // (AJ, 2026-09-28). awaitFsVideoReady() reveals the pane and the video
+        //. awaitFsVideoReady() reveals the pane and the video
         // together, once frames are actually advancing.
         // Hidden until frames advance (the ready gate below), but with NO
-        // transition: the reveal is a cut, not a fade (AJ, 2026-10-20).
+        // transition: the reveal is a cut, not a fade.
         lv.style.setProperty("opacity", "0", "important");
         awaitFsVideoReady(lv);
         return;
@@ -17003,11 +17774,11 @@
         // (cancelVideoFrameCallback vs cancelAnimationFrame), and
         // cancelAnimationFrame CANNOT cancel a requestVideoFrameCallback
         // handle — clearing fsSavedVideo first left the video-frame loop
-        // running forever on a detached video (AJ's 1 fps symptom).
+        // running forever on a detached video (the 1 fps symptom).
         stopBgDrawLoop();
         // Restore the video to the slot it came from so YTM keeps ownership
         // and can reuse it for the next music video. Orphaning it here is
-        // what broke MV loading after a skip (AJ-confirmed).
+        // what broke MV loading after a skip (-confirmed).
         if (saved && saved.node && saved.parent) {
           if (saved.next && saved.next.parentNode === saved.parent) {
             saved.parent.insertBefore(saved.node, saved.next);
@@ -17031,11 +17802,11 @@
         fsOverlay.style.removeProperty("--ym-sl-fs-video-ratio");
         // The video is gone, so any pending "waiting for it to be ready" is moot
         // — drop it, or its spinner could appear over the cover art that is
-        // about to load (AJ, 2026-09-28).
+        // about to load.
         cancelFsVideoReady();
         // If we were in Video Background, it has nothing to blur now - drop
         // back to Video + Lyrics so a non-MV skip can't strand a broken
-        // backdrop (AJ 2026-09-28). This is a fallback, not a preference, so
+        // backdrop. This is a fallback, not a preference, so
         // do not rewrite the stored audio layout.
         if (fsLayoutMode === "background") applyFullscreenLayout("side", false);
         if (fsBgCanvas && fsBgCanvas.parentElement) {
@@ -17051,14 +17822,13 @@
         if (artUrl) {
           // Reuse the card the reconcile tick may already have made — creating a
           // second one here left the pane showing the cover twice, side by side
-          // (AJ, 2026-09-28).
           const img = ensureFsArtImg();
           // instant = no decode fade: this is a mode swap, so the card must
-          // appear in the same frame the video leaves (AJ, 2026-10-20).
+          // appear in the same frame the video leaves.
           if (img) setFsArtSrc(img, hiResArt(artUrl));
         }
         startFullscreenKawarp(artUrl ? hiResArt(artUrl) : "");
-        // No band re-publish (AJ, 2026-10-20): the chrome sits at fixed offsets,
+        // No band re-publish: the chrome sits at fixed offsets,
         // so a pane geometry change no longer has to move it.
       }
       // Fade back in. The MV attach path returns above and reveals once frames
@@ -17071,7 +17841,7 @@
     }, FS_MEDIA_SWAP_MS);
   }
 
-  // ===== event-driven track detection (AJ, 2026-10-20) =====================
+  // ===== event-driven track detection =====================
   // ⭐ The track watcher that calls refreshTrack() -> syncFsVideoMode() lives in
   // housekeeping(), which runs on a 500ms INTERVAL. That interval was the last
   // real source of the cover -> MV delay: the skip had to wait up to half a
@@ -17112,7 +17882,7 @@
     // The player response may still describe the OLD track, so give it a couple
     // of frames before asking which mode this track wants. reconcileFsMediaArt()
     // runs here too so a COVER -> COVER skip swaps the artwork on the same beat
-    // instead of waiting for the 500ms housekeeping pass (AJ, 2026-10-20).
+    // instead of waiting for the 500ms housekeeping pass.
     window.setTimeout(() => {
       if (!fsActive) return;
       syncFsVideoMode();
@@ -17149,7 +17919,7 @@
   // findPlayerVideo() reports real dimensions, and that happens when the NEW
   // stream's metadata lands — anywhere from ~80ms to over a second after the
   // skip. Leaving that to the 2s refresh tick is what made cover -> MV feel
-  // slow (AJ, 2026-10-20). 60ms cadence, 5s ceiling, and it stops the instant
+  // slow. 60ms cadence, 5s ceiling, and it stops the instant
   // the intent stops being "video".
   let fsVideoWaitTimer = 0;
   function retryVideoModeUntilReady() {
@@ -17170,7 +17940,7 @@
   // ---- music-video ready gate -------------------------------------------
   // A skip attaches YTM's ONE recycled <video>, which still reports readyState /
   // videoWidth / !paused from the PREVIOUS track — so those alone revealed a
-  // stale or poster frame (the "thumbnail" AJ kept seeing, 2026-09-28). The gate
+  // stale or poster frame (the "thumbnail" kept seeing). The gate
   // therefore ALSO requires the playback clock to move, the only reliable proof
   // that the NEW content is rendering.
   //
@@ -17183,7 +17953,7 @@
   //
   // 350 -> 60 -> 140. Originally the media fade duration; then a couple of frames
   // for the DOM to settle. Now it must also outlast the CHROME fade (.14s) so the
-  // control column is invisible when it restructures (AJ, 2026-10-21). The media
+  // control column is invisible when it restructures. The media
   // dissolve is 220ms, so the swap still happens inside the dark window and costs
   // nothing perceptible.
   const FS_MEDIA_SWAP_MS = 140;
@@ -17199,20 +17969,18 @@
   // allowed to fade back in. fsChromeFadeIn can be called the instant the media is
   // ready (which on a cover -> MV skip is the same tick the fade-out started), and
   // without this floor the class is removed before it paints — so the dissolve is
-  // invisible. A touch above the .22s fade-out so the out always completes (AJ,
-  // 2026-10-21).
+  // invisible. A touch above the .22s fade-out so the out always completes.
   const FS_CHROME_FADE_MIN_MS = 280;
   const FS_VIDEO_READY_MAX_MS = 8000;
   const FS_VIDEO_READY_POLL_MS = 60;
   let fsVideoReadySeq = 0;
   let fsVideoSpinnerEl = null;
 
-  // FS_MEDIA_SETTLE_MS / fsMediaSwapAt / fsPaneRevealSeq are GONE (AJ,
-  // 2026-10-20): they existed to hold the pane hidden until its geometry had
+  // FS_MEDIA_SETTLE_MS / fsMediaSwapAt / fsPaneRevealSeq are GONE: they existed to hold the pane hidden until its geometry had
   // animated, and the geometry is static now. The media is revealed by the
   // track-change dissolve instead.
 
-  // ===== track-change media dissolve (AJ, 2026-10-20) ====================
+  // ===== track-change media dissolve ====================
   // "When the song ends fade the video out, then when the next song starts fade
   // it back in" — and the same for every combination of cover art / music video.
   //
@@ -17238,7 +18006,7 @@
     } catch (_) {}
   }
 
-  // ===== chrome dissolve, MODE CHANGES ONLY (AJ, 2026-10-21) ==============
+  // ===== chrome dissolve, MODE CHANGES ONLY ==============
   // Between the cover and MV layouts the whole control column restructures: the
   // credit moves from under the artwork to under the video, the transport swaps
   // between a centred row and a spread row, and the volume changes rows. None of
@@ -17253,7 +18021,7 @@
   // to make an MV -> MV skip fade the controls out (the element reuses itself on a
   // track change, so only its source changes) and, through a race in the
   // detach/re-attach, sometimes strand them invisible until fullscreen was
-  // reopened (AJ, 2026-10-21).
+  // reopened.
   // The heal timer is the backstop: a real swap restores the chrome through
   // fsFadeInMedia() -> fsChromeFadeIn(). If that path is ever missed, the timer
   // force-restores it after the longest legitimate swap (a cover -> MV wait is
@@ -17321,7 +18089,7 @@
     // and the control column together. A swap that lands AFTER the media has
     // settled calls this with nothing to fade in, and returning early skipped
     // the chrome half of the deal: the controls stayed dissolved until
-    // fsChromeFadeOut's 9s heal timer restored them (AJ, 2026-10-23).
+    // fsChromeFadeOut's 9s heal timer restored them.
     if (!fsOverlay) return;
     if (!fsMediaFadingOut) {
       fsChromeFadeIn();
@@ -17357,7 +18125,7 @@
   //    On a COVER -> * skip that is immediate. On an MV -> COVER skip the element
   //    is not reloaded until WE restore it, so the first event lands AFTER the new
   //    cover is already on screen — which is exactly the "cover shows first, then
-  //    disappears, then fades in" AJ reported (2026-10-20).
+  // disappears, then fades in" reported.
   //  - the player response's videoId changes on every skip, immediately.
   // Both funnel through here, and only ONE fade-out is allowed per track change.
   const FS_MEDIA_FADE_DEDUPE_MS = 1200;
@@ -17366,7 +18134,7 @@
     // Repeat-one restarts the SAME stream, and YTM reloads it, so we get the
     // same emptied/loadstart a real skip produces. Nothing on screen is being
     // replaced, so dissolving the cover and the chrome is pure noise — the
-    // user sees a pointless dip once per loop (AJ, 2026-10-22).
+    // user sees a pointless dip once per loop.
     //
     // Identity is the URL's ?v=. It does not change when the loop restarts, and
     // it DOES change on a real skip. fsFadeTrackId holds the id of the last
@@ -17403,7 +18171,7 @@
   // Kept as the call-site name, but no longer gated on FS_MEDIA_SETTLE_MS: that
   // gate existed to let the pane's geometry transition finish before revealing,
   // and the geometry is static now. Holding the fade-in for it added up to 800ms
-  // of black between the outgoing and incoming media (AJ, 2026-10-20).
+  // of black between the outgoing and incoming media.
   function revealFsMediaPane() {
     revealFsMediaPaneNow();
   }
@@ -17462,7 +18230,7 @@
       if (done || seq !== fsVideoReadySeq) return;
       cleanup();
       hideFsVideoSpinner();
-      // HARD CUT (AJ, 2026-10-20): the outgoing cover card is removed in the SAME
+      // HARD CUT: the outgoing cover card is removed in the SAME
       // frame the video becomes visible, so there is no cross-dissolve and no
       // empty pane in between. Guarded on the video actually living in the pane,
       // because the give-up timer can fire after a teardown.
@@ -17481,7 +18249,7 @@
       const t = video.currentTime;
       // A recycled element reports NaN until the NEW stream has metadata. Letting
       // that reach lastTime poisoned every later comparison, so the gate could
-      // only be satisfied by the 8s give-up timer (AJ, 2026-10-20).
+      // only be satisfied by the 8s give-up timer.
       if (!Number.isFinite(t)) return;
       // A NEW SOURCE resets the clock. MV -> MV keeps the same element, so
       // currentTime jumps back to ~0 — without this the gate kept comparing
@@ -17490,14 +18258,14 @@
       if (t > lastTime + 0.02) progressed = true;
       lastTime = t;
       if (progressed && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) { finish(); return; }
-      // PAUSED SKIP (AJ, 2026-10-20): a paused video never advances, so the
+      // PAUSED SKIP: a paused video never advances, so the
       // progress test above can never pass and the pane would stay dissolved to
       // the backdrop until the 8s give-up. A paused element with metadata already
       // has its frame decoded, so show it after a short grace.
       if (video.paused && video.readyState >= 2 && video.videoWidth > 0 &&
           performance.now() - startedAt > 400) finish();
     }
-    // ⭐ Frame-accurate detection (AJ, 2026-10-20). timeupdate is throttled to
+    // ⭐ Frame-accurate detection. timeupdate is throttled to
     // ~4Hz and the poll is one timer tick, so both can sit on an already-ready
     // video for a whole interval — that interval is the "the video is hidden"
     // delay on cover -> MV. requestVideoFrameCallback fires on the next PRESENTED
@@ -17547,7 +18315,7 @@
   // Artwork fallback straight off the player bar's own thumbnail. It is always
   // in step with what YTM is playing, whereas getCurrentTrack() can lag a skip
   // by a beat - and a lagging read is exactly what left the fullscreen pane
-  // empty after a skip (AJ, 2026-09-28).
+  // empty after a skip.
   function getDomArtworkUrl() {
     const img = document.querySelector("ytmusic-miniplayer img.ytmusicTrackInfoThumbnail") ||
       document.querySelector("ytmusic-miniplayer img") ||
@@ -17558,23 +18326,23 @@
     return img.getAttribute("src") || img.currentSrc || "";
   }
 
-  // Set fsArtImg.src with a cover-card crossfade (2026-09-28). The sharp card
+  // Set fsArtImg.src with a cover-card crossfade. The sharp card
   // and the Kawarp canvas both load the new art independently, and the
   // browser keeps painting the OLD decoded bitmap during the decode window
   // — so for a beat the pane showed the old sharp card alongside the new
-  // Kawarp output (AJ, 2026-09-28). Marking the card as loading drops it
+  // Kawarp output. Marking the card as loading drops it
   // to opacity 0; removing the mark on the img's load event lets it fade
   // back in, by which point Kawarp also has the new art and the two
   // reveal together. fsArtImgSeq invalidates stale onloads when src changes
   // mid-decode; the timeout is the belt that prevents a hung decode from
   // stranding the card at opacity:0.
-  // ⭐ NO PER-CARD FADE AT ALL (AJ, 2026-10-21). This used to toggle
+  // ⭐ NO PER-CARD FADE AT ALL. This used to toggle
   // `.ym-sl-fs-art-loading` (card opacity 0 -> 1 over .28s) to hide the old
   // bitmap while the new one decoded. That was a SECOND opacity animation
   // competing with the host dissolve, and reconcile can re-set the src
   // (bar thumbnail -> real artwork) up to 2s after a skip — outside any
   // "recently faded" window — so the card blinked on its own. That blink is the
-  // "cover art flashes for some ms" AJ kept seeing.
+  // "cover art flashes for some ms" kept seeing.
   // The dissolve owns every reveal now. The browser keeps painting the previous
   // bitmap until the new one decodes, and outside a track change that bitmap is
   // the SAME artwork (a resolution variant), so nothing wrong is ever shown.
@@ -17586,6 +18354,28 @@
     const reveal = () => { if (seq === fsArtImgSeq) fsFadeInMedia(); };
     img.onload = reveal;
     img.onerror = reveal;
+    // STAGE crossfade: an <img> clears its bitmap the instant `src` changes, so
+    // the pane went blank for a frame and the Kawarp showed through the seam.
+    // Hold the outgoing picture as a ghost above the new one and fade it out
+    // once it has had time to paint. Only in stage mode; the card layouts are
+    // already covered by the host dissolve.
+    if (
+      fsOverlay &&
+      fsOverlay.classList.contains("ym-sl-fs-stage") &&
+      !fsOverlay.classList.contains("ym-sl-fs-no-anim") &&
+      img.getAttribute("src") &&
+      img.parentElement
+    ) {
+      const ghost = img.cloneNode(false);
+      ghost.className = "ym-sl-fs-art ym-sl-fs-art-ghost";
+      ghost.removeAttribute("style");
+      ghost.setAttribute("aria-hidden", "true");
+      img.parentElement.insertBefore(ghost, img);
+      window.requestAnimationFrame(() => ghost.classList.add("is-out"));
+      window.setTimeout(() => {
+        if (ghost.parentElement) ghost.parentElement.removeChild(ghost);
+      }, 460);
+    }
     img.setAttribute("src", src);
     // A cached image can already be complete here; onload still fires, but rAF
     // covers the same-frame gap so a cached cover does not wait a task.
@@ -17596,12 +18386,11 @@
   // it — the 2s reconcile tick and the MV -> cover swap in syncFsVideoMode — and
   // when both ran for the same skip the second overwrote fsArtImg while the
   // first stayed in the DOM, so the pane showed the cover TWICE, side by side
-  // (AJ, 2026-09-28). This is now the single create-or-reuse entry point.
+  //. This is now the single create-or-reuse entry point.
   // A YouTube video thumbnail is NOT cover art — it is the music video's own
   // hqdefault (letterboxed, low-res) and the real video is about to fill the
   // pane. Rendering it put that thumbnail in a square card for the ~1s before
-  // the video attached (AJ, 2026-09-28: the reconcile resolved
-  // i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
+  // the video attached (the reconcile resolved i.ytimg.com/vi/<id>/hqdefault.jpg). Album art
   // lives on yt3/lh3.googleusercontent.com, so the /vi/ path is the tell.
   function isVideoThumbnailUrl(url) {
     return typeof url === "string" && /^https?:\/\/i\.ytimg\.com\/vi\//.test(url);
@@ -17633,14 +18422,13 @@
     // fsSavedVideo flag: YTM recycles the <video> element between tracks, so the
     // flag can say "a video owns the pane" while the element is already dead.
     // That mismatch is what left the pane on a stale video instead of loading
-    // the new cover art after an MV -> song skip (AJ, 2026-09-28).
+    // the new cover art after an MV -> song skip.
     // Bail when a video is attached AT ALL. findPlayerVideo() additionally
     // requires dimensions, so during a skip it reports null while the video is
     // still sitting in the pane — and creating the card then put a cover image
     // (clamped to the MV pane's short height, hence cropped and small) beside
-    // the video until the detach (AJ, 2026-09-28; the trace caught
-    // reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
-    // ⭐ Decide from the SAME intent signal syncFsVideoMode uses (AJ, 2026-10-21).
+    // the video until the detach (the trace caught reconcile: cover with pane 960x365 + art 756x365 while has-video was set).
+    // ⭐ Decide from the SAME intent signal syncFsVideoMode uses.
     // `findPlayerVideo()` alone is transient during a reload — the recycled
     // element reports videoWidth 0 for a beat — so this branch used to flip on
     // and off mid-skip, removing and re-creating the cover card (the art that
@@ -17654,7 +18442,7 @@
       // Symmetric teardown: never leave a cover card sitting on top of a video.
       // MV -> MV returns early inside syncFsVideoMode, so nothing else clears it.
       // EXCEPT while a cover -> MV swap is holding the card as its outgoing image
-      // (AJ, 2026-10-20) — finish() clears it in the same frame the video shows.
+      // — finish() clears it in the same frame the video shows.
       if (fsArtImg && !fsHoldCoverCard) {
         if (fsArtImg.parentElement) fsArtImg.parentElement.removeChild(fsArtImg);
         fsArtImg = null;
@@ -17667,7 +18455,7 @@
     if (!hi) return;
     if (isVideoThumbnailUrl(hi)) {
       // The MV's own thumbnail, not cover art: drop any card. The pane is NOT
-      // hidden (AJ, 2026-10-20) — hiding it faded to black and then faded the
+      // hidden — hiding it faded to black and then faded the
       // video back in. It now keeps its blurred backdrop until the video attaches
       // and the reveal is a cut.
       if (fsArtImg) {
@@ -17697,8 +18485,7 @@
     // A track with no lyrics already built its empty state while the panel was
     // docked, so entering fullscreen rebuilds nothing and the composition stayed
     // in the side layout. Adopt the state once the panel has been moved into the
-    // overlay and the panes have their normal geometry to measure (AJ,
-    // 2026-11-16: "going in fullscreen doesnt move the stuff in the middle").
+    // overlay and the panes have their normal geometry to measure("going in fullscreen doesnt move the stuff in the middle).
     window.setTimeout(() => {
       if (!fsActive || !fsOverlay || !linesRoot) return;
       if (!linesRoot.querySelector(".ym-sl-empty")) return;
@@ -17743,7 +18530,7 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
-    // In-page fullscreen fades in (AJ, 2026-10-22). Native fullscreen deliberately
+    // In-page fullscreen fades in. Native fullscreen deliberately
     // gets no entrance: the browser is already repainting the whole display, so a
     // fade on top of that reads as a late start rather than a transition.
     if (currentSettings.fullscreenInPage && fsMotionOK() && typeof fsOverlay.animate === "function") {
@@ -17752,14 +18539,14 @@
         { duration: FS_ANIM_MS + 40, easing: "cubic-bezier(.22, .61, .36, 1)" }
       );
     }
-    // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
+    //: the media/lyrics panes are transitioned on left/width, so
     // applying the entry layout to them animates them sliding in from the CSS
     // default (side) — a visible "side layout" flash on cover-art entry. Hold
     // transitions off until the first paint, then drop the class (the double-rAF
     // in buildFullscreenControls does the actual removal so the opacity fade is
     // live too). Layout cycling on the cycle button keeps animating normally.
     fsOverlay.classList.add("ym-sl-fs-no-anim");
-    // The artwork's layout switch (AJ, 2026-10-26). Built here so it exists
+    // The artwork's layout switch. Built here so it exists
     // before the first paint; the saved side is applied with no animation, as
     // the entry paint must not slide the columns into place.
     buildFsCoverSwitch();
@@ -17793,13 +18580,13 @@
     } catch (_) {}
     fsOverlay.appendChild(fsTitleEl);
     // Fullscreen "Next up" list, bottom-left. Reuses the title's font stack so
-    // it reads as part of the composition (AJ: "Apple font" = Spicy Lyrics).
+    // it reads as part of the composition (Apple font" = Spicy Lyrics).
     fsNextUp = h("div", { class: "ym-sl-fs-nextup", "aria-hidden": "true" });
     fsNextUp.style.fontFamily = fsTitleEl.style.fontFamily;
     fsOverlay.appendChild(fsNextUp);
     // Bottom-right escape hatch for a track with no lyrics: the lyrics column is
     // faded out in that state, so the panel's own empty-state button is not
-    // reachable (AJ, 2026-11-16). Hidden unless .ym-sl-fs-no-lyrics is on.
+    // reachable. Hidden unless.ym-sl-fs-no-lyrics is on.
     const fsSearchCta = h("button", {
       class: "ym-sl-fs-search-cta",
       type: "button",
@@ -17808,7 +18595,7 @@
     fsSearchCta.addEventListener("click", () => toggleSearchPanel());
     fsOverlay.appendChild(fsSearchCta);
 
-    // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
+    // (The "See all" full-queue panel was removed: click-to-jump was
     // abandoned, so there is nothing left to open. The Next up list above is
     // now display-only.)
     refreshFsTitle();
@@ -17816,7 +18603,7 @@
     // tick. Entry builds the static cover card immediately, but the animated
     // cover's lookup was only ever started by the tick — so entering fullscreen
     // on a track whose art was already CACHED still showed the YTM cover first for
-    // up to two seconds before the animated one appeared (AJ, 2026-10-03).
+    // up to two seconds before the animated one appeared.
     reconcileFsMediaArt();
     // Long-title marquee: re-measure whenever the title's box changes width
     // (viewport resize, pane resize, font swap). updateFsTitleMarquee() itself
@@ -17825,7 +18612,7 @@
     fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
     fsTitleRO.observe(fsTitleEl);
     // The font-size transitionend re-measure that used to live here is gone
-    // (AJ, 2026-10-20): the chip and scrubber no longer stack off the title's
+    //: the chip and scrubber no longer stack off the title's
     // measured height, so there is nothing to re-sync after the zoom.
     // Request native browser fullscreen immediately while the user activation
     // from the click is still fresh. documentElement is always present, always
@@ -17834,7 +18621,7 @@
     // before the rest of the setup so the activation token cannot be consumed
     // by anything else in this function first.
     //
-    // In-page fullscreen skips this entirely (AJ, 2026-10-22). The overlay is
+    // In-page fullscreen skips this entirely. The overlay is
     // already `position: fixed; inset: 0`, so it covers the viewport on its own;
     // native fullscreen only adds taking over the whole display, which also
     // strands the tab strip and every other tab. Escape still exits, because
@@ -17873,7 +18660,7 @@
 
       // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
       // low-res blurred/dimmed copy of the video, which cost a full-viewport
-      // canvas blur every frame and looked muddier (AJ, 2026-10-19). The 2D
+      // canvas blur every frame and looked muddier. The 2D
       // canvas is created but left blank; it only starts drawing if Kawarp is
       // unavailable (no WebGL / Dynamic add-on off).
       fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
@@ -17882,7 +18669,7 @@
       fsBgLastDrawAt = 0;
       // findPlayerVideo() returns the <video> itself, not a container — querying
       // a video inside a video returns null, which silently started Kawarp with
-      // no source at all (AJ, 2026-10-19).
+      // no source at all.
       const liveVideoEl = video.tagName === "VIDEO" ? video : video.querySelector("video");
       startFullscreenKawarp("", liveVideoEl).then((ok) => {
         if (ok || !fsActive) return;
@@ -17907,7 +18694,7 @@
       video.style.setProperty("max-width", "none", "important");
       video.style.setProperty("max-height", "none", "important");
       // Fill the media pane edge-to-edge so the 16:9 video never leaves the
-      // two horizontal black bars AJ reported on 2026-09-27. The video is
+      // two horizontal black bars reported on. The video is
       // cropped instead of letterboxed - matches what Ableton / Spicy do for
       // their fullscreen MV pane, and the host already has rounded corners
       // so the cropped edges look intentional rather than truncated.
@@ -17935,7 +18722,7 @@
         // first one in the pane: both are IMG.ym-sl-fs-art with the same src, the
         // flex row squeezes them to half width each, and the orphan is only
         // cleaned up by the next 2s tick — two covers side by side on entry.
-        // Live-captured on the real page (AJ, 2026-10-21):
+        // Live-captured on the real page:
         //   'IMG.ym-sl-fs-art 583x583 block/1 | IMG.ym-sl-fs-art 583x583 block/1'
         // then one card, ~2s later. ensureFsArtImg() also removes any stray card,
         // so this is the same single-create point reconcile uses.
@@ -17974,7 +18761,7 @@
       // switches from cover art to the live video (or back). Without this,
       // fullscreen opened on a no-MV track is stuck on cover art forever.
       syncFsVideoMode();
-      // No band re-derive here any more (AJ, 2026-10-20). This tick used to be
+      // No band re-derive here any more. This tick used to be
       // the only thing that noticed a viewport resize and moved the chrome; the
       // chrome is anchored to the overlay's own bottom now, so it follows a
       // resize by itself.
@@ -18006,7 +18793,7 @@
     startFsMediaWatchers();
   }
 
-  /* ---- in-page fullscreen: open/close motion (AJ, 2026-10-22) --------------
+  /* ---- in-page fullscreen: open/close motion --------------
      The in-tab fullscreen is a surface INSIDE the page, so it can enter and leave
      like one. Native fullscreen does not get the closing fade: the browser has
      already returned to the page, and a 220ms ghost over it reads as lag. */
@@ -18077,7 +18864,7 @@
     // Same for the minimum-hold deferred restore (FS_CHROME_FADE_MIN_MS).
     if (fsChromeFadeHoldTimer) { clearTimeout(fsChromeFadeHoldTimer); fsChromeFadeHoldTimer = 0; }
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
-    // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
+    // — the mode swap no longer fades the controls at all.
     fsActive = false;
     fsNativeRequested = false;
     stopFsIdleTracking();
@@ -18199,7 +18986,7 @@
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
     if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
     if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
-    // Long-title marquee teardown (2026-09-28). Disconnect the resize observer
+    // Long-title marquee teardown. Disconnect the resize observer
     // and clear any inline shift/marquee state on the inner so a second
     // fullscreen entry starts from a clean baseline. fsTitleInner is gone
     // with its parent.
@@ -18271,13 +19058,13 @@
   // Escape: let the BROWSER drive it. The old handler called preventDefault()
   // and then exitFullscreenMode() itself, which suppressed Chrome's own
   // "Escape leaves fullscreen" path and did not reliably land either - so Esc
-  // appeared to do nothing (AJ, 2026-09-28). With no preventDefault the browser
+  // appeared to do nothing. With no preventDefault the browser
   // exits fullscreen and the fullscreenchange handler below unwinds our
   // overlay, which is the same path F11 and the browser chrome already use.
   // The explicit exit is kept ONLY for the case where native fullscreen never
   // engaged (requestFullscreen can be refused), where no fullscreenchange fires.
   //
-  // Arrow keys (AJ, 2026-10-30): every fullscreen player — YouTube's own included —
+  // Arrow keys: every fullscreen player — YouTube's own included —
   // seeks with Left/Right and changes the volume with Up/Down, and YTM's page has
   // no equivalent. This overlay does, in every layout, because the listener lives
   // on the document rather than on one layout's chrome:
@@ -18360,7 +19147,6 @@
   function handleFsFullscreenChange() {
     // Only OUR native fullscreen ending unwinds the overlay. In-page fullscreen
     // never asks for native, so an unrelated F11 out must leave it alone
-    // (AJ, 2026-10-22).
     if (fsActive && fsNativeRequested && !document.fullscreenElement) exitFullscreenMode();
   }
 
@@ -18653,7 +19439,7 @@
     // `reveal` forces the panel visible on return. Needed when the host gives it
     // back BECAUSE the user opened the Lyrics tab: without it the panel restores
     // to its pre-dock state (usually hidden), so the tab falls back to YTM's own
-    // lyrics instead of ours (AJ, 2026-10-19).
+    // lyrics instead of ours.
     panelVisible = reveal === true ? true : externalHostSavedVisible === true;
     externalHostSavedVisible = null;
     // Put the panel back where the tab system expects it (#tab-renderer, or
@@ -18704,8 +19490,8 @@
   let fsTitleSwapTimer = 0;
 
   /* ---- fullscreen "Next up" list ----------------------------------------
-     A native-looking list of the next few queue tracks, bottom-left of the
-     overlay. The queue model comes from YTM's own ytmusic-player-queue.data
+     A native-looking list of the next few queue tracks, bottom-right of the
+     overlay, rising into view on hover. The queue model comes from YTM's own ytmusic-player-queue.data
      (verified in the next-up add-on: an array of playlistPanelVideoRenderer
      entries; the playing row carries `selected`). Logic copied from that add-on. */
   const FS_NEXTUP_COUNT = 4;
@@ -18760,7 +19546,7 @@
     const key = items.map((it) => it.title + "|" + it.thumb).join("~");
     if (fsNextUp.__ymKey !== key) {
       fsNextUp.__ymKey = key;
-      const rows = [h("div", { class: "ym-sl-fs-nextup-head", text: "Next up" })];
+      const rows = [];
       for (const it of items) {
         const img = h("img", { class: "ym-sl-fs-nextup-thumb" });
         img.alt = "";
@@ -18770,7 +19556,7 @@
         if (it.artist) {
           meta.appendChild(h("div", { class: "ym-sl-fs-nextup-artist", text: it.artist }));
         }
-        // Display-only row (AJ, 2026-10-03): click-to-jump was abandoned, so
+        // Display-only row: click-to-jump was abandoned, so
         // this is a plain div - no button affordance, no handler.
         const row = h("div", {
           class: "ym-sl-fs-nextup-row", title: it.title,
@@ -18780,8 +19566,111 @@
       }
       fsNextUp.replaceChildren(...rows);
     }
+    syncFsNextUpShift();
     fsNextUp.classList.add("ym-sl-fs-nextup-in");
   }
+
+  /* The resting row hugs the panel's right edge; hovering slides it to the
+     left edge (see the CSS block). The distance is unknowable in CSS - it is
+     the panel width minus however wide this track's thumb + title + artist
+     happen to render - so it is measured here and published as a px variable.
+     Re-measured on every render (the 2s refresh and every track change), which
+     is the only time the text, and therefore the distance, can change. */
+  function syncFsNextUpShift() {
+    if (!fsNextUp) return;
+    const row = fsNextUp.querySelector(".ym-sl-fs-nextup-row");
+    if (!row) return;
+    const thumb = row.querySelector(".ym-sl-fs-nextup-thumb");
+    const meta = row.querySelector(".ym-sl-fs-nextup-meta");
+    if (!thumb || !meta) return;
+    // A long title is capped by the panel and ellipsised: no spare width, no
+    // shift, and the row simply rests against the left edge.
+    const gap = 10;
+    const content = thumb.getBoundingClientRect().width + gap +
+      meta.getBoundingClientRect().width;
+    const spare = Math.max(0, fsNextUp.clientWidth - content);
+    fsNextUp.style.setProperty("--ym-sl-fs-nu-shift", spare.toFixed(1) + "px");
+  }
+  /* ---- release year -------------------------------------------------------
+     YTM renders "artist • album • year" in the player-bar byline, with the year
+     as a plain trailing span (verified live: underscores • U • 2026). That is
+     the ONLY release year this site exposes - the player response carries an
+     upload date, not a release date - so it is read from the DOM rather than
+     looked up. Segments are scanned from the END, because an album name can
+     contain a bullet and a title never follows the year.
+
+     The byline is filled a beat AFTER the track changes, so a title painted on
+     the change often has no year yet; syncFsTitleYear() is therefore retried a
+     few times and, when it lands, patches the existing credit in place instead
+     of rebuilding it (a rebuild would restart the entrance animation). */
+  function readPlayerBarYear() {
+    try {
+      const bar = document.querySelector("ytmusic-player-bar");
+      const byline = bar && (bar.querySelector(".subtitle") || bar.querySelector(".byline"));
+      const text = byline ? String(byline.textContent || "").trim() : "";
+      if (!text) return "";
+      const parts = text.split("\u2022").map((part) => part.trim()).filter(Boolean);
+      for (let index = parts.length - 1; index >= 0; index--) {
+        if (/^(19|20)\d{2}$/.test(parts[index])) return parts[index];
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  let fsTitleYearTimer = 0;
+  let fsTitleYearTries = 0;
+
+  // Returns true when a year is on the credit afterwards. Safe to call any time.
+  function syncFsTitleYear() {
+    if (!fsTitleEl) return false;
+    const inner = fsTitleEl.querySelector(".ym-sl-fs-title-inner");
+    if (!inner) return false;
+    const year = readPlayerBarYear();
+    const existing = inner.querySelector(".ym-sl-fs-title-year");
+    if (!year) {
+      // A year that was on screen for the previous track must not linger.
+      if (existing) {
+        const sep = inner.querySelector(".ym-sl-fs-title-year-sep");
+        if (sep) sep.remove();
+        existing.remove();
+        updateFsTitleMarquee();
+      }
+      return false;
+    }
+    if (existing) {
+      if (existing.textContent !== year) {
+        existing.textContent = year;
+        updateFsTitleMarquee();
+      }
+      return true;
+    }
+    const track = inner.querySelector(".ym-sl-fs-title-track");
+    if (!track) return false;
+    // Stay inside the title's own line: a direct child of .ym-sl-fs-title-inner
+    // would become a separate (and, because it is column-reverse, ABOVE-title)
+    // row. Fall back to the track's parent for any older painted credit.
+    const line = track.closest(".ym-sl-fs-title-line") || track.parentElement || inner;
+    const sep = h("span", { class: "ym-sl-fs-title-year-sep", text: "\u2022", "aria-hidden": "true" });
+    const label = h("span", { class: "ym-sl-fs-title-year", text: year });
+    line.appendChild(sep);
+    line.appendChild(label);
+    // The credit is wider now; the marquee is measured, not guessed.
+    updateFsTitleMarquee();
+    return true;
+  }
+
+  // Up to four passes over ~1.2s: the byline can land after the title paint.
+  function retryFsTitleYear() {
+    if (fsTitleYearTimer) { window.clearTimeout(fsTitleYearTimer); fsTitleYearTimer = 0; }
+    if (fsTitleYearTries >= 4) return;
+    fsTitleYearTries += 1;
+    fsTitleYearTimer = window.setTimeout(() => {
+      fsTitleYearTimer = 0;
+      if (!fsTitleEl) return;
+      if (!syncFsTitleYear()) retryFsTitleYear();
+    }, 300);
+  }
+
   function refreshFsTitle() {
     renderFsNextUp();
     // Hits owns its own credit; it refreshes from the same track-change signal.
@@ -18814,15 +19703,26 @@
       inner.appendChild(byline);
       if (title) {
         if (artist) inner.appendChild(document.createTextNode(" "));
-        inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
+        // The credit is a column-reverse stack (see the CSS), so every direct
+        // child is its own ROW: appending the year beside the track put it on
+        // the row above the title. Title and year therefore share one flex item
+        // that lays them out in a baseline row, and the year is appended into
+        // it by syncFsTitleYear().
+        inner.appendChild(h("span", { class: "ym-sl-fs-title-line" },
+          h("span", { class: "ym-sl-fs-title-track", text: title })));
       }
       fsTitleEl.dataset.trackKey = fullscreenTrackKey(track);
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       syncFsTitleWriters();
+      // Release year rides next to the title as "Title • 2026". Written here so
+      // the first paint already carries it when the bar is ahead of us, with a
+      // bounded retry for the usual case where it is not.
+      fsTitleYearTries = 0;
+      if (!syncFsTitleYear()) retryFsTitleYear();
       // Apply (or remove) the marquee now that the text is in the DOM and
       // measurable. No band re-measure follows: the chip no longer stacks off the
-      // title's height (AJ, 2026-10-20).
+      // title's height.
       updateFsTitleMarquee();
     };
     if (fsTitleSwapTimer) {
@@ -19073,7 +19973,7 @@
   // Measured straight off the pane's own rect rather than derived from
   // `overlay.clientWidth * 0.5 / AR`: the arithmetic version silently produced
   // a 358px pane (band top 737) for a 540px pane, which parked the title
-  // INSIDE the video (AJ, 2026-09-28). The rect cannot disagree with the
+  // INSIDE the video. The rect cannot disagree with the
   // layout it is reading.
   // Called on track change, when the aspect ratio changes (deferred a frame so
   // the new aspect-ratio has been laid out), and on the 2s refresh tick -
@@ -19167,7 +20067,7 @@
     }
   }
 
-  // STATIC CHROME STRUCTURE (AJ, 2026-10-20).
+  // STATIC CHROME STRUCTURE.
   // The measured band publisher that used to live here is GONE: it wrote
   // --ym-sl-fs-band-top / -title-h / -art-left / -art-width / -pane-left /
   // -pane-width from the media's live rect, and every write moved the controls.
@@ -19184,7 +20084,7 @@
     // ratio only arrives with the video's metadata. The Like/Dislike buttons are
     // pinned from the transport chip's measured offset, so without these retries
     // they can stay where the chip USED to be, which put them on top of the video
-    // (measured live: button at y 725-769, video spanning 270-810, AJ 2026-10-21).
+    // (measured live: button at y 725-769, video spanning 270-810).
     // Two bounded retries, cancelled on every call so they cannot pile up.
     fsChromeRepinTimers.forEach((t) => window.clearTimeout(t));
     fsChromeRepinTimers = [150, 600].map((ms) => window.setTimeout(() => {
@@ -19200,7 +20100,7 @@
     refreshFsTitle();
     // Decide the media MODE first, on the track change itself. It used to run
     // only from the 2s fullscreen tick, so a cover <-> music-video skip could
-    // take up to two seconds to switch — the delay AJ reported (2026-10-20).
+    // take up to two seconds to switch — the delay reported.
     // syncFsVideoMode() is cheap and self-guarding: it early-returns unless the
     // intent actually differs from what is attached.
     if (fsActive) syncFsVideoMode();
@@ -20179,7 +21079,7 @@
   }
 
   // (G) Delete the permanently-saved TTML for the current track. Lets the user
-  // undo an accidental "Permanent" import (AJ, 2026-09-17).
+  // undo an accidental "Permanent" import.
   //
   // The file being deleted is the one RENDERED right now, so deleting it has to
   // take it off the screen too. Re-resolve the track exactly like a fresh play
@@ -20357,6 +21257,9 @@
   function resetLyricsPanelState() {
     lyricsSkeletonToken++;
     braccatoClearForLoad();
+    // New content is on its way: the no-lyrics notice (and the Spicy scroller it
+    // borrows from Better Lyrics) must give the panel back to the live renderer.
+    if (panelEl) panelEl.classList.remove("ym-sl-empty-state");
     lyricsSkeletonShown = false;
     currentLyricsfileArtist = "";
     currentWordSyncQualityWarning = false;
@@ -20416,7 +21319,6 @@
     // A message means the lookup is OVER, so the fullscreen loading spinner has to
     // come down with it. It used to keep spinning over a "No lyrics found." panel
     // forever, because only the success paths ever called hideFsSpinner()
-    // (AJ, 2026-10-01).
     hideFsSpinner();
     // Same for the AMLL loading skeleton: a message is a terminal state, so no
     // shimmer may be left behind. A genuine "no lyrics" / "didn't load" also has
@@ -20439,7 +21341,7 @@
     // Fullscreen Video Background keeps the lyrics panel hidden until the first
     // line actually plays (see the intro-dim rules), so a track with NO lyrics
     // produced no feedback at all there — no panel, no message, nothing
-    // (AJ, 2026-10-01). BOTH failure messages raise the notice: from the user's
+    //. BOTH failure messages raise the notice: from the user's
     // side "no lyrics" and "couldn't load them" are the same dead end.
     // Checked BEFORE the panel guard below, because the notice does not depend on
     // the panel existing.
@@ -20448,6 +21350,12 @@
     }
     if (!lineScrollEl || !linesRoot) return;
     resetLyricsPanelState();
+    // Better Lyrics keeps its own container in front of the panel and that
+    // container has nothing to say here, while the notice is built in the Spicy
+    // scroller it hides - which is why a word-by-word track with no lyrics
+    // showed a blank panel. The class swaps the two for as long as the message
+    // is up (see 05-styles); the next load clears it.
+    if (panelEl) panelEl.classList.add("ym-sl-empty-state");
     // Centred box, the way an empty state should read.
     if (lineScrollEl) lineScrollEl.classList.add("offline");
     const outage = message === LRCLIB_OUTAGE_MESSAGE;
@@ -20485,14 +21393,14 @@
     }
     linesRoot.replaceChildren(empty);
     // Fullscreen has no lines to pair the cover with, so the composition
-    // collapses to a centred cover plus a Search CTA (AJ, 2026-11-16).
+    // collapses to a centred cover plus a Search CTA.
     if (fsActive) {
       setFsNoLyricsState(true);
       watchFsNoLyrics();
     }
   }
 
-  /* ---- fullscreen no-lyrics composition (AJ, 2026-11-16) --------------------
+  /* ---- fullscreen no-lyrics composition --------------------
      With nothing to read, the side-by-side composition leaves the cover pinned
      to one half and an empty column on the other. The overlay gets a class
      instead; the sheet uses it to centre the cover/controls, fade the lyrics
@@ -20508,7 +21416,7 @@
       if (fsNoLyricsOutTimer) window.clearTimeout(fsNoLyricsOutTimer);
       // Return the offset first and drop the class once the panes have arrived:
       // the transition lives on that class, so removing it up front would also
-      // remove the animation and the return would snap (AJ, 2026-11-16).
+      // remove the animation and the return would snap.
       fsOverlay.style.setProperty("--ym-sl-fs-nolyr-dx", "0px");
       fsNoLyricsOutTimer = window.setTimeout(() => {
         fsNoLyricsOutTimer = 0;
@@ -20526,7 +21434,7 @@
     // Measure BEFORE the class lands: the panes still sit in their normal
     // column, and that is the distance they have to travel. Translating by a
     // measured offset rather than snapping to left:50% is what makes both the
-    // cover and the transport slide (AJ, 2026-11-16: the cover jumped).
+    // cover and the transport slide (the cover jumped).
     const media = fsOverlay.querySelector(".ym-sl-fs-media");
     // Hits is not a valid composition without lyrics (its layout is measured
     // from the header above the column), so an empty-state track in Hits falls
@@ -20534,7 +21442,7 @@
     // measurement: in Hits the media host is a full-bleed, hidden box whose
     // centre IS the screen centre, so measuring there produced dx=0 and the
     // cover only centred once something measured again - the move to the left
-    // edge followed by the jump to the middle (AJ, 2026-11-16).
+    // edge followed by the jump to the middle.
     const forcingSide = fsOverlay.classList.contains("ym-sl-fs-mode-hits");
     let restoreAnim = false;
     if (forcingSide) {
@@ -20593,7 +21501,7 @@
      Video Background hides the lyrics panel until the first line plays, which is
      a nice touch on a normal track — but it means a track with NO lyrics gives
      no feedback whatsoever. This flashes a transient notice instead, so the user
-     is told AND can carry on watching the video (AJ, 2026-10-01).
+     is told AND can carry on watching the video.
      Deliberately non-interactive: it must never block or capture the video. */
   const FS_NO_LYRICS_MS = 5000;
   let fsNoLyricsEl = null;
@@ -20747,7 +21655,7 @@
     if (jumpButton) {
       if (visible) {
         // The same popup doubles as "Jump to current" (synced) and "Auto scroll"
-        // (unsynced) — label it for whichever mode is active (AJ, 2026-09-18).
+        // (unsynced) — label it for whichever mode is active.
         if (staticLyricsActive) {
           jumpButton.textContent = "Auto scroll";
           jumpButton.title = "Resume automatic scrolling";
@@ -20832,6 +21740,9 @@
     // their wheel/touch input, which reads as the panel fighting them.
     stopScrollGlide();
     manualScrollActive = true;
+    // Stop skipping far lines while the user browses: every line they can
+    // scroll to must be painted, not just the active line's neighbourhood.
+    if (!braccatoOwnsTrack()) applyLyricCulling(lastActiveLine);
     if (braccatoOwnsTrack() && braccatoRenderer) {
       // Braccato has no scroll listener of its own; this is the explicit hook
       // that suspends its auto-scroll and raises the resume affordance.
@@ -20839,7 +21750,7 @@
     }
     if (staticLyricsActive) {
       // A manual scroll pauses auto-scroll; the "Auto scroll" popup (shown by
-      // setJumpButtonVisible below) resumes it when tapped (AJ, 2026-09-18).
+      // setJumpButtonVisible below) resumes it when tapped.
       autoScrollUserPaused = true;
     }
     setJumpButtonVisible(true);
@@ -20952,7 +21863,7 @@
 
        hard === false -> behavior: "auto" -> the CSS ease. One-shot only: issued
          when the target CHANGES (once per line), never per frame. */
-  /* ---- line-follow glide: a SPRING (upstream 6.3.153's model, AJ 2026-10-07) ---
+  /* ---- line-follow glide: a SPRING (upstream 6.3.153's model) ---
      Upstream drives its smooth scroll with a Fraktality `spr` spring
      (LyricsVirtualizer._smoothScrollToIndex): critically damped, ~0.8s to settle,
      and — the part that matters — a RETARGET MID-FLIGHT KEEPS THE VELOCITY, so
@@ -21019,9 +21930,17 @@
   // is needed (upstream applies it to their virtual container instead).
   function setScrollFraction(fraction) {
     if (!lineScrollEl) return;
-    if (Math.abs(fraction - scrollGlideFraction) < 0.01 && fraction !== 0) return;
-    scrollGlideFraction = fraction;
-    lineScrollEl.style.setProperty("--ym-sl-scroll-frac", fraction === 0 ? "0px" : (-fraction) + "px");
+    // Quantised to a quarter pixel. The carry exists to stop the list ticking a
+    // whole pixel at the slow end of the glide, and a 0.25px step is far below
+    // the granularity that fixes - but writing it at frame resolution (the old
+    // 0.01px epsilon) changed the scrollport's transform on EVERY frame, and a
+    // changed transform repaints the whole transformed subtree. In fullscreen
+    // that subtree is a 1080px-tall, masked lyric column: measured 17.7ms per
+    // frame with the per-frame carry, 11.9ms with the transform pinned.
+    const quantised = Math.round(fraction * 4) / 4;
+    if (quantised === scrollGlideFraction) return;
+    scrollGlideFraction = quantised;
+    lineScrollEl.style.setProperty("--ym-sl-scroll-frac", quantised === 0 ? "0px" : (-quantised) + "px");
   }
 
   function stopScrollGlide() {
@@ -21054,7 +21973,7 @@
     // glyph inside it onto a composited layer, and Chromium drops LCD sub-pixel
     // text antialiasing on composited layers — the words render a hair differently
     // and read as shifting left while the glide runs, snapping back the moment the
-    // promotion is released (AJ, 2026-10-07). The sub-pixel carry still works
+    // promotion is released. The sub-pixel carry still works
     // without it; the @property registration is what carries the perf.
     scrollGlideActive = true;
   }
@@ -21137,7 +22056,7 @@
      stepScrollSpring, stopScrollSpring). It was DEAD — its target was never set
      from outside — and it is superseded by the glide above, which drives the exact
      `spr` Spring class (frame-rate independent, velocity-carrying) instead of
-     hand-integrated Euler steps. Removed 2026-10-07; the four lifecycle sites now
+     hand-integrated Euler steps. Removed; the four lifecycle sites now
      call stopScrollGlide(). */
 
   function scrollActiveLineIntoView(element, force) {
@@ -21151,7 +22070,6 @@
     const lineRect = element.getBoundingClientRect();
     const viewportRect = lineScrollEl.getBoundingClientRect();
     const lineCenter = lineRect.top + lineRect.height / 2;
-    const viewportCenter = viewportRect.top + viewportRect.height / 2;
     // Side-by-side and background keep the true centre. Hits lifts the active
     // line above it, because reading near the bottom of a tall column makes the
     // eye travel down on every line change.
@@ -21226,7 +22144,7 @@
      pass there is no active line at all until the first lyric starts - so the
      normal line-follow retarget has nothing to aim at and the panel sat at the
      bottom for the whole intro, then glided the entire song height in one
-     sweep once line 1 finally began (AJ, 2026-10-26, repeat-one in fullscreen).
+     sweep once line 1 finally began (, repeat-one in fullscreen).
      Place it NOW, on the line the new position belongs to (the first line when
      the pass starts in an intro), and do not animate: the user did not scroll,
      the track restarted. */
@@ -21252,7 +22170,7 @@
   // (unsynced) lyrics: scrollTop = progress * maxScroll, eased each frame. At
   // song start progress is 0 (top), at the end it is 1 (bottom). A small lerp
   // factor keeps it slow and fluid; if playback is paused the target is fixed so
-  // the panel simply settles and holds (AJ, 2026-09-18).
+  // the panel simply settles and holds.
   function driveStaticAutoScroll(positionMs) {
     const player = window.YTMod && window.YTMod.player;
     const durationMs = player && typeof player.getDurationMs === "function"
@@ -21646,7 +22564,7 @@
   // these as NoKaraoke static blocks and, because their time window is empty,
   // they resolve to the "Sung" (fully-filled) state at every playback position
   // and the active-line search never matches them, so the panel shows them all
-  // at once with no karaoke sweep and no auto-scroll (AJ, 2026-09-18).
+  // at once with no karaoke sweep and no auto-scroll.
   function parsePlain(text) {
     const lines = String(text || "")
       .replace(/\r/g, "")
@@ -21740,7 +22658,7 @@
       // A TTML loaded from a local file (not via the Spicy Lyrics API) has no
       // provider and no credited people — the attribution rule governs API
       // responses, not files the user brought. Surface it as a Local Database
-      // credit instead of showing nothing — AJ, 2026-09-26. No url, so
+      // credit instead of showing nothing —. No url, so
       // buildPersonRow renders it as plain text (no dead link).
       currentProvider = "";
       currentMaker = null;
@@ -21803,7 +22721,7 @@
     }
     // An LRCLIB result may carry plain lyrics without synced timestamps. Load
     // those as a static, already-filled set instead of reporting "no lyrics".
-    // Synced lyrics always win when both are present (AJ, 2026-09-18).
+    // Synced lyrics always win when both are present.
     if (data && data.syncedLyrics) {
       staticLyricsActive = false;
       const parsed = parseLRC(data.syncedLyrics, (durationMs || 0) / 1000);
@@ -21953,7 +22871,6 @@
   // Sibling of selectLRCLIBResult for plain (unsynced) entries. Only used as a
   // last-resort auto-fetch fallback when no synced result exists, so unsynced
   // LRCLIB lyrics render automatically instead of reporting "no lyrics"
-  // (AJ, 2026-09-18).
   function selectLRCLIBPlainResult(results, track) {
     const candidates = Array.isArray(results)
       ? results.filter((result) => result
@@ -21983,8 +22900,8 @@
   // ---- Spicy Lyrics API integration (publishable key, client-side) ----
   // ---- Spicy Lyrics API cache -----------------------------------------------
   // The /v1/lyrics endpoint is rate-limited, and every play of a song we've
-  // already resolved would otherwise re-run the MusicBrainz search (up to ~16
-  // sequential HTTP requests) plus the API round-trip.
+  // already resolved would otherwise re-run the track search plus the API
+  // round-trip.
   //
   // RETENTION — Terms of Service s7. Caching and storage are allowed, and they
   // ask that we do NOT hit the API for every view, on one hard condition:
@@ -21993,7 +22910,7 @@
   // effect (a sync can be pulled at any time, with no removal notice), so it is
   // a CEILING, not a target. We sit at exactly the cap: long enough that a
   // replay almost never re-fetches, and never past the point where a withdrawn
-  // sync stops propagating. (Was 3 days — upstream's window — until 2026-10-07.)
+  // sync stops propagating. (Was 3 days — upstream's window — until.)
   //
   // Storage is chrome.storage.local (bridged through window.YTMod) rather than
   // localStorage: the localStorage lyrics cache is capped at 15 entries and is
@@ -22007,7 +22924,7 @@
   // v3 — the cached value is the TTML STRING that `parseSpicyLyrics` SERIALIZES
   // from the API's JSON, so it is only ever as current as the serializer that
   // wrote it. `parseSpicyLyrics` is new (it does not exist in any backup older
-  // than 2026-09-26), so every entry predating it was produced by a different
+  // than), so every entry predating it was produced by a different
   // code path and carries a SHAPE WE NO LONGER EMIT — most visibly, one span
   // per LINE instead of one per syllable, which the renderer then fills as a
   // single unit. Symptom: "the lyrics are line by line, not word by word"
@@ -22156,7 +23073,7 @@
   //
   // Negative entries are pure disposable optimisation, so re-deriving them costs
   // one API call at worst. Resolver entries (`r:*`) are NOT touched — they
-  // record a stable fact that spending a ListenBrainz round-trip would only
+  // record a stable fact that spending a search round-trip would only
   // re-learn. Runs once per page load, and only when the stored version differs.
   function invalidateStaleSpicyEntries() {
     if (!spicyCache) return 0;
@@ -22305,117 +23222,41 @@
     return touched;
   }
 
-  // Resolves a Spotify track id from the track's title + artist via
-  // ListenBrainz (free, no API key, CORS-enabled, no backend required).
-  //
-  // WHY LISTENBRAINZ INSTEAD OF MUSICBRAINZ
-  // ---------------------------------------
-  // MusicBrainz could answer the same question, but only by search-then-walk:
-  // search recordings, then fetch each candidate's URL relations until one
-  // carries a Spotify link. That was up to ~16 sequential requests per song
-  // against a 400-request window, and most of them were spent discovering that
-  // a particular pressing has no link. ListenBrainz — the same organisation,
-  // MetaBrainz — publishes the recording→Spotify mapping directly, so the whole
-  // walk collapses into a single request.
-  //
-  // Endpoint: /spotify-id-from-metadata
-  //   artist_name + track_name + release_name → spotify_track_ids[]
-  //
-  // GOTCHAS that shaped this implementation (each cost a debugging cycle):
-  //   * `release_name` is REQUIRED by the validator, but sending it EMPTY is
-  //     treated loosely and returns every mapping it has for that title+artist.
-  //     Empty beats guessing, because YTM's album string never matches
-  //     MusicBrainz's character-for-character. (A wrong name also degrades to
-  //     the loose behaviour rather than failing.)
-  //   * ARTIST CREDIT DRIFT is the trap that makes this look broken. MusicBrainz
-  //     and Spotify store featured artists in the ARTIST field, while YouTube
-  //     Music keeps them in the title's parentheses. So "underscores" returns
-  //     NOTHING for a song that "underscores feat. 8485" resolves instantly —
-  //     the very song that motivated building this. Hence the variant ladder.
-  //
-  // We deliberately do NOT try /spotify-id-from-mbid: it needs a MusicBrainz
-  // recording id, and obtaining one means going back through MusicBrainz search,
-  // which is exactly the round trip we are removing.
-
-  /** Loose normalisation — Unicode-aware, used only for de-duplicating variants. */
+  /** Loose normalisation — Unicode-aware, used for comparing titles/artists. */
   const normLoose = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
-  /** Strip "(Official Video)", "(feat. X)", trailing "- Remastered 2011", etc. */
-  const stripParensLoose = (v) => String(v || "")
-    .replace(/\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*/g, " ")
-    .replace(/\s+-\s+[A-Za-z][^-]*$/, "")
-    .trim();
-
-  /** Drop a featured credit from an artist string. */
-  const dropFeatCredit = (v) => String(v || "")
-    .replace(/\s*(?:feat|ft|featuring|with)\b\.?\s*.*$/i, "")
-    .replace(/\s*[&,]\s*.*$/, "")
-    .trim();
-
-  /** Ordered, de-duplicated variant builder. */
-  function variantList(...values) {
-    const out = [];
-    const seen = new Set();
-    for (const value of values) {
-      const s = String(value || "").trim();
-      if (!s) continue;
-      const k = normLoose(s);
-      if (!k || seen.has(k)) continue;
-      seen.add(k);
-      out.push(s);
-    }
-    return out;
-  }
-
-  /**
-   * Artist strings worth trying, most-likely first.
-   *
-   * The interesting case is a featured credit sitting in the TITLE: YTM gives us
-   * "Song (feat. X)" / "Artist", while the mapping is keyed on "Artist feat. X".
-   * So we lift the credit out of the parens and graft it onto the artist, in the
-   * spellings MusicBrainz editors actually use.
-   */
-  function listenbrainzArtistVariants(artist, title) {
-    const base = dropFeatCredit(artist);
-    const feat = /[\(\[\{]\s*(?:feat|ft|featuring|with)\b\.?\s*([^\)\]\}]+)[\)\]\}]/i.exec(String(title || ""));
-    const credit = feat && feat[1] ? feat[1].trim() : "";
-    return variantList(
-      artist,
-      base,
-      credit && base ? `${base} feat. ${credit}` : "",
-      credit && base ? `${base} ft. ${credit}` : "",
-      credit && base ? `${base} featuring ${credit}` : "",
-      stripParensLoose(artist)
-    );
-  }
-
-  /* Uploader-styled titles never match a catalogue. The live console showed
-     queries like "more than life ft. glaive (Official Music Video) (feat.
-     glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
-     exclusive" — those miss MusicBrainz and ListenBrainz every time.
-     Strip the noise before querying anything (AJ, 2026-10-19). */
-  const TITLE_NOISE_RE =
-    /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;
-  // Bracketed text that describes a DIFFERENT RECORDING must survive: dropping
-  // "(Remix)" would query the original and fetch the wrong ISRC/timing.
-  const TITLE_VERSION_RE =
-    /\b(remix|re-?mix|live|acoustic|instrumental|sped\s*up|slowed|reverb|nightcore|demo|edit|version|cover|orchestral)\b/i;
+  /* Uploader-styled titles carry distribution labels that are not part of the
+     song's name. Strip those, but ONLY those: "(u want it)" is the title, and
+     "(feat. blackbear)" is a different recording from the solo cut. The old
+     rule dropped every bracket, which turned "tell me (u want it)" into
+     "tell me" and matched the wrong song. */
+  const TITLE_NOISE_WORDS = new Set([
+    "official", "music", "video", "audio", "lyric", "lyrics", "visualizer",
+    "visualiser", "amv", "mv", "hd", "hq", "4k", "8k", "explicit", "clean",
+  ]);
+  const TITLE_BRACKET_RE = /[\(\[]([^\)\]]*)[\)\]]/g;
+  // A trailing " - Official Video" / " - Lyrics" label, outside brackets.
+  const TITLE_NOISE_TAIL_RE =
+    /\s*[-–—]\s*(?:(?:official\s*)?(?:music\s*)?(?:video|audio)|lyric\s*video|lyrics?|visuali[sz]er|amv|mv|hd|hq|4k|8k)\s*$/i;
 
   function cleanSearchTitle(title, artist) {
     let s = String(title || "");
     // "Song | Channel" — everything after the pipe is uploader branding.
     s = s.split("|")[0];
-    // Bracketed qualifiers: drop (Official Video) / [Lyrics / AMV], keep
-    // (Remix) / (Live) / (Acoustic) because those are different recordings.
-    s = s.replace(/[\(\[]\s*([^\)\]]*)[\)\]]/g, (match, inner) =>
-      TITLE_VERSION_RE.test(inner) ? match : " "
-    );
+    // Drop a bracketed label only when the whole bracket is label words:
+    // "(Official Video)", "[Lyrics / AMV]", "(prod. X)". Keep "(u want it)",
+    // "(feat. blackbear)", "(Remix)", "(Live)", "(Acoustic)", "(Extended)".
+    s = s.replace(TITLE_BRACKET_RE, (match, inner) => {
+      const text = String(inner || "").trim();
+      if (!text) return " ";
+      if (/^prod(?:uced)?\.?\b/i.test(text)) return " ";
+      const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      return words.length && words.every((word) => TITLE_NOISE_WORDS.has(word)) ? " " : match;
+    });
     s = s.replace(/\{[^}]*\}/g, " ");
     // YTM sometimes truncates a title mid-bracket: "Song (Official ...".
     s = s.replace(/[\(\[]\s*[^\)\]]*$/, " ");
-    // Inline feature credits: "Song ft. X" / "Song feat. X".
-    s = s.replace(/\s+(?:ft|feat|featuring)\.?\s+.*$/i, " ");
-    s = s.replace(TITLE_NOISE_RE, " ");
+    s = s.replace(TITLE_NOISE_TAIL_RE, " ");
     s = s.replace(/\s*[-–—]\s*$/, " ");
     // "Artist - Song" -> "Song" when the prefix is the artist we already know.
     const dash = /^(.+?)\s*[-–—]\s*(.+)$/.exec(s);
@@ -22429,271 +23270,182 @@
     return s.replace(/\s{2,}/g, " ").trim();
   }
 
-  /** Title strings worth trying: cleaned first, then stripped, then raw. */
-  function listenbrainzTitleVariants(title, artist) {
-    const cleaned = cleanSearchTitle(title, artist);
-    return variantList(cleaned, stripParensLoose(title), title);
+  // ---- YTM -> Spotify id ------------------------------------------------------
+  // The Spicy Lyrics API is keyed by a Spotify track id, which YouTube Music
+  // does not expose. /tracks/search answers that question directly: give it the
+  // title, artist, album and duration and it returns ranked Spotify tracks with
+  // a `tier` saying how well each one matches. This replaced the old
+  // metadata-mapping ladder: one request instead of up to twelve, and no second
+  // catalogue to keep in sync.
+  //
+  // Tier behaviour, measured live: `exact` requires the duration within about
+  // 3s; a 4-10s drift is still `likely`; past that every result becomes
+  // `version`, where live/remix/cover look-alikes live (and the live recording
+  // is often ranked first). That is why the accepted window is deliberately
+  // small — a wider one would silently adopt the wrong recording.
+
+  function spicySearchSeconds(track) {
+    const ms = Number(track && track.durationMs);
+    return Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0;
   }
 
-  /* YTM's player bar renders a title with the uploader noise already removed —
-     the raw videoDetails.title still carries "(Official Music Video)". That
-     makes the bar text the best canonical string available without a catalogue
-     lookup, and Spicy is the source we most want to hit (AJ, 2026-10-19). */
-  function playerBarTitle() {
-    const selectors = [
-      "ytmusic-player-bar .title",
-      "ytmusic-player-bar #song-title",
-      "ytmusic-player-bar yt-formatted-string.title",
-      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
-    ];
-    for (const selector of selectors) {
-      const el = document.querySelector(selector);
-      const text = el && el.textContent ? el.textContent.trim() : "";
-      if (text) return text;
-    }
-    return "";
+  function spicyResultArtistMatches(result, artist) {
+    const wanted = normLoose(artist);
+    if (!wanted) return true;
+    const names = Array.isArray(result && result.artists) ? result.artists : [];
+    return names.some((name) => {
+      const got = normLoose(name);
+      return got && (got === wanted || got.includes(wanted) || wanted.includes(got));
+    });
   }
 
   /**
-   * One request against /spotify-id-from-metadata.
-   * Returns { ids, transient } — `transient` means the answer is unknowable
-   * right now (timeout, 429, 5xx), as opposed to a definitive "no mapping".
+   * One request against /tracks/search. `duration` is seconds, or 0 to omit it.
+   * Returns { results, transient, aborted } — `transient` means the answer is
+   * unknowable right now (timeout, 429, 5xx), not that the track has no match.
    */
-  async function listenbrainzLookupMetadata(artist, title, release, controller) {
+  async function spicySearchTracks(title, artist, album, duration, controller) {
     const params = new URLSearchParams();
-    params.set("artist_name", artist || "");
-    params.set("track_name", title || "");
-    // Sent even when empty — the endpoint requires the parameter, and an empty
-    // value is what triggers its loose matching.
-    params.set("release_name", release || "");
+    params.set("title", title);
+    if (artist) params.set("artist", artist);
+    if (album) params.set("album", album);
+    if (duration > 0) params.set("duration", String(duration));
+    params.set("limit", String(SPICY_SEARCH_LIMIT));
 
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), LB_TIMEOUT_MS);
+    const timer = setTimeout(() => timeout.abort(), SPICY_SEARCH_TIMEOUT_MS);
     const onAbort = () => timeout.abort();
     if (controller && controller.signal) {
-      if (controller.signal.aborted) { clearTimeout(timer); return { ids: [], transient: false }; }
+      if (controller.signal.aborted) {
+        clearTimeout(timer);
+        return { results: [], transient: false, aborted: true };
+      }
       controller.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     let response;
     try {
-      response = await fetch(`${LISTENBRAINZ_LABS_API}/spotify-id-from-metadata/json?${params.toString()}`, {
+      response = await fetch(`${SPICY_LYRICS_BASE}/tracks/search?${params.toString()}`, {
+        headers: { Authorization: "Bearer " + SPICY_LYRICS_PUBLISHABLE_KEY },
         credentials: "omit",
         signal: timeout.signal,
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) alWarn("ListenBrainz lookup failed:", error && error.message);
-      return { ids: [], transient: !userAborted };
+      if (!userAborted) alWarn("Spicy search failed:", error && error.message);
+      return { results: [], transient: !userAborted, aborted: userAborted };
     } finally {
       clearTimeout(timer);
       if (controller && controller.signal) controller.signal.removeEventListener("abort", onAbort);
     }
 
-    // 400 = our parameters were rejected. That is our bug, not a flake, so it is
-    // a definitive no rather than something worth retrying.
-    if (response.status === 400) {
-      alWarn("ListenBrainz rejected the query (HTTP 400).");
-      return { ids: [], transient: false };
-    }
     if (response.status === 429) {
-      lbThrottledUntil = Date.now() + 30_000;
-      alWarn("ListenBrainz rate-limited us; backing off for 30s.");
-      return { ids: [], transient: true };
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 30_000;
+      spicySearchThrottledUntil = Date.now() + Math.min(waitMs, 60_000);
+      alWarn("Spicy search rate-limited; backing off.");
+      return { results: [], transient: true };
     }
-    if (response.status >= 500) return { ids: [], transient: true };
-    if (!response.ok) return { ids: [], transient: false };
+    if (response.status === 0 || response.status >= 500) {
+      return { results: [], transient: true };
+    }
+    if (response.status === 401 || response.status === 403) {
+      // Revoked key, disabled application, or this origin left the allowlist.
+      // Falling through is right, but staying quiet would hide a permanently
+      // broken key behind a working fallback path.
+      alWarn(`Spicy search rejected the key (HTTP ${response.status}); lyrics calls will fail too.`);
+      return { results: [], transient: false };
+    }
+    if (!response.ok) return { results: [], transient: false };
 
     const json = await response.json().catch(() => null);
-    const first = Array.isArray(json) ? json[0] : (json && json[0]) || null;
-    const ids = (first && Array.isArray(first.spotify_track_ids)) ? first.spotify_track_ids : [];
-    return { ids: ids.filter((id) => /^[A-Za-z0-9]{22}$/.test(String(id))), transient: false };
+    const results = json && json.Body && Array.isArray(json.Body.results) ? json.Body.results : [];
+    return { results, transient: false };
   }
 
-  /**
-   * Walk the variant ladder until a mapping turns up.
-   *
-   * Ordered most-likely-and-cheapest first: the stripped title with the raw
-   * artist answers for the overwhelming majority of songs in one request, so the
-   * feat-credit permutations only run when that fails.
-   */
-  function spotifyTrackIdFromMusicBrainzUrl(value) {
-    const raw = String(value || "");
-    const uri = /^spotify:track:([A-Za-z0-9]{22})$/i.exec(raw);
-    if (uri) return uri[1];
-    const web = /open\.spotify\.com\/(?:intl-[^/]+\/)?track\/([A-Za-z0-9]{22})/i.exec(raw);
-    return web ? web[1] : "";
+  /** First result that is safe to take automatically, or null. */
+  function pickSpicySearchResult(results, track, duration) {
+    if (!Array.isArray(results) || !results.length) return null;
+    const wantedMs = Number(track && track.durationMs) || 0;
+    for (const result of results) {
+      if (!result || typeof result.id !== "string" || !/^[A-Za-z0-9]{22}$/.test(result.id)) continue;
+      if (!spicyResultArtistMatches(result, track && track.artist)) continue;
+      const gotMs = Number(result.duration) * 1000;
+      const delta = wantedMs > 0 && Number.isFinite(gotMs) ? Math.abs(gotMs - wantedMs) : 0;
+      const durationAgrees =
+        duration > 0 && wantedMs > 0 && Number.isFinite(gotMs) && delta <= SPICY_SEARCH_EXACT_DELTA_MS;
+      if (result.tier === "exact") {
+        // The API already applies roughly this window; the second check only
+        // guards against a result whose duration is absent or malformed.
+        if (duration > 0 && wantedMs > 0 && Number.isFinite(gotMs) && !durationAgrees) continue;
+        return { result, delta };
+      }
+      // `version` normally means another cut, but the API also uses it when the
+      // title differs only in how the credit is written — "dropout (feat.
+      // blackbear)" vs Spotify's "dropout (w/ blackbear)". A live/remix take
+      // drifts by tens of seconds, so a version whose duration still agrees is
+      // the same recording.
+      if (result.tier === "version" && durationAgrees) return { result, delta };
+      // `likely` means the title and artist matched but the duration did not.
+      // Take it for small padding, never for another cut.
+      if (result.tier === "likely" && duration > 0 && delta <= SPICY_SEARCH_LIKELY_DELTA_MS) {
+        return { result, delta };
+      }
+    }
+    return null;
   }
 
-  /* Relations are attached by the host's lookup (content.js), not by the
-     search response — MusicBrainz's search endpoint never returns them. TYPE is
-     deliberately ignored: ordinary Spotify mappings are filed as
-     `free streaming`, and filtering for `streaming` would drop every one of
-     them (AJ, 2026-10-22). */
-  function musicBrainzSpotifyId(recording) {
-    const relations = recording && Array.isArray(recording.relations) ? recording.relations : [];
-    for (const relation of relations) {
-      const resource = relation && relation.url && relation.url.resource;
-      const id = spotifyTrackIdFromMusicBrainzUrl(resource);
-      if (id) return id;
-    }
-    return "";
-  }
-
-  function scoreMusicBrainzRecording(recording, track) {
-    if (!recording || !track) return -1;
-    const wantedTitle = normLoose(track.title);
-    const gotTitle = normLoose(recording.title);
-    if (!wantedTitle || !gotTitle) return -1;
-    let score = gotTitle === wantedTitle ? 8 : 0;
-    if (!score && (gotTitle.includes(wantedTitle) || wantedTitle.includes(gotTitle))) score = 4;
-    if (!score) return -1;
-    const wantedArtist = normLoose(track.artist);
-    const artistNames = Array.isArray(recording["artist-credit"])
-      ? recording["artist-credit"].map((credit) => normLoose(credit && (credit.name || credit.artist && credit.artist.name)))
-      : [];
-    // A different artist is a different song, however exactly the title matches.
-    // Once relations became readable this mattered: "Ready or Not" also exists
-    // by other artists, and a wrong-but-linked recording would otherwise beat
-    // the right one whenever its duration happened to be closer (AJ, 2026-10-22).
-    // Rejecting here also means we never fetch a Spotify id for a cover/remix by
-    // someone else and serve its lyrics under this track.
-    if (wantedArtist && artistNames.length &&
-        !artistNames.some((name) => name && (name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name)))) {
-      return -1;
-    }
-    if (wantedArtist && artistNames.some((name) => name === wantedArtist)) score += 6;
-    else if (wantedArtist && artistNames.some((name) => name && (name.includes(wantedArtist) || wantedArtist.includes(name)))) score += 3;
-    const wantedDuration = Number(track.durationMs);
-    const gotDuration = Number(recording.length);
-    if (Number.isFinite(wantedDuration) && wantedDuration > 0 && Number.isFinite(gotDuration) && gotDuration > 0) {
-      const delta = Math.abs(gotDuration - wantedDuration);
-      if (delta <= 1500) score += 4;
-      else if (delta <= 5000) score += 2;
-    }
-    return score;
-  }
-
-  async function resolveSpotifyIdViaMusicBrainz(track, controller, key, options = null) {
-    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") {
-      return { id: null, transient: false };
-    }
+  async function resolveSpotifyIdViaSpicySearch(track, controller, key, options = null) {
     const prefetching = !!(options && options.prefetch);
     const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
     if (stale()) return { id: null, transient: false };
-    try {
-      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        cleanSearchTitle(track.title, track.artist),
-        track.artist,
-        track.album,
-        track.durationMs
-      );
-      if (stale()) return { id: null, transient: false };
-      // status 0 = the host could not reach MusicBrainz at all (the relation
-      // lookup reports it that way), so it is a transport failure like 429/5xx,
-      // never evidence that the song has no mapping.
-      if (!response || response.status === 0 || response.status === 429 || response.status >= 500) {
-        return { id: null, transient: true };
-      }
-      if (!response.ok || !response.data || !Array.isArray(response.data.recordings)) {
-        return { id: null, transient: false };
-      }
-      const candidates = response.data.recordings
-        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
-        .filter((candidate) => candidate.score > 0 && musicBrainzSpotifyId(candidate.recording))
-        .sort((a, b) => b.score - a.score);
-      const best = candidates[0];
-      if (!best) {
-        alWarn(`MusicBrainz: no Spotify match for "${track.title}".`);
-        return { id: null, transient: false };
-      }
-      const id = musicBrainzSpotifyId(best.recording);
-      alLog(`Spotify id ${id} via MusicBrainz (${best.score}).`);
-      return { id, transient: false };
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        alWarn("MusicBrainz fallback failed:", error && error.message);
-      }
-      return { id: null, transient: !controller.signal.aborted };
-    }
-  }
-
-  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
-    const prefetching = !!(options && options.prefetch);
-    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
-    const title = track && track.title;
-    if (!title) {
-      alWarn("no track title; Spotify lookup skipped.");
-      return { id: null, transient: false };
+    if (spicySearchThrottledUntil > Date.now()) {
+      alWarn("Spicy search still backing off; skipping this lookup.");
+      return { id: null, transient: true };
     }
 
     const artist = (track && track.artist) || "";
     const album = (track && track.album) || "";
-    const titles = listenbrainzTitleVariants(title, artist);
-    // Prefer the player bar's already-cleaned title when it says something new.
-    // During prefetch the bar still shows the CURRENT song, so using it would
-    // poison the next track's lookup with the wrong title.
-    if (!prefetching) {
-      const barTitle = cleanSearchTitle(playerBarTitle(), artist);
-      if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
-        titles.unshift(barTitle);
-      }
-    }
-    const artists = listenbrainzArtistVariants(artist, title);
-    // Try the album YTM gave us first, then the loose empty form. YTM's album
-    // string is often close enough to tighten the match, and when it isn't the
-    // endpoint degrades to the loose lookup rather than returning nothing.
-    const releases = album ? [album, ""] : [""];
+    const title = cleanSearchTitle(track && track.title, artist) || (track && track.title) || "";
+    if (!title) return { id: null, transient: false };
+    const duration = spicySearchSeconds(track);
 
-    let attempts = 0;
-    let transientFailure = false;
-    let sawAnyAnswer = false;
+    let out = await spicySearchTracks(title, artist, album, duration, controller);
+    if (out.aborted) return { id: null, transient: false };
+    if (stale()) return { id: null, transient: false };
 
-    lbLadder: for (const t of titles) {
-      for (const a of artists) {
-        for (const r of releases) {
-          if (stale()) return { id: null, transient: false };
-          // A 429 elsewhere means the rest of this window is gone. Bail with
-          // `transient` rather than spending the remaining budget on calls that
-          // cannot succeed.
-          if (lbThrottledUntil > Date.now()) {
-            alWarn("ListenBrainz backing off; trying MusicBrainz.");
-            break lbLadder;
-          }
-          if (attempts >= LB_MAX_ATTEMPTS) {
-            // Budget exhausted without a definitive answer, so the caller must
-            // not record this as a permanent miss.
-            alWarn("ListenBrainz budget spent; trying MusicBrainz.");
-            break lbLadder;
-          }
-          attempts++;
+    let picked = out.transient ? null : pickSpicySearchResult(out.results, track, duration);
 
-          const out = await listenbrainzLookupMetadata(a, t, r, controller);
-          if (out.transient) transientFailure = true;
-          else sawAnyAnswer = true;
-
-          if (out.ids.length) {
-            const id = out.ids[0];
-            alLog(`resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
-            return { id, transient: false };
-          }
-        }
-      }
+    // A long music video can be a minute past the Spotify cut, which the API
+    // reports as `version` for every result. Duration is what caused that, so
+    // the one retry worth spending drops it: without a duration the API can
+    // still answer `exact` when every release of the recording agrees.
+    let retriedWithoutDuration = false;
+    if (!picked && duration > 0 && !out.transient) {
+      retriedWithoutDuration = true;
+      out = await spicySearchTracks(title, artist, album, 0, controller);
+      if (out.aborted || stale()) return { id: null, transient: false };
+      if (!out.transient) picked = pickSpicySearchResult(out.results, track, 0);
     }
 
-    alWarn(`ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
-    // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
-    // behind ListenBrainz: it is slower and rate-limited, but it covers some
-    // recordings whose direct ListenBrainz -> Spotify mapping is missing.
-    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key, options);
-    if (musicBrainz.id) return musicBrainz;
-    // Every mapping layer failed at the transport level, so we have no evidence
-    // that the song is genuinely unresolvable. Do not negative-cache that.
-    if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      alWarn(`free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
-      return { id: null, transient: true };
+    if (!picked) {
+      if (out.transient) return { id: null, transient: true };
+      alWarn(`Spicy search: no safe match for "${title}" / "${artist || "?"}".`);
+      return { id: null, transient: false };
     }
-    return { id: null, transient: false };
+
+    const id = picked.result.id;
+    const delta = duration > 0 ? `, ${Math.round(picked.delta / 1000)}s off` : "";
+    alLog(`Spotify id ${id} via Spicy search (${picked.result.tier}${delta}${retriedWithoutDuration ? ", duration omitted" : ""}).`);
+    return { id, transient: false };
+  }
+
+  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
+    if (!track || !track.title) {
+      alWarn("no track title; Spotify lookup skipped.");
+      return { id: null, transient: false };
+    }
+    return resolveSpotifyIdViaSpicySearch(track, controller, key, options);
   }
 
   /**
@@ -22704,12 +23456,11 @@
     const prefetching = !!(options && options.prefetch);
     const cacheKey = spicyCacheKeyFor(track, "");
     // Only HITS are cached. A miss used to be recorded for 12 hours and then
-    // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
+    // short-circuit this function, which meant a Spotify mapping the
     // user added afterwards stayed invisible for half a day — the mapping is
     // exactly what these lookups exist to find, and it can change at any time
-    // without our knowing (AJ, 2026-10-23). A lookup that fails now simply fails
-    // again next time; both layers are budgeted, so re-asking costs a handful of
-    // requests per play, not a loop.
+    // without our knowing. A lookup that fails now simply fails
+    // again next time; the search is one request per play, not a loop.
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
       if (cached && cached.spotifyId) {
@@ -22831,7 +23582,7 @@
   // absence of whitespace between adjacent spans — parseTTML infers it that way.
   // Returns { ttml, attribution } so the caller can surface the uploader credit.
   //
-  // TWO BODY SHAPES, AND BOTH ARE COMMON (verified live 2026-09-20)
+  // TWO BODY SHAPES, AND BOTH ARE COMMON (verified live)
   // ---------------------------------------------------------------
   // `Body.Type === "Syllable"` — each Content entry carries
   //   Lead: { StartTime, EndTime, Syllables: [{ Text, StartTime, EndTime,
@@ -23385,7 +24136,7 @@
        exists when the automatic resolver already failed for this track. Served
        from the persistent cache before any runner runs, so a replay or a page
        reload loads it instantly instead of searching and landing on "no
-       lyrics" again (AJ, 2026-10-22). */
+       lyrics" again. */
     const manualPick = getManualLyricsPersistent(key);
     if (manualPick) {
       if (stale()) return;
@@ -23457,7 +24208,7 @@
         }
         // Prefer a synced match; fall back to a plain (unsynced) match so the
         // panel shows lyrics automatically instead of "No lyrics found"
-        // (AJ, 2026-09-18). Both are scored against the current track on the
+        //. Both are scored against the current track on the
         // same search response — no second request.
         data = selectLRCLIBResult(searchResponse.data, track)
           || selectLRCLIBPlainResult(searchResponse.data, track);
@@ -23641,7 +24392,7 @@
     // wins when it has the track. Spicy is next; if it only has line-level
     // timing, the spicy runner holds it while Unison gets one word-level check.
     // Unison line-level or a miss falls back to Spicy. LRCLIB is last.
-    // lrc.red was retired on 2026-10-22.
+    // lrc.red was retired on.
     const order = ["community", "spicy", "unison", "lrclib"];
     for (const id of order) {
       const runner = runners[id];
@@ -23660,7 +24411,7 @@
 
   /* ===================== next-track prefetch ===================== */
   // Warm the NEXT track's ARTWORK so an MV -> audio skip has a decoded image the
-  // instant the pane switches (AJ, 2026-10-20). The browser keeps the decoded
+  // instant the pane switches. The browser keeps the decoded
   // bitmap for the URL, so the pane's <img> paints on its first frame instead of
   // showing an empty box while the CDN responds.
   // Best-effort: no DOM node is kept, no error surfaces, and the URL goes through
@@ -23946,7 +24697,7 @@
     // ON by default. A manual pick exists precisely because the automatic
     // resolver could not find this track, so without remembering it the next
     // play (or a page reload) goes back to "No lyrics found" and the pick is
-    // lost — AJ's exact report (2026-10-22). Untick it for a one-off answer.
+    // lost — the exact report. Untick it for a one-off answer.
     remember.checked = true;
     rememberRow.append(remember, h("span", { text: "Remember for this track" }));
 
@@ -24008,7 +24759,7 @@
   }
 
   // Fullscreen only: the Search CTA must yield to the sheet it opened, then come
-  // back if the listener closes it without picking a result (AJ, 2026-11-16).
+  // back if the listener closes it without picking a result.
   // Toggled on the overlay rather than the button so the sheet's own open/close
   // animation and the fade stay independent.
   function syncFsSearchCta(open) {
@@ -24111,7 +24862,7 @@
     row.append(name, meta);
     if (hasSync || hasPlain) {
       // Both synced and plain matches are now loadable. Plain ones render as a
-      // static, already-filled set with no karaoke sweep (AJ, 2026-09-18).
+      // static, already-filled set with no karaoke sweep.
       if (!hasSync) {
         row.classList.add("no-sync-available");
         row.title = "Load unsynced lyrics (no timestamps)";
@@ -24343,7 +25094,7 @@
 
   // Does the whole-word join apply to this line? `joinSyllables` is the master
   // switch; `joinBgSyllables` lets the user keep per-syllable karaoke on the
-  // background-vocal lines while the lead lines stay joined (AJ, 2026-10-20).
+  // background-vocal lines while the lead lines stay joined.
   // Defaults to ON, which is the historical behaviour — bg lines joined too.
   function joinApplies(background) {
     if (!currentSettings.joinSyllables) return false;
@@ -24354,7 +25105,7 @@
   function makeWord(word, isLast, lineTimed, noKaraoke, background) {
     // An unsynced line (no real per-word timing) must not spawn syllable/letter
     // karaoke springs — that is what tanks FPS on partially-synced TTML imports
-    // (AJ, 2026-09-17). Force it to a plain word so animateWord shows it as a
+    //. Force it to a plain word so animateWord shows it as a
     // static block.
     const suppressKaraoke = !!(noKaraoke && !lineTimed);
     const start = word.StartTime * 1000;
@@ -24364,7 +25115,7 @@
     // become a letterGroup: makeLetterGroup() would spawn one karaoke spring per
     // CHARACTER, so a 40-character line turns into 40 animated spans each with a
     // ~90ms window, while the line-level fill runs over the full multi-second
-    // window. The result is the "wavy and glowy" drift AJ sees — it reads as an
+    // window. The result is the "wavy and glowy" drift sees — it reads as an
     // animation bug, not as line-synced lyrics.
     //
     // Keeping it a plain `.word` hands the whole thing to the line-level fill:
@@ -24377,9 +25128,9 @@
       !word.DisableLetterAnimation &&
       !word.disableLetterAnimation &&
       isLetterCapable(word.Text, duration);
-    // Join syllables (AJ, 2026-10-19): paint every word as ONE whole-word fill
+    // Join syllables: paint every word as ONE whole-word fill
     // instead of a per-letter karaoke group, so a word lights up whole with no
-    // syllable stepping — the Spicy Lyrics toggle the user asked to mirror. The
+    // syllable stepping, matching the Spicy Lyrics whole-word toggle. The
     // plain-.word path keeps its own scale/glow/gradient springs, so it still
     // animates, just as a single unit.
     // Simple lyrics (Apple Music / AMLL style): a long word must NOT split into a
@@ -24432,7 +25183,7 @@
   }
 
   function appendWords(lineElement, lineModel, words, background, noKaraoke) {
-    // Join syllables (AJ, 2026-10-19): a logical word is a run of syllable tokens
+    // Join syllables: a logical word is a run of syllable tokens
     // glued by IsPartOfWord. Left alone each token fills in sequence, so a word
     // reads as separate syllables. When the setting is on, collapse every run into
     // ONE word spanning the whole run (merged text + merged time window) so it
@@ -24741,8 +25492,8 @@
   };
   // Sources whose timing is machine-aligned rather than hand-synced get the
   // warning treatment: red pill + triangle. Persistent, unlike the transient
-  // chip above the lyrics (AJ, 2026-10-19). Empty since lrc.red was retired
-  // (2026-10-22); kept as the hook for any future machine-aligned source.
+  // chip above the lyrics. Empty since lrc.red was retired
+  // ; kept as the hook for any future machine-aligned source.
   const PROVIDER_WARN = {};
 
   // Provider marks ship beside the renderer so the page can load them from the
@@ -24804,7 +25555,7 @@
   function buildProviderRow(provider, isStatic) {
     // The red pill/triangle means "these timings are machine-aligned". A static
     // (unsynced) set has no timings at all, so the warning is meaningless and
-    // reads as a defect — show the normal credit instead (AJ, 2026-10-20).
+    // reads as a defect — show the normal credit instead.
     const warn = !!PROVIDER_WARN[provider] && !isStatic;
     const row = h("div", { class: "ym-sl-provider" + (warn ? " ym-sl-provider-warn" : "") });
     if (warn) row.appendChild(buildProviderWarnIcon());
@@ -24825,7 +25576,7 @@
     }
     if (!warn) return row;
     // Explain WHY it is flagged, so the red pill is not just alarm without
-    // context. Static — it lives as long as the lyrics do (AJ, 2026-10-19).
+    // context. Static — it lives as long as the lyrics do.
     return h("div", { class: "ym-sl-provider-block" },
       row,
       h("div", {
@@ -24942,7 +25693,7 @@
   // normal-mode curves for the whole session (the one-shot guard below made the
   // re-publish a no-op, which is why the PiP's Apple Music mode kept bouncing:
   // normal Y-offset is 0 -> -1/60 -> 0, i.e. down and BACK, while Simple is a
-  // monotonic 0 -> -0.033). AJ, 2026-10-07.
+  // monotonic 0 -> -0.033).
   function publishRendererKit(force) {
     if (rendererKitPublished && !force) return;
     if (!window.YTMod || !window.YTMod.bus) return;
@@ -24992,7 +25743,7 @@
   // NEXT syllable" (parseTTML infers it from the absence of whitespace between
   // spans — see the word-scan above), so a space belongs before every syllable
   // whose PREDECESSOR is not part of a word. The empty join produced
-  // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+  // "Breadonmelikeabaker" for syllable-level lyrics, which
   // then rendered as one giant word on the share card. The panel itself never
   // showed this because it renders from `words`, not from `text` — but `text`
   // is a published bus field, so every consumer was getting the broken form.
@@ -25212,7 +25963,6 @@
       cachedLastRealLyricEndMs = Math.max(cachedLastRealLyricEndMs, lead.EndTime * 1000);
       // Static (unsynced) lines get the .static class so CSS can paint them at
       // full opacity / alpha-1 regardless of the per-state Sung/NotSung dim
-      // (AJ, 2026-09-18).
       const lineElement = h("div", {
         class: staticLyricsActive ? "line static" : "line",
       });
@@ -25339,10 +26089,13 @@
     // class on the old nodes is gone.
     markPauseSyncLine();
     lineScrollEl.classList.remove("offline");
+    // The rows were just replaced, so any hover-revealed stack belongs to the
+    // previous song. The class is otherwise cleared on pointerleave.
+    clearSungRowHover();
     // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
-    // from here through the song (AJ, 2026-09-18).
+    // from here through the song.
     if (staticLyricsActive && lineScrollEl && !braccatoOwnsTrack()) {
-      // Instant: a reset, not a scroll the user asked to watch.
+      // Instant: a reset, not a scroll to animate.
       writeScrollTop(0, true);
     }
     // The scroll position is now meaningless: the PREVIOUS song's scrollTop is
@@ -25363,7 +26116,7 @@
   function loadLyrics(xml) {
     // A freshly imported file invalidates any pause sync point: it was measured
     // against the previous TTML's line times, so keeping it would silently
-    // mis-sync. Drop it (AJ's call, 2026-09-15).
+    // mis-sync. Drop it (the call).
     pauseSync = null;
     pausePickMode = false;
     return loadTTML(xml, "imported");
@@ -25490,6 +26243,10 @@
   // resting letter was already producing byte-identical values every frame.
   function animateLetters(word, wordState, lineState, positionMs, deltaTime) {
     if (!word.Letters) return false;
+    // Background-vocal letter words used the lead's full 185x / 16px letter
+    // glow, which read as a halo around the smaller bg text. Keep the lead
+    // untouched and soften only the bg row to the lead word's strength.
+    const backgroundWord = word.BGWord === true;
     let activeIndex = -1;
     let activeProgress = 0;
     if (wordState === "Active") {
@@ -25569,7 +26326,7 @@
       } else if (letterState === "Sung" && activeIndex === -1) {
         targetScale = LetterScaleSpline.at(1);
         targetYOffset = LetterYOffsetSpline.at(1);
-        // DELIBERATE DIVERGENCE FROM UPSTREAM (AJ, 2026-09-20).
+        // DELIBERATE DIVERGENCE FROM UPSTREAM.
         //
         // Upstream uses targetGlow = GlowSpline.at(SungLetterGlow /* 0.2 */) for
         // a sung letter in an active word where no letter is currently active
@@ -25625,8 +26382,18 @@
       // letter-group word always matches its neighbours. Upstream Spicy Lyrics
       // only animates --gradient-position, scale/transform and the glow
       // variables on a letter; everything else is CSS.
-      setStyleIfChanged(letter.HTMLElement, "--text-shadow-blur-radius", `${4 + 12 * glow}px`, 0.5);
-      setStyleIfChanged(letter.HTMLElement, "--text-shadow-opacity", `${glow * 185}%`, 1);
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "--text-shadow-blur-radius",
+        `${4 + (backgroundWord ? 7 : 12) * glow}px`,
+        0.5
+      );
+      setStyleIfChanged(
+        letter.HTMLElement,
+        "--text-shadow-opacity",
+        `${glow * (backgroundWord ? 110 : 185)}%`,
+        1
+      );
     }
     return anyAwake;
   }
@@ -25703,7 +26470,7 @@
 
     // No real per-word sync: show the line as a static block that lights up when
     // active/sung instead of running syllable/letter karaoke springs — the
-    // dominant per-frame cost on partially-synced TTML imports (AJ, 2026-09-17).
+    // dominant per-frame cost on partially-synced TTML imports.
     if (word.NoKaraoke) {
       const lit = state !== "NotSung";
       setStyleIfChanged(word.HTMLElement, "--gradient-position", lit ? "100%" : "-20%", 0.1);
@@ -25781,7 +26548,7 @@
     // false the moment they "settle" — but the word's gradient sweep still needs a
     // per-frame write while the word is being sung. Keep Active words awake in
     // this mode, or the gradient freezes at its state-flip value: that was the
-    // "flash of fill at the line end, then dim" AJ saw (2026-10-02). In normal
+    // "flash of fill at the line end, then dim" saw. In normal
     // mode the glow spring chases a progress-driven goal and never sleeps during
     // a line, which is what kept these writes flowing before the stubs existed.
     const selfAwake =
@@ -25825,21 +26592,17 @@
       setStyleIfChanged(word.HTMLElement, "color", "inherit");
     } else {
       setStyleIfChanged(word.HTMLElement, "--gradient-position", `${gradient}%`, 0.1);
-      // A LINE-TIMED word's glow IS the line-fill highlight, and at the shared 35x
-      // multiplier it read too faint next to the letter glow's 185x. AJ asked for
-      // a little more (2026-10-02): 50x peaks near 50% opacity at the glow's
-      // natural peak of 1.0. Background-vocal words (word.BGWord) get 70x plus a
-      // wider radius, because the bg line no longer dims its glow via a <1 line
-      // opacity — so the glow now has to read as bright/white on its own (AJ,
-      // 2026-10-02 late: "the glow isnt bright or white still"). The letter-group
-      // bg path already peaks at 100% white at L12473.
-      const glowMultiplier = word.BGWord ? 60 : (word.LineTimed ? 50 : 35);
-      // Line-timed words get a slightly wider glow to match the boosted opacity
-      // (AJ, 2026-10-02: "up the radius a little bit").
+      // A LINE-TIMED word's glow IS the line-fill highlight; 50x peaks near
+      // 50% opacity at the glow's natural peak of 1.0. Background vocals used
+      // to get 60x and a wider radius, which read hotter than the lead row on a
+      // real track. They now use the lead word's own multiplier and radius, so
+      // bg vocals sit behind the main line instead of glowing over it.
+      const glowMultiplier = word.LineTimed ? 50 : 35;
+      // Line-timed words get a slightly wider glow to match the boosted opacity.
       setStyleIfChanged(
         word.HTMLElement,
         "--text-shadow-blur-radius",
-        `${word.BGWord ? 4 + 4 * glow : (word.LineTimed ? 4 + 3 * glow : 4 + 2 * glow)}px`,
+        `${word.LineTimed ? 4 + 3 * glow : 4 + 2 * glow}px`,
         0.5
       );
       setStyleIfChanged(word.HTMLElement, "--text-shadow-opacity", `${Math.min(glow * glowMultiplier, 100)}%`, 1);
@@ -25901,7 +26664,7 @@
     if (!currentSettings.adaptiveSpacing) return;
     // Apple Music style lyrics skips the shrink pass entirely: its words rest at
     // a static 0.95 scale, and this pass's inward pull read as "some rows are
-    // shifted to the right" on wrapped word-by-word lines (AJ, 2026-10-02). The
+    // shifted to the right" on wrapped word-by-word lines. The
     // reset is cheap per frame -- setStyleIfChanged's cache makes it a no-op
     // once everything is back at 1 -- and it guarantees nothing stays
     // half-squeezed from before the toggle was flipped.
@@ -26056,6 +26819,31 @@
     return found;
   }
 
+  // A finished line leaves no active window until the next lyric begins, so the
+  // normal target is -1 and the camera used to sit on the line that had just
+  // faded. If the next lyric is still a real pause away, target it as soon as
+  // the old line clears. When it starts almost immediately, let the normal
+  // active-line move handle it once instead of pre-scrolling into a duplicate.
+  const GAP_SCROLL_MIN_MS = 750;
+  function findGapScrollTarget(positionMs) {
+    let next = -1;
+    let nextStart = Infinity;
+    let hasFinishedLine = false;
+    for (let index = 0; index < scrollCandidateIndices.length; index++) {
+      const candidateIndex = scrollCandidateIndices[index];
+      const candidate = modelLines[candidateIndex];
+      if (!candidate || candidate.DotLine) continue;
+      if (candidate.EndTime <= positionMs) hasFinishedLine = true;
+      if (candidate.StartTime > positionMs && candidate.StartTime < nextStart) {
+        next = candidateIndex;
+        nextStart = candidate.StartTime;
+      }
+    }
+    // No previous lyric is the intro; no next lyric is the end of the song.
+    if (!hasFinishedLine || next < 0) return -1;
+    return nextStart - positionMs > GAP_SCROLL_MIN_MS ? next : -1;
+  }
+
   function lineNeedsAnimation(line) {
     if (!line.Syllables || !line.Syllables.Lead) return false;
     const words = line.Syllables.Lead;
@@ -26063,6 +26851,100 @@
       if (wordNeedsAnimation(words[index])) return true;
     }
     return false;
+  }
+
+  /* ---- lyric paint window --------------------------------------------------
+     Spicy keeps the WHOLE song in one long text layer. Repainting 45-80 lines
+     whenever the karaoke fill moves is what holds the panel near 60 fps on a
+     170 Hz display (measured: hide the lines -> 170 fps; paint them all -> 60).
+     Skip every line outside a window around the active one, keeping its exact
+     height so the scroller cannot move. The window is far wider than the
+     scrollport, so the visible lyrics are unchanged. Manual browsing shows all
+     lines again, so scrolling never lands on a blank one. */
+  const LYRIC_PAINT_WINDOW = 8;
+  let lyricCullLines = null;
+  let lyricCullHeights = null;
+  let lyricCullHidden = null;
+  let lyricCullActive = null;
+  let lyricCullManual = null;
+
+  function clearLyricCulling() {
+    if (lyricCullLines && lyricCullHidden) {
+      for (let index = 0; index < lyricCullLines.length; index++) {
+        if (!lyricCullHidden[index]) continue;
+        lyricCullLines[index].style.contentVisibility = "";
+        lyricCullLines[index].style.containIntrinsicSize = "";
+      }
+    }
+    lyricCullLines = null;
+    lyricCullHeights = null;
+    lyricCullHidden = null;
+    lyricCullActive = null;
+    lyricCullManual = null;
+  }
+
+  function applyLyricCulling(activeIndex) {
+    if (!lineElements.length) {
+      clearLyricCulling();
+      return;
+    }
+    if (
+      lyricCullLines &&
+      (lyricCullLines[0] !== lineElements[0] || lyricCullLines.length !== lineElements.length)
+    ) {
+      clearLyricCulling();
+    }
+    if (manualScrollActive || activeIndex < 0) {
+      if (lyricCullManual !== true) {
+        clearLyricCulling();
+        lyricCullManual = true;
+      }
+      return;
+    }
+    if (lyricCullActive === activeIndex) return;
+    lyricCullActive = activeIndex;
+    lyricCullManual = false;
+    if (!lyricCullLines) {
+      // Every line is visible on this pass, so these are real heights. They are
+      // the height each skipped line keeps while it is not painted.
+      lyricCullLines = lineElements.slice();
+      // contain-intrinsic-size is the CONTENT box, while offsetHeight includes
+      // the line's vertical padding (5.46px top/bottom on a live line) and
+      // border. Passing offsetHeight straight through made every skipped line
+      // ~11px TALLER than the real one, so the scroller snapped when the window
+      // moved past a line. Store offsetHeight minus that vertical box. Margins
+      // are outside the box and stay on the element, so they need no handling.
+      lyricCullHeights = lineElements.map((element) => {
+        const box = getComputedStyle(element);
+        const vertical = (parseFloat(box.paddingTop) || 0) +
+          (parseFloat(box.paddingBottom) || 0) +
+          (parseFloat(box.borderTopWidth) || 0) +
+          (parseFloat(box.borderBottomWidth) || 0);
+        return Math.max(0, (element.offsetHeight || 0) - vertical);
+      });
+      lyricCullHidden = new Array(lineElements.length).fill(false);
+    }
+    for (let index = 0; index < lineElements.length; index++) {
+      const element = lineElements[index];
+      // Dot lines change height with their play state (0 while idle, a short
+      // band while the three dots are showing), so a height cached at mount
+      // would leave a stale gap after one stops playing. They are only a few
+      // short rows; keep them painted instead of culling them.
+      const hide = Math.abs(index - activeIndex) > LYRIC_PAINT_WINDOW &&
+        !element.classList.contains("musical-line");
+      // A zero height means layout was not ready when we measured; keep the
+      // line painted rather than collapsing the scroller around a 0px block.
+      if (hide && !lyricCullHeights[index]) continue;
+      if (lyricCullHidden[index] === hide) continue;
+      lyricCullHidden[index] = hide;
+      if (hide) {
+        element.style.containIntrinsicSize = lyricCullHeights[index] + "px";
+        element.style.contentVisibility = "hidden";
+      } else {
+        element.style.contentVisibility = "";
+        element.style.containIntrinsicSize = "";
+      }
+    }
   }
 
   function animate(positionMs, positionSampledAtMs) {
@@ -26086,7 +26968,7 @@
 
     // Static (unsynced) lyrics: slowly and smoothly auto-scroll so the panel
     // tracks playback — top at song start, bottom at song end. Paused while the
-    // user scrolls manually (AJ, 2026-09-18).
+    // user scrolls manually.
     if (staticLyricsActive && !autoScrollUserPaused && lineScrollEl && !braccatoOwnsTrack()) {
       driveStaticAutoScroll(positionMs);
       setJumpButtonVisible(false);
@@ -26107,7 +26989,7 @@
     // pass has NO active line until the first lyric starts, so the normal
     // line-follow retarget has nothing to aim at — the panel used to sit at the
     // bottom for the whole intro and then sweep the entire song height once
-    // line 1 began (AJ, 2026-10-26). Place it on the new position immediately.
+    // line 1 began. Place it on the new position immediately.
     if (
       lastLyricPositionMs >= 0 &&
       lyricPositionMs < lastLyricPositionMs - PLAYHEAD_JUMP_MS &&
@@ -26126,6 +27008,7 @@
       lastActiveLine = activeIndex;
       publishActiveLine(activeIndex);
     }
+    if (!braccatoOwnsTrack()) applyLyricCulling(activeIndex);
     // Better Lyrics owns its whole timeline, scroll and word animation. The
     // built-in model above is kept in step only for Aurora's shared surfaces
     // (fullscreen dimming, active-line bus, jump-to-current), so stop here and
@@ -26168,9 +27051,19 @@
     const scrollLeadMs = (!externalHostActive && currentSettings.scrollLeadEnabled && !amllSimpleLookActive())
       ? currentSettings.scrollLeadMs
       : 0;
-    const scrollIndex = scrollLeadMs > 0
+    let scrollIndex = scrollLeadMs > 0
       ? findLineIndexAt(lyricPositionMs + scrollLeadMs)
       : activeIndex;
+    // The previous line has faded and nothing is active yet. Move to the next
+    // lyric now, so a pause does not leave the camera parked on empty space.
+    if (
+      activeIndex < 0 &&
+      scrollIndex < 0 &&
+      currentSettings.fadePreviousLines &&
+      !staticLyricsActive
+    ) {
+      scrollIndex = findGapScrollTarget(lyricPositionMs);
+    }
     // Gated on the target changing rather than on the active line changing: with
     // a lead these differ, and this keeps scrollActiveLineIntoView — which reads
     // layout via getBoundingClientRect — off the per-frame path.
@@ -26204,14 +27097,16 @@
       }
     }
 
+    let anyLineUnsung = false;
     for (let index = 0; index < modelLines.length; index++) {
       const line = modelLines[index];
       const lineState = getState(lyricPositionMs, line.StartTime, line.EndTime);
+      if (!line.DotLine && lineState !== "Sung") anyLineUnsung = true;
       const stateChanged = line.RenderState !== lineState;
       if (stateChanged) {
         line.RenderState = lineState;
         // Static (unsynced) lines keep the .static CSS state so they stay bright
-        // and never get the per-state opacity/alpha overrides (AJ, 2026-09-18).
+        // and never get the per-state opacity/alpha overrides.
         if (!staticLyricsActive) {
           line.HTMLElement.classList.toggle("Active", lineState === "Active");
           line.HTMLElement.classList.toggle("NotSung", lineState === "NotSung");
@@ -26224,7 +27119,7 @@
         // (lyricPositionMs = positionMs - offset), so using the raw position
         // here made the dots bounce out and vanish at a time that ignored the
         // sync offset - early or late by exactly the offset, while the pause
-        // itself was still running (AJ, 2026-09-28).
+        // itself was still running.
         const nearEnd = lyricPositionMs > line.EndTime - PRE_HIDDEN_DOT_LINE_MS;
         const playing = lineState === "Active" && !nearEnd;
         line.HTMLElement.classList.toggle("playing", playing);
@@ -26241,15 +27136,14 @@
       // an interlude's dots. The built-in renderer used to grow its unsung
       // TEXT-SHADOW halo with distance instead, which read as a dirty haze
       // around the words rather than as focus, so the halo is retired with the
-      // same write (AJ, 2026-10-23).
+      // same write.
       //
       // Background vocals are ranked by the LEAD line they belong to, not by
       // their own slot: they are separate .line.bg-line entries pushed right
       // after that lead, so their own index put them at distance 1 from the
       // line being sung — blurred underneath the words the user was reading
-      // (AJ, 2026-10-23).
       //
-      // Two rules keep that ranking honest at a line boundary (AJ, 2026-10-26):
+      // Two rules keep that ranking honest at a line boundary:
       //
       // 1. ANY line that is still being sung stays crisp, background vocals
       //    included. A bg phrase routinely runs past the start of the next lead
@@ -26261,18 +27155,19 @@
       //    the last line of an overlapping block sat in focus — as sharp as the
       //    line being read — until the reader reached the next line.
       //
-      // Low performance mode gets a cheaper reading of the same cue: radius
-      // capped at 2px, and only the four nearest rows are filtered at all. A
-      // filtered line is its own compositor surface, so the NUMBER of blurred
-      // lines is what this costs, not the radius — and past four rows the text
-      // is already dimmed by its own state, where a 4-5px blur just reads as
-      // haze (AJ, 2026-10-26).
+      // Low performance mode keeps the same cue but caps the radius at 2px.
+      // It used to skip every row beyond the four nearest, which left the
+      // partially cut rows at the top and bottom sharp; when the song advanced
+      // one of those rows entered the four-row window and visibly popped into
+      // blur. Every non-focus row now gets the small blur, so the rack stays
+      // consistent all the way to both edges. The culling pass already removes
+      // rows far outside the paint window, so this does not grow the painted
+      // stack.
       if ((activeLineChanged || stateChanged || depthModeChanged) && activeIndex >= 0) {
         const anchorIndex = line.BGLine && Number.isInteger(line.LeadIndex) ? line.LeadIndex : index;
         const distance = Math.abs(anchorIndex - activeIndex);
         const inFocus = line.DotLine || distance === 0 || lineState === "Active";
-        const pastLowRange = lowPerfMode && !inFocus && distance > 3;
-        const depthBlur = inFocus || pastLowRange
+        const depthBlur = inFocus
           ? 0
           : Math.min(lowPerfMode ? 2 : 5, 1 + distance);
         setStyleIfChanged(line.HTMLElement, "filter", depthBlur > 0 ? `blur(${depthBlur}px)` : "none", 0.25);
@@ -26340,105 +27235,26 @@
       }
     }
 
+    // Upstream's all-sung cue: once the last line has been sung, stop hiding
+    // finished lines and show the whole lyric again at its resting brightness.
+    // Written only when the answer changes, so it never lands on the hot path.
+    const allLinesSung = !anyLineUnsung;
+    if (allLinesSung !== lastAllLinesSung) {
+      lastAllLinesSung = allLinesSung;
+      if (lineScrollEl) {
+        lineScrollEl.classList.toggle("ym-sl-lines-all-sung", allLinesSung);
+      }
+    }
+
     applyAdaptiveSpacing(activeIndex, activeLineChanged);
   }
 
-  // TEMP PERF PROBE (2026-10-22) - diagnosis only, remove once the lag is
-  // pinned. Publishes one-second totals as attributes on <html> so the numbers
-  // can be read through the browser bridge without opening DevTools:
-  //   data-aurora-fps          rAF callbacks per second (two loops would double it)
-  //   data-aurora-frame-ms     mean gap between rAF callbacks
-  //   data-aurora-worst-ms     worst gap in the window
-  //   data-aurora-animate-ms   mean time inside animate() (the built-in renderer)
-  //   data-aurora-amll-ms      mean time inside amllDrive() (the AMLL renderer)
-  //   data-aurora-tick-ms      mean time inside the WHOLE tick() body
-  //   data-aurora-long-ms      total long-task (>50ms) time in the window
-  //   data-aurora-long-n       number of long tasks in the window
-  //   data-aurora-anims        live CSS/Web animations on the document
-  //   data-aurora-rejections   unhandled promise rejections in the window
-  const perfProbe = {
-    frames: 0,
-    frameSum: 0,
-    frameWorst: 0,
-    animateSum: 0,
-    animateFrames: 0,
-    amllSum: 0,
-    amllFrames: 0,
-    tickSum: 0,
-    longMs: 0,
-    longN: 0,
-    rejections: 0,
-    lastTs: 0,
-    lastPublish: 0,
-    addAmll(ms) { this.amllSum += ms; this.amllFrames++; },
-    report() {
-      const now = performance.now();
-      if (!this.lastPublish) this.lastPublish = now;
-      if (now - this.lastPublish < 1000) return;
-      const span = now - this.lastPublish;
-      const el = document.documentElement;
-      try {
-        el.setAttribute("data-aurora-fps", ((this.frames * 1000) / span).toFixed(1));
-        el.setAttribute("data-aurora-frame-ms", (this.frames ? this.frameSum / this.frames : 0).toFixed(2));
-        el.setAttribute("data-aurora-worst-ms", this.frameWorst.toFixed(1));
-        el.setAttribute("data-aurora-animate-ms", (this.animateFrames ? this.animateSum / this.animateFrames : 0).toFixed(2));
-        el.setAttribute("data-aurora-amll-ms", (this.amllFrames ? this.amllSum / this.amllFrames : 0).toFixed(2));
-        el.setAttribute("data-aurora-tick-ms", (this.frames ? this.tickSum / this.frames : 0).toFixed(2));
-        el.setAttribute("data-aurora-long-ms", this.longMs.toFixed(0));
-        el.setAttribute("data-aurora-long-n", String(this.longN));
-        el.setAttribute("data-aurora-anims", String(document.getAnimations().length));
-        el.setAttribute("data-aurora-rejections", String(this.rejections));
-        el.setAttribute("data-aurora-simple", amllSimpleLookActive() ? "1" : "0");
-      } catch (e) {}
-      this.frames = 0;
-      this.frameSum = 0;
-      this.frameWorst = 0;
-      this.animateSum = 0;
-      this.animateFrames = 0;
-      this.amllSum = 0;
-      this.amllFrames = 0;
-      this.tickSum = 0;
-      this.longMs = 0;
-      this.longN = 0;
-      this.rejections = 0;
-      this.lastPublish = now;
-    },
-  };
-  window.__auroraPerf = perfProbe;
-  window.addEventListener("unhandledrejection", () => { perfProbe.rejections++; });
-  // Anything the browser spends >50ms on in one chunk is a long task, whether it
-  // came from our callback or from style/layout/paint it triggered. If our JS is
-  // 0.3ms/frame and long tasks are still stacking up, the cost is the browser
-  // reacting to what we wrote, not the writing itself.
-  try {
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        perfProbe.longMs += entry.duration;
-        perfProbe.longN++;
-      }
-    }).observe({ type: "longtask", buffered: false });
-  } catch (e) {}
-
   function tick() {
     raf = requestAnimationFrame(tick);
-    const tickStartedAt = performance.now();
-    try {
-      tickBody();
-    } finally {
-      perfProbe.tickSum += performance.now() - tickStartedAt;
-    }
+    tickBody();
   }
 
   function tickBody() {
-    const probeNow = performance.now();
-    if (perfProbe.lastTs) {
-      const gap = probeNow - perfProbe.lastTs;
-      perfProbe.frames++;
-      perfProbe.frameSum += gap;
-      if (gap > perfProbe.frameWorst) perfProbe.frameWorst = gap;
-    }
-    perfProbe.lastTs = probeNow;
-    perfProbe.report();
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
     if (!window.YTMod || !window.YTMod.player) return;
@@ -26464,13 +27280,10 @@
     // transparent for one frame: the black flicker. It lands hardest on the
     // active line and on bg words because those have their text-shadow faded to
     // 0, leaving nothing to cover the hole. Skipping the frame is the fix; the
-    // springs simply advance on the next good frame. (AJ: "some lines just
+    // springs simply advance on the next good frame. (some lines just
     // flicker black for a very very short time".)
     if (Number.isFinite(position)) {
-      const animStartedAt = performance.now();
       animate(position, positionSampledAt);
-      perfProbe.animateSum += performance.now() - animStartedAt;
-      perfProbe.animateFrames++;
     }
   }
 
@@ -26485,7 +27298,7 @@
      Official lyric timings do not match a music video's edit (cold opens, cut
      verses, re-ordered choruses), so when a player video is live the lyrics are
      likely desynced through no fault of the sync data. A pill at the top of the
-     panel says so (AJ, 2026-10-02): "Music video lyrics may be out of sync",
+     panel says so: "Music video lyrics may be out of sync",
      with a DISPLAYED 5-second timer bar, then it fades out and is removed.
      Latched on the video ELEMENT so it shows once per video, not once per
      housekeeping pass. Absolutely positioned, pointer-events:none, so it never
@@ -26501,40 +27314,6 @@
     if (mvSyncChip) { mvSyncChip.remove(); mvSyncChip = null; }
   }
 
-  /* Source warning chip — same component as the music-video one above, used
-     when the lyrics came from a source whose timing is machine-aligned rather
-     than hand-synced (lrc.red). Reusing .ym-sl-mv-sync-chip keeps one visual
-     language and inherits the shrinking timer bar for free (AJ, 2026-10-19). */
-  let sourceChip = null;
-  let sourceChipFadeTimer = 0;
-  let sourceChipRemoveTimer = 0;
-  const SOURCE_NOTICE_MS = 6500;
-  const SOURCE_FADE_MS = 450;
-
-  function removeSourceChip() {
-    if (sourceChip) { sourceChip.remove(); sourceChip = null; }
-  }
-
-  function showSourceNotice(text) {
-    if (!panelEl || !text) return;
-    if (sourceChipFadeTimer) { clearTimeout(sourceChipFadeTimer); sourceChipFadeTimer = 0; }
-    if (sourceChipRemoveTimer) { clearTimeout(sourceChipRemoveTimer); sourceChipRemoveTimer = 0; }
-    removeSourceChip();
-    sourceChip = h("div", { class: "ym-sl-mv-sync-chip ym-sl-source-chip" },
-      h("span", { text }),
-      h("span", { class: "ym-sl-mv-sync-chip-timer" })
-    );
-    panelEl.appendChild(sourceChip);
-    sourceChipFadeTimer = setTimeout(() => {
-      sourceChipFadeTimer = 0;
-      if (!sourceChip) return;
-      sourceChip.classList.add("ym-sl-fading");
-      sourceChipRemoveTimer = setTimeout(() => {
-        sourceChipRemoveTimer = 0;
-        removeSourceChip();
-      }, SOURCE_FADE_MS);
-    }, SOURCE_NOTICE_MS);
-  }
 
   function syncMvSyncNotice() {
     if (!panelEl) return;
@@ -26641,7 +27420,6 @@
   // early-returns when the key is unchanged, so we clear currentTrackKey first to
   // force it past that guard. Used when the lyrics SOURCE ORDER changes: the cached
   // result came from the old priority, so we want a fresh resolve under the new one
-  // (AJ, 2026-10-19).
   function reresolveCurrentTrackLyrics() {
     const track = getCurrentTrack();
     if (!track) return;
@@ -26683,7 +27461,7 @@
       // A source-order change means the cached lyrics came from the OLD priority,
       // so re-resolve the current track once under the new order. The panel only
       // posts settings on close (see content.js pendingOrderPost), so this fires
-      // at most once per edit session, never on every drag nudge (AJ, 2026-10-19).
+      // at most once per edit session, never on every drag nudge.
       const prevOrder = Array.isArray(currentSettings.sourceOrder)
         ? currentSettings.sourceOrder.join(",") : "";
       applySettings(data.settings);
@@ -26923,7 +27701,7 @@
   let amllPrevTime = 0;
   let amllWasPlaying = false;
   let amllCssInjected = false;
-  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS (AJ, 2026-10-23):
+  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS:
    *  - by default, word-synced lyrics render through Aurora's own Spicy
    *    renderer exactly as they always have (same DOM, springs, glow, scroll),
    *    and line-synced ones through the AMLL engine.
@@ -26976,7 +27754,7 @@
     const wordTimed = amllContentHasWordTiming(content);
     const choice = wordTimed
       ? normalizeRendererChoice(currentSettings.wordRenderer, "spicy")
-      : normalizeRendererChoice(currentSettings.lineRenderer, "amll");
+      : normalizeRendererChoice(currentSettings.lineRenderer, "braccato");
     if (choice === "amll" && !amllContentIsTimed(content)) return "spicy";
     return choice;
   }
@@ -27033,14 +27811,6 @@
      that went to Spicy does not load it), so handing the next track to the
      engine has to START it here — waiting for a settings change was the "stays
      on Spicy until I toggle the mode" bug. */
-  // Which renderer actually OWNS this content right now — published to consumers
-  // (the PiP) so they run the same one instead of guessing from the timings.
-  // "amll" means the engine is drawing timed, line-by-line content; everything
-  // else (word tracks pointed at Spicy, static lyrics, no content) is the
-  // built-in renderer, even while the engine object exists.
-  function amllTrackUsesEngine(content) {
-    return rendererChoiceForContent(content) === "amll";
-  }
 
   function amllApplyTrackRenderer(content) {
     const next = rendererChoiceForContent(content);
@@ -27167,7 +27937,7 @@
   /* Sized off the lyric HOST's width, not the viewport. The same card renders
      in a 1920 fullscreen pane, a tab that shrinks when the NPV rail opens, and
      a ~380px NPV lyric box; 5vh stayed at full-screen size in the small ones,
-     so the rail's words blew past its card edges (AJ, 2026-10-21). 7.5cqw is
+     so the rail's words blew past its card edges. 7.5cqw is
      tuned to land on the SAME size as the standard renderer, whose
      --DefaultLyricsSize is 7cqw of .ym-sl-panel (measured: 522px panel -> 36.5px,
      this host 487px -> 36.5px), so the two renderers agree in the tab; the 5vh
@@ -27182,7 +27952,7 @@
        where a row wraps. The engine wraps at the wrapper's CONTENT width while
        the highlight box paints the wrapper's full width, so the upstream 1em
        per side broke rows at 696px inside an 804px player and left a dead
-       strip on the right of every wrapped line (measured live, AJ 2026-10-21).
+       strip on the right of every wrapped line (measured live).
        .2em keeps the box off the glyphs and hands ~86px back to the text. */
     --lyric-line-padding-x: .2em;
     --amll-lp-bg-line-scale: .7;
@@ -27255,6 +28025,30 @@
     --bright-mask-alpha: 1;
     --dark-mask-alpha: .4;
   }
+}
+
+/* Most of the Apple renderer's per-word cost is not the animation, it is the
+   MASK. The engine gives every word span its own inline mask-image gradient.
+   On the focused line that gradient IS the karaoke wipe and it has to stay.
+   On a settled idle line both stops are the same rgba(0,0,0,.2) - a flat 20%
+   dim - so the mask buys nothing except one masked surface per word. Measured
+   on a word-synced track: 85 masked spans as the engine built it, 5 once the
+   settled idle lines are excluded (interleaved A/B: long frames 22/19/18 ->
+   10/10/18 per 0.9s sample).
+
+   .ym-sl-idle is stamped by amllMarkIdleLines(), NOT by :not(gradientMask).
+   The engine takes the gradient class off while a line is still LIT (its
+   --bright-mask-alpha is still 1 and fading to .2 over ~.45s), so selecting on
+   the class alone caught finished lines mid-fade and dropped them to 20% - the
+   line visibly darkened before coming back. Only when the two alpha vars have
+   actually settled equal is the gradient a flat dim, and only then is swapping
+   it for one opacity on the line's content box exactly equivalent. */
+.amll-lyric-player .FmKaba_lyricLine.ym-sl-idle:not(.FmKaba_gradientMask) span {
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+.amll-lyric-player .FmKaba_lyricLine.ym-sl-idle:not(.FmKaba_gradientMask) .FmKaba_lyricMainLine {
+  opacity: .2 !important;
 }
 
 .FmKaba_lyricDuetLine {
@@ -27535,7 +28329,7 @@
   pointer-events: auto;
   /* The SAME face the built-in renderer uses, including a user-supplied custom
      font (--ym-sl-lyric-font). Hardcoding "SpicyLyrics" here meant a custom font
-     applied everywhere except Apple-style lyrics (AJ, 2026-10-23). */
+     applied everywhere except Apple-style lyrics. */
   font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
   /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
      lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
@@ -27598,7 +28392,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
    and a visible descendant still paints inside a visibility:hidden ancestor -
    so once a word-by-word track handed the panel back to the built-in renderer,
    the engine's leftover backdrop lines kept drawing as ghosts behind the real
-   ones (AJ, 2026-10-26). Hide them whenever the engine is not the active
+   ones. Hide them whenever the engine is not the active
    renderer; the host's own visibility still governs everything while it is. */
 body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLine) {
   visibility: hidden !important;
@@ -27635,7 +28429,7 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 /* The host stamps its karaoke face onto EVERYTHING inside it: 700 weight plus a
    0.6px text stroke, in a 1.2 line box. That is right for the lyrics and wrong
    for the footer - the built-in renderer draws this same shared markup as a
-   plain footnote at 400/600, so here it read bold and airy (AJ, 2026-10-23).
+   plain footnote at 400/600, so here it read bold and airy.
    Opt the credits out and give them that footnote's pitch. :is() covers both
    mountings: the engine's bottom-line slot when it has one, the host when it
    does not. */
@@ -27874,7 +28668,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      down and move the pointer, and every frame feeds the engine the wheel
      events a real wheel would, at a speed set by how far the pointer sits from
      the press point. Releasing the middle button ends it at once (press-and-
-     hold, not Chrome's toggle — AJ asked for the release to stop it), as does
+     hold, not Chrome's toggle — asked for the release to stop it), as does
      any other press, a real wheel, Escape or losing the window. Links keep
      their own middle-click (open in a new tab). */
   let amllAuto = null;
@@ -28740,7 +29534,57 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
           amllCallMaybeAsync(group.bgLine.resume, group.bgLine);
         }
       }
+      amllMarkIdleLines();
     } catch (e) {}
+  }
+
+  // Stamp .ym-sl-idle on lines whose karaoke gradient has SETTLED to the flat
+  // 20% dim, so the CSS can replace 20+ identical per-word masks with one
+  // opacity. See the long note in AMLL_ENGINE_CSS for why this cannot simply be
+  // :not(.FmKaba_gradientMask) - the engine drops that class while the line is
+  // still lit, and catching it there is what made finished lines darken before
+  // coming back to full brightness.
+  // Runs on the 10 Hz kick tick, so a line is at most ~100ms late to the cheap
+  // path; classList only writes when the value actually changes.
+  function amllMarkIdleLines() {
+    let lines = null;
+    try { lines = document.querySelectorAll(".amll-lyric-player .FmKaba_lyricLine"); } catch (e) { return; }
+    if (!lines || !lines.length) return;
+    // Two rules, both learned the hard way:
+    //
+    //  1. A two-line margin around the playhead keeps its real masks. The mask
+    //     is what carries the wipe position, so a line that regains one while
+    //     it is only dimmed comes back showing a stale, fully-lit gradient for
+    //     a frame - a bright flash. At one line of margin that flash landed on
+    //     the second-to-last sung row, where it is still in the corner of your
+    //     eye; at two it is out of the readable area.
+    //
+    //  2. The strip is NOT sticky. Keeping it sticky made the approach rows sit
+    //     at a flat 20% while the engine was already pre-lighting them for the
+    //     takeover, so the next line went dark. Rows inside the margin have to
+    //     be handed back their masks; because the margin is two, that hand-back
+    //     happens out on the third row, away from the line being sung.
+    let focusIndex = -1;
+    for (let index = 0; index < lines.length; index++) {
+      if (lines[index].classList.contains("FmKaba_gradientMask")) { focusIndex = index; break; }
+    }
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      let idle = false;
+      if (!line.classList.contains("FmKaba_gradientMask")) {
+        if (focusIndex >= 0 && Math.abs(index - focusIndex) <= 2) {
+          idle = false;
+        } else {
+          try {
+            const cs = getComputedStyle(line);
+            const bright = parseFloat(cs.getPropertyValue("--bright-mask-alpha")) || 0;
+            const dark = parseFloat(cs.getPropertyValue("--dark-mask-alpha")) || 0;
+            idle = Math.abs(bright - dark) < 0.02 && bright <= 0.25;
+          } catch (e) {}
+        }
+      }
+      line.classList.toggle("ym-sl-idle", idle);
+    }
   }
 
   // The engine builds a line's word elements - and one Web Animation per word,
@@ -28937,15 +29781,15 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     setJumpButtonVisible(suspended);
   }
 
-  // Same problem the Better Lyrics tick had: this engine is pumped on EVERY rAF,
-  // so on a 170 Hz display it runs ~170 times a second - setCurrentTime(), update(),
-  // kickActiveLine(), two sweeps over the line list - while a word-synced track
-  // carries 77-113 live Web Animations (103 of them the per-word "float-word").
-  // That combination is what makes Apple Music word-by-word stutter where the
-  // line-by-line path idles at 170 fps with zero animations. 80 Hz matches the
-  // Better Lyrics cap and leaves the rest of the frame alone; the engine's clocks
-  // are time-based (update() takes a delta), so the picture does not change.
-  const AMLL_DRIVE_INTERVAL_MS = 1000 / 80;
+  // This engine used to be pumped on EVERY rAF - on a 170 Hz display that is
+  // ~170 setCurrentTime()/update()/kickActiveLine() passes a second against 100+
+  // live word animations - so it was capped at 80 Hz (the Better Lyrics cap).
+  // The per-word mask work that made that necessary is gone (see the .ym-sl-idle
+  // rules: 85 masked spans -> 5), and the cap is off at the user's request.
+  // 0 = drive every frame. The engine's clocks are time-based (update() takes a
+  // delta), so removing the cap changes smoothness, not timing - but if word-by-
+  // word ever stutters again, this number is the first lever to put back.
+  const AMLL_DRIVE_INTERVAL_MS = 0;
   let amllLastDriveAt = 0;
 
   function amllDrive(positionMs) {
@@ -28957,7 +29801,6 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       if (!amllJumped) return;
     }
     amllLastDriveAt = amllDriveNow;
-    const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
     amllLastFrameTime = now;
@@ -28999,7 +29842,6 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       amllReapDistantLines(now);
       amllSyncJumpButton();
       amllDriveErrors = 0;
-      if (window.__auroraPerf) window.__auroraPerf.addAmll(performance.now() - amllPerfStartedAt);
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
       // first one: a single hiccup (a half-built line, a mid-track line swap)
@@ -29036,9 +29878,6 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      translations, never with a broken panel. */
 
   const AT_TARGET = "en";
-  // Below this many characters a line is an interjection ("Oh oh oh") where
-  // detection is unreliable and the translation adds nothing.
-  const AT_MIN_LATIN_CHARS = 4;
   const AT_MIN_CJK_CHARS = 2;
   const AT_MAX_TRANSLATIONS = 800;
   // How long to wait before giving a failed line, or a failed translator, a
@@ -29778,6 +30617,14 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
    * 500 ms. At 60 Hz a normal frame leaves ~20 ms of residual between the WAAPI
    * and lyric clocks; the engine's accumulator reads that as 100 ms of drift and
    * restarts the line mid-word, which is the intermittent fill hitch.
+   *
+   * It also skips the drift reset once the line's WAAPI animation has finished.
+   * A short last line followed by a long instrumental gap stays "active" until
+   * the end of the track; resetting it rebuilt the whole line every few frames
+   * (measured 777 element.animate() calls in 1.2 s, all cancelled and recreated).
+   * The lyrics stayed smooth because their animations run on the compositor,
+   * but the main thread was saturated and the rest of YouTube Music sat near
+   * 12 fps. With the guard the same passage holds ~60 fps and logs no resets.
    */
   let braccatoRenderer = null;
   let braccatoMount = null;
@@ -30258,8 +31105,8 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   }
 
   // The engine's tick is the most expensive thing Aurora runs per frame: 2.4 ms
-  // on a settled line, 4.6 ms while a word-dense line sweeps (measured through
-  // __auroraPerf on a running player). On a 170 Hz display the whole frame is
+  // on a settled line, 4.6 ms while a word-dense line sweeps (measured on a
+  // running player). On a 170 Hz display the whole frame is
   // 5.9 ms, so an unthrottled tick cannot fit and Chromium falls back to
   // presenting every other frame - which is what makes the rest of the panel
   // feel low-fps meanwhile. Past the budget, drive on alternating frames: the
@@ -30275,13 +31122,13 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
   // rate instead of once per frame changes nothing you can see: the highlight keeps interpolating
   // on the compositor between drives. Proof it is the tick and not the paint: the
   // live lyrics DOM cloned and frozen by hand runs 169 fps / 5.9 ms against 83 fps
-  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz (AJ, 2026-11-16) because
+  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz because
   // 90 is the wrong number on a 170 Hz panel: a tick every 11.1 ms is SHORTER than
   // the 11.8 ms a tick-carrying frame takes, so it lands on about half the frames
   // and the median frame stays at two vsyncs. At 80 Hz the tick is due every
   // 12.5 ms, i.e. once per ~2.1 frames, so a clear majority of frames are free and
   // the median drops back to one vsync. Lower still (60) frees more frames but
-  // coarsens the highlight; 80 is the compromise AJ picked.
+  // coarsens the highlight; 80 is the compromise picked.
   const BRACCATO_DRIVE_INTERVAL_MS = 1000 / 80;
   let braccatoLastDriveAt = 0;
 
@@ -30484,7 +31331,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      The first-run onboarding tour used to live above this line: a modal card, a
      pulsing highlight on the waffle icon, a localStorage completion flag and a
      second kickoff IIFE that re-ran it on DOMContentLoaded. Removed entirely
-     (AJ, 2026-10-21) — a brand-new install opens straight into the app, which
+      — a brand-new install opens straight into the app, which
      also retires the four #1ed760 green rules that were the last non-crimson
      colours in the project. */
   whenYTMod(() => {

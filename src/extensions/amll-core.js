@@ -6375,7 +6375,7 @@ var LyricLineBase = class extends EventTarget {
   dispose() {
   }
 };
-/* Aurora patch (AJ, 2026-10-21): GREEDY wrapping instead of the upstream
+/* Aurora patch: GREEDY wrapping instead of the upstream
    balanced DP. The DP spread the slack across EVERY row, so a lyric that needs
    two rows split into two half-empty ones and both stopped well short of the
    column edge - the "words stack instead of stretching right" look. Filling

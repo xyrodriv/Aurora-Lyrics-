@@ -14,6 +14,14 @@
    * 500 ms. At 60 Hz a normal frame leaves ~20 ms of residual between the WAAPI
    * and lyric clocks; the engine's accumulator reads that as 100 ms of drift and
    * restarts the line mid-word, which is the intermittent fill hitch.
+   *
+   * It also skips the drift reset once the line's WAAPI animation has finished.
+   * A short last line followed by a long instrumental gap stays "active" until
+   * the end of the track; resetting it rebuilt the whole line every few frames
+   * (measured 777 element.animate() calls in 1.2 s, all cancelled and recreated).
+   * The lyrics stayed smooth because their animations run on the compositor,
+   * but the main thread was saturated and the rest of YouTube Music sat near
+   * 12 fps. With the guard the same passage holds ~60 fps and logs no resets.
    */
   let braccatoRenderer = null;
   let braccatoMount = null;
@@ -494,8 +502,8 @@
   }
 
   // The engine's tick is the most expensive thing Aurora runs per frame: 2.4 ms
-  // on a settled line, 4.6 ms while a word-dense line sweeps (measured through
-  // __auroraPerf on a running player). On a 170 Hz display the whole frame is
+  // on a settled line, 4.6 ms while a word-dense line sweeps (measured on a
+  // running player). On a 170 Hz display the whole frame is
   // 5.9 ms, so an unthrottled tick cannot fit and Chromium falls back to
   // presenting every other frame - which is what makes the rest of the panel
   // feel low-fps meanwhile. Past the budget, drive on alternating frames: the
@@ -511,13 +519,13 @@
   // rate instead of once per frame changes nothing you can see: the highlight keeps interpolating
   // on the compositor between drives. Proof it is the tick and not the paint: the
   // live lyrics DOM cloned and frozen by hand runs 169 fps / 5.9 ms against 83 fps
-  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz (AJ, 2026-11-16) because
+  // / 11.8 ms live, same 1,693 nodes, same CSS. 80 Hz because
   // 90 is the wrong number on a 170 Hz panel: a tick every 11.1 ms is SHORTER than
   // the 11.8 ms a tick-carrying frame takes, so it lands on about half the frames
   // and the median frame stays at two vsyncs. At 80 Hz the tick is due every
   // 12.5 ms, i.e. once per ~2.1 frames, so a clear majority of frames are free and
   // the median drops back to one vsync. Lower still (60) frees more frames but
-  // coarsens the highlight; 80 is the compromise AJ picked.
+  // coarsens the highlight; 80 is the compromise picked.
   const BRACCATO_DRIVE_INTERVAL_MS = 1000 / 80;
   let braccatoLastDriveAt = 0;
 

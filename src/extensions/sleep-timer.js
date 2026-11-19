@@ -25,8 +25,8 @@
   // Defensive global guard: if this IIFE somehow runs more than once (e.g. the
   // content script's `applied[id+"_js"]` guard is bypassed, or the script tag
   // gets appended twice), make the extra runs a no-op so we never end up with
-  // 4 copies of the popup on the page — AJ hit this in the marketplace on
-  // 2026-09-28 and the panels stacked into a 2×2 grid. The first run sets the
+  // 4 copies of the popup on the page — hit this in the marketplace on
+  // and the panels stacked into a 2×2 grid. The first run sets the
   // flag, every subsequent run returns immediately before defining any state.
   if (window.__ym_sleep_timer_loaded__) return;
   window.__ym_sleep_timer_loaded__ = true;

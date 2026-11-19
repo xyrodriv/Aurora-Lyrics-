@@ -18,7 +18,7 @@
   }
 
   // Where the spinner belongs. It is armed by the lyrics skeleton, so while it
-  // is showing the LYRICS are still loading, and the rule (AJ 2026-09-28) puts
+  // is showing the LYRICS are still loading, and the rule puts
   // it with the lyrics then — covering both "lyrics not loaded" and "both not
   // loaded". It only sits over the video pane when the VIDEO is the sole thing
   // still buffering (lyrics already landed). A track with no MV has nothing
@@ -177,7 +177,7 @@
     // Mirrors play state and our rating onto the Hits header. Cheap: it only
     // rewrites a glyph/label when the state actually flips.
     syncFsHitsLive();
-    // NOTE (AJ, 2026-10-20): the edge Like / Dislike buttons are no longer
+    // NOTE: the edge Like / Dislike buttons are no longer
     // re-pinned on this 500ms tick. Every chrome position is a fixed length now,
     // so there is nothing to chase; re-pinning was itself a source of the
     // "controls move a lot" behaviour. They are positioned once on entry and once
@@ -321,7 +321,7 @@
     { tag: "rect", attrs: { x: "3", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
     { tag: "rect", attrs: { x: "14", y: "14", width: "7", height: "7", rx: "1.5", fill: "none", stroke: "currentColor", "stroke-width": "2" } },
   ];
-  // Sliders/adjust icon — reads as "options" (AJ, 2026-10-19). Opens the SAME
+  // Sliders/adjust icon — reads as "options". Opens the SAME
   // tabbed options overlay the normal panel uses, so fullscreen has it too.
   const FS_ICON_OPTIONS = [
     { tag: "line", attrs: { x1: "4", y1: "6", x2: "20", y2: "6", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
@@ -335,9 +335,6 @@
   // Next). The path data is byte-for-byte from Icons.ts; only the wrapping
   // <svg> viewBox is normalised so the chip's square buttons can render it
   // without distorting the aspect ratio.
-  const FS_ICON_PREV = [
-    { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
-  ];
   const FS_ICON_NEXT = [
     { tag: "path", attrs: { d: "M 19.467 19.905 C 20.008 19.905 20.463 19.746 21.005 19.426 L 33.61 12.023 C 34.533 11.482 35 10.817 35 9.993 C 35 9.158 34.545 8.53 33.61 7.977 L 21.005 0.574 C 20.463 0.254 19.998 0.094 19.456 0.094 C 18.374 0.094 17.475 0.917 17.475 2.418 L 17.475 9.49 C 17.315 8.898 16.873 8.408 16.135 7.977 L 3.529 0.574 C 3 0.254 2.533 0.094 1.993 0.094 C 0.911 0.094 0 0.917 0 2.418 L 0 17.582 C 0 19.083 0.91 19.906 1.993 19.906 C 2.533 19.906 3 19.746 3.529 19.426 L 16.135 12.023 C 16.861 11.593 17.315 11.088 17.475 10.485 L 17.475 17.582 C 17.475 19.083 18.386 19.906 19.467 19.906 L 19.467 19.905 Z", fill: "currentColor", "fill-rule": "nonzero" } },
   ];
@@ -525,7 +522,7 @@
   }
 
   /* ---- like / dislike buttons in fullscreen --------------------------------
-     AJ (2026-10-08, evening): drop the YTM-native mirroring entirely. The old
+      Drop the YTM-native mirroring entirely. The old
      build cloned YTM's icon and mirrored its like-status every 500ms, which
      flickered and showed a permanently-filled thumb (YTM's aria-pressed is
      unreliable). These buttons are now 100% OURS: our own glyph, our own state,
@@ -543,7 +540,7 @@
   let fsRatings = loadFsRatings();          // { [videoId]: "like" | "dislike" }
   let fsCurrentFsVideoId = null;            // last videoId we painted for
   let fsRatingSeedBlockUntil = 0;           // skip a stale YTM seed after our own rating
-  // Transient arrow-key readout (AJ, 2026-10-30). One pill, used for both
+  // Transient arrow-key readout. One pill, used for both
   // gestures: above the scrubber for seeks, under the volume bar for volume.
   let fsHudEl = null;
   let fsHudTimer = 0;
@@ -576,13 +573,13 @@
   }
 
   // Pin the Like / Dislike to the MEDIA PANE's left/right edges, but on the
-  // CONTROLS ROW's vertical centre (AJ, 2026-10-18).
+  // CONTROLS ROW's vertical centre.
   //
   // The buttons live in .ym-sl-fs-player-controls (inset:0 over the overlay,
   // z-index 21) rather than inside .ym-sl-fs-media. Two reasons:
   //   1. .ym-sl-fs-media is z-index 2 and .ym-sl-fs-lyrics is z-index 3, so a
   //      button parented to the media is painted UNDER the lyrics pane and the
-  //      dislike disappeared behind the lyrics in side layout (AJ's report).
+  // dislike disappeared behind the lyrics in side layout (the report).
   //      The controls layer is above everything.
   //   2. The controls layer is a full-overlay layer, so we can compute BOTH the
   //      media's horizontal edges and the transport chip's vertical centre in
@@ -630,7 +627,7 @@
     // chip is faded out (opacity does not affect layout). Fall back to the
     // chip's own CSS bottom offset (46px) if it is not in the DOM yet.
     //
-    // ⭐ LAYOUT offsets, not getBoundingClientRect (AJ, 2026-10-20). The chip
+    // ⭐ LAYOUT offsets, not getBoundingClientRect. The chip
     // animates with a TRANSFORM during fullscreen entry and on track change, and
     // a rect includes that transform — so measuring mid-animation pinned the
     // buttons to a half-slid position ("sometimes random, sometimes lower") until
@@ -794,9 +791,9 @@
   }
   // (Like/Dislike handlers are defined above: clickFsRating() and
   // refreshFsRatingState(). The old YTM-mirroring functions were removed
-  // 2026-10-08 — our buttons no longer read YTM's renderer for display.)
+  // — our buttons no longer read YTM's renderer for display.)
 
-  /* ---- transient HUD for the arrow keys (AJ, 2026-10-30) -----------------
+  /* ---- transient HUD for the arrow keys -----------------
      The keys are otherwise silent: a seek only moves the thumb and a volume
      step only moves a 3px line. Each press writes what it did into one small
      pill that fades on its own. Positions come from the live rects inside
@@ -852,7 +849,7 @@
     }, FS_HUD_HOLD_MS);
   }
 
-  /* ---- Hits fullscreen layout (AJ, 2026-11-09) -----------------------------
+  /* ---- Hits fullscreen layout -----------------------------
      The default fullscreen composition. Album art, track title, byline and the
      real sync / provider chips sit in a centred header; the control dock under
      it carries seek, transport, volume and the utilities. The lyrics start
@@ -907,11 +904,6 @@
   const FS_HITS_ICON_PAUSE = [
     { tag: "rect", attrs: { x: "6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
     { tag: "rect", attrs: { x: "13.6", y: "5", width: "4.4", height: "14", rx: "1.6", fill: "currentColor", stroke: "none" } },
-  ];
-  const FS_HITS_ICON_MORE = [
-    { tag: "circle", attrs: { cx: "5", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
-    { tag: "circle", attrs: { cx: "12", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
-    { tag: "circle", attrs: { cx: "19", cy: "12", r: "1.6", fill: "currentColor", stroke: "none" } },
   ];
   const FS_HITS_LIKE_PATH = "M5.8 20A1.8 1.8 0 0 1 4 18.2v-5.4A1.8 1.8 0 0 1 5.8 11h2.9l2.8-4.7a1.95 1.95 0 0 1 3.6 1.2l-.55 3.7h4.1a2 2 0 0 1 1.97 2.4l-1.02 4.3A2.55 2.55 0 0 1 16.97 20H5.8Z";
   function fsHitsThumbSvg(kind) {
@@ -1008,7 +1000,7 @@
     if (!fsHits) return;
     // Hits is the cover-art layout. It shows the source, not whether the track
     // is word- or line-synced; that technical label belongs in the old info
-    // rail, not over the artwork (AJ, 2026-11-16).
+    // rail, not over the artwork.
     const providerLabel = currentProvider || "Aurora";
     if (!force && providerLabel === fsHitsMetaKey) return;
     fsHitsMetaKey = providerLabel;
@@ -1088,49 +1080,6 @@
     }
   }
 
-  // "Like" becomes "Liked" when the rating lands. Snapping the width would
-  // make the pill's border jump, so measure the new natural width and animate
-  // the inline width between the two. The inline width is cleared afterwards
-  // so auto layout (wrapped rows, zoom) keeps working; reduced motion skips it.
-  function animateFsHitsLikeLabel(next) {
-    if (!fsHits || !fsHits.like) return;
-    const button = fsHits.like;
-    const label = button.querySelector(".ym-sl-fs-hits-btn-label");
-    if (!label || label.textContent === next) return;
-    if (!fsMotionOK() || typeof button.animate !== "function") {
-      label.textContent = next;
-      return;
-    }
-    if (fsHits.likeAnim) {
-      try { fsHits.likeAnim.cancel(); } catch (_) {}
-      fsHits.likeAnim = null;
-    }
-    button.style.width = "";
-    // offsetWidth, not the bounding rect: the pressed state applies a scale
-    // transform, and the border animation must start from the layout width.
-    const from = button.offsetWidth;
-    label.textContent = next;
-    button.style.width = "auto";
-    const to = button.offsetWidth;
-    button.style.width = from + "px";
-    void button.offsetWidth;
-    const anim = button.animate(
-      [{ width: from + "px" }, { width: to + "px" }],
-      { duration: 260, easing: "cubic-bezier(.22, .61, .36, 1)" }
-    );
-    fsHits.likeAnim = anim;
-    button.style.width = to + "px";
-    const done = () => {
-      // A rapid Like -> Unlike click cancels this animation and starts another.
-      // The cancelled promise settles afterwards; it must not clear the newer
-      // animation's inline width.
-      if (fsHits && fsHits.likeAnim && fsHits.likeAnim !== anim) return;
-      if (fsHits) fsHits.likeAnim = null;
-      button.style.width = "";
-    };
-    if (anim && anim.finished) anim.finished.then(done, done);
-    else window.setTimeout(done, 280);
-  }
 
   function syncFsHitsGeometry() {
     if (!fsOverlay || !fsHits) return;
@@ -1533,7 +1482,7 @@
       h("span", { class: "ym-sl-fs-btn-label", text: "Hide lyrics" }),
       fsSvgIcon(FS_ICON_LYRICS),
     );
-    // Options button (AJ, 2026-10-19): fullscreen now reuses the SAME tabbed
+    // Options button: fullscreen now reuses the SAME tabbed
     // options overlay as the normal panel (it is a <body> child floated at a higher
     // z-index), so no duplicate FS overlay is needed. offsetWrap (built above) stays
     // a local unused variable; the overlay's Sync tab carries the offset.
@@ -1576,7 +1525,7 @@
     fsPlayerShuffleButton = shuffleButton;
     fsPlayerRepeatButton = repeatButton;
     // Like / Dislike sit on the MEDIA PANE's left/right edges, but on the
-    // CONTROLS ROW's vertical centre (AJ, 2026-10-18). They are appended into
+    // CONTROLS ROW's vertical centre. They are appended into
     // .ym-sl-fs-player-controls (z-index 21) so they paint above the lyrics
     // pane; positionFsEdgeButtons() computes the media's horizontal edges and
     // the transport chip's vertical centre. These are our OWN buttons (see the
@@ -1653,7 +1602,7 @@
     const playChip = h("div", { class: "ym-sl-fs-play-chip" }, transportGroup);
     fsTimeCurrent = h("span", { class: "ym-sl-fs-time", "data-time": "current", text: "0:00" });
     fsTimeTotal = h("span", { class: "ym-sl-fs-time", "data-time": "total", text: "0:00" });
-    // The volume lives on the SCRUBBER row, not the transport row (AJ, 2026-10-01):
+    // The volume lives on the SCRUBBER row, not the transport row:
     // it sits after the total time, and the seek range is the flex child that gives
     // up the room. The row's box is still exactly the media pane, so bar + volume
     // together span the video — which is the point of putting it here.
@@ -1663,19 +1612,19 @@
     fsOverlay.append(fsControls, fsPlayerControls);
     // Hits header. Built after the classic chrome so its buttons can
     // reuse the existing play / rating / options handlers instead of cloning
-    // their logic (AJ, 2026-11-09).
+    // their logic.
     buildFsHits();
     // Like / Dislike live in the CONTROLS LAYER (z-index 21), NOT in the media.
     // The media is z-index 2 and the lyrics pane is z-index 3, so a button
     // parented to the media was painted UNDER the lyrics and the dislike
-    // vanished behind them in side layout (AJ, 2026-10-18). The controls layer
+    // vanished behind them in side layout. The controls layer
     // is above both; positionFsEdgeButtons() then pins them to the media's
     // horizontal edges and the transport row's vertical centre.
     fsPlayerControls.querySelectorAll(".ym-sl-fs-player-like--edge, .ym-sl-fs-player-dislike--edge")
       .forEach((n) => n.remove());
     fsPlayerControls.appendChild(likeButton);
     fsPlayerControls.appendChild(dislikeButton);
-    // Bootstrap transient (AJ 2026-10-08): the media/lyrics panes settle from a
+    // Bootstrap transient: the media/lyrics panes settle from a
     // stale side layout + stale art over ~1s while native fullscreen opens. Fade
     // them in over the existing .35s opacity transition instead of snapping them
     // on, so that flash is hidden behind the fade. The rating buttons live in the
@@ -1703,7 +1652,7 @@
     fsSeekDragging = false;
     fsSeekUserAt = 0;
     // The ResizeObserver that re-pinned the edge buttons whenever the media
-    // resized is REMOVED (AJ, 2026-10-20). It fired repeatedly while the pane
+    // resized is REMOVED. It fired repeatedly while the pane
     // animated its width, which slid the buttons along with it — one of the
     // clearest "controls move a lot" symptoms. Positions are static now.
     refreshFullscreenPlayerState();
@@ -1711,7 +1660,7 @@
     // Wrapped, not passed by reference: a listener receives the MouseEvent as
     // its first argument, and exitFullscreenMode() reads a truthy `immediate`
     // as "skip the close animation". This is why the overlay used to vanish
-    // without its fade (AJ, 2026-10-22).
+    // without its fade.
     exit.addEventListener("click", () => exitFullscreenMode());
     previousButton.addEventListener("click", () => {
       clickPlayerButton("previous");
@@ -1744,8 +1693,8 @@
       // Shared with the overlay's arrow keys, so both paths clamp and paint alike.
       setFullscreenVolumePercent(v);
     }
-    // ---- drag affordances (AJ's "for tmr" note, 2026-10-03) ----------------
-    // While a slider is dragged: hide the cursor (an accident AJ liked), and
+    // ---- drag affordances (the "for tmr" note) ----------------
+    // While a slider is dragged: hide the cursor (an accident liked), and
     // on the seek bar show a time bubble above the thumb. The counter lets the
     // two sliders nest without one drag's pointerup un-hiding the other's.
     let fsDragCount = 0;
@@ -1944,10 +1893,10 @@
      at the cursor and DRAWS ITSELF (a stroke-dashoffset tween on an SVG
      circle — a ring filling up, NOT a solid disc) over the idle delay. As the
      chrome auto-hides, the ring fades out and shrinks. Purely an affordance
-     that the cursor is about to vanish (AJ, 2026-09-28). Any input hides it
+     that the cursor is about to vanish. Any input hides it
      and restarts the countdown. */
   // Movement must pause this long before the ring appears. Raised 260 -> 700
-  // (AJ, 2026-09-28): at 260ms it fired constantly during ordinary mouse use,
+  //: at 260ms it fired constantly during ordinary mouse use,
   // which read as noise. 700ms only triggers on a genuine stop.
   const FS_IDLE_RING_DELAY_MS = 700;
   const FS_IDLE_RING_FILL_MS = Math.max(400, FS_IDLE_HIDE_MS - FS_IDLE_RING_DELAY_MS);

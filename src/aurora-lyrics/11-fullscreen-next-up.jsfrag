@@ -1,6 +1,6 @@
   /* ---- fullscreen "Next up" list ----------------------------------------
-     A native-looking list of the next few queue tracks, bottom-left of the
-     overlay. The queue model comes from YTM's own ytmusic-player-queue.data
+     A native-looking list of the next few queue tracks, bottom-right of the
+     overlay, rising into view on hover. The queue model comes from YTM's own ytmusic-player-queue.data
      (verified in the next-up add-on: an array of playlistPanelVideoRenderer
      entries; the playing row carries `selected`). Logic copied from that add-on. */
   const FS_NEXTUP_COUNT = 4;
@@ -55,7 +55,7 @@
     const key = items.map((it) => it.title + "|" + it.thumb).join("~");
     if (fsNextUp.__ymKey !== key) {
       fsNextUp.__ymKey = key;
-      const rows = [h("div", { class: "ym-sl-fs-nextup-head", text: "Next up" })];
+      const rows = [];
       for (const it of items) {
         const img = h("img", { class: "ym-sl-fs-nextup-thumb" });
         img.alt = "";
@@ -65,7 +65,7 @@
         if (it.artist) {
           meta.appendChild(h("div", { class: "ym-sl-fs-nextup-artist", text: it.artist }));
         }
-        // Display-only row (AJ, 2026-10-03): click-to-jump was abandoned, so
+        // Display-only row: click-to-jump was abandoned, so
         // this is a plain div - no button affordance, no handler.
         const row = h("div", {
           class: "ym-sl-fs-nextup-row", title: it.title,
@@ -75,8 +75,111 @@
       }
       fsNextUp.replaceChildren(...rows);
     }
+    syncFsNextUpShift();
     fsNextUp.classList.add("ym-sl-fs-nextup-in");
   }
+
+  /* The resting row hugs the panel's right edge; hovering slides it to the
+     left edge (see the CSS block). The distance is unknowable in CSS - it is
+     the panel width minus however wide this track's thumb + title + artist
+     happen to render - so it is measured here and published as a px variable.
+     Re-measured on every render (the 2s refresh and every track change), which
+     is the only time the text, and therefore the distance, can change. */
+  function syncFsNextUpShift() {
+    if (!fsNextUp) return;
+    const row = fsNextUp.querySelector(".ym-sl-fs-nextup-row");
+    if (!row) return;
+    const thumb = row.querySelector(".ym-sl-fs-nextup-thumb");
+    const meta = row.querySelector(".ym-sl-fs-nextup-meta");
+    if (!thumb || !meta) return;
+    // A long title is capped by the panel and ellipsised: no spare width, no
+    // shift, and the row simply rests against the left edge.
+    const gap = 10;
+    const content = thumb.getBoundingClientRect().width + gap +
+      meta.getBoundingClientRect().width;
+    const spare = Math.max(0, fsNextUp.clientWidth - content);
+    fsNextUp.style.setProperty("--ym-sl-fs-nu-shift", spare.toFixed(1) + "px");
+  }
+  /* ---- release year -------------------------------------------------------
+     YTM renders "artist • album • year" in the player-bar byline, with the year
+     as a plain trailing span (verified live: underscores • U • 2026). That is
+     the ONLY release year this site exposes - the player response carries an
+     upload date, not a release date - so it is read from the DOM rather than
+     looked up. Segments are scanned from the END, because an album name can
+     contain a bullet and a title never follows the year.
+
+     The byline is filled a beat AFTER the track changes, so a title painted on
+     the change often has no year yet; syncFsTitleYear() is therefore retried a
+     few times and, when it lands, patches the existing credit in place instead
+     of rebuilding it (a rebuild would restart the entrance animation). */
+  function readPlayerBarYear() {
+    try {
+      const bar = document.querySelector("ytmusic-player-bar");
+      const byline = bar && (bar.querySelector(".subtitle") || bar.querySelector(".byline"));
+      const text = byline ? String(byline.textContent || "").trim() : "";
+      if (!text) return "";
+      const parts = text.split("\u2022").map((part) => part.trim()).filter(Boolean);
+      for (let index = parts.length - 1; index >= 0; index--) {
+        if (/^(19|20)\d{2}$/.test(parts[index])) return parts[index];
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  let fsTitleYearTimer = 0;
+  let fsTitleYearTries = 0;
+
+  // Returns true when a year is on the credit afterwards. Safe to call any time.
+  function syncFsTitleYear() {
+    if (!fsTitleEl) return false;
+    const inner = fsTitleEl.querySelector(".ym-sl-fs-title-inner");
+    if (!inner) return false;
+    const year = readPlayerBarYear();
+    const existing = inner.querySelector(".ym-sl-fs-title-year");
+    if (!year) {
+      // A year that was on screen for the previous track must not linger.
+      if (existing) {
+        const sep = inner.querySelector(".ym-sl-fs-title-year-sep");
+        if (sep) sep.remove();
+        existing.remove();
+        updateFsTitleMarquee();
+      }
+      return false;
+    }
+    if (existing) {
+      if (existing.textContent !== year) {
+        existing.textContent = year;
+        updateFsTitleMarquee();
+      }
+      return true;
+    }
+    const track = inner.querySelector(".ym-sl-fs-title-track");
+    if (!track) return false;
+    // Stay inside the title's own line: a direct child of .ym-sl-fs-title-inner
+    // would become a separate (and, because it is column-reverse, ABOVE-title)
+    // row. Fall back to the track's parent for any older painted credit.
+    const line = track.closest(".ym-sl-fs-title-line") || track.parentElement || inner;
+    const sep = h("span", { class: "ym-sl-fs-title-year-sep", text: "\u2022", "aria-hidden": "true" });
+    const label = h("span", { class: "ym-sl-fs-title-year", text: year });
+    line.appendChild(sep);
+    line.appendChild(label);
+    // The credit is wider now; the marquee is measured, not guessed.
+    updateFsTitleMarquee();
+    return true;
+  }
+
+  // Up to four passes over ~1.2s: the byline can land after the title paint.
+  function retryFsTitleYear() {
+    if (fsTitleYearTimer) { window.clearTimeout(fsTitleYearTimer); fsTitleYearTimer = 0; }
+    if (fsTitleYearTries >= 4) return;
+    fsTitleYearTries += 1;
+    fsTitleYearTimer = window.setTimeout(() => {
+      fsTitleYearTimer = 0;
+      if (!fsTitleEl) return;
+      if (!syncFsTitleYear()) retryFsTitleYear();
+    }, 300);
+  }
+
   function refreshFsTitle() {
     renderFsNextUp();
     // Hits owns its own credit; it refreshes from the same track-change signal.
@@ -109,15 +212,26 @@
       inner.appendChild(byline);
       if (title) {
         if (artist) inner.appendChild(document.createTextNode(" "));
-        inner.appendChild(h("span", { class: "ym-sl-fs-title-track", text: title }));
+        // The credit is a column-reverse stack (see the CSS), so every direct
+        // child is its own ROW: appending the year beside the track put it on
+        // the row above the title. Title and year therefore share one flex item
+        // that lays them out in a baseline row, and the year is appended into
+        // it by syncFsTitleYear().
+        inner.appendChild(h("span", { class: "ym-sl-fs-title-line" },
+          h("span", { class: "ym-sl-fs-title-track", text: title })));
       }
       fsTitleEl.dataset.trackKey = fullscreenTrackKey(track);
       fsTitleEl.replaceChildren(inner);
       fsTitleInner = inner;
       syncFsTitleWriters();
+      // Release year rides next to the title as "Title • 2026". Written here so
+      // the first paint already carries it when the bar is ahead of us, with a
+      // bounded retry for the usual case where it is not.
+      fsTitleYearTries = 0;
+      if (!syncFsTitleYear()) retryFsTitleYear();
       // Apply (or remove) the marquee now that the text is in the DOM and
       // measurable. No band re-measure follows: the chip no longer stacks off the
-      // title's height (AJ, 2026-10-20).
+      // title's height.
       updateFsTitleMarquee();
     };
     if (fsTitleSwapTimer) {
@@ -368,7 +482,7 @@
   // Measured straight off the pane's own rect rather than derived from
   // `overlay.clientWidth * 0.5 / AR`: the arithmetic version silently produced
   // a 358px pane (band top 737) for a 540px pane, which parked the title
-  // INSIDE the video (AJ, 2026-09-28). The rect cannot disagree with the
+  // INSIDE the video. The rect cannot disagree with the
   // layout it is reading.
   // Called on track change, when the aspect ratio changes (deferred a frame so
   // the new aspect-ratio has been laid out), and on the 2s refresh tick -
@@ -462,7 +576,7 @@
     }
   }
 
-  // STATIC CHROME STRUCTURE (AJ, 2026-10-20).
+  // STATIC CHROME STRUCTURE.
   // The measured band publisher that used to live here is GONE: it wrote
   // --ym-sl-fs-band-top / -title-h / -art-left / -art-width / -pane-left /
   // -pane-width from the media's live rect, and every write moved the controls.
@@ -479,7 +593,7 @@
     // ratio only arrives with the video's metadata. The Like/Dislike buttons are
     // pinned from the transport chip's measured offset, so without these retries
     // they can stay where the chip USED to be, which put them on top of the video
-    // (measured live: button at y 725-769, video spanning 270-810, AJ 2026-10-21).
+    // (measured live: button at y 725-769, video spanning 270-810).
     // Two bounded retries, cancelled on every call so they cannot pile up.
     fsChromeRepinTimers.forEach((t) => window.clearTimeout(t));
     fsChromeRepinTimers = [150, 600].map((ms) => window.setTimeout(() => {

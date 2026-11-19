@@ -138,7 +138,7 @@
     fontLinkEl.rel = "stylesheet";
     fontLinkEl.href = SPICY_LYRICS_FONT_CSS;
     document.head.appendChild(fontLinkEl);
-    // Segmented control (AJ, 2026-10-19): a compact row of pill buttons for a small
+    // Segmented control: a compact row of pill buttons for a small
     // set of choices — cleaner than a dropdown for 2-3 options. Exposes `.value`
     // (getter) + `.setValue()` so callers that read `el.value` keep working.
     const buildSegmentedControl = (config) => {
@@ -207,7 +207,7 @@
 
     const videoOffsetWrap = h("div", { class: "ym-sl-video-offset", title: "Shift lyric timing for this track" });
     const videoOffsetLabel = h("span", { text: "Offset" });
-    // "Video vs Song" offset-scope picker removed (AJ, 2026-10-19):
+    // "Video vs Song" offset-scope picker removed:
     // recomputeActiveOffsetMode() already auto-switches the control between the
     // video/song slot by track type (music video vs audio-only), so the manual
     // override was redundant. The read-only .ym-sl-offset-applied badge still
@@ -336,9 +336,9 @@
     );
 
     // Options is a pill beside the song-layout switcher, in the empty band
-    // above both panels (AJ, 2026-10-26). It used to be a hover-revealed row
+    // above both panels. It used to be a hover-revealed row
     // across the panel's own top edge, which only appeared for people who
-    // already knew to sweep the pointer there — AJ's friend went looking and
+    // already knew to sweep the pointer there — went looking and
     // found nothing. Here it is always on screen, on the left of a control
     // that is also about the song view, and it cannot collide with the tab
     // labels or push them aside. content.js builds the container; see
@@ -358,8 +358,6 @@
     // containing block for fixed-position descendants and would trap + clip a
     // nested overlay (the panel also has overflow: hidden).
     const optionsOverlay = h("div", { class: "ym-sl-options-overlay ym-sl-op2 hidden" });
-    const optionsDivider = h("hr", { class: "ym-sl-options-divider" });
-    const optionsTtmlTitle = h("div", { class: "ym-sl-options-section-title", text: "TTML" });
     const optionsBottom = h("div", { class: "ym-sl-options-section" });
     const exportButton = h("button", {
       class: "ym-sl-import ym-sl-export-button",
@@ -387,7 +385,7 @@
     });
     deletePermanentButton.addEventListener("click", deletePermanentTTMLForCurrentTrack);
     optionsBottom.append(importMode, importButton, exportActions, deletePermanentButton);
-    /* MV pause re-sync REMOVED entirely on AJ's call (2026-10-19): the section,
+    /* MV pause re-sync REMOVED entirely: the section,
        the "Set pause point" picker, its editor, and the pick banner are all gone
        from the panel. The low-level offset machinery in 12-track-offset-sync is
        left in place but dormant — nothing calls enterPausePickMode() now, and
@@ -397,8 +395,6 @@
     // for up to 30 days; this exposes an explicit purge so a stale or wrong
     // match can be cleared without nuking unrelated LRCLIB data. The community
     // store is separate, so both purge funcs must run here.
-    const cacheDivider = h("hr", { class: "ym-sl-options-divider" });
-    const cacheTitle = h("div", { class: "ym-sl-options-section-title", text: "Cache" });
     const cacheSection = h("div", { class: "ym-sl-options-section ym-sl-cache-section" });
     const cacheStatus = h("div", { class: "ym-sl-cache-status", text: "Spicy Lyrics and Aurora Community results are cached for up to 30 days." });
     const cacheClear = h("button", {
@@ -410,7 +406,7 @@
     // The button wipes the cache instantly and irreversibly, so gate it behind an
     // explicit confirmation: clicking "Clear cache" reveals an "Are you sure?" row
     // with a RED delete action (trash icon) + a Cancel. The user expected a
-    // confirm step here and was surprised it fired immediately (AJ, 2026-10-19).
+    // confirm step here and was surprised it fired immediately.
     const cacheConfirm = h("div", { class: "ym-sl-cache-confirm hidden" });
     const cacheConfirmText = h("div", {
       class: "ym-sl-cache-confirm-text",
@@ -486,7 +482,7 @@
     });
     cacheSection.append(cacheStatus, cacheClear, cacheConfirm);
 
-    // ---- Options body: ADAPTIVE SHELL (AJ, 2026-11-14) -------------------
+    // ---- Options body: ADAPTIVE SHELL -------------------
     // The add-ons panel's split, reused here: one rail, one scrolling pane,
     // and a single red marker that slides between rows. The old build stacked
     // absolutely positioned pages inside a height it measured itself; one missed
@@ -1004,6 +1000,8 @@
     lineScrollEl.addEventListener("touchmove", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("pointerdown", handleManualScrollIntent, { passive: true });
     lineScrollEl.addEventListener("keydown", handleManualScrollKey);
+    lineScrollEl.addEventListener("pointerover", syncSungRowHover, { passive: true });
+    lineScrollEl.addEventListener("pointerleave", clearSungRowHover, { passive: true });
     applySettings(currentSettings);
     document.body.appendChild(panelEl);
     refreshTrack();
@@ -1017,6 +1015,30 @@
       wpObserver = new MutationObserver(onWatchMutations);
       wpObserver.observe(watchRoot, { childList: true, subtree: true });
     }
+  }
+
+  /* ---- fade-away previous lines: hover reveal ------------------------------
+     A finished row's glyphs are visibility:hidden, but its ::before hitbox is
+     deliberately visible, so the pointer still reports the .line as the event
+     target. One delegated listener sets a class on the scroll container; the
+     stylesheet keys the ghost stack off that class instead of off
+     :has(.line.Sung:hover), which re-validated the whole lyric subtree on every
+     descendant style change (i.e. every karaoke frame). */
+  function syncSungRowHover(event) {
+    if (!lineScrollEl) return;
+    const element = event.target instanceof Element ? event.target : null;
+    const line = element ? element.closest(".line") : null;
+    const revealing =
+      !!line &&
+      line.classList.contains("Sung") &&
+      !line.classList.contains("static") &&
+      !line.classList.contains("musical-line");
+    if (lineScrollEl.classList.contains("ym-sl-sung-hover") === revealing) return;
+    lineScrollEl.classList.toggle("ym-sl-sung-hover", revealing);
+  }
+
+  function clearSungRowHover() {
+    if (lineScrollEl) lineScrollEl.classList.remove("ym-sl-sung-hover");
   }
 
   function mountOptionsPill() {

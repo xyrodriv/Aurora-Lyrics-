@@ -16,7 +16,7 @@
   // normal-mode curves for the whole session (the one-shot guard below made the
   // re-publish a no-op, which is why the PiP's Apple Music mode kept bouncing:
   // normal Y-offset is 0 -> -1/60 -> 0, i.e. down and BACK, while Simple is a
-  // monotonic 0 -> -0.033). AJ, 2026-10-07.
+  // monotonic 0 -> -0.033).
   function publishRendererKit(force) {
     if (rendererKitPublished && !force) return;
     if (!window.YTMod || !window.YTMod.bus) return;
@@ -66,7 +66,7 @@
   // NEXT syllable" (parseTTML infers it from the absence of whitespace between
   // spans — see the word-scan above), so a space belongs before every syllable
   // whose PREDECESSOR is not part of a word. The empty join produced
-  // "Breadonmelikeabaker" for syllable-level lyrics (AJ, 2026-09-28), which
+  // "Breadonmelikeabaker" for syllable-level lyrics, which
   // then rendered as one giant word on the share card. The panel itself never
   // showed this because it renders from `words`, not from `text` — but `text`
   // is a published bus field, so every consumer was getting the broken form.
@@ -286,7 +286,6 @@
       cachedLastRealLyricEndMs = Math.max(cachedLastRealLyricEndMs, lead.EndTime * 1000);
       // Static (unsynced) lines get the .static class so CSS can paint them at
       // full opacity / alpha-1 regardless of the per-state Sung/NotSung dim
-      // (AJ, 2026-09-18).
       const lineElement = h("div", {
         class: staticLyricsActive ? "line static" : "line",
       });
@@ -413,10 +412,13 @@
     // class on the old nodes is gone.
     markPauseSyncLine();
     lineScrollEl.classList.remove("offline");
+    // The rows were just replaced, so any hover-revealed stack belongs to the
+    // previous song. The class is otherwise cleared on pointerleave.
+    clearSungRowHover();
     // Static (unsynced) lyrics begin at the top; the auto-scroll driver eases
-    // from here through the song (AJ, 2026-09-18).
+    // from here through the song.
     if (staticLyricsActive && lineScrollEl && !braccatoOwnsTrack()) {
-      // Instant: a reset, not a scroll the user asked to watch.
+      // Instant: a reset, not a scroll to animate.
       writeScrollTop(0, true);
     }
     // The scroll position is now meaningless: the PREVIOUS song's scrollTop is
@@ -437,7 +439,7 @@
   function loadLyrics(xml) {
     // A freshly imported file invalidates any pause sync point: it was measured
     // against the previous TTML's line times, so keeping it would silently
-    // mis-sync. Drop it (AJ's call, 2026-09-15).
+    // mis-sync. Drop it (the call).
     pauseSync = null;
     pausePickMode = false;
     return loadTTML(xml, "imported");

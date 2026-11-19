@@ -17,9 +17,6 @@
      translations, never with a broken panel. */
 
   const AT_TARGET = "en";
-  // Below this many characters a line is an interjection ("Oh oh oh") where
-  // detection is unreliable and the translation adds nothing.
-  const AT_MIN_LATIN_CHARS = 4;
   const AT_MIN_CJK_CHARS = 2;
   const AT_MAX_TRANSLATIONS = 800;
   // How long to wait before giving a failed line, or a failed translator, a

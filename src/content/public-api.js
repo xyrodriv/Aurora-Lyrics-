@@ -69,6 +69,20 @@
     return title;
   }
 
+  // YTM's player response carries the catalogue title, which can leave out the
+  // qualifier on screen: "dropout" there, "dropout (feat. blackbear)" in the
+  // bar. A feature credit names a different recording, so when the bar title is
+  // the response title plus a qualifier, keep the bar's fuller title.
+  function preferQualifiedTitle(base, detailed) {
+    if (!base) return detailed || "";
+    if (!detailed || detailed === base) return base;
+    if (!detailed.toLowerCase().startsWith(base.toLowerCase())) return base;
+    const extra = detailed.slice(base.length);
+    // A bracketed version ("(feat. X)", "[Live]") or an appended credit.
+    if (!/^\s*(?:[([{\u2013\u2014-]|(?:feat\.?|ft\.?|with\b|w\/))/i.test(extra)) return base;
+    return detailed;
+  }
+
   // Opportunistically pull an ISRC out of a YTM player-response object, if one
   // exists. YTM does not reliably expose ISRC (observed: the videoDetails read
   // is often empty at track-change time), so this is a best-effort bonus used
@@ -187,9 +201,6 @@
      is actually mounted and falls back to the old selectors. Nothing below
      assumes only one of them exists.
   */
-  function playerBar() {
-    return $("ytmusic-miniplayer") || $("ytmusic-player-bar");
-  }
 
   function transportButton(name) {
     const labels = {
@@ -317,7 +328,9 @@
       if (mini) {
         const info = miniPlayerTrack();
         if (info) {
-          if (!title) title = cleanTrackTitle(info.title, artist || info.artist) || null;
+          const barTitle = cleanTrackTitle(info.title, artist || info.artist);
+          if (!title) title = barTitle || null;
+          else title = preferQualifiedTitle(title, barTitle);
           if (!artist) artist = info.artist;
           if (!album) album = info.album;
           if (!artworkUrl) artworkUrl = info.artworkUrl;
@@ -341,12 +354,12 @@
           $("a[href*='/album/']", oldBar) ||
           $("a[href*='/browse/']", oldBar);
         if (albumLink) album = albumLink.textContent.trim();
-        if (!title) {
-          title = cleanTrackTitle(
-            ($(".title", oldBar) || $(".song-title", oldBar))?.textContent?.trim() || "",
-            artist
-          ) || null;
-        }
+        const barTitle = cleanTrackTitle(
+          ($(".title", oldBar) || $(".song-title", oldBar))?.textContent?.trim() || "",
+          artist
+        );
+        if (!title) title = barTitle || null;
+        else title = preferQualifiedTitle(title, barTitle);
       }
 
       // Media Session: last resort, and the only source that survives a bar
@@ -354,7 +367,9 @@
       if (!title || !artist || !artworkUrl) {
         const session = mediaSessionTrack();
         if (session) {
-          if (!title) title = cleanTrackTitle(session.title, artist || session.artist) || null;
+          const sessionTitle = cleanTrackTitle(session.title, artist || session.artist);
+          if (!title) title = sessionTitle || null;
+          else title = preferQualifiedTitle(title, sessionTitle);
           if (!artist) artist = session.artist;
           if (!album) album = session.album;
           if (!artworkUrl) artworkUrl = session.artworkUrl;
@@ -403,7 +418,7 @@
       if (movie && typeof movie.seekTo === "function") { try { movie.seekTo(ms / 1000); } catch (e) {} }
       // seekTo() can EXIST yet silently no-op on some YTM builds — when that
       // happened the fullscreen thumb snapped back to the pre-drag position
-      // because the media never actually moved (AJ, 2026-10-03). Verify the
+      // because the media never actually moved. Verify the
       // seek landed on the media element itself and fall back to a direct
       // currentTime write when it did not (1.5s tolerance for quantisation).
       const media = findPlaybackMedia();
@@ -451,7 +466,7 @@
                 // Carried so the fullscreen pane can PRELOAD the next cover while
                 // the current track is still playing — an MV -> audio skip then
                 // has a decoded image ready instead of showing an empty pane
-                // (AJ, 2026-10-20). Best-effort: absent on some queue shapes.
+                //. Best-effort: absent on some queue shapes.
                 artworkUrl: pickArtworkUrl(item.thumbnail && item.thumbnail.thumbnails),
               };
             }
@@ -474,8 +489,7 @@
             durationMs: rendererDurationMs(item),
             // Carried so the fullscreen pane can PRELOAD the next cover while the
             // current track is still playing — an MV -> audio skip then has a
-            // decoded image ready instead of showing an empty pane (AJ,
-            // 2026-10-20). Best-effort: absent on some queue shapes.
+            // decoded image ready instead of showing an empty pane. Best-effort: absent on some queue shapes.
             artworkUrl: pickArtworkUrl(item.thumbnail && item.thumbnail.thumbnails),
           };
         }
@@ -662,7 +676,7 @@
      .middle-controls is justify-content:center, so a narrower track would drag
      the centred song title left by half the difference.
 
-     Measured live 2026-09-16: 36px buttons on a 48px pitch (36px + 12px gap), so
+     Measured live: 36px buttons on a 48px pitch (36px + 12px gap), so
      each button costs 48px. Two buttons = 96px.
   */
   const PLAYER_BAR_STYLE_ID = "ym-pb-style";
@@ -1030,9 +1044,6 @@
     setCommunityCache: (cache) => cmd("setCommunityCache", [cache]),
     fetchLRCLIB: (url) => cmd("fetchLRCLIB", [url]),
     fetchUnison: (url) => cmd("fetchUnison", [url]),
-    fetchMusicBrainzRecordingSearch: (title, artist, album, durationMs) =>
-      cmd("fetchMusicBrainzRecordingSearch", [title, artist, album, durationMs]),
-    fetchCoverArt: (title, artist) => cmd("fetchCoverArt", [title, artist]),
   };
   alLog("public API ready (page world) v" + window.YTMod.version);
 })();

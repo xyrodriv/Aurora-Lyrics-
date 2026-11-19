@@ -13,15 +13,18 @@
   const KAWARP_MODULE_URL = EXTENSION_SCRIPT_URL
     ? new URL("kawarp-core.js", EXTENSION_SCRIPT_URL).href
     : "";
+  // Keep these in step with the Kawarp defaults in addons-catalog.js; they are
+  // the values used until the first settings message arrives.
   const KAWARP_OPTIONS = {
-    warpIntensity: 1,
-    blurPasses: 6,
+    warpIntensity: 0.60,
+    blurPasses: 5,
     animationSpeed: 0.1,
-    saturation: 1.2,
-    brightness: 1,
-    contrast: 1,
-    outputSaturation: 1,
-    // Dithering is the fixed kawarp-core default, not a user setting.
+    saturation: 1.25,
+    brightness: 0.75,
+    contrast: 1.15,
+    outputSaturation: 1.25,
+    // Grain in the final output pass. 0 removes it; the shader caps it at 0.1.
+    dithering: 0.02,
     transitionDuration: 1000,
     tintIntensity: 0,
     scale: 1,
@@ -32,8 +35,8 @@
   // page-world extension script self-contained: a `<script src>` injection
   // runs in the page's main world, which cannot fetch `chrome-extension://`
   // URLs, so a packaged image asset would be unreachable from this context.
-  // Current default (AJ, 2026-10-20) = his dark+red gradient, source file
-  // `Logos/dark and red gradient.jpg` (1536x1536 -> 512x512) -> PIL libwebp
+  // Current default = the dark+red gradient, source file
+  // `branding/logos/dark and red gradient.jpg` (1536x1536 -> 512x512) -> PIL libwebp
   // -quality 90 (~4.6 KB) -> base64. This is the backdrop shown at STARTUP when
   // nothing is playing, so it is NOT assets/ambient-gradient.png (that one is the
   // marketplace wash only). To swap it: re-encode the source to
@@ -42,20 +45,22 @@
   // will refuse to decode it.
   const DEFAULT_KAWARP_DATA_URL = "data:image/webp;base64,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";
   const DEFAULT_SETTINGS = {
-    brightness: 0.60,
-    saturation: 1.20,
-    blurPasses: 6,
-    warpIntensity: 1,
+    brightness: 0.75,
+    saturation: 1.25,
+    blurPasses: 5,
+    warpIntensity: 0.60,
+    // Grain in the final output pass, adjustable from the Kawarp settings.
+    dithering: 0.02,
     // Keep the Kawarp backdrop on the cover art even when a music video is
-    // playing (AJ, 2026-10-20).
+    // playing.
     kawarpCoverArtOnly: false,
-    // Custom background (AJ, 2026-10-21). Declared here so the add-on has sane
+    // Custom background. Declared here so the add-on has sane
     // values BEFORE the first settings message arrives.
     customBg: false,
     customBgKawarp: true,
     customBgBlur: 24,
-    contrast: 1,
-    // Absorbed from the Ambient add-on (AJ, 2026-10-26): the same artwork that
+    contrast: 1.15,
+    // Absorbed from the Ambient add-on: the same artwork that
     // feeds the backdrop also tints the player bar. ON, which is what Ambient
     // shipped with.
     artworkAccent: true,
@@ -95,7 +100,7 @@
   let kawarpLostBackoffMs = 400;
   let kawarpLastRebuildAt = 0;
 
-  // Performance mode (AJ, 2026-10-26), mirrored into every add-on's settings by
+  // Performance mode, mirrored into every add-on's settings by
   // the content script. Ultra = the untouched theme; Normal = 30fps backdrop and
   // no live-video sampling; Low = 24fps, same cover-art-only rule. The numbers
   // match the copies in 04-state-settings.jsfrag and snippet-npv-panel.js.
@@ -131,6 +136,12 @@
     currentSettings.saturation = Math.min(2.5, Math.max(0.5, Number(currentSettings.saturation) || DEFAULT_SETTINGS.saturation));
     currentSettings.blurPasses = Math.round(Math.min(8, Math.max(2, Number(currentSettings.blurPasses) || DEFAULT_SETTINGS.blurPasses)));
     currentSettings.warpIntensity = Math.min(1, Math.max(0.2, Number(currentSettings.warpIntensity) || DEFAULT_SETTINGS.warpIntensity));
+    // Unlike the other sliders, 0 is a meaningful dithering value (off), so it
+    // cannot use `Number(value) || default` here.
+    const dithering = Number(currentSettings.dithering);
+    currentSettings.dithering = Number.isFinite(dithering)
+      ? Math.min(0.1, Math.max(0, dithering))
+      : DEFAULT_SETTINGS.dithering;
     currentSettings.kawarpCoverArtOnly = !!currentSettings.kawarpCoverArtOnly;
     // Normalise the custom-background keys. customBgKawarp uses !== false so a
     // missing value keeps the intended default (ON) while an explicit OFF sticks.
@@ -146,6 +157,7 @@
     KAWARP_OPTIONS.warpIntensity = currentSettings.warpIntensity;
     KAWARP_OPTIONS.blurPasses = currentSettings.blurPasses;
     KAWARP_OPTIONS.saturation = currentSettings.saturation;
+    KAWARP_OPTIONS.dithering = currentSettings.dithering;
     // Grade the backdrop inside the shader. This used to be a CSS filter on the
     // canvas, which made the compositor run a second full-screen pass over a
     // texture that repaints every frame; kawarp-core now applies the same
@@ -165,6 +177,7 @@
         brightness: gradeBrightness,
         contrast: gradeContrast,
         outputSaturation: gradeSaturation,
+        dithering: currentSettings.dithering,
       });
       try { kawarpInstance.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
     }
@@ -185,7 +198,7 @@
     });
   }
 
-  /* ===== artwork accent (AJ, 2026-10-26) =================================
+  /* ===== artwork accent =================================
      Absorbed from the Ambient add-on, which shipped as a card of its own. It
      reads the same artwork this theme's backdrop is built from, so it lives
      here: the cover is sampled once per track, and the player bar's progress
@@ -492,8 +505,8 @@
        overlaps the bar's interactive controls and disturbs Chromium's compositor
        — YTM mis-measures the bar width (false narrow mode -> the "More player
        controls" arrow appears on a wide screen) AND the expand-button's mouseout
-       is never delivered, leaving #expanding-menu stuck open (AJ-confirmed
-       2026-10-07). Keep this element transparent + click-through only. */
+       is never delivered, leaving #expanding-menu stuck open. Keep this
+       element transparent + click-through only. */
     .ym-dynamic-page-bg-root #player-bar-background {
       background: transparent !important;
       background-color: transparent !important;
@@ -508,7 +521,7 @@
       /* Exactly the player bar, never a fixed 72px: YouTube Modifications can
          shrink the bar (compact mode), and a taller frost layer then pokes its
          1px top border out ABOVE the bar as a line across the whole window
-         (AJ, 2026-10-22 — measured at 882 while the compact bar started at
+         (— measured at 882 while the compact bar started at
          896). Following the variable keeps the frost on the surface and the
          border on the bar's real edge. */
       height: var(--ytmusic-player-bar-height, 64px);
@@ -619,9 +632,9 @@
    ytmusic-immersive-header-renderer and is the real banner we want to show.
    On HOME it is a standalone decorative background (ytmusic-browse-response
    there has NO page-type attribute, and the page has ZERO
-   ytmusic-immersive-header-renderer elements — measured live 2026-09-16), and
+   ytmusic-immersive-header-renderer elements — measured live), and
    it renders a stale album-art gradient over the top of the page
-   (AJ-confirmed: red, then yellow/blue).
+   (-confirmed: red, then yellow/blue).
    So: hide every home-mode fullbleed, then re-show only the ones that belong
    to an immersive header. (Bleed-through behind the watch page is a separate
    Dynamic / Smooth Motion issue, not this rule — see MEMORY.md Round 8.) */
@@ -673,11 +686,11 @@
        player page transparent so the page-wide Kawarp shows through, but the
        inactive browse/search pages behind it are ALSO transparent, and their
        opaque UI children (the page tabs, header, lists) bleed right through
-       the fullscreen player (AJ-confirmed 2026-09-16 — "the library page tabs
+       the fullscreen player (-confirmed — "the library page tabs
        and header show behind the video"). The player page IS the current
        view during player-page-open, so hide the inactive browse/search pages
        entirely. The left guide (#guide) is a separate element and is
-       unaffected — AJ explicitly wants the guide + left playlists panel to
+       unaffected — explicitly wants the guide + left playlists panel to
        stay visible; this rule only kills the page-content bleed. */
     .ym-dynamic-page-bg-root ytmusic-app-layout[player-page-open] ytmusic-browse-response,
     .ym-dynamic-page-bg-root ytmusic-app-layout[player-page-open] ytmusic-search-page {
@@ -955,7 +968,7 @@
     // #ym-npv is the Now Playing rail: while it is open on a non-song page it
     // PARKS YTM's live player inside its own art slot, so the video is no
     // longer under any of the YTM containers below. Without this selector the
-    // page-wide Kawarp fell back to the still artwork (AJ, 2026-10-19).
+    // page-wide Kawarp fell back to the still artwork.
     const nodes = document.querySelectorAll(
       "ytmusic-player-page video, #song-video video, ytmusic-player video, #ym-npv video"
     );
@@ -976,8 +989,8 @@
   function syncVideoFeed() {
     if (!kawarpInstance || kawarpSuspended) return;
     // Cover-art-only: never follow the video. If one was being followed, the
-    // block below hands the feed back to the cover art (AJ, 2026-10-20).
-    // ⭐ A CUSTOM BACKGROUND is the same rule (AJ, 2026-10-21): this runs on every
+    // block below hands the feed back to the cover art.
+    // ⭐ A CUSTOM BACKGROUND is the same rule: this runs on every
     // tick and called loadVideo() unconditionally, so on the first track change to
     // an MV it quietly replaced the uploaded image with the video. updateKawarp
     // Background() already refused the video, but this second path did not.
@@ -1007,7 +1020,7 @@
     }
   }
 
-  /* ===== custom background (AJ, 2026-10-21) =============================
+  /* ===== custom background =============================
      The blob is written by the panel's file control into IndexedDB; this side
      only READS it. Two render paths:
        Kawarp  — feed the object URL exactly like cover art (same loadImage call)
@@ -1137,11 +1150,18 @@
       // map, so this stays cheap. Audio tracks fall through to loadImage.
       // ⭐ A custom background must not be hijacked by the playing video. This
       // branch runs BEFORE the source comparison, so an MV would always win and
-      // the uploaded image never appeared (AJ, 2026-10-21).
+      // the uploaded image never appeared.
       const usingCustom = customBgState === "ready" && !!customBgUrl;
-      const playingVideo = (usingCustom || currentSettings.kawarpCoverArtOnly || !videoSamplingAllowed())
+      // The animated album cover outranks a music video: when the Animated
+      // Artwork add-on has a loop running, that IS what is on screen behind the
+      // cover card, so the backdrop should follow it. Falls through to the live
+      // video, then to the still cover.
+      const animatedCover = (usingCustom || currentSettings.kawarpCoverArtOnly || !videoSamplingAllowed())
         ? null
-        : findPlayingVideo();
+        : findAnimatedArtworkVideo();
+      const playingVideo = animatedCover || ((usingCustom || currentSettings.kawarpCoverArtOnly || !videoSamplingAllowed())
+        ? null
+        : findPlayingVideo());
       if (playingVideo) {
         try {
           kawarpInstance.loadVideo(playingVideo, {
@@ -1171,6 +1191,19 @@
       if (requestId !== kawarpRequestSeq) return;
       console.warn("[Dynamic] Kawarp background failed:", error);
       if (kawarpCanvas) kawarpCanvas.classList.remove("ready");
+    }
+  }
+
+  // The Animated Artwork add-on publishes its live <video> on this global. It is
+  // inside a closed shadow root, but Kawarp samples by element reference, so it
+  // does not need to be in the page's DOM tree.
+  function findAnimatedArtworkVideo() {
+    try {
+      const bridge = window.__ymAuroraAnimatedArt;
+      const video = bridge && typeof bridge.getVideo === "function" ? bridge.getVideo() : null;
+      return video && video.isConnected && video.readyState >= 2 ? video : null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -1216,9 +1249,16 @@
 
     if (pageBgRoot) {
       rootObserver = new MutationObserver(() => {
-        mountPageBackground();
+        // YTM mutates its DOM continuously (player clock, queue, hover cards).
+        // Remounting on every batch ran getComputedStyle on the app root and
+        // reset pageChromeState, so applyPageChrome re-toggled three classes on
+        // ytmusic-app many times a second - a full style + compositor rebuild
+        // each time. Only remount when the host or root was actually detached
+        // (route change); size changes are covered by the ResizeObserver.
+        if (!pageBgHost || !pageBgHost.isConnected || !pageBgRoot || !pageBgRoot.isConnected) {
+          mountPageBackground();
+        }
         syncPageChrome();
-        sizeKawarpCanvas();
       });
       rootObserver.observe(pageBgRoot, { childList: true, subtree: true });
     }
@@ -1227,7 +1267,7 @@
     // presence also signals "Dynamic is active", which gates the fullscreen
     // Kawarp. Removed in teardown so a disabled add-on leaves no trace.
     // getSettings() lets other add-ons (the NPV rail) render their own Kawarp
-    // with the SAME bloom settings instead of hard-coded values (AJ, 2026-10-19).
+    // with the SAME bloom settings instead of hard-coded values.
     window.__ymAuroraDynamic = {
       suspend: suspendKawarp,
       resume: resumeKawarp,
@@ -1247,7 +1287,7 @@
       syncPageChrome();
       // ⭐ YTM replaces the app's children on a route change (Home -> watch), which
       // detached the background host and made the custom image "disappear when I
-      // switched to the home tab" (AJ, 2026-10-21). Re-mount whenever it is gone.
+      // switched to the home tab". Re-mount whenever it is gone.
       if (pageBgHost && !pageBgHost.isConnected) mountPageBackground();
       if (customBgState === "ready" && customBgUrl && !currentSettings.customBgKawarp) {
         showCustomImg();

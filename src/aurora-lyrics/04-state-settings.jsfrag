@@ -14,7 +14,6 @@
   let panelHost = null;
   let fontLinkEl = null;
   let panelVisible = false;
-  let nativeTabAtOpen = null;
   let lyricsTabObserver = null;
   /* ---- external host (NPV dock) ----
      The Now Playing snippet can claim the live panel and dock it inside its own
@@ -47,11 +46,10 @@
   let fsSavedVideo = null; // { node, parent, next }
   let fsVideoModeSwapTimer = 0; // setTimeout handle for the in-flight backdrop swap
   // True while the OLD cover card is deliberately kept on screen across a
-  // cover -> music-video swap, so the cut has something to cut FROM (AJ,
-  // 2026-10-20). Cleared the moment the video is revealed, so the 2s reconcile
+  // cover -> music-video swap, so the cut has something to cut FROM. Cleared the moment the video is revealed, so the 2s reconcile
   // can resume tearing stray cards down.
   let fsHoldCoverCard = false;
-  // ---- track-change media dissolve (AJ, 2026-10-20) ----------------------
+  // ---- track-change media dissolve ----------------------
   // ONE opacity value on the media host drives every transition: fade out on the
   // track change, fade back in when the incoming media can paint. Deliberately
   // sequential (out -> in), not a crossfade, so it works identically for
@@ -74,7 +72,7 @@
   let fsVideoZeroSince = 0;
   // True while the CHROME (credit + transport + scrubber) is dissolved for a
   // cover <-> MV mode change. MV -> MV never sets it, so those skips leave the
-  // chrome completely still (AJ, 2026-10-21).
+  // chrome completely still.
   let fsChromeFading = false;
   // Backstop watchdog handle: force-restores the chrome if a mode-change fade is
   // ever left stranded (see fsChromeFadeOut). Cleared by fsChromeFadeIn and on
@@ -83,7 +81,7 @@
   // Timestamp of the last fsChromeFadeOut, so fsChromeFadeIn can enforce a minimum
   // visible hold (see FS_CHROME_FADE_MIN_MS). Without it an MV -> MV-style instant
   // media-ready wipes the chrome-out class the same tick it was added and the
-  // dissolve is never seen (AJ, 2026-10-21).
+  // dissolve is never seen.
   let fsChromeFadeOutAt = 0;
   // Deferred restore handle for the minimum-hold above; cleared on fullscreen exit.
   let fsChromeFadeHoldTimer = 0;
@@ -95,14 +93,14 @@
   let fsLayoutApplied = false;
   // Media host geometry transition used only while leaving Video Background.
   let fsMediaLayoutAnimTimer = 0;
-  // Cover-art side (AJ, 2026-10-26): which side the ARTWORK takes in the
+  // Cover-art side: which side the ARTWORK takes in the
   // cover-art side layout. "right" is the composition the overlay shipped
   // with (art left, words right); "left" mirrors it. Cover art only — the
   // hover button that sets it is not built for music videos.
   let fsCoverSide = "right";
   let fsCoverSwitch = null; // { ui, btn } inside fsMediaHost
   let fsArtLikeButton = null; // heart on the artwork hover surface (cover art only)
-  // ---- Hits fullscreen layout (AJ, 2026-11-09) ---------------------------
+  // ---- Hits fullscreen layout ---------------------------
   // Built once per entry in 08. fsHits is the header model (root plus the
   // nodes that change); the header's measured height is what positions the
   // lyrics column beneath it.
@@ -159,6 +157,10 @@
   let fsKawarpVideoEl = null; // live <video> currently feeding the Kawarp instance
   let fsKawarpSeq = 0; // guards async module/loadImage races
   let fsKawarpActive = false;
+  // Music videos push a full frame of motion through the warp; even a little
+  // displacement reads as smearing, so the shader runs with warp off for them.
+  let fsKawarpSoftWarp = false;
+  const FS_KAWARP_VIDEO_WARP = 0;
   let fsKawarpResizeObserver = null;
   let fsLyricsShade = null; // always-on readability shade + blur behind the lyrics
   let fsLyricsShadeTimer = 0;
@@ -173,7 +175,7 @@
   let fsLyricsShadeCapture = null;
   let fsLyricsShadeReader = null;
   let fsLyricsShadeSampleInFlight = false;
-  // Bright-video controls scrim (AJ, 2026-09-28 QoL). The fullscreen controls
+  // Bright-video controls scrim (QoL). The fullscreen controls
   // are deliberately surface-less, so over a bright / near-white music video
   // (especially once the lyrics — and their readability shade — are hidden)
   // they wash out completely. This flag drives a dark scrim behind the chrome
@@ -187,7 +189,7 @@
   // Fullscreen "Next up" list (bottom-left). Its OWN element, separate from the
   // next-up add-on's pill (which hides in fullscreen).
   let fsNextUp = null;
-  // Long-title marquee state (2026-09-28). fsTitleInner is the nowrap wrapper
+  // Long-title marquee state. fsTitleInner is the nowrap wrapper
   // that gets the translateX animation; the shift is passed in via the
   // --ym-sl-fs-title-shift CSS variable on the inner. fsTitleRO watches
   // fsTitleEl for resize and re-measures (text width or container width
@@ -207,14 +209,14 @@
   let fsBgLastDrawAt = 0;
   // The ambient layer is blurred beyond recognition, so 24fps and a very small
   // backing store are visually close to 60fps while costing a fraction of the
-  // draw + upload work. AJ asked for 60fps anyway (2026-09-27) - the canvas is
+  // draw + upload work. asked for 60fps anyway - the canvas is
   // only ever created for music videos, so this raises the MV backdrop refresh
   // rate without touching cover-art tracks (they use the static blurred image
   // or Kawarp, not this loop). The loop is driven by requestVideoFrameCallback,
   // so it draws once per real video frame and cannot outrun the source.
   const FS_BG_RENDER_FPS = 60;
   const FS_BG_FRAME_INTERVAL_MS = 1000 / FS_BG_RENDER_FPS;
-  // NOTE (AJ, 2026-10-20): FS_BAND_GAP was removed with the measured band anchor.
+  // NOTE: FS_BAND_GAP was removed with the measured band anchor.
   // Chrome positions are fixed lengths in 05-styles.jsfrag now, so nothing needs
   // the old 18px pane-to-title gap as a variable.
   const FS_LYRICS_SHADE_SAMPLE_MS = 240;
@@ -265,6 +267,9 @@
   // the pass writes (see 19-animation-modes), so it has to re-rank every line
   // immediately instead of waiting for the next line boundary.
   let lastDepthBlurLow = false;
+  // Last answer from the all-lines-sung check, so the class is only written
+  // when the answer changes instead of on every animation frame.
+  let lastAllLinesSung = null;
   // Last offset-adjusted playhead. A large backwards step between frames is a
   // seek or a repeat-one restart, handled by restartPlayheadScroll().
   let lastLyricPositionMs = -1;
@@ -372,10 +377,10 @@
   let currentLyricsFromSavedTTML = false;
   // True when the currently displayed lyrics are plain (unsynced) text loaded
   // from an LRCLIB result that had no synced lyrics. Static lines render fully
-  // filled and never auto-scroll — see loadLRCLyrics / makeWord (AJ, 2026-09-18).
+  // filled and never auto-scroll — see loadLRCLyrics / makeWord.
   let staticLyricsActive = false;
   // For static (unsynced) lyrics: when the user manually scrolls, auto-scroll is
-  // paused and a "Auto scroll" popup is shown to resume it (AJ, 2026-09-18).
+  // paused and a "Auto scroll" popup is shown to resume it.
   let autoScrollUserPaused = false;
   let lastObservedTrackKey = "";
   let lastObservedPositionMs = null;
@@ -444,19 +449,19 @@
   const lrclibCache = new Map();
   let adaptiveLayoutLastAt = 0;
   // Defaults track the Synced Lyrics settings popup so a fresh install (and the
-  // host's "Reset to defaults" button) open at AJ's preferred look: big lyrics,
+  // host's "Reset to defaults" button) open at the preferred look: big lyrics,
   // pushed up, full-strength background vocals, adaptive spacing
   // on. The popup schema in src/content/content.js mirrors these values; if you
   // change one, change both.
   //
   // These three intensity sliders multiply together and then scale a curve that
   // is already upstream-shaped, so they are a pure amplitude boost. See
-  // blendSyllableAnimation. Current defaults (AJ, 2026-09-26) are 1.0 / 1.0 /
+  // blendSyllableAnimation. Current defaults are 1.0 / 1.0 /
   // 1.25, i.e. scale+glow are at EXACT upstream parity (1.0 x 1.0) while the
-  // vertical rise is x1.25 — deliberately, that is the one place he wants more
-  // travel than Spicy Lyrics. All three at 1.0 is full parity.
+  // vertical rise is x1.25 — deliberately more travel than Spicy Lyrics.
+  // All three at 1.0 is full parity.
   const DEFAULT_SETTINGS = {
-    // 1.30 (AJ, 2026-10-07). Was 1.45 (2026-09-28); that read too big, so it is
+    // 1.30. Was 1.45 ; that read too big, so it is
     // back to the original 130% look. The slider ceiling stays at 600%.
     size: 1.30,
     offset: -80,
@@ -469,14 +474,18 @@
     verticalAnimation: 1.25,
     adaptiveSpacing: true,
     // On-device English translation of non-English lines (Chrome 138+ desktop).
-    // ON by default (AJ, 2026-10-26): a song in a language you don't read is the
+    // ON by default: a song in a language you don't read is the
     // one case where the second line is the point. The model download is what
     // the switch costs, and only a foreign line starts it.
     autoTranslate: true,
     legibilityBackdrop: false,
-    // Scroll behaviour. smoothScrolling ON by default (AJ, 2026-10-07): he
-    // prefers the eased glide into the active line. (It was flipped OFF on
-    // 2026-09-28 to match an older screenshot; that is reverted.) The Apple
+    // Fade the line that has just ended out and recede it slightly, so the eye
+    // follows the line being sung. ON by default; matches Apple Music and
+    // Spicy Lyrics' fullscreen "Fade Away Previous Lines" option.
+    fadePreviousLines: true,
+    // Scroll behaviour. smoothScrolling ON by default: the eased glide into
+    // the active line. Earlier builds turned it off to match a screenshot,
+    // but that no longer applies. The Apple
     // engine springs its own scroll and ignores it; the Spicy renderer honours
     // it, whichever kind of track Spicy is drawing.
     smoothScrolling: true,
@@ -485,7 +494,7 @@
     // MV ambient backdrop brightness. Drives the baked ctx.filter in
     // drawBgFrame() — the blurred live-video canvas behind the MV in
     // fullscreen. The SLIDER lives in the Aurora Bloom add-on (ytmod-dynamic),
-    // NOT here (AJ, 2026-09-28): music videos don't use Kawarp, so this is a
+    // NOT here: music videos don't use Kawarp, so this is a
     // separate control from Bloom's "Brightness" (which drives Kawarp). This
     // value is the fallback used until Aurora Bloom's setting arrives — see
     // handleHostMessage(), which accepts ytmod-dynamic settings and picks out
@@ -495,19 +504,19 @@
     // duplicated blurred-video backdrop. The toggle lives in Aurora Bloom
     // (cross-add-on); this is the fallback. Off = only still uploads
     // (Official Audio / Lyric Video) use Kawarp — see FS_STATIC_VIDEO_RE.
-    // AJ, 2026-09-28.
+    //
     preferKawarpAlways: false,
     // Fullscreen without the Fullscreen API: the overlay is a fixed, inset-0
     // surface already, so requesting native fullscreen is the ONLY thing that
     // takes over the display. OFF by default, which keeps the previous behaviour
     // (and Chrome's Escape/F11 path) exactly as it was. ON keeps the tab strip
-    // and every other tab usable while the fullscreen view is up (AJ, 2026-10-22).
+    // and every other tab usable while the fullscreen view is up.
     fullscreenInPage: false,
     // Apple-Music-style rendering (schema row lives in content.js). OFF by default
     // so the existing karaoke look is unchanged until the user opts in. When ON,
     // the gradient sweep is driven by a CSS animation on a registered custom
     // property instead of per-frame JS writes — see the Simple lyrics CSS block.
-    // PINNED, not user-facing (AJ, 2026-10-23). "Apple style" stopped being a
+    // PINNED, not user-facing. "Apple style" stopped being a
     // master switch when the renderer became per-kind; what is left of it is the
     // LOOK question (which splines, which body class), and that is derived from
     // who owns the track. Pinned like `offset` below, so a value stored back when
@@ -519,12 +528,13 @@
     // amllWordTracks/spicyLineTracks booleans are still read once to migrate an
     // existing install, then ignored.
     wordRenderer: "spicy",
-    lineRenderer: "amll",
+    // Better Lyrics is the main line-by-line renderer: line-synced tracks are
+    // the engine's native case. Spicy and Apple Music remain selectable.
+    lineRenderer: "braccato",
     // Better Lyrics' per-letter rise/fall. ON by default; the Renderer tab
     // exposes it so a quieter karaoke look is one switch away.
-    // OFF (AJ, 2026-11-16): the per-letter rise/fall is an opt-in look now.
-    braccatoLetterWave: false,
-    // "Glow on sung words": ON (AJ, 2026-11-16). Shipped off first on the theory
+    braccatoLetterWave: true,
+    // "Glow on sung words": ON. Shipped off first on the theory
     // that the halos were the cost; A/B/A then measured glow-on FASTER than
     // glow-off, so the cost is inside the noise and this is purely the look.
     braccatoGlow: true,
@@ -535,31 +545,31 @@
     spicyLineTracks: false,
     // Join syllables: paint each word as ONE whole-word fill instead of the
     // per-letter syllable karaoke, so a word lights up whole with no syllable
-    // stepping (the Spicy Lyrics toggle; AJ, 2026-10-19). OFF by default so the
+    // stepping (the Spicy Lyrics toggle;). OFF by default so the
     // karaoke look is unchanged until opted in. Reuse: when ON, makeWord() forces
     // a plain .word instead of a letterGroup.
     joinSyllables: false,
     // Whether the whole-word join above also applies to BACKGROUND-vocal lines.
     // ON by default, which is the historical behaviour (bg lines joined too);
     // turning it off keeps per-syllable karaoke on the bg lines while the lead
-    // lines stay joined (AJ, 2026-10-20). Only meaningful while joinSyllables is
+    // lines stay joined. Only meaningful while joinSyllables is
     // ON — joinApplies() checks the master switch first.
     joinBgSyllables: true,
     // Custom lyrics font. Empty = the bundled SpicyLyrics face. When set, holds a
     // CSS url() value for a user-uploaded @font-face (HTTPS/data: URLs only; an
     // http:/host-relative URL is rejected server-side and downgraded here), e.g.
     // `url(https://...) format("woff2")`. A scale multiplier on top lets a font
-    // nudge bigger/smaller without touching the size slider (AJ, 2026-10-20).
+    // nudge bigger/smaller without touching the size slider.
     customFont: "",
-    // AJ wants a newly-uploaded face to start at 200% (2026-10-20). size-adjust
+    // A newly-uploaded face starts at 200%. size-adjust
     // is a percentage of the font's own advance width, so 2.0 doubles it.
     customFontScale: 2.0,
     // Which lyrics source is tried first. The resolver walks this list top to
     // bottom and stops at the first source that has the track. (The user-facing
-    // reordering UI was removed — AJ, 2026-10-19 — but the value is still used
+    // reordering UI was removed, but the value is still used
     // as the resolver fallback order.)
     sourceOrder: ["community", "spicy", "unison", "lrclib"],
-    // Performance mode (AJ, 2026-10-26). ONE global governor, stored by the
+    // Performance mode. ONE global governor, stored by the
     // content script (not by this add-on) and mirrored into every add-on's
     // settings payload, so the page backdrop, the Now Playing rail and this
     // fullscreen view all agree. "ultra" is the untouched product; "normal"
@@ -609,7 +619,16 @@
 
   function kawarpFpsForPerformance() {
     const mode = currentSettings.performanceMode;
-    return mode === "low" ? 24 : mode === "normal" ? 30 : 0; // 0 = uncapped
+    // 60 in Ultra, NOT uncapped. The identical function in dynamic.js has capped
+    // the page-wide backdrop at 60 for a while, with the note that past ~60 the
+    // slow drift looks identical while the GPU work starves the compositor. The
+    // fullscreen instance never got that treatment, so on a 170Hz display it
+    // painted eight full-resolution blur passes 170 times a second behind the
+    // lyrics - and that is the frame-time floor that makes fullscreen scroll and
+    // karaoke feel worse than the docked panel, which runs the 60-capped page
+    // backdrop instead. Uncapped work also cannot be tested by shrinking the
+    // canvas: Kawarp keeps its own full-resolution render targets.
+    return mode === "low" ? 24 : mode === "normal" ? 30 : 60;
   }
 
   function videoSamplingAllowed() {
@@ -639,7 +658,7 @@
     applyStaticVideoBackdrop();
   }
 
-  // ---- Custom lyrics font (AJ, 2026-10-20) -----------------------------------
+  // ---- Custom lyrics font -----------------------------------
   // `customFont` is the src descriptor of a user-supplied @font-face (already
   // sanitised in applySettings) or "" for the bundled SpicyLyrics face.
   // `customFontScale` is baked into the @font-face as `size-adjust` so a swapped
@@ -650,7 +669,7 @@
   let customFontStyleEl = null;
   function applyCustomFont() {
     const css = currentSettings.customFont || "";
-    // The size slider is PREVIEW-ONLY (AJ, 2026-10-20): the lyrics already have
+    // The size slider is PREVIEW-ONLY: the lyrics already have
     // their own Lyrics size setting, and letting the custom face carry a second
     // size-adjust made the two fight. The face is always registered at 100%.
     const key = css;
@@ -665,7 +684,7 @@
       // `src` MUST be a url()/local() function — a bare data:/https: token is an
       // invalid descriptor, so the browser silently drops the whole @font-face
       // and the lyrics fall back to the system font (the "apply does nothing,
-      // it just goes to the Windows font" bug, AJ 2026-10-20). Escape quotes so
+      // it just goes to the Windows font" bug). Escape quotes so
       // a crafted URL can never break out of the descriptor. `format()` hints
       // are optional; the browser sniffs from the URL. Registered at 100% on
       // purpose: the preview slider must NOT resize the real lyrics, which
@@ -712,7 +731,7 @@
     // Source order is a user-editable list, so it is normalised on every apply:
     // unknown ids dropped, duplicates dropped, missing sources appended.
     currentSettings.sourceOrder = normalizeSourceOrder(currentSettings.sourceOrder);
-    // "Vertical position" is no longer a user setting (AJ, 2026-09-26): its slider
+    // "Vertical position" is no longer a user setting: its slider
     // is gone and the panel simply sits at the default -80px. PINNED rather than
     // merely defaulted, because a value stored back when the slider existed would
     // otherwise keep shifting the lyrics with no UI left to move it back.
@@ -746,6 +765,10 @@
     currentSettings.legibilityBackdrop = booleanValue(
       currentSettings.legibilityBackdrop,
       DEFAULT_SETTINGS.legibilityBackdrop
+    );
+    currentSettings.fadePreviousLines = booleanValue(
+      currentSettings.fadePreviousLines,
+      DEFAULT_SETTINGS.fadePreviousLines
     );
     currentSettings.smoothScrolling = booleanValue(
       currentSettings.smoothScrolling,
@@ -854,13 +877,16 @@
     // applySimpleLyricsSplines REPLACES them — so a consumer (the PiP) would keep
     // the NORMAL-mode curves, which is why its Apple Music style motion kept
     // bouncing. FORCE, because publishRendererKit is otherwise one-shot and the
-    // re-publish would be a silent no-op (AJ, 2026-10-07).
+    // re-publish would be a silent no-op.
     try { publishRendererKit(true); } catch (e) {}
     document.body.classList.toggle("ym-sl-legibility-backdrop", !!currentSettings.legibilityBackdrop);
+    // A body class survives fullscreen's reparenting of the panel, so the fade
+    // follows the lyrics into fullscreen for free, like the backdrop class.
+    document.body.classList.toggle("ym-sl-fade-previous-lines", !!currentSettings.fadePreviousLines);
     applyPerformanceMode();
     // NOTE: the page-wide YouTube font swap moved to the panel's own YouTube
     // page (content.js, YT_FONT_CLASS), so it no longer depends on this add-on
-    // being installed (AJ, 2026-10-22).
+    // being installed.
     // Simple lyrics is a RENDER MODE, not a per-element tweak, so it is a BODY
     // class — the same shape as the legibility backdrop above. A body class also
     // covers the fullscreen overlay, which reparents the panel but leaves body
@@ -887,7 +913,7 @@
     // toggle IMMEDIATELY instead of waiting for the next lyrics payload. The
     // payload only re-emits on a track/lyrics change, which is exactly why
     // turning Smooth Scrolling off — or Simple Lyrics on — did nothing in the PiP
-    // until the next song (AJ, 2026-10-07).
+    // until the next song.
     try {
       if (window.YTMod && window.YTMod.bus) {
         window.YTMod.bus.emit("lyrics:settings", {
@@ -952,7 +978,7 @@
   // less. All three at 1.0 is exact upstream parity.
   // This matters because the defaults were originally tuned AGAINST the old
   // Catmull-Rom curve, whose vertical dip was 2.23x too shallow; the spline fix
-  // (2026-09-20) corrected the curve, so the slider boost now stacks on a
+  // corrected the curve, so the slider boost now stacks on a
   // correct curve instead of compensating for a broken one.
   // resolver-worker/test-animation-parity.mjs guard D prints the live numbers.
   function blendAnimation(resting, target) {

@@ -1,8 +1,8 @@
   // ---- Spicy Lyrics API integration (publishable key, client-side) ----
   // ---- Spicy Lyrics API cache -----------------------------------------------
   // The /v1/lyrics endpoint is rate-limited, and every play of a song we've
-  // already resolved would otherwise re-run the MusicBrainz search (up to ~16
-  // sequential HTTP requests) plus the API round-trip.
+  // already resolved would otherwise re-run the track search plus the API
+  // round-trip.
   //
   // RETENTION — Terms of Service s7. Caching and storage are allowed, and they
   // ask that we do NOT hit the API for every view, on one hard condition:
@@ -11,7 +11,7 @@
   // effect (a sync can be pulled at any time, with no removal notice), so it is
   // a CEILING, not a target. We sit at exactly the cap: long enough that a
   // replay almost never re-fetches, and never past the point where a withdrawn
-  // sync stops propagating. (Was 3 days — upstream's window — until 2026-10-07.)
+  // sync stops propagating. (Was 3 days — upstream's window — until.)
   //
   // Storage is chrome.storage.local (bridged through window.YTMod) rather than
   // localStorage: the localStorage lyrics cache is capped at 15 entries and is
@@ -25,7 +25,7 @@
   // v3 — the cached value is the TTML STRING that `parseSpicyLyrics` SERIALIZES
   // from the API's JSON, so it is only ever as current as the serializer that
   // wrote it. `parseSpicyLyrics` is new (it does not exist in any backup older
-  // than 2026-09-26), so every entry predating it was produced by a different
+  // than), so every entry predating it was produced by a different
   // code path and carries a SHAPE WE NO LONGER EMIT — most visibly, one span
   // per LINE instead of one per syllable, which the renderer then fills as a
   // single unit. Symptom: "the lyrics are line by line, not word by word"
@@ -174,7 +174,7 @@
   //
   // Negative entries are pure disposable optimisation, so re-deriving them costs
   // one API call at worst. Resolver entries (`r:*`) are NOT touched — they
-  // record a stable fact that spending a ListenBrainz round-trip would only
+  // record a stable fact that spending a search round-trip would only
   // re-learn. Runs once per page load, and only when the stored version differs.
   function invalidateStaleSpicyEntries() {
     if (!spicyCache) return 0;
@@ -323,117 +323,41 @@
     return touched;
   }
 
-  // Resolves a Spotify track id from the track's title + artist via
-  // ListenBrainz (free, no API key, CORS-enabled, no backend required).
-  //
-  // WHY LISTENBRAINZ INSTEAD OF MUSICBRAINZ
-  // ---------------------------------------
-  // MusicBrainz could answer the same question, but only by search-then-walk:
-  // search recordings, then fetch each candidate's URL relations until one
-  // carries a Spotify link. That was up to ~16 sequential requests per song
-  // against a 400-request window, and most of them were spent discovering that
-  // a particular pressing has no link. ListenBrainz — the same organisation,
-  // MetaBrainz — publishes the recording→Spotify mapping directly, so the whole
-  // walk collapses into a single request.
-  //
-  // Endpoint: /spotify-id-from-metadata
-  //   artist_name + track_name + release_name → spotify_track_ids[]
-  //
-  // GOTCHAS that shaped this implementation (each cost a debugging cycle):
-  //   * `release_name` is REQUIRED by the validator, but sending it EMPTY is
-  //     treated loosely and returns every mapping it has for that title+artist.
-  //     Empty beats guessing, because YTM's album string never matches
-  //     MusicBrainz's character-for-character. (A wrong name also degrades to
-  //     the loose behaviour rather than failing.)
-  //   * ARTIST CREDIT DRIFT is the trap that makes this look broken. MusicBrainz
-  //     and Spotify store featured artists in the ARTIST field, while YouTube
-  //     Music keeps them in the title's parentheses. So "underscores" returns
-  //     NOTHING for a song that "underscores feat. 8485" resolves instantly —
-  //     the very song that motivated building this. Hence the variant ladder.
-  //
-  // We deliberately do NOT try /spotify-id-from-mbid: it needs a MusicBrainz
-  // recording id, and obtaining one means going back through MusicBrainz search,
-  // which is exactly the round trip we are removing.
-
-  /** Loose normalisation — Unicode-aware, used only for de-duplicating variants. */
+  /** Loose normalisation — Unicode-aware, used for comparing titles/artists. */
   const normLoose = (v) => String(v || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
-  /** Strip "(Official Video)", "(feat. X)", trailing "- Remastered 2011", etc. */
-  const stripParensLoose = (v) => String(v || "")
-    .replace(/\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*/g, " ")
-    .replace(/\s+-\s+[A-Za-z][^-]*$/, "")
-    .trim();
-
-  /** Drop a featured credit from an artist string. */
-  const dropFeatCredit = (v) => String(v || "")
-    .replace(/\s*(?:feat|ft|featuring|with)\b\.?\s*.*$/i, "")
-    .replace(/\s*[&,]\s*.*$/, "")
-    .trim();
-
-  /** Ordered, de-duplicated variant builder. */
-  function variantList(...values) {
-    const out = [];
-    const seen = new Set();
-    for (const value of values) {
-      const s = String(value || "").trim();
-      if (!s) continue;
-      const k = normLoose(s);
-      if (!k || seen.has(k)) continue;
-      seen.add(k);
-      out.push(s);
-    }
-    return out;
-  }
-
-  /**
-   * Artist strings worth trying, most-likely first.
-   *
-   * The interesting case is a featured credit sitting in the TITLE: YTM gives us
-   * "Song (feat. X)" / "Artist", while the mapping is keyed on "Artist feat. X".
-   * So we lift the credit out of the parens and graft it onto the artist, in the
-   * spellings MusicBrainz editors actually use.
-   */
-  function listenbrainzArtistVariants(artist, title) {
-    const base = dropFeatCredit(artist);
-    const feat = /[\(\[\{]\s*(?:feat|ft|featuring|with)\b\.?\s*([^\)\]\}]+)[\)\]\}]/i.exec(String(title || ""));
-    const credit = feat && feat[1] ? feat[1].trim() : "";
-    return variantList(
-      artist,
-      base,
-      credit && base ? `${base} feat. ${credit}` : "",
-      credit && base ? `${base} ft. ${credit}` : "",
-      credit && base ? `${base} featuring ${credit}` : "",
-      stripParensLoose(artist)
-    );
-  }
-
-  /* Uploader-styled titles never match a catalogue. The live console showed
-     queries like "more than life ft. glaive (Official Music Video) (feat.
-     glaive)" and "fijimar & guardin - goodbye, forever [Lyrics / AMV] | biteki
-     exclusive" — those miss MusicBrainz and ListenBrainz every time.
-     Strip the noise before querying anything (AJ, 2026-10-19). */
-  const TITLE_NOISE_RE =
-    /\b(official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio(?:\s*only)?|visuali[sz]er|music\s*video|hd|hq|mv|amv|explicit|clean)\b/gi;
-  // Bracketed text that describes a DIFFERENT RECORDING must survive: dropping
-  // "(Remix)" would query the original and fetch the wrong ISRC/timing.
-  const TITLE_VERSION_RE =
-    /\b(remix|re-?mix|live|acoustic|instrumental|sped\s*up|slowed|reverb|nightcore|demo|edit|version|cover|orchestral)\b/i;
+  /* Uploader-styled titles carry distribution labels that are not part of the
+     song's name. Strip those, but ONLY those: "(u want it)" is the title, and
+     "(feat. blackbear)" is a different recording from the solo cut. The old
+     rule dropped every bracket, which turned "tell me (u want it)" into
+     "tell me" and matched the wrong song. */
+  const TITLE_NOISE_WORDS = new Set([
+    "official", "music", "video", "audio", "lyric", "lyrics", "visualizer",
+    "visualiser", "amv", "mv", "hd", "hq", "4k", "8k", "explicit", "clean",
+  ]);
+  const TITLE_BRACKET_RE = /[\(\[]([^\)\]]*)[\)\]]/g;
+  // A trailing " - Official Video" / " - Lyrics" label, outside brackets.
+  const TITLE_NOISE_TAIL_RE =
+    /\s*[-–—]\s*(?:(?:official\s*)?(?:music\s*)?(?:video|audio)|lyric\s*video|lyrics?|visuali[sz]er|amv|mv|hd|hq|4k|8k)\s*$/i;
 
   function cleanSearchTitle(title, artist) {
     let s = String(title || "");
     // "Song | Channel" — everything after the pipe is uploader branding.
     s = s.split("|")[0];
-    // Bracketed qualifiers: drop (Official Video) / [Lyrics / AMV], keep
-    // (Remix) / (Live) / (Acoustic) because those are different recordings.
-    s = s.replace(/[\(\[]\s*([^\)\]]*)[\)\]]/g, (match, inner) =>
-      TITLE_VERSION_RE.test(inner) ? match : " "
-    );
+    // Drop a bracketed label only when the whole bracket is label words:
+    // "(Official Video)", "[Lyrics / AMV]", "(prod. X)". Keep "(u want it)",
+    // "(feat. blackbear)", "(Remix)", "(Live)", "(Acoustic)", "(Extended)".
+    s = s.replace(TITLE_BRACKET_RE, (match, inner) => {
+      const text = String(inner || "").trim();
+      if (!text) return " ";
+      if (/^prod(?:uced)?\.?\b/i.test(text)) return " ";
+      const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      return words.length && words.every((word) => TITLE_NOISE_WORDS.has(word)) ? " " : match;
+    });
     s = s.replace(/\{[^}]*\}/g, " ");
     // YTM sometimes truncates a title mid-bracket: "Song (Official ...".
     s = s.replace(/[\(\[]\s*[^\)\]]*$/, " ");
-    // Inline feature credits: "Song ft. X" / "Song feat. X".
-    s = s.replace(/\s+(?:ft|feat|featuring)\.?\s+.*$/i, " ");
-    s = s.replace(TITLE_NOISE_RE, " ");
+    s = s.replace(TITLE_NOISE_TAIL_RE, " ");
     s = s.replace(/\s*[-–—]\s*$/, " ");
     // "Artist - Song" -> "Song" when the prefix is the artist we already know.
     const dash = /^(.+?)\s*[-–—]\s*(.+)$/.exec(s);
@@ -447,271 +371,182 @@
     return s.replace(/\s{2,}/g, " ").trim();
   }
 
-  /** Title strings worth trying: cleaned first, then stripped, then raw. */
-  function listenbrainzTitleVariants(title, artist) {
-    const cleaned = cleanSearchTitle(title, artist);
-    return variantList(cleaned, stripParensLoose(title), title);
+  // ---- YTM -> Spotify id ------------------------------------------------------
+  // The Spicy Lyrics API is keyed by a Spotify track id, which YouTube Music
+  // does not expose. /tracks/search answers that question directly: give it the
+  // title, artist, album and duration and it returns ranked Spotify tracks with
+  // a `tier` saying how well each one matches. This replaced the old
+  // metadata-mapping ladder: one request instead of up to twelve, and no second
+  // catalogue to keep in sync.
+  //
+  // Tier behaviour, measured live: `exact` requires the duration within about
+  // 3s; a 4-10s drift is still `likely`; past that every result becomes
+  // `version`, where live/remix/cover look-alikes live (and the live recording
+  // is often ranked first). That is why the accepted window is deliberately
+  // small — a wider one would silently adopt the wrong recording.
+
+  function spicySearchSeconds(track) {
+    const ms = Number(track && track.durationMs);
+    return Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0;
   }
 
-  /* YTM's player bar renders a title with the uploader noise already removed —
-     the raw videoDetails.title still carries "(Official Music Video)". That
-     makes the bar text the best canonical string available without a catalogue
-     lookup, and Spicy is the source we most want to hit (AJ, 2026-10-19). */
-  function playerBarTitle() {
-    const selectors = [
-      "ytmusic-player-bar .title",
-      "ytmusic-player-bar #song-title",
-      "ytmusic-player-bar yt-formatted-string.title",
-      "ytmusic-miniplayer .ytmusicTrackInfoTitle",
-    ];
-    for (const selector of selectors) {
-      const el = document.querySelector(selector);
-      const text = el && el.textContent ? el.textContent.trim() : "";
-      if (text) return text;
-    }
-    return "";
+  function spicyResultArtistMatches(result, artist) {
+    const wanted = normLoose(artist);
+    if (!wanted) return true;
+    const names = Array.isArray(result && result.artists) ? result.artists : [];
+    return names.some((name) => {
+      const got = normLoose(name);
+      return got && (got === wanted || got.includes(wanted) || wanted.includes(got));
+    });
   }
 
   /**
-   * One request against /spotify-id-from-metadata.
-   * Returns { ids, transient } — `transient` means the answer is unknowable
-   * right now (timeout, 429, 5xx), as opposed to a definitive "no mapping".
+   * One request against /tracks/search. `duration` is seconds, or 0 to omit it.
+   * Returns { results, transient, aborted } — `transient` means the answer is
+   * unknowable right now (timeout, 429, 5xx), not that the track has no match.
    */
-  async function listenbrainzLookupMetadata(artist, title, release, controller) {
+  async function spicySearchTracks(title, artist, album, duration, controller) {
     const params = new URLSearchParams();
-    params.set("artist_name", artist || "");
-    params.set("track_name", title || "");
-    // Sent even when empty — the endpoint requires the parameter, and an empty
-    // value is what triggers its loose matching.
-    params.set("release_name", release || "");
+    params.set("title", title);
+    if (artist) params.set("artist", artist);
+    if (album) params.set("album", album);
+    if (duration > 0) params.set("duration", String(duration));
+    params.set("limit", String(SPICY_SEARCH_LIMIT));
 
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), LB_TIMEOUT_MS);
+    const timer = setTimeout(() => timeout.abort(), SPICY_SEARCH_TIMEOUT_MS);
     const onAbort = () => timeout.abort();
     if (controller && controller.signal) {
-      if (controller.signal.aborted) { clearTimeout(timer); return { ids: [], transient: false }; }
+      if (controller.signal.aborted) {
+        clearTimeout(timer);
+        return { results: [], transient: false, aborted: true };
+      }
       controller.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     let response;
     try {
-      response = await fetch(`${LISTENBRAINZ_LABS_API}/spotify-id-from-metadata/json?${params.toString()}`, {
+      response = await fetch(`${SPICY_LYRICS_BASE}/tracks/search?${params.toString()}`, {
+        headers: { Authorization: "Bearer " + SPICY_LYRICS_PUBLISHABLE_KEY },
         credentials: "omit",
         signal: timeout.signal,
       });
     } catch (error) {
       const userAborted = !!(controller && controller.signal && controller.signal.aborted);
-      if (!userAborted) alWarn("ListenBrainz lookup failed:", error && error.message);
-      return { ids: [], transient: !userAborted };
+      if (!userAborted) alWarn("Spicy search failed:", error && error.message);
+      return { results: [], transient: !userAborted, aborted: userAborted };
     } finally {
       clearTimeout(timer);
       if (controller && controller.signal) controller.signal.removeEventListener("abort", onAbort);
     }
 
-    // 400 = our parameters were rejected. That is our bug, not a flake, so it is
-    // a definitive no rather than something worth retrying.
-    if (response.status === 400) {
-      alWarn("ListenBrainz rejected the query (HTTP 400).");
-      return { ids: [], transient: false };
-    }
     if (response.status === 429) {
-      lbThrottledUntil = Date.now() + 30_000;
-      alWarn("ListenBrainz rate-limited us; backing off for 30s.");
-      return { ids: [], transient: true };
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 30_000;
+      spicySearchThrottledUntil = Date.now() + Math.min(waitMs, 60_000);
+      alWarn("Spicy search rate-limited; backing off.");
+      return { results: [], transient: true };
     }
-    if (response.status >= 500) return { ids: [], transient: true };
-    if (!response.ok) return { ids: [], transient: false };
+    if (response.status === 0 || response.status >= 500) {
+      return { results: [], transient: true };
+    }
+    if (response.status === 401 || response.status === 403) {
+      // Revoked key, disabled application, or this origin left the allowlist.
+      // Falling through is right, but staying quiet would hide a permanently
+      // broken key behind a working fallback path.
+      alWarn(`Spicy search rejected the key (HTTP ${response.status}); lyrics calls will fail too.`);
+      return { results: [], transient: false };
+    }
+    if (!response.ok) return { results: [], transient: false };
 
     const json = await response.json().catch(() => null);
-    const first = Array.isArray(json) ? json[0] : (json && json[0]) || null;
-    const ids = (first && Array.isArray(first.spotify_track_ids)) ? first.spotify_track_ids : [];
-    return { ids: ids.filter((id) => /^[A-Za-z0-9]{22}$/.test(String(id))), transient: false };
+    const results = json && json.Body && Array.isArray(json.Body.results) ? json.Body.results : [];
+    return { results, transient: false };
   }
 
-  /**
-   * Walk the variant ladder until a mapping turns up.
-   *
-   * Ordered most-likely-and-cheapest first: the stripped title with the raw
-   * artist answers for the overwhelming majority of songs in one request, so the
-   * feat-credit permutations only run when that fails.
-   */
-  function spotifyTrackIdFromMusicBrainzUrl(value) {
-    const raw = String(value || "");
-    const uri = /^spotify:track:([A-Za-z0-9]{22})$/i.exec(raw);
-    if (uri) return uri[1];
-    const web = /open\.spotify\.com\/(?:intl-[^/]+\/)?track\/([A-Za-z0-9]{22})/i.exec(raw);
-    return web ? web[1] : "";
+  /** First result that is safe to take automatically, or null. */
+  function pickSpicySearchResult(results, track, duration) {
+    if (!Array.isArray(results) || !results.length) return null;
+    const wantedMs = Number(track && track.durationMs) || 0;
+    for (const result of results) {
+      if (!result || typeof result.id !== "string" || !/^[A-Za-z0-9]{22}$/.test(result.id)) continue;
+      if (!spicyResultArtistMatches(result, track && track.artist)) continue;
+      const gotMs = Number(result.duration) * 1000;
+      const delta = wantedMs > 0 && Number.isFinite(gotMs) ? Math.abs(gotMs - wantedMs) : 0;
+      const durationAgrees =
+        duration > 0 && wantedMs > 0 && Number.isFinite(gotMs) && delta <= SPICY_SEARCH_EXACT_DELTA_MS;
+      if (result.tier === "exact") {
+        // The API already applies roughly this window; the second check only
+        // guards against a result whose duration is absent or malformed.
+        if (duration > 0 && wantedMs > 0 && Number.isFinite(gotMs) && !durationAgrees) continue;
+        return { result, delta };
+      }
+      // `version` normally means another cut, but the API also uses it when the
+      // title differs only in how the credit is written — "dropout (feat.
+      // blackbear)" vs Spotify's "dropout (w/ blackbear)". A live/remix take
+      // drifts by tens of seconds, so a version whose duration still agrees is
+      // the same recording.
+      if (result.tier === "version" && durationAgrees) return { result, delta };
+      // `likely` means the title and artist matched but the duration did not.
+      // Take it for small padding, never for another cut.
+      if (result.tier === "likely" && duration > 0 && delta <= SPICY_SEARCH_LIKELY_DELTA_MS) {
+        return { result, delta };
+      }
+    }
+    return null;
   }
 
-  /* Relations are attached by the host's lookup (content.js), not by the
-     search response — MusicBrainz's search endpoint never returns them. TYPE is
-     deliberately ignored: ordinary Spotify mappings are filed as
-     `free streaming`, and filtering for `streaming` would drop every one of
-     them (AJ, 2026-10-22). */
-  function musicBrainzSpotifyId(recording) {
-    const relations = recording && Array.isArray(recording.relations) ? recording.relations : [];
-    for (const relation of relations) {
-      const resource = relation && relation.url && relation.url.resource;
-      const id = spotifyTrackIdFromMusicBrainzUrl(resource);
-      if (id) return id;
-    }
-    return "";
-  }
-
-  function scoreMusicBrainzRecording(recording, track) {
-    if (!recording || !track) return -1;
-    const wantedTitle = normLoose(track.title);
-    const gotTitle = normLoose(recording.title);
-    if (!wantedTitle || !gotTitle) return -1;
-    let score = gotTitle === wantedTitle ? 8 : 0;
-    if (!score && (gotTitle.includes(wantedTitle) || wantedTitle.includes(gotTitle))) score = 4;
-    if (!score) return -1;
-    const wantedArtist = normLoose(track.artist);
-    const artistNames = Array.isArray(recording["artist-credit"])
-      ? recording["artist-credit"].map((credit) => normLoose(credit && (credit.name || credit.artist && credit.artist.name)))
-      : [];
-    // A different artist is a different song, however exactly the title matches.
-    // Once relations became readable this mattered: "Ready or Not" also exists
-    // by other artists, and a wrong-but-linked recording would otherwise beat
-    // the right one whenever its duration happened to be closer (AJ, 2026-10-22).
-    // Rejecting here also means we never fetch a Spotify id for a cover/remix by
-    // someone else and serve its lyrics under this track.
-    if (wantedArtist && artistNames.length &&
-        !artistNames.some((name) => name && (name === wantedArtist || name.includes(wantedArtist) || wantedArtist.includes(name)))) {
-      return -1;
-    }
-    if (wantedArtist && artistNames.some((name) => name === wantedArtist)) score += 6;
-    else if (wantedArtist && artistNames.some((name) => name && (name.includes(wantedArtist) || wantedArtist.includes(name)))) score += 3;
-    const wantedDuration = Number(track.durationMs);
-    const gotDuration = Number(recording.length);
-    if (Number.isFinite(wantedDuration) && wantedDuration > 0 && Number.isFinite(gotDuration) && gotDuration > 0) {
-      const delta = Math.abs(gotDuration - wantedDuration);
-      if (delta <= 1500) score += 4;
-      else if (delta <= 5000) score += 2;
-    }
-    return score;
-  }
-
-  async function resolveSpotifyIdViaMusicBrainz(track, controller, key, options = null) {
-    if (!window.YTMod || typeof window.YTMod.fetchMusicBrainzRecordingSearch !== "function") {
-      return { id: null, transient: false };
-    }
+  async function resolveSpotifyIdViaSpicySearch(track, controller, key, options = null) {
     const prefetching = !!(options && options.prefetch);
     const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
     if (stale()) return { id: null, transient: false };
-    try {
-      const response = await window.YTMod.fetchMusicBrainzRecordingSearch(
-        cleanSearchTitle(track.title, track.artist),
-        track.artist,
-        track.album,
-        track.durationMs
-      );
-      if (stale()) return { id: null, transient: false };
-      // status 0 = the host could not reach MusicBrainz at all (the relation
-      // lookup reports it that way), so it is a transport failure like 429/5xx,
-      // never evidence that the song has no mapping.
-      if (!response || response.status === 0 || response.status === 429 || response.status >= 500) {
-        return { id: null, transient: true };
-      }
-      if (!response.ok || !response.data || !Array.isArray(response.data.recordings)) {
-        return { id: null, transient: false };
-      }
-      const candidates = response.data.recordings
-        .map((recording) => ({ recording, score: scoreMusicBrainzRecording(recording, track) }))
-        .filter((candidate) => candidate.score > 0 && musicBrainzSpotifyId(candidate.recording))
-        .sort((a, b) => b.score - a.score);
-      const best = candidates[0];
-      if (!best) {
-        alWarn(`MusicBrainz: no Spotify match for "${track.title}".`);
-        return { id: null, transient: false };
-      }
-      const id = musicBrainzSpotifyId(best.recording);
-      alLog(`Spotify id ${id} via MusicBrainz (${best.score}).`);
-      return { id, transient: false };
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        alWarn("MusicBrainz fallback failed:", error && error.message);
-      }
-      return { id: null, transient: !controller.signal.aborted };
-    }
-  }
-
-  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
-    const prefetching = !!(options && options.prefetch);
-    const stale = () => controller.signal.aborted || (!prefetching && key !== currentTrackKey);
-    const title = track && track.title;
-    if (!title) {
-      alWarn("no track title; Spotify lookup skipped.");
-      return { id: null, transient: false };
+    if (spicySearchThrottledUntil > Date.now()) {
+      alWarn("Spicy search still backing off; skipping this lookup.");
+      return { id: null, transient: true };
     }
 
     const artist = (track && track.artist) || "";
     const album = (track && track.album) || "";
-    const titles = listenbrainzTitleVariants(title, artist);
-    // Prefer the player bar's already-cleaned title when it says something new.
-    // During prefetch the bar still shows the CURRENT song, so using it would
-    // poison the next track's lookup with the wrong title.
-    if (!prefetching) {
-      const barTitle = cleanSearchTitle(playerBarTitle(), artist);
-      if (barTitle && !titles.some((variant) => normLoose(variant) === normLoose(barTitle))) {
-        titles.unshift(barTitle);
-      }
-    }
-    const artists = listenbrainzArtistVariants(artist, title);
-    // Try the album YTM gave us first, then the loose empty form. YTM's album
-    // string is often close enough to tighten the match, and when it isn't the
-    // endpoint degrades to the loose lookup rather than returning nothing.
-    const releases = album ? [album, ""] : [""];
+    const title = cleanSearchTitle(track && track.title, artist) || (track && track.title) || "";
+    if (!title) return { id: null, transient: false };
+    const duration = spicySearchSeconds(track);
 
-    let attempts = 0;
-    let transientFailure = false;
-    let sawAnyAnswer = false;
+    let out = await spicySearchTracks(title, artist, album, duration, controller);
+    if (out.aborted) return { id: null, transient: false };
+    if (stale()) return { id: null, transient: false };
 
-    lbLadder: for (const t of titles) {
-      for (const a of artists) {
-        for (const r of releases) {
-          if (stale()) return { id: null, transient: false };
-          // A 429 elsewhere means the rest of this window is gone. Bail with
-          // `transient` rather than spending the remaining budget on calls that
-          // cannot succeed.
-          if (lbThrottledUntil > Date.now()) {
-            alWarn("ListenBrainz backing off; trying MusicBrainz.");
-            break lbLadder;
-          }
-          if (attempts >= LB_MAX_ATTEMPTS) {
-            // Budget exhausted without a definitive answer, so the caller must
-            // not record this as a permanent miss.
-            alWarn("ListenBrainz budget spent; trying MusicBrainz.");
-            break lbLadder;
-          }
-          attempts++;
+    let picked = out.transient ? null : pickSpicySearchResult(out.results, track, duration);
 
-          const out = await listenbrainzLookupMetadata(a, t, r, controller);
-          if (out.transient) transientFailure = true;
-          else sawAnyAnswer = true;
-
-          if (out.ids.length) {
-            const id = out.ids[0];
-            alLog(`resolved Spotify id ${id} via ListenBrainz "${t}" / "${a}"${r ? ` / "${r}"` : ""} (${attempts} request${attempts === 1 ? "" : "s"}).`);
-            return { id, transient: false };
-          }
-        }
-      }
+    // A long music video can be a minute past the Spotify cut, which the API
+    // reports as `version` for every result. Duration is what caused that, so
+    // the one retry worth spending drops it: without a duration the API can
+    // still answer `exact` when every release of the recording agrees.
+    let retriedWithoutDuration = false;
+    if (!picked && duration > 0 && !out.transient) {
+      retriedWithoutDuration = true;
+      out = await spicySearchTracks(title, artist, album, 0, controller);
+      if (out.aborted || stale()) return { id: null, transient: false };
+      if (!out.transient) picked = pickSpicySearchResult(out.results, track, 0);
     }
 
-    alWarn(`ListenBrainz has no Spotify mapping for "${title}" / "${artist || "?"}" (${attempts} request${attempts === 1 ? "" : "s"}); trying MusicBrainz fallback.`);
-    // Layer 2: MusicBrainz search + Spotify URL relations. This is deliberately
-    // behind ListenBrainz: it is slower and rate-limited, but it covers some
-    // recordings whose direct ListenBrainz -> Spotify mapping is missing.
-    const musicBrainz = await resolveSpotifyIdViaMusicBrainz(track, controller, key, options);
-    if (musicBrainz.id) return musicBrainz;
-    // Every mapping layer failed at the transport level, so we have no evidence
-    // that the song is genuinely unresolvable. Do not negative-cache that.
-    if ((!sawAnyAnswer && transientFailure) || musicBrainz.transient) {
-      alWarn(`free Spotify-ID mapping layers were unavailable for "${title}"; giving up for now.`);
-      return { id: null, transient: true };
+    if (!picked) {
+      if (out.transient) return { id: null, transient: true };
+      alWarn(`Spicy search: no safe match for "${title}" / "${artist || "?"}".`);
+      return { id: null, transient: false };
     }
-    return { id: null, transient: false };
+
+    const id = picked.result.id;
+    const delta = duration > 0 ? `, ${Math.round(picked.delta / 1000)}s off` : "";
+    alLog(`Spotify id ${id} via Spicy search (${picked.result.tier}${delta}${retriedWithoutDuration ? ", duration omitted" : ""}).`);
+    return { id, transient: false };
+  }
+
+  async function resolveSpotifyIdUncached(track, controller, key, options = null) {
+    if (!track || !track.title) {
+      alWarn("no track title; Spotify lookup skipped.");
+      return { id: null, transient: false };
+    }
+    return resolveSpotifyIdViaSpicySearch(track, controller, key, options);
   }
 
   /**
@@ -722,12 +557,11 @@
     const prefetching = !!(options && options.prefetch);
     const cacheKey = spicyCacheKeyFor(track, "");
     // Only HITS are cached. A miss used to be recorded for 12 hours and then
-    // short-circuit this function, which meant a Spotify↔MusicBrainz mapping the
+    // short-circuit this function, which meant a Spotify mapping the
     // user added afterwards stayed invisible for half a day — the mapping is
     // exactly what these lookups exist to find, and it can change at any time
-    // without our knowing (AJ, 2026-10-23). A lookup that fails now simply fails
-    // again next time; both layers are budgeted, so re-asking costs a handful of
-    // requests per play, not a loop.
+    // without our knowing. A lookup that fails now simply fails
+    // again next time; the search is one request per play, not a loop.
     if (cacheKey) {
       const cached = await getSpicyCacheEntry(`r:${cacheKey}`);
       if (cached && cached.spotifyId) {
@@ -849,7 +683,7 @@
   // absence of whitespace between adjacent spans — parseTTML infers it that way.
   // Returns { ttml, attribution } so the caller can surface the uploader credit.
   //
-  // TWO BODY SHAPES, AND BOTH ARE COMMON (verified live 2026-09-20)
+  // TWO BODY SHAPES, AND BOTH ARE COMMON (verified live)
   // ---------------------------------------------------------------
   // `Body.Type === "Syllable"` — each Content entry carries
   //   Lead: { StartTime, EndTime, Syllables: [{ Text, StartTime, EndTime,
@@ -1403,7 +1237,7 @@
        exists when the automatic resolver already failed for this track. Served
        from the persistent cache before any runner runs, so a replay or a page
        reload loads it instantly instead of searching and landing on "no
-       lyrics" again (AJ, 2026-10-22). */
+       lyrics" again. */
     const manualPick = getManualLyricsPersistent(key);
     if (manualPick) {
       if (stale()) return;
@@ -1475,7 +1309,7 @@
         }
         // Prefer a synced match; fall back to a plain (unsynced) match so the
         // panel shows lyrics automatically instead of "No lyrics found"
-        // (AJ, 2026-09-18). Both are scored against the current track on the
+        //. Both are scored against the current track on the
         // same search response — no second request.
         data = selectLRCLIBResult(searchResponse.data, track)
           || selectLRCLIBPlainResult(searchResponse.data, track);
@@ -1659,7 +1493,7 @@
     // wins when it has the track. Spicy is next; if it only has line-level
     // timing, the spicy runner holds it while Unison gets one word-level check.
     // Unison line-level or a miss falls back to Spicy. LRCLIB is last.
-    // lrc.red was retired on 2026-10-22.
+    // lrc.red was retired on.
     const order = ["community", "spicy", "unison", "lrclib"];
     for (const id of order) {
       const runner = runners[id];

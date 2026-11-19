@@ -4,8 +4,7 @@
     // A track with no lyrics already built its empty state while the panel was
     // docked, so entering fullscreen rebuilds nothing and the composition stayed
     // in the side layout. Adopt the state once the panel has been moved into the
-    // overlay and the panes have their normal geometry to measure (AJ,
-    // 2026-11-16: "going in fullscreen doesnt move the stuff in the middle").
+    // overlay and the panes have their normal geometry to measure("going in fullscreen doesnt move the stuff in the middle).
     window.setTimeout(() => {
       if (!fsActive || !fsOverlay || !linesRoot) return;
       if (!linesRoot.querySelector(".ym-sl-empty")) return;
@@ -50,7 +49,7 @@
     // readability gradient; there is no cloned or blurred video layer.
     fsOverlay = h("div", { class: "ym-sl-fs-overlay" }, fsBgImg, tint, fsMediaHost, fsLyricsShade, fsLyricsHost);
     document.body.appendChild(fsOverlay);
-    // In-page fullscreen fades in (AJ, 2026-10-22). Native fullscreen deliberately
+    // In-page fullscreen fades in. Native fullscreen deliberately
     // gets no entrance: the browser is already repainting the whole display, so a
     // fade on top of that reads as a late start rather than a transition.
     if (currentSettings.fullscreenInPage && fsMotionOK() && typeof fsOverlay.animate === "function") {
@@ -59,14 +58,14 @@
         { duration: FS_ANIM_MS + 40, easing: "cubic-bezier(.22, .61, .36, 1)" }
       );
     }
-    // AJ 2026-10-09: the media/lyrics panes are transitioned on left/width, so
+    //: the media/lyrics panes are transitioned on left/width, so
     // applying the entry layout to them animates them sliding in from the CSS
     // default (side) — a visible "side layout" flash on cover-art entry. Hold
     // transitions off until the first paint, then drop the class (the double-rAF
     // in buildFullscreenControls does the actual removal so the opacity fade is
     // live too). Layout cycling on the cycle button keeps animating normally.
     fsOverlay.classList.add("ym-sl-fs-no-anim");
-    // The artwork's layout switch (AJ, 2026-10-26). Built here so it exists
+    // The artwork's layout switch. Built here so it exists
     // before the first paint; the saved side is applied with no animation, as
     // the entry paint must not slide the columns into place.
     buildFsCoverSwitch();
@@ -100,13 +99,13 @@
     } catch (_) {}
     fsOverlay.appendChild(fsTitleEl);
     // Fullscreen "Next up" list, bottom-left. Reuses the title's font stack so
-    // it reads as part of the composition (AJ: "Apple font" = Spicy Lyrics).
+    // it reads as part of the composition (Apple font" = Spicy Lyrics).
     fsNextUp = h("div", { class: "ym-sl-fs-nextup", "aria-hidden": "true" });
     fsNextUp.style.fontFamily = fsTitleEl.style.fontFamily;
     fsOverlay.appendChild(fsNextUp);
     // Bottom-right escape hatch for a track with no lyrics: the lyrics column is
     // faded out in that state, so the panel's own empty-state button is not
-    // reachable (AJ, 2026-11-16). Hidden unless .ym-sl-fs-no-lyrics is on.
+    // reachable. Hidden unless.ym-sl-fs-no-lyrics is on.
     const fsSearchCta = h("button", {
       class: "ym-sl-fs-search-cta",
       type: "button",
@@ -115,7 +114,7 @@
     fsSearchCta.addEventListener("click", () => toggleSearchPanel());
     fsOverlay.appendChild(fsSearchCta);
 
-    // (The "See all" full-queue panel was removed 2026-10-03: click-to-jump was
+    // (The "See all" full-queue panel was removed: click-to-jump was
     // abandoned, so there is nothing left to open. The Next up list above is
     // now display-only.)
     refreshFsTitle();
@@ -123,7 +122,7 @@
     // tick. Entry builds the static cover card immediately, but the animated
     // cover's lookup was only ever started by the tick — so entering fullscreen
     // on a track whose art was already CACHED still showed the YTM cover first for
-    // up to two seconds before the animated one appeared (AJ, 2026-10-03).
+    // up to two seconds before the animated one appeared.
     reconcileFsMediaArt();
     // Long-title marquee: re-measure whenever the title's box changes width
     // (viewport resize, pane resize, font swap). updateFsTitleMarquee() itself
@@ -132,7 +131,7 @@
     fsTitleRO = new ResizeObserver(() => updateFsTitleMarquee());
     fsTitleRO.observe(fsTitleEl);
     // The font-size transitionend re-measure that used to live here is gone
-    // (AJ, 2026-10-20): the chip and scrubber no longer stack off the title's
+    //: the chip and scrubber no longer stack off the title's
     // measured height, so there is nothing to re-sync after the zoom.
     // Request native browser fullscreen immediately while the user activation
     // from the click is still fresh. documentElement is always present, always
@@ -141,7 +140,7 @@
     // before the rest of the setup so the activation token cannot be consumed
     // by anything else in this function first.
     //
-    // In-page fullscreen skips this entirely (AJ, 2026-10-22). The overlay is
+    // In-page fullscreen skips this entirely. The overlay is
     // already `position: fixed; inset: 0`, so it covers the viewport on its own;
     // native fullscreen only adds taking over the whole display, which also
     // strands the tab strip and every other tab. Escape still exits, because
@@ -180,7 +179,7 @@
 
       // Ambient backdrop: Kawarp fed by the LIVE video. This replaces the old
       // low-res blurred/dimmed copy of the video, which cost a full-viewport
-      // canvas blur every frame and looked muddier (AJ, 2026-10-19). The 2D
+      // canvas blur every frame and looked muddier. The 2D
       // canvas is created but left blank; it only starts drawing if Kawarp is
       // unavailable (no WebGL / Dynamic add-on off).
       fsBgCanvas = h("canvas", { class: "ym-sl-fs-bg-canvas" });
@@ -189,7 +188,7 @@
       fsBgLastDrawAt = 0;
       // findPlayerVideo() returns the <video> itself, not a container — querying
       // a video inside a video returns null, which silently started Kawarp with
-      // no source at all (AJ, 2026-10-19).
+      // no source at all.
       const liveVideoEl = video.tagName === "VIDEO" ? video : video.querySelector("video");
       startFullscreenKawarp("", liveVideoEl).then((ok) => {
         if (ok || !fsActive) return;
@@ -214,7 +213,7 @@
       video.style.setProperty("max-width", "none", "important");
       video.style.setProperty("max-height", "none", "important");
       // Fill the media pane edge-to-edge so the 16:9 video never leaves the
-      // two horizontal black bars AJ reported on 2026-09-27. The video is
+      // two horizontal black bars reported on. The video is
       // cropped instead of letterboxed - matches what Ableton / Spicy do for
       // their fullscreen MV pane, and the host already has rounded corners
       // so the cropped edges look intentional rather than truncated.
@@ -242,7 +241,7 @@
         // first one in the pane: both are IMG.ym-sl-fs-art with the same src, the
         // flex row squeezes them to half width each, and the orphan is only
         // cleaned up by the next 2s tick — two covers side by side on entry.
-        // Live-captured on the real page (AJ, 2026-10-21):
+        // Live-captured on the real page:
         //   'IMG.ym-sl-fs-art 583x583 block/1 | IMG.ym-sl-fs-art 583x583 block/1'
         // then one card, ~2s later. ensureFsArtImg() also removes any stray card,
         // so this is the same single-create point reconcile uses.
@@ -281,7 +280,7 @@
       // switches from cover art to the live video (or back). Without this,
       // fullscreen opened on a no-MV track is stuck on cover art forever.
       syncFsVideoMode();
-      // No band re-derive here any more (AJ, 2026-10-20). This tick used to be
+      // No band re-derive here any more. This tick used to be
       // the only thing that noticed a viewport resize and moved the chrome; the
       // chrome is anchored to the overlay's own bottom now, so it follows a
       // resize by itself.
@@ -313,7 +312,7 @@
     startFsMediaWatchers();
   }
 
-  /* ---- in-page fullscreen: open/close motion (AJ, 2026-10-22) --------------
+  /* ---- in-page fullscreen: open/close motion --------------
      The in-tab fullscreen is a surface INSIDE the page, so it can enter and leave
      like one. Native fullscreen does not get the closing fade: the browser has
      already returned to the page, and a 220ms ghost over it reads as lag. */
@@ -384,7 +383,7 @@
     // Same for the minimum-hold deferred restore (FS_CHROME_FADE_MIN_MS).
     if (fsChromeFadeHoldTimer) { clearTimeout(fsChromeFadeHoldTimer); fsChromeFadeHoldTimer = 0; }
     // The .ym-sl-fs-swapping chrome fade that used to need clearing here is gone
-    // (AJ, 2026-10-20) — the mode swap no longer fades the controls at all.
+    // — the mode swap no longer fades the controls at all.
     fsActive = false;
     fsNativeRequested = false;
     stopFsIdleTracking();
@@ -506,7 +505,7 @@
     if (fsCoverFlipTimer) { window.clearTimeout(fsCoverFlipTimer); fsCoverFlipTimer = 0; }
     if (fsCoverShadeTimer) { window.clearTimeout(fsCoverShadeTimer); fsCoverShadeTimer = 0; }
     if (fsCoverShadeSideTimer) { window.clearTimeout(fsCoverShadeSideTimer); fsCoverShadeSideTimer = 0; }
-    // Long-title marquee teardown (2026-09-28). Disconnect the resize observer
+    // Long-title marquee teardown. Disconnect the resize observer
     // and clear any inline shift/marquee state on the inner so a second
     // fullscreen entry starts from a clean baseline. fsTitleInner is gone
     // with its parent.
@@ -578,13 +577,13 @@
   // Escape: let the BROWSER drive it. The old handler called preventDefault()
   // and then exitFullscreenMode() itself, which suppressed Chrome's own
   // "Escape leaves fullscreen" path and did not reliably land either - so Esc
-  // appeared to do nothing (AJ, 2026-09-28). With no preventDefault the browser
+  // appeared to do nothing. With no preventDefault the browser
   // exits fullscreen and the fullscreenchange handler below unwinds our
   // overlay, which is the same path F11 and the browser chrome already use.
   // The explicit exit is kept ONLY for the case where native fullscreen never
   // engaged (requestFullscreen can be refused), where no fullscreenchange fires.
   //
-  // Arrow keys (AJ, 2026-10-30): every fullscreen player — YouTube's own included —
+  // Arrow keys: every fullscreen player — YouTube's own included —
   // seeks with Left/Right and changes the volume with Up/Down, and YTM's page has
   // no equivalent. This overlay does, in every layout, because the listener lives
   // on the document rather than on one layout's chrome:
@@ -667,7 +666,6 @@
   function handleFsFullscreenChange() {
     // Only OUR native fullscreen ending unwinds the overlay. In-page fullscreen
     // never asks for native, so an unrelated F11 out must leave it alone
-    // (AJ, 2026-10-22).
     if (fsActive && fsNativeRequested && !document.fullscreenElement) exitFullscreenMode();
   }
 
@@ -960,7 +958,7 @@
     // `reveal` forces the panel visible on return. Needed when the host gives it
     // back BECAUSE the user opened the Lyrics tab: without it the panel restores
     // to its pre-dock state (usually hidden), so the tab falls back to YTM's own
-    // lyrics instead of ours (AJ, 2026-10-19).
+    // lyrics instead of ours.
     panelVisible = reveal === true ? true : externalHostSavedVisible === true;
     externalHostSavedVisible = null;
     // Put the panel back where the tab system expects it (#tab-renderer, or

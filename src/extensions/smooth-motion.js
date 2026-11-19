@@ -350,7 +350,7 @@
           yt-icon-button wraps an inner <button>, and scaling both compounds to
           1.08 squared. */
     /* The PLAYER-BAR buttons are deliberately NOT in this list any more. Their
-       press + spring-back is wanted "in general" (AJ, 2026-10-07) — i.e. with
+       press + spring-back is wanted "in general" — i.e. with
        this add-on off — so that styling lives in the always-injected
        src/content/styles.css. Keeping a transition for them here would also
        WIN on specificity and silently kill that spring. This module keeps the
@@ -418,7 +418,7 @@
     html.ym-sm-tabs #tab-renderer.ym-sm-tabswap > * {
       /* Same blur-lift the Centered-home snippet uses, but armed from the CLICK
          (capture phase) so it starts the instant the tab flips instead of
-         waiting for the new child to be rendered (AJ, 2026-10-19). */
+         waiting for the new child to be rendered. */
       animation: ym-sm-tab-in .4s cubic-bezier(.32,.72,0,1) both;
     }
     @keyframes ym-sm-tab-in {
@@ -451,7 +451,7 @@
 
     /* 7. Like / Dislike flourish — the emoji burst on the state change.
        The press-shrink and its spring-back are deliberately NOT here: they are
-       wanted "in general" (AJ, 2026-10-07), so they live in the always-injected
+       wanted "in general", so they live in the always-injected
        src/content/styles.css alongside the rest of the player-bar buttons.
        The particles are spawned by JS (spawnLikeFlourish) and are
        position:fixed, so the player bar can never clip them. */
@@ -639,7 +639,7 @@
   function pagesOn() { return settings.master !== false && settings.pages !== false; }
 
   function applySettings(next) {
-    // AJ 2026-09-28: Aurora Flow has no settings UI — every module is always
+    //: Aurora Flow has no settings UI — every module is always
     // on. Ignore the incoming "next" and force all gates true so the gates
     // below (guideOn / pagesOn / etc.) and the root class toggles land in the
     // enabled state regardless of what content.js sends.
@@ -798,7 +798,7 @@
      <video>'s inline width/height/left/top, and it re-fits that size in response
      to a resize event. It does NOT re-fit from a ResizeObserver on the player,
      which is why a size computed mid-flight stays wrong until something else
-     forces another pass — AJ's "it all resets when the next song plays".
+     forces another pass — the "it all resets when the next song plays".
 
      So: let the geometry SNAP, let YTM re-fit against the settled box, then FLIP
      the video from its old box to its new one. A FLIP is a transform on an
@@ -1004,7 +1004,7 @@
   //     you are LEAVING (the "old tab fades in" bug). So a mutation only counts
   //     if it landed in the content node.
   //   * "yt-navigate-start" / "yt-navigate-finish" never fire on YTM (verified
-  //     live 2026-09-16 — every markNavigating was preceded by a nav click), so a
+  // live — every markNavigating was preceded by a nav click), so a
   //     click or an Enter in the search box is the only "leaving" signal.
   //
   // We therefore never pre-hide. We wait for the content to actually be
@@ -1021,7 +1021,7 @@
   // [hidden] on them, it merely collapses them to a 0x0 box — so they would read
   // as "the current page" below. Animating one there reveals a page the user is
   // not actually on, and it bleeds through the transparent player/watch page
-  // (AJ-confirmed 2026-09-16: turning Smooth Motion off stopped the bleed).
+  // (-confirmed: turning Smooth Motion off stopped the bleed).
   function songViewActive() {
     try {
       if (String(location.pathname || "").indexOf("/watch") === 0) return true;
@@ -1276,7 +1276,7 @@
     navHandler = () => { markNavigating(); };
     startHandler = () => { markNavigating(); };
     // Kept as cheap insurance: these never actually fire on YTM (verified
-    // 2026-09-16), but they cost nothing and cover a future nav path.
+    //), but they cost nothing and cover a future nav path.
     document.addEventListener(NAV_FINISH, navHandler);
     window.addEventListener(NAV_FINISH, navHandler);
     document.addEventListener(NAV_START, startHandler);
@@ -1309,14 +1309,14 @@
   // instantly. Two problems to solve:
   //   OPEN: YTM paints the popup at full opacity for a frame BEFORE our async
   //     poll adds the animation class, so it reads as a flash of the final
-  //     state (AJ: "looks like it's lagging"). Fix: pre-hide it for one frame
+  // state (it looked like lag"). Fix: pre-hide it for one frame
   //     (.ym-sm-menu-popup-pre -> opacity 0) synchronously in the capture
   //     click, then once visible swap to the fade+rise (.ym-sm-menu-popup-open).
   //   CLOSE: YTM removes the menu's content and collapses the popup to 0x0 in
   //     the same frame, so afterwards there is nothing left to fade. A clone
   //     cannot help either — cloneNode does NOT copy shadow DOM, and YTM's menu
   //     items are custom elements, so a cloned menu renders as an EMPTY box
-  //     (AJ saw exactly that: a bare sliver, then nothing at all). Fix: swallow
+  // (saw exactly that: a bare sliver, then nothing at all). Fix: swallow
   //     the close click, fade the REAL popup's opacity to 0 with its content
   //     still on screen, then re-dispatch the same (trusted) event so YTM does
   //     its normal close. A safety net force-closes if YTM ignores the
@@ -1516,7 +1516,7 @@
 
   // The Comments tab re-fetches on every visit: the panel is shown first and the
   // comments land a moment later, so an entrance armed at click time animates an
-  // EMPTY box and the comments then pop in (AJ: "the animation happens too
+  // EMPTY box and the comments then pop in (the animation happens too
   // early"). So after a switch we watch the newly shown panel and run the
   // entrance again the moment real content lands.
   function shownTabChild() {

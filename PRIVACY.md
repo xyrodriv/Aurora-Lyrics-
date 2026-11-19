@@ -112,9 +112,6 @@ The services contacted are:
 | `aurora-community-api.mitsyonsp.workers.dev` | Aurora Community TTML, offsets, profiles, uploads and view counts |
 | `discord.com` | Optional Discord sign-in for maker profiles |
 | `cdn.discordapp.com` | Community uploader and maker avatars |
-| `labs.api.listenbrainz.org` | Spotify-id resolution |
-| `musicbrainz.org` | Release lookup, for matching a track |
-| `open.spotify.com` | Artwork and artist lookup (oEmbed) |
 | `raw.githubusercontent.com` | Update check (release notes only) |
 | `site-ecb11ddf30644a24b5d9f12c57480dbd.freebuff.page` | Announcements (read-only) |
 | `fonts.spikerko.org` | Lyrics typeface stylesheet |

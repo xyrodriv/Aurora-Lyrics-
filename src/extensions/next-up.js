@@ -2,7 +2,7 @@
    ---------------------------------------------------------------------------
    What plays next, shown IN the player bar instead of floating over the page.
 
-   WHY IT MOVED (AJ, 2026-10-26): the old pill sat in the gutter above the bar
+   WHY IT MOVED: the old pill sat in the gutter above the bar
    inside a translucent glass shell with a two-colour conic glow spinning on a
    requestAnimationFrame loop — a repaint every ~42ms for as long as a track was
    playing, and it still read as a badge stuck to the page rather than part of
@@ -369,7 +369,7 @@ html.ym-yt-compact #${CHIP_ID}.ym-nu-artonly,
       event.preventDefault();
       event.stopPropagation();
       // The chip shows the track IMMEDIATELY after the current one, so a single
-      // `next()` is exactly what the user asked for.
+      // `next()` is the only step needed.
       try {
         if (window.YTMod && window.YTMod.player && window.YTMod.player.next) {
           window.YTMod.player.next();

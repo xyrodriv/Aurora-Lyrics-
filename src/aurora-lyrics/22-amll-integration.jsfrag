@@ -24,7 +24,7 @@
   let amllPrevTime = 0;
   let amllWasPlaying = false;
   let amllCssInjected = false;
-  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS (AJ, 2026-10-23):
+  /* Apple-style lyrics is ONE SETTING, TWO RENDERERS:
    *  - by default, word-synced lyrics render through Aurora's own Spicy
    *    renderer exactly as they always have (same DOM, springs, glow, scroll),
    *    and line-synced ones through the AMLL engine.
@@ -77,7 +77,7 @@
     const wordTimed = amllContentHasWordTiming(content);
     const choice = wordTimed
       ? normalizeRendererChoice(currentSettings.wordRenderer, "spicy")
-      : normalizeRendererChoice(currentSettings.lineRenderer, "amll");
+      : normalizeRendererChoice(currentSettings.lineRenderer, "braccato");
     if (choice === "amll" && !amllContentIsTimed(content)) return "spicy";
     return choice;
   }
@@ -134,14 +134,6 @@
      that went to Spicy does not load it), so handing the next track to the
      engine has to START it here — waiting for a settings change was the "stays
      on Spicy until I toggle the mode" bug. */
-  // Which renderer actually OWNS this content right now — published to consumers
-  // (the PiP) so they run the same one instead of guessing from the timings.
-  // "amll" means the engine is drawing timed, line-by-line content; everything
-  // else (word tracks pointed at Spicy, static lyrics, no content) is the
-  // built-in renderer, even while the engine object exists.
-  function amllTrackUsesEngine(content) {
-    return rendererChoiceForContent(content) === "amll";
-  }
 
   function amllApplyTrackRenderer(content) {
     const next = rendererChoiceForContent(content);
@@ -268,7 +260,7 @@
   /* Sized off the lyric HOST's width, not the viewport. The same card renders
      in a 1920 fullscreen pane, a tab that shrinks when the NPV rail opens, and
      a ~380px NPV lyric box; 5vh stayed at full-screen size in the small ones,
-     so the rail's words blew past its card edges (AJ, 2026-10-21). 7.5cqw is
+     so the rail's words blew past its card edges. 7.5cqw is
      tuned to land on the SAME size as the standard renderer, whose
      --DefaultLyricsSize is 7cqw of .ym-sl-panel (measured: 522px panel -> 36.5px,
      this host 487px -> 36.5px), so the two renderers agree in the tab; the 5vh
@@ -283,7 +275,7 @@
        where a row wraps. The engine wraps at the wrapper's CONTENT width while
        the highlight box paints the wrapper's full width, so the upstream 1em
        per side broke rows at 696px inside an 804px player and left a dead
-       strip on the right of every wrapped line (measured live, AJ 2026-10-21).
+       strip on the right of every wrapped line (measured live).
        .2em keeps the box off the glyphs and hands ~86px back to the text. */
     --lyric-line-padding-x: .2em;
     --amll-lp-bg-line-scale: .7;
@@ -356,6 +348,30 @@
     --bright-mask-alpha: 1;
     --dark-mask-alpha: .4;
   }
+}
+
+/* Most of the Apple renderer's per-word cost is not the animation, it is the
+   MASK. The engine gives every word span its own inline mask-image gradient.
+   On the focused line that gradient IS the karaoke wipe and it has to stay.
+   On a settled idle line both stops are the same rgba(0,0,0,.2) - a flat 20%
+   dim - so the mask buys nothing except one masked surface per word. Measured
+   on a word-synced track: 85 masked spans as the engine built it, 5 once the
+   settled idle lines are excluded (interleaved A/B: long frames 22/19/18 ->
+   10/10/18 per 0.9s sample).
+
+   .ym-sl-idle is stamped by amllMarkIdleLines(), NOT by :not(gradientMask).
+   The engine takes the gradient class off while a line is still LIT (its
+   --bright-mask-alpha is still 1 and fading to .2 over ~.45s), so selecting on
+   the class alone caught finished lines mid-fade and dropped them to 20% - the
+   line visibly darkened before coming back. Only when the two alpha vars have
+   actually settled equal is the gradient a flat dim, and only then is swapping
+   it for one opacity on the line's content box exactly equivalent. */
+.amll-lyric-player .FmKaba_lyricLine.ym-sl-idle:not(.FmKaba_gradientMask) span {
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+.amll-lyric-player .FmKaba_lyricLine.ym-sl-idle:not(.FmKaba_gradientMask) .FmKaba_lyricMainLine {
+  opacity: .2 !important;
 }
 
 .FmKaba_lyricDuetLine {
@@ -636,7 +652,7 @@
   pointer-events: auto;
   /* The SAME face the built-in renderer uses, including a user-supplied custom
      font (--ym-sl-lyric-font). Hardcoding "SpicyLyrics" here meant a custom font
-     applied everywhere except Apple-style lyrics (AJ, 2026-10-23). */
+     applied everywhere except Apple-style lyrics. */
   font-family: var(--ym-sl-lyric-font, "SpicyLyrics"), "Noto Sans Georgian", "Vazirmatn", "Roboto", system-ui, sans-serif;
   /* 700 = LyricsBold.woff2 — the same weight the built-in renderer uses for
      lyric lines, so Simple lyrics doesn't look lighter than the other modes. */
@@ -699,7 +715,7 @@ body.amll-active #ym-sl-amll-host { visibility: visible; pointer-events: auto; }
    and a visible descendant still paints inside a visibility:hidden ancestor -
    so once a word-by-word track handed the panel back to the built-in renderer,
    the engine's leftover backdrop lines kept drawing as ghosts behind the real
-   ones (AJ, 2026-10-26). Hide them whenever the engine is not the active
+   ones. Hide them whenever the engine is not the active
    renderer; the host's own visibility still governs everything while it is. */
 body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLine) {
   visibility: hidden !important;
@@ -736,7 +752,7 @@ body:not(.amll-active) #ym-sl-amll-host :is(.FmKaba_bgWrapper, .FmKaba_lyricBgLi
 /* The host stamps its karaoke face onto EVERYTHING inside it: 700 weight plus a
    0.6px text stroke, in a 1.2 line box. That is right for the lyrics and wrong
    for the footer - the built-in renderer draws this same shared markup as a
-   plain footnote at 400/600, so here it read bold and airy (AJ, 2026-10-23).
+   plain footnote at 400/600, so here it read bold and airy.
    Opt the credits out and give them that footnote's pitch. :is() covers both
    mountings: the engine's bottom-line slot when it has one, the host when it
    does not. */
@@ -975,7 +991,7 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
      down and move the pointer, and every frame feeds the engine the wheel
      events a real wheel would, at a speed set by how far the pointer sits from
      the press point. Releasing the middle button ends it at once (press-and-
-     hold, not Chrome's toggle — AJ asked for the release to stop it), as does
+     hold, not Chrome's toggle — asked for the release to stop it), as does
      any other press, a real wheel, Escape or losing the window. Links keep
      their own middle-click (open in a new tab). */
   let amllAuto = null;
@@ -1841,7 +1857,57 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
           amllCallMaybeAsync(group.bgLine.resume, group.bgLine);
         }
       }
+      amllMarkIdleLines();
     } catch (e) {}
+  }
+
+  // Stamp .ym-sl-idle on lines whose karaoke gradient has SETTLED to the flat
+  // 20% dim, so the CSS can replace 20+ identical per-word masks with one
+  // opacity. See the long note in AMLL_ENGINE_CSS for why this cannot simply be
+  // :not(.FmKaba_gradientMask) - the engine drops that class while the line is
+  // still lit, and catching it there is what made finished lines darken before
+  // coming back to full brightness.
+  // Runs on the 10 Hz kick tick, so a line is at most ~100ms late to the cheap
+  // path; classList only writes when the value actually changes.
+  function amllMarkIdleLines() {
+    let lines = null;
+    try { lines = document.querySelectorAll(".amll-lyric-player .FmKaba_lyricLine"); } catch (e) { return; }
+    if (!lines || !lines.length) return;
+    // Two rules, both learned the hard way:
+    //
+    //  1. A two-line margin around the playhead keeps its real masks. The mask
+    //     is what carries the wipe position, so a line that regains one while
+    //     it is only dimmed comes back showing a stale, fully-lit gradient for
+    //     a frame - a bright flash. At one line of margin that flash landed on
+    //     the second-to-last sung row, where it is still in the corner of your
+    //     eye; at two it is out of the readable area.
+    //
+    //  2. The strip is NOT sticky. Keeping it sticky made the approach rows sit
+    //     at a flat 20% while the engine was already pre-lighting them for the
+    //     takeover, so the next line went dark. Rows inside the margin have to
+    //     be handed back their masks; because the margin is two, that hand-back
+    //     happens out on the third row, away from the line being sung.
+    let focusIndex = -1;
+    for (let index = 0; index < lines.length; index++) {
+      if (lines[index].classList.contains("FmKaba_gradientMask")) { focusIndex = index; break; }
+    }
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      let idle = false;
+      if (!line.classList.contains("FmKaba_gradientMask")) {
+        if (focusIndex >= 0 && Math.abs(index - focusIndex) <= 2) {
+          idle = false;
+        } else {
+          try {
+            const cs = getComputedStyle(line);
+            const bright = parseFloat(cs.getPropertyValue("--bright-mask-alpha")) || 0;
+            const dark = parseFloat(cs.getPropertyValue("--dark-mask-alpha")) || 0;
+            idle = Math.abs(bright - dark) < 0.02 && bright <= 0.25;
+          } catch (e) {}
+        }
+      }
+      line.classList.toggle("ym-sl-idle", idle);
+    }
   }
 
   // The engine builds a line's word elements - and one Web Animation per word,
@@ -2038,15 +2104,15 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
     setJumpButtonVisible(suspended);
   }
 
-  // Same problem the Better Lyrics tick had: this engine is pumped on EVERY rAF,
-  // so on a 170 Hz display it runs ~170 times a second - setCurrentTime(), update(),
-  // kickActiveLine(), two sweeps over the line list - while a word-synced track
-  // carries 77-113 live Web Animations (103 of them the per-word "float-word").
-  // That combination is what makes Apple Music word-by-word stutter where the
-  // line-by-line path idles at 170 fps with zero animations. 80 Hz matches the
-  // Better Lyrics cap and leaves the rest of the frame alone; the engine's clocks
-  // are time-based (update() takes a delta), so the picture does not change.
-  const AMLL_DRIVE_INTERVAL_MS = 1000 / 80;
+  // This engine used to be pumped on EVERY rAF - on a 170 Hz display that is
+  // ~170 setCurrentTime()/update()/kickActiveLine() passes a second against 100+
+  // live word animations - so it was capped at 80 Hz (the Better Lyrics cap).
+  // The per-word mask work that made that necessary is gone (see the .ym-sl-idle
+  // rules: 85 masked spans -> 5), and the cap is off at the user's request.
+  // 0 = drive every frame. The engine's clocks are time-based (update() takes a
+  // delta), so removing the cap changes smoothness, not timing - but if word-by-
+  // word ever stutters again, this number is the first lever to put back.
+  const AMLL_DRIVE_INTERVAL_MS = 0;
   let amllLastDriveAt = 0;
 
   function amllDrive(positionMs) {
@@ -2058,7 +2124,6 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       if (!amllJumped) return;
     }
     amllLastDriveAt = amllDriveNow;
-    const amllPerfStartedAt = performance.now();
     const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
     const delta = amllLastFrameTime ? Math.min(64, Math.max(0, now - amllLastFrameTime)) : 16;
     amllLastFrameTime = now;
@@ -2100,7 +2165,6 @@ body.amll-active .ym-sl-fs-overlay .ym-sl-fs-lyrics {
       amllReapDistantLines(now);
       amllSyncJumpButton();
       amllDriveErrors = 0;
-      if (window.__auroraPerf) window.__auroraPerf.addAmll(performance.now() - amllPerfStartedAt);
     } catch (e) {
       // A drive failure is per-frame, so do NOT tear the engine down on the
       // first one: a single hiccup (a half-built line, a mid-track line swap)

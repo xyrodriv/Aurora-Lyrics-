@@ -82,7 +82,7 @@
   // This REPLACED a Catmull-Rom / finite-difference Hermite implementation that
   // looked equivalent — same control points, same shape — but is a genuinely
   // different curve. A natural cubic spline OVERSHOOTS its own control points on
-  // a sharp kink; Catmull-Rom does not. Measured 2026-09-20:
+  // a sharp kink; Catmull-Rom does not. Measured:
   //
   //   range              old Catmull-Rom      new natural         what it changed
   //   Scale              1.0509 @ t=0.718     1.0536 @ t=0.615    shrink starts 10% sooner
@@ -91,7 +91,7 @@
   //   LetterYOffset     -0.01786 @ t=0.901   -0.04000 @ t=0.599    2.24x deeper rise
   //   Glow               1.1611 @ t=0.356     1.4330 @ t=0.340    1.23x brighter
   //
-  // The YOffset row is AJ's "it does go up a little but barely": -1/60 is only a
+  // The YOffset row rises only slightly: -1/60 is only a
   // CONTROL POINT, the real curve reaches -0.0372. Equally important, the peak
   // TIME moves 0.901 -> 0.600, so the old curve held the word flat for 90% of its
   // life and then twitched at the very end — which is why it read as "just zooms
@@ -192,7 +192,7 @@
   // (LyricsAnimator.ts, v6.3.20). They are the entire "feel" of the karaoke
   // motion — the spring tuning only governs how fast a value chases its target,
   // while these curves define what the target IS. Keep them in lockstep with
-  // upstream or the animation visibly diverges (AJ, 2026-09-20).
+  // upstream or the animation visibly diverges.
   // Resting scale is IdleLyricsScale = 0.95 upstream.
   const ScaleSpline = getSpline([
     { Time: 0, Value: 0.95 }, { Time: 0.7, Value: 1.0505 }, { Time: 1, Value: 1 },
@@ -201,8 +201,8 @@
   // variant upstream, so they are `let` and get re-pointed when the mode changes
   // (see applySimpleLyricsSplines). Simple mode's whole point is GENTLER CURVES:
   // the letter scale peaks at 1.07 instead of 1.175, and the line Y offset becomes
-  // a straight drift to -0.033 instead of a dip-and-return. That is what AJ
-  // describes as "smoothly move up a bit" instead of a bounce (2026-10-01).
+  // a straight drift to -0.033 instead of a dip-and-return: the word rises
+  // smoothly instead of bouncing.
   // Our 0 resting value is kept in BOTH variants — it is the twice-confirmed fix
   // for the "word glitches slightly down as it starts" bug documented below, and
   // it is independent of which curve set is active.
@@ -221,7 +221,7 @@
   // the new value. There is no spring resting at +1/100 beforehand, so the word
   // is sitting at its natural position (translateY 0) and then JUMPS DOWN by 1%
   // of the font size (0.48px at 48px) the instant it first animates. That is a
-  // step discontinuity, and it is what AJ reports as "as soon as a word starts,
+  // step discontinuity: as soon as a word starts,
   // it kinda glitches and goes very slightly down."
   //
   // With Time:0 = 0 the snap is a no-op, so the word simply begins at rest and
@@ -293,7 +293,7 @@
   // 0 -> 1 rise), NOT a small dim value — see the letter branch in
   // animateLetters() for why we deliberately do NOT apply it. Kept here as the
   // documented upstream value so an A/B can flip the behaviour in one line.
-  // (Was documented as ~1.07 before the 2026-09-20 spline fix; the corrected
+  // (Was documented as ~1.07 before the spline fix; the corrected
   // curve moves it to 1.21, which is 18.5px blur / 224% opacity, not less.)
   const SungLetterGlow = 0.2;
 
@@ -301,8 +301,7 @@
   // out in this mode. createWordSprings and createDotSprings both return no-ops
   // for them and keep only the positional spring. That is exactly what removes the
   // per-word ZOOM and the wavy GLOW while leaving the smooth rise intact
-  // (AJ, 2026-10-01: "the words still like zoom … they have that wavy glowy
-  // animation too when a word is longer than a second").
+  // (words longer than a second still zoom and glow).
   // The LETTER springs are deliberately NOT stubbed — upstream leaves those alone
   // and only gives them the gentler Simple splines.
   // The stubs RETURN THE RESTING VALUE rather than undefined: our animator feeds
@@ -312,7 +311,7 @@
   // CanSleep() on every channel, and a stub without it threw a TypeError on every
   // frame — which aborted animate() right after the scroll step. That was the
   // whole "it scrolls but nothing animates or highlights once the toggle is on"
-  // symptom (AJ, 2026-10-01). CanSleep returns TRUE: a stub is always settled.
+  // symptom. CanSleep returns TRUE: a stub is always settled.
   const simpleSpring = (resting) => ({
     Step: () => resting,
     SetGoal: () => {},
@@ -325,13 +324,11 @@
         // A LINE-TIMED word must rest at scale 1, not the 0.95 word resting
         // value: its scale goal is a constant 1 (animateWord pins it), and with
         // a stub holding 0.95 the whole line-span rendered 5% small and its
-        // wrapped rows pulled inward -- AJ's "some rows shifted to the right"
-        // on line-synced tracks (2026-10-02).
+        // wrapped rows pulled inward on line-synced tracks.
         Scale: simpleSpring(word && word.LineTimed ? 1 : ScaleSpline.at(0)),
         YOffset: new Spring(YOffsetSpline.at(0), 1.45, 0.4),
         // A LINE-TIMED word keeps a real Glow spring: its goal tracks the line's
-        // sweep progress, and that glow IS the line-fill highlight AJ expects
-        // ("they dont have glow when simple lyrics are on", 2026-10-02). The
+        // sweep progress, and that glow IS the line-fill highlight there too. The
         // no-glow rule stays for word-synced words, where the glow is the
         // per-syllable bounce this mode exists to remove.
         Glow: word && word.LineTimed
@@ -347,8 +344,7 @@
   }
 
   function createLetterSprings() {
-    // Simple lyrics: the letters KEEP their motion springs (the wavy drift AJ
-    // wants to stay) and already read the gentler SIMPLE splines via
+    // Simple lyrics: the letters KEEP their motion springs (the wavy drift stays) and already read the gentler SIMPLE splines via
     // applySimpleLyricsSplines, but the Glow channel is stubbed — the letter glow
     // is the per-syllable highlight this mode exists to remove. The springs stay
     // real otherwise, so the progress-driven goals keep the letters awake and
@@ -372,8 +368,7 @@
       return {
         // Scale stays REAL in Simple mode: the dots' entrance zoom (0.75 -> 1) is
         // how they arrive, and stubbing it made them hard-pop in with no
-        // animation at all (AJ, 2026-10-02: "they still snap when the 3 dots come
-        // in"). The bounce this mode removes is the WORD karaoke, not the dots'
+        // animation at all: they snap in abruptly. The bounce this mode removes is the WORD karaoke, not the dots'
         // arrival. YOffset/Glow stay stubbed -- the dots must not drift.
         Scale: new Spring(DotScaleSpline.at(0), 0.7, 0.6),
         YOffset: simpleSpring(DotYOffsetSpline.at(0)),
@@ -483,7 +478,7 @@
   // A search result the user PICKED is stored wrapped (`{ manual, data }`).
   // That flag is the difference between "this is one automatic answer among
   // several sources" and "the user told us this is the right file" — the
-  // resolver serves a manual entry before it asks any API again (AJ, 2026-10-22).
+  // resolver serves a manual entry before it asks any API again.
   // Automatic entries keep the bare data shape older installs already hold, so
   // nothing stored earlier needs a migration.
   const LYRICS_CACHE_KEY = "ytmod_lyrics_cache_v1";

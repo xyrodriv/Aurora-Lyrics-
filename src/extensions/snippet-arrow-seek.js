@@ -3,7 +3,7 @@
  *
  * v0.1.0.
  *
- * AJ (2026-10-20): YouTube Music does not let you scrub a song with the arrow
+ *: YouTube Music does not let you scrub a song with the arrow
  * keys, even though every other player does. Left/Right currently do nothing on
  * the player page, so this claims them.
  *
