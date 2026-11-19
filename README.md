@@ -13,8 +13,9 @@ add-ons.
 - **Multiple lyric sources** — auto-fetches from the **Aurora Community API**,
   the **Spicy Lyrics API**, **Unison**, and **LRCLIB**; the Discord bot accepts community
   TTML uploads, with staff review before Contributor submissions go live. TTML
-  files can be dropped or picked in, re-exported with your sync, and saved per
-  track so they survive a reload.
+  files can be dropped or picked in, saved per track so they survive a reload,
+  and exported again — plain, or through **Export + Sync**, which writes the
+  active offset into every timestamp.
 - **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
   the Spicy Lyrics API is keyed by one. Aurora asks **Spicy Lyrics search** for
   it, sending the title, artist and duration, and only accepts a match the API
@@ -23,8 +24,11 @@ add-ons.
   rather than only hand-matched ones.
 - **Timing calibration** — a global and a per-video offset, plus a pause-sync
   point, so the lyrics line up with any source.
-- **Fullscreen karaoke mode** — video on one side, lyrics on the other, with an
-  ambient Kawarp fluid WebGL backdrop.
+- **Fullscreen modes** — four compositions sharing one engine: **Hits**
+  (artwork, title and actions in a header, lyrics directly beneath), **Video +
+  Lyrics**, **Video Background**, and **Stage** (the artwork or video bleeds to
+  full height on one side with the transport docked over it). All of them run on
+  the ambient Kawarp fluid WebGL backdrop.
 - **Apple Music–style renderer** — the AMLL engine for line-synced tracks, with
   spring scrolling and the Apple Music stacked-line look, alongside the Spicy
   renderer for word-by-word karaoke. Which engine draws which kind of track is
@@ -81,8 +85,11 @@ Aurora Lyrics/
 ├── assets/
 │   ├── ambient-gradient.png   # Backdrop the store mockups render against
 │   └── manifest-logo.webp     # Logo used by the update card
+├── build/                     # Packaged extension ready to load unpacked
 ├── scripts/
-│   └── build-aurora-lyrics.mjs # Concatenates the renderer fragments
+│   ├── build-aurora-lyrics.mjs # Concatenates the renderer fragments
+│   └── package-extension.mjs   # Copies manifest, src/ and icons into build/
+├── website/                   # Marketing site (separate static build)
 └── src/
     ├── aurora-lyrics/         # SOURCE fragments for the renderer (edit these)
     │   └── NN-*.jsfrag        #   01 … 24, concatenated in the order the build lists
@@ -117,6 +124,7 @@ numbered files in `src/aurora-lyrics/` (`01-bootstrap.jsfrag` …
 ```sh
 node scripts/build-aurora-lyrics.mjs          # writes src/extensions/aurora-lyrics.js
 node scripts/build-aurora-lyrics.mjs --check  # fails if the built file is stale
+node scripts/package-extension.mjs           # rebuilds and refreshes build/aurora-lyrics-<version>
 ```
 
 **Never edit `src/extensions/aurora-lyrics.js` directly — it is generated.** The
@@ -152,6 +160,24 @@ when distributing adapted builds.
 Lyrics fetched through the Spicy Lyrics API are credited on screen, in the
 lyrics panel, from the `source` field of each response — the provider is always
 named, and community syncs name and link the uploader and the maker.
+
+## Credits
+
+Aurora Lyrics builds on other people's work. These projects shaped it, and parts
+of it are ports or adaptations of theirs:
+
+- **[Spicy Lyrics](https://github.com/Spikerko/spicy-lyrics)** by **Spikerko** —
+  the Syllable renderer Aurora's own engine is adapted from, and the API its
+  community syncs come from. AGPL-3.0.
+- **[Better Lyrics](https://github.com/better-lyrics/better-lyrics)**
+  ([Chrome Web Store](https://chromewebstore.google.com/detail/better-lyrics-lyrics-for/effdbpeggelllpfkjppbokhmmiinhlmg)) —
+  the extension Aurora started from, and the source of several interface ideas
+  and conventions.
+- **[Apple Music Like Lyrics (AMLL)](https://github.com/amll-dev/applemusic-like-lyrics)** —
+  the Apple Music-style renderer behind the AMLL engine and its spring
+  scrolling.
+
+None of these projects endorse or support Aurora Lyrics.
 
 ## Support
 
