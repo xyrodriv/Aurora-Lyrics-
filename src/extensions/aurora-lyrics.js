@@ -1993,6 +1993,15 @@
     return mode === "low" ? 24 : mode === "normal" ? 30 : 60;
   }
 
+  // A live video backdrop is sampled at 30 fps and smoothed over 120 ms, so
+  // painting it at the full 60 only does the same work twice. Halving the paint
+  // rate is what keeps a 4K music video + karaoke at 60 fps in fullscreen;
+  // artwork (which still moves) keeps the mode's full rate.
+  function kawarpFpsForBackdrop(videoBacked) {
+    const base = kawarpFpsForPerformance();
+    return videoBacked ? Math.min(base, 30) : base;
+  }
+
   function videoSamplingAllowed() {
     return currentSettings.performanceMode === "ultra";
   }
@@ -2004,7 +2013,7 @@
   function applyPerformanceMode() {
     document.body.classList.toggle("ym-sl-perf-low", currentSettings.performanceMode === "low");
     if (fsKawarp) {
-      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+      try { fsKawarp.setMaxFps(kawarpFpsForBackdrop(!!fsKawarpVideoEl && videoSamplingAllowed())); } catch (_) {}
     }
     if (!fsKawarpActive || !fsKawarp || videoSamplingAllowed() || !fsKawarpVideoEl) return;
     // A running video feed must not survive a mode that forbids sampling. The
@@ -2013,6 +2022,11 @@
     const track = getCurrentTrack();
     const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
     fsKawarpVideoEl = null;
+    // Artwork is back in charge, so the backdrop may paint at the mode's rate
+    // again (the 30 cap exists only for the live-video path).
+    if (fsKawarp) {
+      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+    }
     if (artUrl) {
       fsKawarpArtUrl = hiResArt(artUrl);
       try { fsKawarp.loadImage(fsKawarpArtUrl); } catch (_) {}
@@ -6874,6 +6888,16 @@
     .ym-sl-fs-overlay.ym-sl-fs-mode-background.ym-sl-fs-has-video .ym-sl-jump {
       bottom: 68px;
     }
+    /* Fullscreen: Next up owns the bottom-right corner, and hovering it unfurls
+       four rows over a frost panel that bleeds 16px past the box - which buried
+       this pill, so the jump was unclickable exactly when the queue was open.
+       Park the pill to the LEFT of that column instead: the stack's right inset
+       (22px) + its width + the frost bleed (16px) + a 10px gap. Widths mirror
+       .ym-sl-fs-nextup's own min(340px, 42vw) so the two stay in step at every
+       viewport. Hits has no Next up, so it keeps the corner to itself. */
+    .ym-sl-fs-overlay:not(.ym-sl-fs-mode-hits) .ym-sl-jump {
+      right: calc(22px + min(340px, 42vw) + 26px);
+    }
     /* ---- MV pause re-sync ---------------------------------------------------
        Pick mode: hovering a primary line shows the existing .line::before box in a
        stronger form plus a floating "Sync from here" label (.line::after is unused
@@ -9853,8 +9877,13 @@
       }
       /* Idle is exempt on purpose: the class lands after 2s without input, and
          a pointer resting on the art still reports :hover - without this the
-         button would stay up over a hidden cursor forever. */
-      .ym-sl-fs-overlay:not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
+         button would stay up over a hidden cursor forever.
+         Stage is exempt too: its artwork is the composition (full-height, with
+         the dock over it), so the hover scrim darkened the whole picture. The
+         stage's own transparent rule could not win - this selector carries one
+         more compound (:not-idle) - so the exclusion belongs here. Every other
+         cover-art layout keeps the dim. */
+      .ym-sl-fs-overlay:not(.ym-sl-fs-stage):not(.ym-sl-fs-has-video):not(.ym-sl-fs-mode-background):not(.ym-sl-fs-idle) .ym-sl-fs-media > .ym-sl-fs-art-ui:hover {
         background: rgba(0, 0, 0, .42);
       }
       /* A click pins both for the length of the move: the artwork slides out
@@ -12459,7 +12488,13 @@
       bottom: clamp(16px, 3vh, 40px);
       left: clamp(16px, 3vw, 44px);
       right: auto;
-      width: min(44vw, 620px);
+      /* Stretched past the old 620px cap so the progress bar, title and volume
+         span the artwork column instead of stopping mid-picture. The max-width
+         is the guard the request asked for: the lyric column starts at 44% here,
+         so the dock stops 64px before it (dock inset + breathing room) and can
+         never sit under the words at any viewport width. */
+      width: min(46vw, 820px);
+      max-width: calc(44vw - 64px);
       height: auto;
     }
     /* ---- stage + music video ------------------------------------------------
@@ -12486,15 +12521,17 @@
       -webkit-mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
       mask-image: linear-gradient(to right, #000 0, #000 58%, rgba(0,0,0,.85) 70%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.10) 92%, transparent 100%);
     }
-    /* Same dock as the cover stage: bottom-left of the column, 620px wide
-       instead of the video layout's 960px spread bar. */
+    /* Same dock as the cover stage, stretched the same way. A video's lyric
+       column starts at 52.5% (it sits further right than cover art's 44%), so
+       the dock gets the extra room that column leaves: it ends 64px before the
+       column's left edge rather than at an arbitrary pixel cap. */
     .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background):not(.ym-sl-fs-mode-hits) .ym-sl-fs-player-controls {
       left: 38px;
       right: auto;
       top: auto;
       bottom: 32px;
-      width: min(44vw, 620px);
-      max-width: calc(52vw - 76px);
+      width: min(48vw, 920px);
+      max-width: calc(52.5vw - 64px);
       height: auto;
     }
     .ym-sl-fs-overlay.ym-sl-fs-stage.ym-sl-fs-has-video:not(.ym-sl-fs-mode-background) .ym-sl-fs-media > video {
@@ -17241,7 +17278,12 @@
     if (!fsKawarpCanvas || !fsOverlay) return;
     const rect = fsOverlay.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    // Kawarp is a multi-pass blur that ends up stretched over the whole overlay,
+    // so a full-resolution backing store buys nothing visible - but it does cost
+    // a full-screen canvas upload to the compositor every single frame, which is
+    // what made fullscreen stutter on 4K music videos. 0.75x keeps the blur
+    // indistinguishable and hands the compositor a much smaller texture.
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * 0.75;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (fsKawarpCanvas.width === width && fsKawarpCanvas.height === height) return;
@@ -17411,7 +17453,7 @@
       }
       if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
-      fsKawarp.setMaxFps(kawarpFpsForPerformance());
+      fsKawarp.setMaxFps(kawarpFpsForBackdrop(!!fsKawarpVideoEl));
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
       return true;
@@ -26153,18 +26195,32 @@
     return `${minutes}:${remainder}`;
   }
 
+  // TTML time expressions come in three shapes and one file can MIX them:
+  // "59.505" (plain seconds), "1:00.124" (minutes:seconds) and "1:02:03.456"
+  // (hours:minutes:seconds). The old parser returned early whenever the value
+  // had no colon, so every plain-seconds timestamp kept its old value while the
+  // colon ones moved by the offset. A line straddling 60 s then had its begin
+  // frozen and its end shifted - the words stretched across the whole verse -
+  // and the first minute of the song looked like no offset had been applied.
+  function parseTTMLTimeMs(value) {
+    const text = String(value == null ? "" : value).trim();
+    // Reject anything that is not a bare time: "2:35.926", "59.505", "1:02:03.4".
+    if (!/^\d+(?:\.\d+)?(?::\d+(?:\.\d+)?){0,2}$/.test(text)) return NaN;
+    const parts = text.split(":");
+    let seconds = 0;
+    for (let i = 0; i < parts.length; i++) seconds = seconds * 60 + Number(parts[i]);
+    return Number.isFinite(seconds) ? seconds * 1000 : NaN;
+  }
+
   function shiftTTMLSync(xml, offsetMs) {
     if (!offsetMs) return xml;
     return String(xml).replace(/(\b(?:begin|end|itunes:begin|itunes:end)\s*=\s*["'])([^"']+)(["'])/gi,
       (match, prefix, time, suffix) => {
-        const parts = String(time || "").split(":");
-        if (parts.length < 2) return match;
-        const seconds = Number(parts.pop());
-        const minutes = Number(parts.pop());
-        const hours = parts.length ? Number(parts.pop()) : 0;
-        if (![seconds, minutes, hours].every(Number.isFinite)) return match;
-        const shifted = Math.max(0, (hours * 3600 + minutes * 60 + seconds) * 1000 + offsetMs);
-        return `${prefix}${parseExportTime(shifted)}${suffix}`;
+        const ms = parseTTMLTimeMs(time);
+        if (!Number.isFinite(ms)) return match;
+        // Clamp at zero: TTML has no negative time, and dropping the attribute
+        // outright would break the document.
+        return `${prefix}${parseExportTime(Math.max(0, ms + offsetMs))}${suffix}`;
       });
   }
 
@@ -27254,9 +27310,56 @@
     tickBody();
   }
 
+  // Fullscreen runs on a fixed grid derived from the display, not on every
+  // vsync. On a 170 Hz panel every frame's work lands on a different vsync
+  // boundary, so updates alternate between 2- and 3-vsync frames and the
+  // average stays ~55 fps while the rhythm visibly judders. The grid is the
+  // largest exact divisor of the refresh that is still <= 90 Hz (170 -> 85,
+  // 144 -> 72, 120 -> 60, 60 -> 60): a rate that divides the refresh evenly is
+  // the point, because then every update lands on the same slot and there is no
+  // cadence change left to see. The docked panel keeps the uncapped loop.
+  const FS_TARGET_MAX_HZ = 90;
+  let fsRefreshHz = 0;
+  let fsRefreshSamples = 0;
+  let fsLastRafAt = 0;
+  let fsGridMs = 0;
+  let fsNextFrameAt = 0;
+
+  function fsCadenceAllowsFrame(now) {
+    if (fsLastRafAt) {
+      const delta = now - fsLastRafAt;
+      if (delta > 2 && delta < 40) {
+        const hz = 1000 / delta;
+        fsRefreshHz = fsRefreshHz ? fsRefreshHz * 0.85 + hz * 0.15 : hz;
+        fsRefreshSamples++;
+      }
+    }
+    fsLastRafAt = now;
+    // Measure first, cap second: until the panel is known the loop runs free.
+    if (!fsGridMs && fsRefreshSamples >= 12) {
+      const divisor = Math.max(1, Math.ceil(fsRefreshHz / FS_TARGET_MAX_HZ));
+      fsGridMs = 1000 / (fsRefreshHz / divisor);
+    }
+    if (!fsGridMs) return true;
+    if (now < fsNextFrameAt) return false;
+    fsNextFrameAt += fsGridMs;
+    // Fell a whole grid behind (tab switch, GC pause): resync instead of
+    // firing a burst of catch-up frames.
+    if (fsNextFrameAt < now) fsNextFrameAt = now + fsGridMs;
+    return true;
+  }
+
   function tickBody() {
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
+    if (fsActive) {
+      if (!fsCadenceAllowsFrame(performance.now())) return;
+    } else {
+      fsNextFrameAt = 0;
+      fsGridMs = 0;
+      fsLastRafAt = 0;
+      fsRefreshSamples = 0;
+    }
     if (!window.YTMod || !window.YTMod.player) return;
     const position = window.YTMod.player.getPositionMs();
     // Remember when the position was READ, not when it reached the engine.

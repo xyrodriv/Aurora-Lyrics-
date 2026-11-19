@@ -631,6 +631,15 @@
     return mode === "low" ? 24 : mode === "normal" ? 30 : 60;
   }
 
+  // A live video backdrop is sampled at 30 fps and smoothed over 120 ms, so
+  // painting it at the full 60 only does the same work twice. Halving the paint
+  // rate is what keeps a 4K music video + karaoke at 60 fps in fullscreen;
+  // artwork (which still moves) keeps the mode's full rate.
+  function kawarpFpsForBackdrop(videoBacked) {
+    const base = kawarpFpsForPerformance();
+    return videoBacked ? Math.min(base, 30) : base;
+  }
+
   function videoSamplingAllowed() {
     return currentSettings.performanceMode === "ultra";
   }
@@ -642,7 +651,7 @@
   function applyPerformanceMode() {
     document.body.classList.toggle("ym-sl-perf-low", currentSettings.performanceMode === "low");
     if (fsKawarp) {
-      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+      try { fsKawarp.setMaxFps(kawarpFpsForBackdrop(!!fsKawarpVideoEl && videoSamplingAllowed())); } catch (_) {}
     }
     if (!fsKawarpActive || !fsKawarp || videoSamplingAllowed() || !fsKawarpVideoEl) return;
     // A running video feed must not survive a mode that forbids sampling. The
@@ -651,6 +660,11 @@
     const track = getCurrentTrack();
     const artUrl = (track && track.artworkUrl) || getDomArtworkUrl();
     fsKawarpVideoEl = null;
+    // Artwork is back in charge, so the backdrop may paint at the mode's rate
+    // again (the 30 cap exists only for the live-video path).
+    if (fsKawarp) {
+      try { fsKawarp.setMaxFps(kawarpFpsForPerformance()); } catch (_) {}
+    }
     if (artUrl) {
       fsKawarpArtUrl = hiResArt(artUrl);
       try { fsKawarp.loadImage(fsKawarpArtUrl); } catch (_) {}

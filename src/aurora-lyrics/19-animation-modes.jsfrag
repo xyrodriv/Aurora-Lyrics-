@@ -854,9 +854,56 @@
     tickBody();
   }
 
+  // Fullscreen runs on a fixed grid derived from the display, not on every
+  // vsync. On a 170 Hz panel every frame's work lands on a different vsync
+  // boundary, so updates alternate between 2- and 3-vsync frames and the
+  // average stays ~55 fps while the rhythm visibly judders. The grid is the
+  // largest exact divisor of the refresh that is still <= 90 Hz (170 -> 85,
+  // 144 -> 72, 120 -> 60, 60 -> 60): a rate that divides the refresh evenly is
+  // the point, because then every update lands on the same slot and there is no
+  // cadence change left to see. The docked panel keeps the uncapped loop.
+  const FS_TARGET_MAX_HZ = 90;
+  let fsRefreshHz = 0;
+  let fsRefreshSamples = 0;
+  let fsLastRafAt = 0;
+  let fsGridMs = 0;
+  let fsNextFrameAt = 0;
+
+  function fsCadenceAllowsFrame(now) {
+    if (fsLastRafAt) {
+      const delta = now - fsLastRafAt;
+      if (delta > 2 && delta < 40) {
+        const hz = 1000 / delta;
+        fsRefreshHz = fsRefreshHz ? fsRefreshHz * 0.85 + hz * 0.15 : hz;
+        fsRefreshSamples++;
+      }
+    }
+    fsLastRafAt = now;
+    // Measure first, cap second: until the panel is known the loop runs free.
+    if (!fsGridMs && fsRefreshSamples >= 12) {
+      const divisor = Math.max(1, Math.ceil(fsRefreshHz / FS_TARGET_MAX_HZ));
+      fsGridMs = 1000 / (fsRefreshHz / divisor);
+    }
+    if (!fsGridMs) return true;
+    if (now < fsNextFrameAt) return false;
+    fsNextFrameAt += fsGridMs;
+    // Fell a whole grid behind (tab switch, GC pause): resync instead of
+    // firing a burst of catch-up frames.
+    if (fsNextFrameAt < now) fsNextFrameAt = now + fsGridMs;
+    return true;
+  }
+
   function tickBody() {
     // Before any early return, so an in-flight glide always lands.
     stepScrollGlide();
+    if (fsActive) {
+      if (!fsCadenceAllowsFrame(performance.now())) return;
+    } else {
+      fsNextFrameAt = 0;
+      fsGridMs = 0;
+      fsLastRafAt = 0;
+      fsRefreshSamples = 0;
+    }
     if (!window.YTMod || !window.YTMod.player) return;
     const position = window.YTMod.player.getPositionMs();
     // Remember when the position was READ, not when it reached the engine.

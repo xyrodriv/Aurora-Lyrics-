@@ -14,7 +14,12 @@
     if (!fsKawarpCanvas || !fsOverlay) return;
     const rect = fsOverlay.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    // Kawarp is a multi-pass blur that ends up stretched over the whole overlay,
+    // so a full-resolution backing store buys nothing visible - but it does cost
+    // a full-screen canvas upload to the compositor every single frame, which is
+    // what made fullscreen stutter on 4K music videos. 0.75x keeps the blur
+    // indistinguishable and hands the compositor a much smaller texture.
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * 0.75;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (fsKawarpCanvas.width === width && fsKawarpCanvas.height === height) return;
@@ -184,7 +189,7 @@
       }
       if (seq !== fsKawarpSeq) return false;
       fsKawarp.setOptions({ animationSpeed: isPlaybackPaused() ? 0.1 : 1 });
-      fsKawarp.setMaxFps(kawarpFpsForPerformance());
+      fsKawarp.setMaxFps(kawarpFpsForBackdrop(!!fsKawarpVideoEl));
       fsKawarp.start();
       fsKawarpCanvas.classList.add("ready");
       return true;

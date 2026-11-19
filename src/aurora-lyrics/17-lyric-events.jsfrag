@@ -476,18 +476,32 @@
     return `${minutes}:${remainder}`;
   }
 
+  // TTML time expressions come in three shapes and one file can MIX them:
+  // "59.505" (plain seconds), "1:00.124" (minutes:seconds) and "1:02:03.456"
+  // (hours:minutes:seconds). The old parser returned early whenever the value
+  // had no colon, so every plain-seconds timestamp kept its old value while the
+  // colon ones moved by the offset. A line straddling 60 s then had its begin
+  // frozen and its end shifted - the words stretched across the whole verse -
+  // and the first minute of the song looked like no offset had been applied.
+  function parseTTMLTimeMs(value) {
+    const text = String(value == null ? "" : value).trim();
+    // Reject anything that is not a bare time: "2:35.926", "59.505", "1:02:03.4".
+    if (!/^\d+(?:\.\d+)?(?::\d+(?:\.\d+)?){0,2}$/.test(text)) return NaN;
+    const parts = text.split(":");
+    let seconds = 0;
+    for (let i = 0; i < parts.length; i++) seconds = seconds * 60 + Number(parts[i]);
+    return Number.isFinite(seconds) ? seconds * 1000 : NaN;
+  }
+
   function shiftTTMLSync(xml, offsetMs) {
     if (!offsetMs) return xml;
     return String(xml).replace(/(\b(?:begin|end|itunes:begin|itunes:end)\s*=\s*["'])([^"']+)(["'])/gi,
       (match, prefix, time, suffix) => {
-        const parts = String(time || "").split(":");
-        if (parts.length < 2) return match;
-        const seconds = Number(parts.pop());
-        const minutes = Number(parts.pop());
-        const hours = parts.length ? Number(parts.pop()) : 0;
-        if (![seconds, minutes, hours].every(Number.isFinite)) return match;
-        const shifted = Math.max(0, (hours * 3600 + minutes * 60 + seconds) * 1000 + offsetMs);
-        return `${prefix}${parseExportTime(shifted)}${suffix}`;
+        const ms = parseTTMLTimeMs(time);
+        if (!Number.isFinite(ms)) return match;
+        // Clamp at zero: TTML has no negative time, and dropping the attribute
+        // outright would break the document.
+        return `${prefix}${parseExportTime(Math.max(0, ms + offsetMs))}${suffix}`;
       });
   }
 

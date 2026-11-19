@@ -791,6 +791,8 @@ export class Kawarp {
             this.gl.deleteTexture(this.videoUploadTexture);
             this.videoUploadTexture = null;
         }
+        // The 2D downscale scratch canvas only exists while a video is loaded.
+        this.videoSampleCanvas = null;
     }
     /**
      * Read a small RGBA8 thumbnail (size x size, bottom row of the rendered
@@ -923,6 +925,37 @@ export class Kawarp {
     resumeVideoCallbacks = () => {
         this.requestVideoFrame();
     };
+    /**
+     * The frame that is safe to upload. A 4K source is ~25 MB per texImage2D
+     * call, which is what made fullscreen music videos hitch: the sampler runs
+     * 30 times a second and the backdrop only ever reads a 72x128 colour map.
+     * Scaling on a small 2D canvas first keeps the upload in the hundreds of KB.
+     * Small sources (artwork loops, low-res clips) are uploaded directly.
+     */
+    videoUploadSource(video) {
+        const maxEdge = 512;
+        if (video.videoWidth <= maxEdge && video.videoHeight <= maxEdge)
+            return video;
+        const scale = maxEdge / Math.max(video.videoWidth, video.videoHeight);
+        const width = Math.max(2, Math.round(video.videoWidth * scale));
+        const height = Math.max(2, Math.round(video.videoHeight * scale));
+        this.videoSampleCanvas ??= document.createElement("canvas");
+        const canvas = this.videoSampleCanvas;
+        if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx)
+            return video;
+        try {
+            ctx.drawImage(video, 0, 0, width, height);
+        }
+        catch (_) {
+            return video;
+        }
+        return canvas;
+    }
     processVideoFrame(now, mediaTime) {
         const video = this.video;
         if (!video ||
@@ -933,12 +966,15 @@ export class Kawarp {
         }
         const gl = this.gl;
         const elapsedMs = now - this.videoFrameTime;
+        const upload = this.videoUploadSource(video);
+        const sourceWidth = upload === video ? video.videoWidth : upload.width;
+        const sourceHeight = upload === video ? video.videoHeight : upload.height;
         try {
-            this.prepareVideoTargets(video.videoWidth, video.videoHeight);
+            this.prepareVideoTargets(sourceWidth, sourceHeight);
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, this.videoUploadTexture);
             gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upload);
         }
         catch (error) {
             const { onError } = this.videoOptions;
