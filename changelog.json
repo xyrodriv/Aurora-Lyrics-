@@ -1,6 +1,19 @@
 {
   "releases": [
     {
+      "version": "1.6.1",
+      "date": "2026-11-19",
+      "title": "Smoother fullscreen playback and a fixed TTML sync export.",
+      "features": [
+        "Stage controls now stretch to the edge of the lyrics column with cover art or a music video, so the seek bar and volume are easier to grab."
+      ],
+      "fixes": [
+        "Fullscreen playback is smoother on high-refresh displays and over 4K music videos.",
+        "Fixed TTML export with a sync offset: timestamps under a minute were left unshifted, which stretched a line's words across the verse.",
+        "Jump to current no longer sits under Next up in fullscreen, so it stays clickable with the queue open."
+      ]
+    },
+    {
       "version": "1.6.0",
       "date": "2026-11-19",
       "title": "An immersive stage layout and animated cover art.",
