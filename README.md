@@ -1,189 +1,141 @@
 # Aurora Lyrics
 
-> Synced lyrics, artwork tools, and themes for YouTube Music.
+Synced lyrics for YouTube Music, with a bit of taste.
 
-Aurora Lyrics is an MV3 browser extension for YouTube Music that renders
-karaoke-style **synced lyrics** alongside the player, plus a suite of companion
-add-ons.
+Aurora Lyrics is a Manifest V3 extension that puts karaoke-grade lyrics next to
+whatever you are playing — in the side panel, in a fullscreen composition, or in
+a floating window — and hands you the tools to fix the timing when a source is
+off.
 
-## Features
+---
 
-- **Synced lyrics** — word-level (syllable), line-level, and plain/static
-  rendering driven by live playback position.
-- **Multiple lyric sources** — auto-fetches from the **Aurora Community API**,
-  the **Spicy Lyrics API**, **Unison**, and **LRCLIB**; the Discord bot accepts community
-  TTML uploads, with staff review before Contributor submissions go live. TTML
-  files can be dropped or picked in, saved per track so they survive a reload,
-  and exported again — plain, or through **Export + Sync**, which writes the
-  active offset into every timestamp.
-- **Automatic Spotify-id resolution** — YouTube Music exposes no Spotify id, but
-  the Spicy Lyrics API is keyed by one. Aurora asks **Spicy Lyrics search** for
-  it, sending the title, artist and duration, and only accepts a match the API
-  ranks `exact` (or `likely` for small padding). One request per track, no
-  second catalogue, and the Spicy source works for ordinary YT Music tracks
-  rather than only hand-matched ones.
-- **Timing calibration** — a global and a per-video offset, plus a pause-sync
-  point, so the lyrics line up with any source.
-- **Fullscreen modes** — four compositions sharing one engine: **Hits**
-  (artwork, title and actions in a header, lyrics directly beneath), **Video +
-  Lyrics**, **Video Background**, and **Stage** (the artwork or video bleeds to
-  full height on one side with the transport docked over it). All of them run on
-  the ambient Kawarp fluid WebGL backdrop.
-- **Apple Music–style renderer** — the AMLL engine for line-synced tracks, with
-  spring scrolling and the Apple Music stacked-line look, alongside the Spicy
-  renderer for word-by-word karaoke. Which engine draws which kind of track is
-  a setting, so you can put the Apple Music look on karaoke if you prefer it.
-- **On-device translation** — optional English translation of non-English lines,
-  done locally in Chrome (138+); nothing is sent to a server.
-- **Manual lyric search** — when the automatic lookup misses, search LRCLIB in
-  the panel and apply a match to the track you are playing.
-- **Companion add-ons** (managed from the in-app marketplace panel):
-  - **Apple Music Style** — the frosted player bar, wider lyrics column and type
-  - **Aurora Bloom** — dynamic Kawarp backdrop built from the artwork, with the
-    artwork's colour tinting the player bar
-  - **Aurora Flow** — smooth motion across the interface
-  - **Sleep Timer** — fade out, then pause
-  - **PiP Lyrics** — always-on-top lyrics window
-  - **Next Up** — what plays next, in the player bar
-  - **Song Notes** — per-song notes saved in your browser
-  - Plus optional **snippets**: track-change notification, centered home, Now
-    Playing panel, and arrow-key seeking
+## What you get
 
-## Installation
+**Lyrics that actually follow the song.** Word-by-word karaoke, plain line
+sync, or static text, all driven from live playback position rather than a
+timer. Which engine draws which track is a setting, so the Apple Music look can
+go on karaoke tracks if that is your thing.
 
-### Load unpacked (Chromium)
+**Sources, in order.** Aurora Community first, then Spicy Lyrics, then Unison,
+then LRCLIB. The Spicy source is keyed by Spotify id, which YouTube Music does
+not expose, so Aurora asks the Spicy search endpoint for it once per track and
+only accepts a match it ranks exact (or likely, for small padding). If every
+source misses, search LRCLIB yourself from the panel and apply a match by hand.
 
-1. Open `chrome://extensions` (or `edge://extensions`, `brave://extensions`).
-2. Enable **Developer mode** (top-right toggle).
-3. Click **Load unpacked** and select this folder (the one containing
-   `manifest.json`).
-4. Open YouTube Music — the lyrics render in the **Lyrics** tab beside the queue,
-   and the add-ons marketplace opens from the icon at the top-right of the page.
+**Your own files.** Drop a TTML in and it renders immediately — temporarily, or
+saved per track so it survives a reload. Export it back out untouched, or use
+**Export + Sync** to bake the offset you dialled in into every `begin`/`end`.
+Both are saved with the file's own mixed time formats intact.
 
-> **Reload note:** after editing source, reload the extension at
-> `chrome://extensions` **and** reload the YouTube Music tab. `src/content/content.js`
-> runs in the isolated world and does not hot-reload on a tab refresh alone.
+**Timing you can fix.** Separate song and video offsets, a global nudge, a
+pause-sync point for music videos that drift after a break, and offsets shared
+by other people that load automatically for a video.
 
-### Add-ons
+**Translation that never leaves the machine.** Optional English translation of
+non-English lines, using Chrome's on-device translator (138+). No server.
 
-There is nothing else to install. Every add-on ships inside the extension and is
-installed, switched and configured from the in-app marketplace panel; each one
-is a plain script registered through the same `window.YTMod` bridge, so they can
-be enabled and disabled without reloading the extension. On a fresh profile the
-lyrics renderer, **Aurora Bloom**, **Aurora Flow** and **Centered home** install
-and enable themselves; everything else is opt-in.
+## Fullscreen
 
-## Project structure
+Four compositions, one engine:
 
-```
-Aurora Lyrics/
-├── manifest.json              # MV3 manifest (permissions, hosts, injected files)
-├── LICENSE                    # GNU AGPL-3.0
-├── PRIVACY.md                 # What leaves the browser, host by host
-├── changelog.json             # Release notes for the in-app update card
-├── icons/                     # 16/32/48/128 toolbar and store icons
-├── assets/
-│   ├── ambient-gradient.png   # Backdrop the store mockups render against
-│   └── manifest-logo.webp     # Logo used by the update card
-├── build/                     # Packaged extension ready to load unpacked
-├── scripts/
-│   ├── build-aurora-lyrics.mjs # Concatenates the renderer fragments
-│   └── package-extension.mjs   # Copies manifest, src/ and icons into build/
-├── website/                   # Marketing site (separate static build)
-└── src/
-    ├── aurora-lyrics/         # SOURCE fragments for the renderer (edit these)
-    │   └── NN-*.jsfrag        #   01 … 24, concatenated in the order the build lists
-    ├── content/               # Isolated-world injector + marketplace UI
-    │   ├── content.js         # Content script: registry, marketplace, settings, panel
-    │   ├── announcements.js   # Top-bar announcement pill and detail card
-    │   ├── public-api.js      # Page-world window.YTMod bridge (player, bus, lyrics)
-    │   └── styles.css         # Injected panel and marketplace styles
-    ├── background/
-    │   └── service-worker.js  # Fetch proxy for APIs that send no CORS header
-    ├── extensions/            # Add-ons, loaded on demand (web_accessible_resources)
-    │   ├── aurora-lyrics.js   # GENERATED from src/aurora-lyrics/ — do not edit
-    │   ├── amll-core.js       # Apple-Music-style lyric engine
-    │   ├── kawarp-core.js     # Kawarp WebGL backdrop
-    │   ├── dynamic.js         # Aurora Bloom (backdrop + artwork accent)
-    │   ├── smooth-motion.js   # Aurora Flow
-    │   ├── sleep-timer.js
-    │   ├── pip-lyrics.js
-    │   ├── next-up.js
-    │   ├── song-notes.js
-    │   ├── snippet-*.js       # Standalone tweaks
-    │   └── fonts/             # Bundled lyric faces and their licence
-    └── popup/                 # Toolbar popup (popup.html / popup.js / popup.css)
-```
+| | |
+|---|---|
+| **Hits** | Artwork, title, metadata and actions in a header, lyrics directly beneath. The cover-art default. |
+| **Video + Lyrics** | The side-by-side framing, with the media column and the lyric column kept apart by construction. |
+| **Video Background** | The video fills the screen and the lyrics float over it behind a soft shade. |
+| **Stage** | Artwork or video bleeds to full height on one side, transport docked over it, lyrics on the other. |
 
-## Development
+Every composition sits on the **Kawarp** fluid backdrop, which is also what
+drives the colour of the player bar elsewhere in the UI. Hover chrome (layout
+switches, the queue, the jump-to-current pill) clears itself after a couple of
+seconds without input, and the pointer goes with it.
 
-The Aurora Lyrics renderer is assembled from ordered fragments. Edit the
-numbered files in `src/aurora-lyrics/` (`01-bootstrap.jsfrag` …
-`24-braccato-renderer.jsfrag`) and rebuild the injected script:
+## Add-ons
+
+Everything ships inside the extension and installs from the in-app marketplace;
+nothing else to download, and nothing needs an extension reload to switch on.
+
+- **Kawarp** — the animated backdrop plus the artwork tinting it feeds
+- **Aurora Lyrics** — the renderer itself, with its line engines and TTML settings
+- **Aurora Flow** — smooth motion across the interface
+- **Animated Artwork** — Apple Music's animated covers, where an album has one
+- **Sleep Timer** — fade out, then pause (or stop at the end of the track)
+- **PiP Lyrics** — always-on-top lyrics in a picture-in-picture window
+- **Next Up** — what plays next, in the player bar
+- **Song Notes** — a note per song, saved locally
+- **Snippets** — track-change notification, centered home, Now Playing panel,
+  arrow-key seeking
+
+On a fresh profile the lyric renderer, Kawarp, Aurora Flow and Centered home
+arrive enabled; the rest are opt-in.
+
+## Installing
+
+1. Open `chrome://extensions` (or `edge://`, `brave://`).
+2. Turn on **Developer mode**.
+3. **Load unpacked** → pick this folder, or `build/aurora-lyrics-<version>` if you
+   packaged it.
+4. Open YouTube Music. Lyrics live in the **Lyrics** tab beside the queue; the
+   marketplace is the icon at the top-right of the page.
+
+Editing source? Reload the extension at `chrome://extensions` **and** refresh the
+YouTube Music tab. `src/content/content.js` runs in the isolated world and does
+not pick up a change from a tab refresh alone.
+
+## Building
+
+The renderer is assembled from ordered fragments, so the injected script is
+output, not source:
 
 ```sh
 node scripts/build-aurora-lyrics.mjs          # writes src/extensions/aurora-lyrics.js
-node scripts/build-aurora-lyrics.mjs --check  # fails if the built file is stale
-node scripts/package-extension.mjs           # rebuilds and refreshes build/aurora-lyrics-<version>
+node scripts/build-aurora-lyrics.mjs --check  # fails if that file is stale
+node scripts/package-extension.mjs           # refreshes build/aurora-lyrics-<version>
 ```
 
-**Never edit `src/extensions/aurora-lyrics.js` directly — it is generated.** The
-rest of the source is plain JavaScript and CSS with no build step.
+Never edit `src/extensions/aurora-lyrics.js` by hand — the build overwrites it.
+Fragment order follows the build script rather than the numeric prefixes:
+`21-boot.jsfrag` closes the shared IIFE, so it is concatenated after 22 and 23.
 
-Fragment order is the order in the build script, not the numeric prefix:
-`21-boot.jsfrag` closes the shared IIFE, so it is appended after 22 and 23 even
-though its number is lower.
+Two things that bite: `public-api.js` is a web-accessible resource, so a tab
+refresh is enough for it, while `content.js` and `styles.css` need the full
+extension reload. And some CSS lives inside JavaScript template literals — after
+touching those, run `node --check <file>`, because one stray backtick ends the
+literal early and takes the script with it.
 
-- `src/content/public-api.js` is a `web_accessible_resource`: a YouTube Music tab
-  reload picks up a change, no extension reload needed.
-- `src/content/content.js` and `src/content/styles.css` are `content_scripts`
-  entries and need a full `chrome://extensions` reload **and** a tab reload.
-- There is no committed test suite. Behavioural checks are throwaway Node +
-  headless-Chrome scripts, run while making a change; `--check` above is the one
-  automated gate that stays in the loop.
-- Some CSS lives **inside JavaScript template literals**. After editing CSS in
-  those files, run `node --check <file>` before committing — an unescaped
-  backtick there terminates the literal early and silently breaks the script.
-
-## License and attribution
-
-Licensed under the **GNU Affero General Public License v3.0** — see
-[`LICENSE`](./LICENSE).
-
-**Aurora Lyrics is an unofficial project.** It is a focused adaptation of the
-original **Spicy Lyrics** Syllable renderer by **Spikerko** (AGPL-3.0), and it
-uses the **Spicy Lyrics API** to fetch community syncs. It is **not made,
-endorsed, or supported by Spicy Lyrics** or by Spikerko, and it is not
-affiliated with either. The upstream license and attribution must be preserved
-when distributing adapted builds.
-
-Lyrics fetched through the Spicy Lyrics API are credited on screen, in the
-lyrics panel, from the `source` field of each response — the provider is always
-named, and community syncs name and link the uploader and the maker.
+There is no committed test suite. Behaviour is checked with throwaway
+Node/headless-Chrome scripts while a change is being made; `--check` is the only
+gate that stays.
 
 ## Credits
 
-Aurora Lyrics builds on other people's work. These projects shaped it, and parts
-of it are ports or adaptations of theirs:
+Aurora Lyrics stands on other people's work:
 
 - **[Spicy Lyrics](https://github.com/Spikerko/spicy-lyrics)** by **Spikerko** —
-  the Syllable renderer Aurora's own engine is adapted from, and the API its
+  the Syllable renderer Aurora's engine is adapted from, and the API its
   community syncs come from. AGPL-3.0.
 - **[Better Lyrics](https://github.com/better-lyrics/better-lyrics)**
   ([Chrome Web Store](https://chromewebstore.google.com/detail/better-lyrics-lyrics-for/effdbpeggelllpfkjppbokhmmiinhlmg)) —
   the extension Aurora started from, and the source of several interface ideas
   and conventions.
 - **[Apple Music Like Lyrics (AMLL)](https://github.com/amll-dev/applemusic-like-lyrics)** —
-  the Apple Music-style renderer behind the AMLL engine and its spring
-  scrolling.
+  the Apple Music-style renderer behind the AMLL engine and its spring scrolling.
 
-None of these projects endorse or support Aurora Lyrics.
+None of them endorse or support this project.
+
+## License
+
+**GNU Affero General Public License v3.0** — see [`LICENSE`](./LICENSE).
+
+Aurora Lyrics is unofficial and unaffiliated with Spicy Lyrics, Spikerko, Better
+Lyrics, AMLL or YouTube. The upstream licence and attribution travel with any
+adapted build. Lyrics fetched through the Spicy Lyrics API are credited on
+screen from each response's `source` field, and community syncs name and link
+their uploader and maker.
 
 ## Support
 
-Aurora Lyrics is and always will be free. If you'd like to help keep it
-maintained, tips are genuinely appreciated — they do **not** unlock premium
-features or grant anything extra.
+Free now and free later. Tips keep it maintained; they do not unlock anything.
 
 - Cash App: https://cash.app/$ajlol101
 - PayPal: https://paypal.me/brandiluvsbts
